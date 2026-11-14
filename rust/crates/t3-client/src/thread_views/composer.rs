@@ -2,6 +2,7 @@
 pub mod attachment_files;
 pub mod attachment_intake;
 pub mod block_shortcuts;
+pub mod chip_presentation;
 pub mod citations;
 pub mod cleanup;
 pub mod code_pairs;
@@ -33,3 +34,6 @@ pub mod web_drafts;
 pub mod web_models;
 mod web_normalize;
 pub mod web_sessions;
+pub mod new_task;
+pub mod path_search;
+pub mod answer_context;

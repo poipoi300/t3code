@@ -8,9 +8,14 @@ use t3_contracts::terminal::{
     TerminalAttachInput, TerminalAttachStreamEvent, TerminalMetadataStreamEvent,
     TerminalSessionSnapshot, TerminalSessionStatus, TerminalSummary,
 };
+use t3_shared::terminal_history::{
+    TERMINAL_SEQUENCE_GROUND, retained_terminal_history, terminal_sequence_end,
+    terminal_sequence_state_after,
+};
 
 const CHUNK_BYTES: usize = 16 * 1024;
 const MAX_CHUNKS: usize = 1024;
+pub const CLEAR_TERMINAL_TEXT: &str = "\u{1b}[H\u{1b}[2J\u{1b}[3J";
 fn units(text: &str) -> u64 {
     text.encode_utf16().count() as u64
 }
@@ -36,12 +41,15 @@ pub struct TerminalOutputState {
     pub retained_bytes: usize,
     pub reset_version: u64,
     pub next_offset: u64,
+    pub sequence_state: u32,
+    pub text_start_offset: u64,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerminalOutputCursor {
     pub generation: Option<u64>,
     pub reset_version: Option<u64>,
     pub offset: u64,
+    pub sequence_state: u32,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalOutputUpdate {
@@ -65,11 +73,39 @@ impl TerminalOutputUpdate {
     }
 }
 impl TerminalOutputState {
-    pub fn text(&self) -> String {
+    fn retained_text(&self) -> String {
         self.chunks
             .iter()
             .map(|chunk| chunk.data.as_ref())
             .collect()
+    }
+    pub fn replay(&self) -> String {
+        let text = self.retained_text();
+        suffix_at(
+            &text,
+            terminal_sequence_end(self.sequence_state, &text) as u64,
+        )
+        .into()
+    }
+    pub fn text(&self) -> String {
+        let text = self.retained_text();
+        let first_offset = self
+            .chunks
+            .front()
+            .map_or(self.next_offset, |chunk| chunk.start_offset);
+        let start = (terminal_sequence_end(self.sequence_state, &text) as u64)
+            .max(self.text_start_offset.saturating_sub(first_offset));
+        suffix_at(&text, start).into()
+    }
+    pub fn clear(&mut self, budget: usize) {
+        // Erasure must not evict the retained bytes that negotiated the running program's modes.
+        let budget = if budget == 0 {
+            0
+        } else {
+            budget.max(self.retained_bytes + CLEAR_TERMINAL_TEXT.len())
+        };
+        self.append(CLEAR_TERMINAL_TEXT, budget);
+        self.text_start_offset = self.next_offset;
     }
     fn push(&mut self, data: &str, budget: usize) {
         let mut offset = 0;
@@ -104,6 +140,7 @@ impl TerminalOutputState {
             self.retained_bytes = 0;
             self.reset_version += 1;
             self.next_offset += units(data);
+            self.sequence_state = TERMINAL_SEQUENCE_GROUND;
             return;
         }
         self.push(data, budget);
@@ -113,6 +150,8 @@ impl TerminalOutputState {
             };
             let excess = self.retained_bytes - budget;
             if excess >= first.data.len() {
+                self.sequence_state =
+                    terminal_sequence_state_after(self.sequence_state, &first.data);
                 self.retained_bytes -= first.data.len();
                 continue;
             }
@@ -120,6 +159,8 @@ impl TerminalOutputState {
             while !first.data.is_char_boundary(cut) {
                 cut += 1;
             }
+            self.sequence_state =
+                terminal_sequence_state_after(self.sequence_state, &first.data[..cut]);
             first.start_offset += units(&first.data[..cut]);
             self.retained_bytes -= cut;
             first.data = Rc::from(&first.data[cut..]);
@@ -141,6 +182,8 @@ impl TerminalOutputState {
             }
             while compacted.len() > MAX_CHUNKS {
                 if let Some(first) = compacted.pop_front() {
+                    self.sequence_state =
+                        terminal_sequence_state_after(self.sequence_state, &first.data);
                     self.retained_bytes -= first.data.len();
                 }
             }
@@ -152,17 +195,16 @@ impl TerminalOutputState {
         self.next_offset = 0;
         self.retained_bytes = 0;
         self.reset_version += 1;
-        let mut cut = data.len().saturating_sub(budget);
-        while !data.is_char_boundary(cut) {
-            cut += 1;
-        }
-        self.push(&data[cut..], budget);
+        self.sequence_state = TERMINAL_SEQUENCE_GROUND;
+        self.text_start_offset = 0;
+        self.push(&retained_terminal_history(data, budget), budget);
     }
     pub fn read(&self, cursor: TerminalOutputCursor) -> TerminalOutputUpdate {
-        let next = TerminalOutputCursor {
+        let mut next = TerminalOutputCursor {
             generation: Some(self.generation),
             reset_version: Some(self.reset_version),
             offset: self.next_offset,
+            sequence_state: TERMINAL_SEQUENCE_GROUND,
         };
         if cursor.generation != next.generation
             || cursor.reset_version != next.reset_version
@@ -172,8 +214,15 @@ impl TerminalOutputState {
                     .front()
                     .map_or(self.next_offset, |chunk| chunk.start_offset)
         {
+            let text = self.retained_text();
+            let start = terminal_sequence_end(self.sequence_state, &text) as u64;
+            let data = suffix_at(&text, start);
+            next.sequence_state = terminal_sequence_state_after(
+                self.sequence_state,
+                &text[..text.len() - data.len()],
+            );
             return TerminalOutputUpdate::Reset {
-                data: self.text(),
+                data: data.into(),
                 cursor: next,
             };
         }
@@ -185,24 +234,37 @@ impl TerminalOutputState {
             }
             start -= 1;
         }
-        if start == self.chunks.len() {
-            return TerminalOutputUpdate::None(next);
-        }
-        TerminalOutputUpdate::Append {
-            data: self
-                .chunks
-                .iter()
-                .skip(start)
-                .map(|chunk| {
-                    suffix_at(
-                        &chunk.data,
-                        cursor.offset.saturating_sub(chunk.start_offset),
-                    )
-                })
-                .collect(),
-            cursor: next,
+        let text: String = self
+            .chunks
+            .iter()
+            .skip(start)
+            .map(|chunk| {
+                suffix_at(
+                    &chunk.data,
+                    cursor.offset.saturating_sub(chunk.start_offset),
+                )
+            })
+            .collect();
+        let start = terminal_sequence_end(cursor.sequence_state, &text) as u64;
+        let data = suffix_at(&text, start);
+        next.sequence_state =
+            terminal_sequence_state_after(cursor.sequence_state, &text[..text.len() - data.len()]);
+        if data.is_empty() {
+            TerminalOutputUpdate::None(next)
+        } else {
+            TerminalOutputUpdate::Append {
+                data: data.into(),
+                cursor: next,
+            }
         }
     }
+}
+
+pub fn terminal_output_replay(output: &TerminalOutputState) -> String {
+    output.replay()
+}
+pub fn terminal_output_text(output: &TerminalOutputState) -> String {
+    output.text()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -296,7 +358,7 @@ impl TerminalBufferState {
                 }
             }
             TerminalAttachStreamEvent::TerminalClearedEvent(_) => {
-                self.output.reset("", budget);
+                self.output.clear(budget);
                 self.error = None;
                 self.version += 1;
             }

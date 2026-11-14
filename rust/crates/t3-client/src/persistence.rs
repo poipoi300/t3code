@@ -1,4 +1,5 @@
 //! Cross-shell record codecs and read-only imports. Hosts store bytes; policy lives here.
+pub mod external_links;
 use crate::{
     platform::{
         LegacyStorage, Platform, PlatformError, Storage, StorageArea, StorageCondition, StorageKey,

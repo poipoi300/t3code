@@ -1,4 +1,5 @@
 //! Remote pairing, bearer and DPoP authorization. All transport and key I/O is host supplied.
+pub mod connect_approval;
 #[cfg(test)]
 mod drift_tests;
 use crate::{
@@ -69,6 +70,12 @@ pub enum AuthorizationError {
         status: u16,
         details: Sensitive<Box<t3_contracts::environment_http::EnvironmentHttpCommonError>>,
     },
+    #[error("device is waiting for host approval")]
+    ApprovalPending(Sensitive<Box<crate::connection::ConnectionFailure>>),
+    /// The relay answered a connect with a declared failure, already mapped with its reason,
+    /// hop and trace (TypeScript's `mapManagedRelayError`).
+    #[error("relay refused the connection")]
+    RelayRefused(Sensitive<Box<crate::connection::ConnectionFailure>>),
     #[error("environment rejected the credential")]
     CredentialRejected,
     #[error("environment requires a credential")]
@@ -690,6 +697,9 @@ fn map_relay_error(error: crate::relay::RelayError) -> AuthorizationError {
         RelayError::Request {
             status: 401 | 403, ..
         } => AuthorizationError::CredentialRejected,
+        error @ RelayError::Request { error: Some(_), .. } => AuthorizationError::RelayRefused(
+            Sensitive(Box::new(crate::connection::map_managed_relay_error(&error))),
+        ),
         RelayError::Request {
             status: 500..=599, ..
         } => AuthorizationError::Relay,
@@ -1164,6 +1174,10 @@ impl RemoteAuthorization {
         identity: &SessionIdentity,
     ) -> Result<IssuedToken, AuthorizationError> {
         let revision = self.session_revision(identity);
+        let thumbprint = identity
+            .dpop_thumbprint
+            .as_deref()
+            .ok_or(AuthorizationError::Proof)?;
         self.validate_session_at(identity, revision).await?;
         let clerk = self
             .platform
@@ -1217,7 +1231,10 @@ impl RemoteAuthorization {
             None,
             Some(proof.expose()),
         )
-        .await?
+        .await
+        .map_err(|error| {
+            connect_approval::map_token_exchange_error(error, &descriptor.label.0, thumbprint)
+        })?
         .into_inner();
         self.validate_session_at(identity, revision).await?;
         let seconds = match access.expires_in {
@@ -1501,6 +1518,8 @@ impl RemoteAuthorization {
                     | AuthorizationError::Timeout
                     | AuthorizationError::Relay,
                 ) => {}
+                Err(AuthorizationError::RelayRefused(failure))
+                    if !failure.expose().is_blocked() => {}
                 Err(error) => return Err(error),
             }
         }

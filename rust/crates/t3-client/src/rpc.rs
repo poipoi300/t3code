@@ -1,4 +1,7 @@
+pub mod clock;
 pub mod subscription;
+#[cfg(test)]
+mod subscription_tests;
 use crate::{
     ClientError,
     permissions::{ContractPermissionPolicy, DestinationSessions, SessionGrants},
@@ -74,7 +77,9 @@ impl<E: serde::Serialize> RpcCallError<E> {
                     .filter_map(|error| serde_json::to_value(error).ok())
                     .collect::<Vec<_>>(),
             ),
-            Self::InvalidResponse => ClientError::InvalidPayload("RPC response schema".into()),
+            Self::InvalidResponse => {
+                ClientError::InvalidPayload(subscription::RPC_RESPONSE_SCHEMA_ERROR.into())
+            }
             Self::Overflow => ClientError::InvalidPayload("RPC consumer overflow; resync".into()),
         }
     }
@@ -149,6 +154,7 @@ struct Session {
     queued_starts: usize,
     commands: mpsc::UnboundedSender<DriverCommand>,
     calls: HashMap<RequestId, Rc<RefCell<Mailbox>>>,
+    config_clock: Option<clock::ConfigClock>,
 }
 enum DriverCommand {
     Start(Request, CallKind),
@@ -165,6 +171,47 @@ const MAX_CALLS: usize = 256;
 const MAX_BUFFERED_CHUNKS: usize = 8;
 
 impl SessionEndpoint {
+    pub fn subscribe_recovering<'a, M: RpcMethod, P: crate::platform::Platform + ?Sized>(
+        &'a self,
+        platform: &'a P,
+        input: M::Input,
+        options: subscription::SubscriptionOptions,
+    ) -> LocalBoxStream<'a, Result<M::Output, ClientError>>
+    where
+        M::Input: Clone + 'a,
+        M::Output: 'a,
+    {
+        subscription::recover_subscription(
+            platform,
+            M::NAME,
+            move || self.subscribe::<M>(input.clone()),
+            options,
+        )
+    }
+    pub async fn initial_config_with_clock(
+        &self,
+        platform: &(impl crate::platform::Platform + ?Sized),
+    ) -> Result<t3_contracts::server::ServerConfig, ClientError> {
+        {
+            let mut inner = self.inner.borrow_mut();
+            let environment = inner.environment.clone();
+            inner.config_clock.get_or_insert_with(|| {
+                clock::ConfigClock::new(environment, platform.now_epoch_ms() as f64)
+            });
+        }
+        let config = self.initial_config().await?;
+        if let Some(clock) = &mut self.inner.borrow_mut().config_clock {
+            clock.observe(&config, platform.now_epoch_ms() as f64);
+        }
+        Ok(config)
+    }
+    pub fn to_server_clock(&self, client_ms: f64) -> f64 {
+        self.inner
+            .borrow()
+            .config_clock
+            .as_ref()
+            .map_or(client_ms, |clock| clock.to_server_clock(client_ms))
+    }
     pub async fn initial_config(&self) -> Result<t3_contracts::server::ServerConfig, ClientError> {
         let config = self
             .call::<t3_contracts::rpc::WsServerGetConfigRpc>(t3_contracts::rpc::Empty {})
@@ -319,21 +366,41 @@ fn decoded_stream<A: DeserializeOwned, E: 'static>(
         Ok(call) => call.boxed_local(),
         Err(error) => futures::stream::once(futures::future::ready(Err(error))).boxed_local(),
     };
-    stream
-        .flat_map(|chunk| {
-            futures::stream::iter(match chunk {
-                Ok(values) => values.into_iter().map(Ok).collect(),
-                Err(error) => vec![Err(error)],
-            })
-        })
-        .map(move |value| {
-            value
-                .and_then(|value| {
-                    serde_json::from_value(value).map_err(|_| RpcCallError::InvalidResponse)
+    EndOnError(Some(
+        stream
+            .flat_map(|chunk| {
+                futures::stream::iter(match chunk {
+                    Ok(values) => values.into_iter().map(Ok).collect(),
+                    Err(error) => vec![Err(error)],
                 })
-                .map_err(map_error)
-        })
-        .boxed_local()
+            })
+            .map(move |value| {
+                value
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|_| RpcCallError::InvalidResponse)
+                    })
+                    .map_err(map_error)
+            }),
+    ))
+    .boxed_local()
+}
+struct EndOnError<S>(Option<S>);
+impl<S, T, E> Stream for EndOnError<S>
+where
+    S: Stream<Item = Result<T, E>> + Unpin,
+{
+    type Item = Result<T, E>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(stream) = &mut this.0 else {
+            return Poll::Ready(None);
+        };
+        let next = Pin::new(stream).poll_next(cx);
+        if matches!(&next, Poll::Ready(None | Some(Err(_)))) {
+            this.0 = None;
+        }
+        next
+    }
 }
 impl RpcEndpoint for SessionEndpoint {
     fn destination(&self) -> Option<EnvironmentId> {
@@ -446,6 +513,7 @@ where
         queued_starts: 0,
         commands,
         calls: HashMap::new(),
+        config_clock: None,
     }));
     (
         SessionEndpoint {

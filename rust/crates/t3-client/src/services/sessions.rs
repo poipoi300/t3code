@@ -12,6 +12,7 @@ use futures::{
     stream::LocalBoxStream,
 };
 use std::{
+    cell::RefCell,
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
@@ -67,25 +68,24 @@ impl<R> EstablishedSessions<R> {
     }
 }
 
-type Subscribe<R, T> =
-    Box<dyn FnMut(&ServiceSession<R>) -> LocalBoxStream<'static, Result<T, ClientError>>>;
+type Subscribe<'a, R, T> =
+    Box<dyn FnMut(&ServiceSession<R>) -> LocalBoxStream<'a, Result<T, ClientError>> + 'a>;
 
 /// Session notifications include the current value first; `None` cancels the installed stream.
-pub struct EnvironmentStream<R, T> {
+pub struct EnvironmentStream<'a, R, T> {
     environment: EnvironmentId,
     sessions: LocalBoxStream<'static, Option<ServiceSession<R>>>,
     current: Option<ServiceSession<R>>,
-    active: Option<LocalBoxStream<'static, Result<T, ClientError>>>,
-    subscribe: Subscribe<R, T>,
+    active: Option<LocalBoxStream<'a, Result<T, ClientError>>>,
+    subscribe: Subscribe<'a, R, T>,
     ended: bool,
 }
-impl<R, T> Unpin for EnvironmentStream<R, T> {}
-impl<R, T> EnvironmentStream<R, T> {
+impl<R, T> Unpin for EnvironmentStream<'_, R, T> {}
+impl<'a, R: 'a, T: 'a> EnvironmentStream<'a, R, T> {
     pub fn new(
         environment: EnvironmentId,
         sessions: LocalBoxStream<'static, Option<ServiceSession<R>>>,
-        subscribe: impl FnMut(&ServiceSession<R>) -> LocalBoxStream<'static, Result<T, ClientError>>
-        + 'static,
+        subscribe: impl FnMut(&ServiceSession<R>) -> LocalBoxStream<'a, Result<T, ClientError>> + 'a,
     ) -> Self {
         Self {
             environment,
@@ -96,8 +96,28 @@ impl<R, T> EnvironmentStream<R, T> {
             ended: false,
         }
     }
+    pub fn recovering<P: Platform + ?Sized>(
+        environment: EnvironmentId,
+        sessions: LocalBoxStream<'static, Option<ServiceSession<R>>>,
+        platform: &'a P,
+        method: &'static str,
+        subscribe: impl FnMut(&ServiceSession<R>) -> LocalBoxStream<'static, Result<T, ClientError>>
+        + 'a,
+    ) -> Self {
+        let subscribe = Rc::new(RefCell::new(subscribe));
+        Self::new(environment, sessions, move |session| {
+            let session = session.clone();
+            let subscribe = subscribe.clone();
+            crate::rpc::subscription::recover_subscription(
+                platform,
+                method,
+                move || subscribe.borrow_mut()(&session),
+                Default::default(),
+            )
+        })
+    }
 }
-impl<R: RpcEndpoint, T> Stream for EnvironmentStream<R, T> {
+impl<R: RpcEndpoint, T> Stream for EnvironmentStream<'_, R, T> {
     type Item = Result<T, ClientError>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -157,10 +177,11 @@ pub fn follow_rpc<M, R>(
     environment: EnvironmentId,
     sessions: LocalBoxStream<'static, Option<ServiceSession<R>>>,
     input: M::Input,
-) -> EnvironmentStream<R, M::Output>
+) -> EnvironmentStream<'static, R, M::Output>
 where
     M: RpcMethod,
     M::Input: Clone + 'static,
+    M::Output: 'static,
     R: RpcEndpoint + 'static,
 {
     EnvironmentStream::new(environment, sessions, move |session| {

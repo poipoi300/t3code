@@ -452,6 +452,9 @@ pub trait Platform: Storage {
     }
     fn open_url(&self, url: String) -> HostFuture<'_, ()> {
         async move {
+            if !crate::persistence::external_links::is_web_url(&url) {
+                return Err(PlatformError::InvalidData("Unable to open link.".into()));
+            }
             match self.host(HostAction::OpenUrl(url)).await? {
                 HostReply::Unit => Ok(()),
                 _ => Err(PlatformError::InvalidData("open_url reply".into())),

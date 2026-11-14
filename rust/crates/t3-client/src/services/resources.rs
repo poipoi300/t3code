@@ -507,6 +507,7 @@ impl<T: PartialEq> Resource<T> {
     ) -> Result<(), ClientError>
     where
         M: RpcMethod<Output = T>,
+        M::Input: Clone,
         R: RpcEndpoint,
         P: Platform + ?Sized,
     {
@@ -521,7 +522,12 @@ impl<T: PartialEq> Resource<T> {
             token,
             finished: false,
         };
-        let stream = endpoint.subscribe::<M>(input);
+        let stream = crate::rpc::subscription::recover_subscription(
+            platform,
+            M::NAME,
+            || endpoint.subscribe::<M>(input.clone()),
+            Default::default(),
+        );
         let stream = futures::stream::Abortable::new(stream, registration);
         futures::pin_mut!(stream);
         while let Some(value) = stream.next().await {

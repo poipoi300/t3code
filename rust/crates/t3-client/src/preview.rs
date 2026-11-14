@@ -1,4 +1,7 @@
 //! Browser preview protocol policy. The host owns JPEG decoding and presentation.
+pub mod open;
+pub mod gesture;
+pub mod file_path;
 use crate::device::{DeviceHubAccess, form_encode};
 use serde_json::{Value, json};
 use t3_contracts::preview::{
@@ -269,13 +272,10 @@ impl PreviewSession {
         }
         Some(PreviewEvent::Send(input))
     }
-    pub fn closed(
-        &mut self,
-        generation: u64,
-        code: u16,
-        reason: &str,
-        now: u64,
-    ) -> Vec<PreviewEvent> {
+    pub fn stop_loading(&self) -> Option<PreviewEvent> {
+        self.send(json!({"type":"stopLoading"}))
+    }
+    pub fn closed(&mut self, generation: u64, code: u16, reason: &str, now: u64) -> Vec<PreviewEvent> {
         if !self.current(generation) {
             return vec![];
         }

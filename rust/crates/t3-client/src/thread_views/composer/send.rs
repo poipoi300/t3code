@@ -174,6 +174,7 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
     pub changes: Changes,
     pub interrupted: Changes,
     pub prepared: RefCell<BTreeMap<MessageId, PreparedAttachments>>,
+    pub launches: RefCell<BTreeMap<MessageId, (u64, t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchInput)>>,
     pub fanout_prepared: RefCell<BTreeMap<String, PreparedAttachments>>,
     pub failure: RefCell<Option<super::send_transport::Failure>>,
     pub drafts: RefCell<Option<Rc<super::mobile_store::MobileDraftStore<P>>>>,
@@ -228,6 +229,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 changes: Changes::default(),
                 interrupted: Changes::default(),
                 prepared: RefCell::new(BTreeMap::new()),
+                launches: RefCell::new(BTreeMap::new()),
                 fanout_prepared: RefCell::new(BTreeMap::new()),
                 failure: RefCell::new(None),
                 drafts: RefCell::new(None),
@@ -315,6 +317,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
     }
     pub fn dispose(&self) {
         self.inner.disposed.set(true);
+        self.inner.launches.borrow_mut().clear();
         self.inner.interrupted.notify();
         self.inner.changes.notify();
     }
@@ -356,7 +359,8 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         }) else {
             return Ok(false);
         };
-        if self.inner.commands.status(&current.command_id).is_some() {
+        if self.inner.commands.status(&current.command_id).is_some()
+            && !(current.creation.is_some() && self.inner.launches.borrow().contains_key(id)) {
             return Err(ClientError::InvalidPayload(
                 "This message has already entered delivery. Wait for its result before editing it."
                     .into(),
@@ -410,6 +414,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .await?;
         if removed.is_some() {
             self.inner.prepared.borrow_mut().remove(id);
+            self.inner.launches.borrow_mut().remove(id);
             self.inner.states.borrow_mut().remove(id);
             self.inner.attempts.borrow_mut().remove(id);
             self.inner.changes.notify();
@@ -855,6 +860,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 self.set_state(&message.message_id, SendState::Accepted { sequence });
                 self.inner.prepared.borrow_mut().remove(&message.message_id);
                 self.inner.attempts.borrow_mut().remove(&message.message_id);
+                self.inner.launches.borrow_mut().remove(&message.message_id);
                 DeliveryResult::Accepted(sequence)
             }
             Ok(result) => result,

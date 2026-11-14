@@ -6,16 +6,26 @@
 //! crate owns no executor, so the UI supplies a spawner for the futures it must keep running.
 use crate::{
     ClientError, ClientStore,
+    authorization::RemoteAuthorization,
     connection::{
-        ConnectedClient, ConnectionFailure, ConnectionState, ConnectionTask, PairingInput, Phase,
-        ThreadLease, Time, prepare_pairing_registration, runtime::session_failure, supervise_saved,
+        ConnectedClient, ConnectionDiagnosis, ConnectionFailure, ConnectionMode, ConnectionProfile,
+        ConnectionState, ConnectionStores, ConnectionTask, ConnectionVia, DiagnosisInput,
+        PairingInput, Phase, Route, ThreadLease, Time, prepare_pairing_registration,
+        prepare_ssh_registration, present_connection_diagnosis, runtime::session_failure,
+        supervise_saved,
     },
-    environment::EnvironmentRegistry,
+    environment::{EnvironmentRegistration, EnvironmentRegistry},
+    relay::{DpopSigner, HostDpopSigner, ManagedRelayClient, RelayDiscovery, RelayDiscoveryState},
     platform::{NetworkStatus, Platform},
-    rpc::{RpcMethod, SessionEndpoint},
+    rpc::{RpcEndpoint, RpcMethod, SessionEndpoint},
     services::{
+        command_output::{
+            COMPLETED_OUTPUT_TTL_MS, CommandOutputCell, CommandOutputView, drive_command_output,
+        },
         resources::{Resource, ResourcePolicy},
-        sessions::{QueryConnection, QueryConnectionPhase, ServiceSession, drive_query},
+        sessions::{
+            EnvironmentStream, QueryConnection, QueryConnectionPhase, ServiceSession, drive_query,
+        },
     },
     store::Scope,
     thread_views::composer::send::{PendingMessage, SendService},
@@ -40,6 +50,32 @@ pub struct EnvironmentEntry {
     pub id: EnvironmentId,
     pub label: String,
     pub state: ConnectionState,
+    /// Its saved routes in preference order: direct addresses (LAN, Tailscale, public), the
+    /// relay, SSH. `connection::route_kind` names each.
+    pub routes: Vec<Route>,
+}
+
+/// T3 Connect: the relay that reaches environments linked to the signed-in account.
+#[derive(Clone, Debug)]
+pub struct RelayConfig {
+    pub relay_url: String,
+    pub client_id: t3_contracts::relay::RelayPublicClientId,
+}
+
+/// An SSH host the desktop launches T3 Code on (`Platform::ssh_provision`).
+#[derive(Clone, Debug)]
+pub struct SshPairingInput {
+    pub target: t3_contracts::ipc::DesktopSshEnvironmentTargetSchema,
+    pub label: Option<String>,
+    pub expected_environment: Option<EnvironmentId>,
+}
+
+const RELAY_ROUTE_ID: &str = "relay";
+
+struct Relay {
+    discovery: RelayDiscovery,
+    /// Ends discovery's credential and network watcher.
+    task: AbortHandle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -55,6 +91,7 @@ pub enum SendError {
 struct Environment<P: Platform + 'static> {
     id: EnvironmentId,
     label: String,
+    routes: Vec<Route>,
     client: Option<ConnectedClient>,
     send: Option<SendService<P, SessionEndpoint>>,
     /// Why the last connection attempt failed before a client existed.
@@ -81,10 +118,20 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Serializes changes to the saved environments (pair, restore, reconnect, remove) so they
     /// apply in the order asked, as TypeScript's registry lease does.
     registry: Mutex<()>,
+    /// Open command rows by identity, so every reader of one row shares one subscription.
+    command_outputs: RefCell<BTreeMap<String, std::rc::Weak<CommandOutputShared>>>,
+    /// Settled commands' final output, kept until the instant given after the last reader left.
+    settled_outputs: Rc<RefCell<BTreeMap<String, (CommandOutputView, u64)>>>,
+    /// One authorization for every environment, as TypeScript's; relay-capable with a relay.
+    authorization: RemoteAuthorization,
+    relay: Option<Relay>,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
     fn drop(&mut self) {
+        if let Some(relay) = &self.relay {
+            relay.task.abort();
+        }
         self.threads.get_mut().clear();
         for environment in self.environments.get_mut().drain(..) {
             drop(shut_down(environment));
@@ -114,12 +161,62 @@ pub struct ClientRuntime<P: Platform + Clone + 'static> {
 }
 
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
-    /// `source` names this client in the threads it creates (web, mobile).
+    /// `source` names this client in the threads it creates (web, mobile). Direct, Tailscale
+    /// and SSH environments only; [`Self::with_relay`] adds T3 Connect.
     pub fn new(
         platform: P,
         store: ClientStore,
         source: OrchestrationV2CreationSource,
         spawn: Spawner,
+    ) -> Self {
+        let authorization = RemoteAuthorization::direct(Rc::new(platform.clone()));
+        Self::build(platform, store, source, spawn, authorization, None)
+    }
+
+    /// [`Self::new`] plus T3 Connect: environments linked to the account the host is signed in
+    /// to (`Platform::cloud_token`) are discovered through the relay and connect through it
+    /// with the host's DPoP key.
+    pub fn with_relay(
+        platform: P,
+        store: ClientStore,
+        source: OrchestrationV2CreationSource,
+        spawn: Spawner,
+        relay: RelayConfig,
+    ) -> Self {
+        let shared: Rc<dyn Platform> = Rc::new(platform.clone());
+        let signer: Rc<dyn DpopSigner> = Rc::new(HostDpopSigner::new(shared.clone()));
+        let client = ManagedRelayClient::new(
+            shared.clone(),
+            signer.clone(),
+            &relay.relay_url,
+            relay.client_id,
+        );
+        let authorization = RemoteAuthorization::new(shared.clone(), signer, client.clone());
+        let discovery = RelayDiscovery::new(client);
+        let (task, registration) = AbortHandle::new_pair();
+        let watcher = discovery.clone();
+        spawn(
+            Abortable::new(async move { watcher.run(shared).await }, registration)
+                .map(|_| ())
+                .boxed_local(),
+        );
+        Self::build(
+            platform,
+            store,
+            source,
+            spawn,
+            authorization,
+            Some(Relay { discovery, task }),
+        )
+    }
+
+    fn build(
+        platform: P,
+        store: ClientStore,
+        source: OrchestrationV2CreationSource,
+        spawn: Spawner,
+        authorization: RemoteAuthorization,
+        relay: Option<Relay>,
     ) -> Self {
         Self {
             inner: Rc::new(Inner {
@@ -133,6 +230,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 message_listeners: Rc::default(),
                 queries: RefCell::new(BTreeMap::new()),
                 registry: Mutex::new(()),
+                command_outputs: RefCell::new(BTreeMap::new()),
+                settled_outputs: Rc::default(),
+                authorization,
+                relay,
             }),
         }
     }
@@ -160,9 +261,217 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     this.fail(&id, session_failure(&error));
                 }
             }
+            drop(_lease);
+            this.refresh_relay().await;
             Ok(())
         }
         .boxed_local()
+    }
+
+    /// Launches T3 Code on an SSH host through the desktop (`Platform::ssh_provision`), saves it
+    /// with the token it returns, then connects in the background through the tunnel the
+    /// desktop keeps (`Platform::ssh_prepare`). Ports TypeScript's `registerSsh`.
+    pub fn pair_ssh(
+        &self,
+        input: SshPairingInput,
+    ) -> LocalBoxFuture<'static, Result<EnvironmentId, ConnectionFailure>> {
+        let this = self.clone();
+        async move {
+            let _lease = this.inner.registry.lock().await;
+            let platform = this.inner.platform.clone();
+            let prepared = prepare_ssh_registration(
+                &platform,
+                input.target,
+                input.label.as_deref(),
+                input.expected_environment.as_ref(),
+            )
+            .await?;
+            let id = prepared.registration.id.clone();
+            let mut registry = this
+                .load_registry()
+                .await
+                .map_err(|error| session_failure(&error))?;
+            registry
+                .register_prepared(
+                    &platform,
+                    prepared,
+                    false,
+                    false,
+                    NetworkStatus::Unknown,
+                    Time::from_platform(&platform),
+                )
+                .await
+                .map_err(|error| session_failure(&error))?;
+            this.start_saved(&id)
+                .await
+                .map_err(|error| session_failure(&error))?;
+            Ok(id)
+        }
+        .boxed_local()
+    }
+
+    /// What relay discovery knows: the account's linked environments and their health. `None`
+    /// without T3 Connect.
+    pub fn relay_environments(&self) -> Option<RelayDiscoveryState> {
+        Some(self.inner.relay.as_ref()?.discovery.snapshot())
+    }
+
+    /// Fires when [`Self::relay_environments`] may answer differently; never without T3 Connect.
+    pub fn relay_changes(&self) -> LocalBoxStream<'static, ()> {
+        match &self.inner.relay {
+            Some(relay) => relay.discovery.changes().map(|_| ()).boxed_local(),
+            None => futures::stream::pending().boxed_local(),
+        }
+    }
+
+    /// Lists the signed-in account's environments again (discovery also refreshes when the
+    /// host's credentials change).
+    pub fn refresh_relay(&self) -> LocalBoxFuture<'static, ()> {
+        let Some(discovery) = self.inner.relay.as_ref().map(|relay| relay.discovery.clone())
+        else {
+            return futures::future::ready(()).boxed_local();
+        };
+        let platform = self.inner.platform.clone();
+        async move {
+            match platform.cloud_token().await {
+                Ok(token) => {
+                    discovery
+                        .refresh(token.map(crate::authorization::Sensitive))
+                        .await
+                }
+                Err(_) => discovery.refresh(None).await,
+            }
+        }
+        .boxed_local()
+    }
+
+    /// Saves a discovered environment's relay route (no stored credential: each connection is
+    /// minted for this device) and connects through it. An environment already saved with
+    /// direct routes keeps them and gains the relay as another route.
+    pub fn add_relay_environment(
+        &self,
+        environment: &EnvironmentId,
+        label: &str,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let this = self.clone();
+        let environment = environment.clone();
+        let label = label.to_owned();
+        async move {
+            if this.inner.relay.is_none() {
+                return Err(ClientError::Unsupported("T3 Connect is not configured"));
+            }
+            let _lease = this.inner.registry.lock().await;
+            let platform = this.inner.platform.clone();
+            let mut registry = this.load_registry().await?;
+            registry.bind_authorization(this.inner.authorization.clone());
+            registry.register(
+                EnvironmentRegistration {
+                    id: environment.clone(),
+                    label,
+                    routes: vec![Route {
+                        id: RELAY_ROUTE_ID.into(),
+                        environment: environment.clone(),
+                        mode: ConnectionMode::Relay,
+                        http_base: String::new(),
+                        ws_base: String::new(),
+                    }],
+                    enabled: true,
+                },
+                false,
+                NetworkStatus::Unknown,
+                Time::from_platform(&platform),
+            )?;
+            registry.save(&platform).await?;
+            this.start_saved(&environment).await
+        }
+        .boxed_local()
+    }
+
+    /// After signing out of T3 Connect: drops every relay route. An environment reachable only
+    /// through the relay is removed as [`Self::remove`] does; one with direct routes keeps them
+    /// and reconnects over them. Ports TypeScript's `removeRelayEnvironments`.
+    pub fn remove_relay_environments(&self) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let this = self.clone();
+        async move {
+            let _lease = this.inner.registry.lock().await;
+            let platform = this.inner.platform.clone();
+            let mut registry = this.load_registry().await?;
+            registry.bind_authorization(this.inner.authorization.clone());
+            let relayed: Vec<_> = registry
+                .entries()
+                .filter(|registration| {
+                    registration
+                        .routes
+                        .iter()
+                        .any(|route| route.mode == ConnectionMode::Relay)
+                })
+                .map(|registration| (registration.id.clone(), registration.routes.len() == 1))
+                .collect();
+            let mut kept = Vec::new();
+            for (environment, only_route) in relayed {
+                if only_route {
+                    this.remove_locked(&environment).await?;
+                } else {
+                    registry.remove_route(
+                        &environment,
+                        RELAY_ROUTE_ID,
+                        Time::from_platform(&platform),
+                    )?;
+                    kept.push(environment);
+                }
+            }
+            if !kept.is_empty() {
+                registry.save(&platform).await?;
+            }
+            for environment in kept {
+                this.start_saved(&environment).await?;
+            }
+            Ok(())
+        }
+        .boxed_local()
+    }
+
+    /// What failed on the way to `environment`, as Settings shows it, or `None` while it is
+    /// connected, off, or has not failed. Ports the web's `useConnectionDiagnosis`: the relay's
+    /// health counts only when the relay is the environment's one route.
+    pub fn diagnosis(
+        &self,
+        environment: &EnvironmentId,
+        client_version: Option<&str>,
+    ) -> Option<ConnectionDiagnosis> {
+        let entry = self
+            .environments()
+            .into_iter()
+            .find(|entry| &entry.id == environment)?;
+        if !entry.state.desired || entry.state.phase == Phase::Connected {
+            return None;
+        }
+        let relay_only =
+            matches!(entry.routes.as_slice(), [route] if route.mode == ConnectionMode::Relay);
+        let relay_status = relay_only
+            .then(|| self.relay_environments())
+            .flatten()
+            .and_then(|state| state.environments.get(environment)?.status.clone());
+        let server_version = self
+            .inner
+            .store
+            .snapshot()
+            .environments
+            .get(environment)
+            .and_then(|state| state.config.as_ref())
+            .map(|config| config.environment.server_version.0.clone());
+        present_connection_diagnosis(DiagnosisInput {
+            host_label: &entry.label,
+            state: &entry.state,
+            via: if relay_only {
+                ConnectionVia::Relay
+            } else {
+                ConnectionVia::Direct
+            },
+            relay_status: relay_status.as_ref(),
+            client_version,
+            server_version: server_version.as_deref(),
+        })
     }
 
     /// Pairs with the server the user described and saves it, then connects in the background.
@@ -238,40 +547,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let environment = environment.clone();
         async move {
             let _lease = this.inner.registry.lock().await;
-            this.inner
-                .threads
-                .borrow_mut()
-                .retain(|key, _| key.environment != environment);
-            let removed = {
-                let mut environments = this.inner.environments.borrow_mut();
-                environments
-                    .iter()
-                    .position(|entry| entry.id == environment)
-                    .map(|index| environments.remove(index))
-            };
-            // The driver publishes its last connection state while it stops; clear the store after.
-            if let Some(finished) = removed.and_then(shut_down) {
-                let _ = finished.await;
-            }
-            this.inner.store.remove_environment(&environment);
-            this.notify();
-            this.notify_messages();
-            let platform = this.inner.platform.clone();
-            let mut registry: EnvironmentRegistry<SessionEndpoint> = EnvironmentRegistry::load(
-                &platform,
-                NetworkStatus::Unknown,
-                crate::connection::Time::from_platform(&platform),
-            )
-            .await?;
-            if registry.get(&environment).is_some() {
-                registry.remove(
-                    &environment,
-                    crate::connection::Time::from_platform(&platform),
-                )?;
-                registry.save(&platform).await?;
-            }
-            // A later pairing of the same server must not deliver what was queued for this one.
-            SendService::<P, SessionEndpoint>::forget_saved(Rc::new(platform), &environment).await
+            this.remove_locked(&environment).await
         }
         .boxed_local()
     }
@@ -293,6 +569,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                         ..ConnectionState::default()
                     },
                 },
+                routes: entry.routes.clone(),
             })
             .collect()
     }
@@ -491,6 +768,88 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     /// The environment's connection as query drivers read it: the current state first, then
     /// each change of phase, failure or session, with one endpoint object per session.
+    /// Whether `environment`'s server streams command output (its config's
+    /// `commandOutputStreaming`); open a [`Self::command_output`] lease only when it does.
+    pub fn command_output_streaming(&self, environment: &EnvironmentId) -> bool {
+        self.inner
+            .store
+            .snapshot()
+            .environments
+            .get(environment)
+            .and_then(|state| state.config.as_ref())
+            .is_some_and(|config| {
+                config.environment.capabilities.command_output_streaming == Some(true)
+            })
+    }
+
+    /// The output of one command row while the row is open: streamed while the command runs,
+    /// then final. Readers of one row share one subscription, which ends with the last lease
+    /// or once the command settles; a settled command's output is kept for five minutes after
+    /// its last reader leaves, so reopening the row does not fetch it again.
+    pub fn command_output(
+        &self,
+        key: &ThreadKey,
+        item: &t3_contracts::base_schemas::TurnItemId,
+    ) -> CommandOutputLease {
+        let identity = format!("{}\u{0}{}\u{0}{}", key.environment.0, key.thread.0, item.0);
+        let live = self
+            .inner
+            .command_outputs
+            .borrow()
+            .get(&identity)
+            .and_then(std::rc::Weak::upgrade);
+        if let Some(shared) = live {
+            return CommandOutputLease { shared };
+        }
+        let now = self.inner.platform.monotonic_ms();
+        let settled = {
+            let mut settled = self.inner.settled_outputs.borrow_mut();
+            settled.retain(|_, (_, until)| *until > now);
+            settled.get(&identity).map(|(view, _)| view.clone())
+        };
+        let platform = self.inner.platform.clone();
+        let (cell, driver) = match settled {
+            Some(view) => (Rc::new(CommandOutputCell::settled(view)), None),
+            None => {
+                let cell = Rc::new(CommandOutputCell::default());
+                let input = t3_contracts::orchestration_v2::OrchestrationV2SubscribeCommandOutputInput {
+                    thread_id: key.thread.clone(),
+                    item_id: item.clone(),
+                };
+                let sessions = self
+                    .query_connections(&key.environment)
+                    .map(|connection| connection.session)
+                    .boxed_local();
+                let frames = EnvironmentStream::new(key.environment.clone(), sessions, move |session| {
+                    session
+                        .endpoint
+                        .subscribe::<t3_contracts::rpc::WsOrchestrationV2SubscribeCommandOutputRpc>(
+                            input.clone(),
+                        )
+                });
+                let driven = cell.clone();
+                let driver = self.spawn(
+                    async move {
+                        drive_command_output(driven, frames).await;
+                    }
+                    .boxed_local(),
+                );
+                (cell, Some(driver))
+            }
+        };
+        let shared = Rc::new(CommandOutputShared {
+            identity: identity.clone(),
+            cell,
+            driver,
+            settled: self.inner.settled_outputs.clone(),
+            now: Rc::new(move || platform.monotonic_ms()),
+        });
+        let mut outputs = self.inner.command_outputs.borrow_mut();
+        outputs.retain(|_, output| output.strong_count() > 0);
+        outputs.insert(identity, Rc::downgrade(&shared));
+        CommandOutputLease { shared }
+    }
+
     fn query_connections(
         &self,
         environment: &EnvironmentId,
@@ -612,15 +971,69 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         else {
             return Ok(());
         };
+        // Relay and SSH routes have no saved address; their uploads take the RPC path.
         let origin = registration
             .routes
             .first()
             .map(|route| route.http_base.clone())
-            .ok_or(ClientError::EnvironmentMismatch)?;
-        let (client, driver) =
-            supervise_saved(self.inner.platform.clone(), self.inner.store.clone(), id).await?;
-        self.attach(client, driver, registration.label, &origin);
+            .filter(|base| !base.is_empty());
+        let (client, driver) = supervise_saved(
+            self.inner.platform.clone(),
+            self.inner.store.clone(),
+            self.inner.authorization.clone(),
+            id,
+        )
+        .await?;
+        self.attach(client, driver, registration.label, registration.routes, origin);
         Ok(())
+    }
+
+    /// Disconnects and forgets `environment`: follows, delivery, saved registration and
+    /// credentials, queued messages, store data, and a managed SSH backend. The caller holds
+    /// the registry lease.
+    async fn remove_locked(&self, environment: &EnvironmentId) -> Result<(), ClientError> {
+        self.inner
+            .threads
+            .borrow_mut()
+            .retain(|key, _| &key.environment != environment);
+        let removed = {
+            let mut environments = self.inner.environments.borrow_mut();
+            environments
+                .iter()
+                .position(|entry| &entry.id == environment)
+                .map(|index| environments.remove(index))
+        };
+        // The driver publishes its last connection state while it stops; clear the store after.
+        if let Some(finished) = removed.and_then(shut_down) {
+            let _ = finished.await;
+        }
+        self.inner.store.remove_environment(environment);
+        self.notify();
+        self.notify_messages();
+        let platform = self.inner.platform.clone();
+        let mut registry = self.load_registry().await?;
+        registry.bind_authorization(self.inner.authorization.clone());
+        let mut ssh_targets = Vec::new();
+        if let Some(handle) = registry.get(environment) {
+            let stores = ConnectionStores::new(Rc::new(platform.clone()));
+            for route in handle.registration().routes.clone() {
+                if route.mode == ConnectionMode::Ssh
+                    && let Ok(Some(ConnectionProfile::Ssh { target, .. })) =
+                        stores.profile(environment, &route.id).await
+                {
+                    ssh_targets.push(target);
+                }
+            }
+            registry.remove(environment, Time::from_platform(&platform))?;
+            registry.save(&platform).await?;
+        }
+        // The supervisor owned only the session; the SSH backend and its tunnel outlive it.
+        // TypeScript logs and ignores a failed teardown, and so does this.
+        for target in ssh_targets {
+            let _ = platform.ssh_disconnect(target).await;
+        }
+        // A later pairing of the same server must not deliver what was queued for this one.
+        SendService::<P, SessionEndpoint>::forget_saved(Rc::new(platform), environment).await
     }
 
     /// The supervisor ended on an error, not a disconnect: show it as blocked with that error
@@ -650,6 +1063,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             environments.push(Environment {
                 id,
                 label,
+                routes: Vec::new(),
                 client: None,
                 send: None,
                 failure: None,
@@ -686,7 +1100,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
     /// Installs a connected environment: its driver, its message delivery and the binding of
     /// delivery to each new session, and the leases of threads already open on it.
-    fn attach(&self, client: ConnectedClient, driver: ConnectionTask, label: String, origin: &str) {
+    fn attach(
+        &self,
+        client: ConnectedClient,
+        driver: ConnectionTask,
+        label: String,
+        routes: Vec<Route>,
+        origin: Option<String>,
+    ) {
         let id = client.environment().clone();
         let (done, finished) = futures::channel::oneshot::channel();
         let runtime = Rc::downgrade(&self.inner);
@@ -730,7 +1151,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 self.inner.store.clone(),
                 client.clone(),
                 send.clone(),
-                origin.to_owned(),
+                origin,
             )),
         ];
         let replaced = {
@@ -738,6 +1159,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             let entry = Environment {
                 id: id.clone(),
                 label,
+                routes,
                 client: Some(client.clone()),
                 send: Some(send),
                 failure: None,
@@ -776,7 +1198,7 @@ fn bind_sessions<P: Platform + 'static>(
     store: ClientStore,
     client: ConnectedClient,
     send: SendService<P, SessionEndpoint>,
-    origin: String,
+    origin: Option<String>,
 ) -> LocalBoxFuture<'static, ()> {
     // Holds the client until the composition root aborts this task (removal, replacement, drop).
     async move {
@@ -791,9 +1213,16 @@ fn bind_sessions<P: Platform + 'static>(
                 .and_then(|state| Some((state.session, state.config.clone()?, client.session()?)));
             match current {
                 Some((generation, config, endpoint)) if bound != Some(generation) => {
-                    if send
-                        .connect_with_upload_base(generation, Rc::new(endpoint), config, &origin)
-                        .is_ok()
+                    let connected = match &origin {
+                        Some(origin) => send.connect_with_upload_base(
+                            generation,
+                            Rc::new(endpoint),
+                            config,
+                            origin,
+                        ),
+                        None => send.connect(generation, Rc::new(endpoint), config),
+                    };
+                    if connected.is_ok()
                     {
                         bound = Some(generation);
                     }
@@ -807,6 +1236,49 @@ fn bind_sessions<P: Platform + 'static>(
         }
     }
     .boxed_local()
+}
+
+struct CommandOutputShared {
+    identity: String,
+    cell: Rc<CommandOutputCell>,
+    driver: Option<AbortHandle>,
+    settled: Rc<RefCell<BTreeMap<String, (CommandOutputView, u64)>>>,
+    now: Rc<dyn Fn() -> u64>,
+}
+
+impl Drop for CommandOutputShared {
+    fn drop(&mut self) {
+        if let Some(driver) = &self.driver {
+            driver.abort();
+        }
+        if let Some(view) = self.cell.view().filter(|view| !view.running) {
+            self.settled.borrow_mut().insert(
+                std::mem::take(&mut self.identity),
+                (view, (self.now)().saturating_add(COMPLETED_OUTPUT_TTL_MS)),
+            );
+        }
+    }
+}
+
+/// One open command row's output; the subscription lasts while a lease is held.
+#[must_use = "the output streams only while its lease is held"]
+#[derive(Clone)]
+pub struct CommandOutputLease {
+    shared: Rc<CommandOutputShared>,
+}
+
+impl CommandOutputLease {
+    /// `None` while loading (no frame yet).
+    pub fn view(&self) -> Option<CommandOutputView> {
+        self.shared.cell.view()
+    }
+    /// Why the output could not be loaded ("Couldn't load output: …" in the web).
+    pub fn error(&self) -> Option<String> {
+        self.shared.cell.error()
+    }
+    pub fn changes(&self) -> LocalBoxStream<'static, ()> {
+        self.shared.cell.changes()
+    }
 }
 
 struct QueryShared<T> {

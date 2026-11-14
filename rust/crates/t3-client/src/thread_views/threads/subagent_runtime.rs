@@ -20,6 +20,13 @@ pub fn is_terminal_subagent_status(s: &OrchestrationV2TurnItemStatus) -> bool {
 pub fn is_live_subagent_turn_item(i: &OrchestrationV2TurnItem) -> bool {
     matches!(i, OrchestrationV2TurnItem::Subagent(i) if work_active(&i.status))
 }
+pub fn waiting_on_subagents_label(count: usize) -> String {
+    if count == 1 {
+        "Waiting on a subagent".into()
+    } else {
+        format!("Waiting on {count} subagents")
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSubagentKind {
     Subagent,

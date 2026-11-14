@@ -1,4 +1,7 @@
 //! A retained local RPC driver over the host's cancel-safe WebSocket receive.
+#[cfg(test)]
+#[path = "socket_clock_tests.rs"]
+mod clock_tests;
 use super::{
     ConnectionFailure, ConnectionVia, FailureKind, SessionFactory, map_remote_environment_error,
 };
@@ -22,6 +25,7 @@ type FrameSink = Pin<Box<dyn Sink<Frame, Error = PlatformError>>>;
 
 struct SessionScope {
     endpoint: SessionEndpoint,
+    platform: Rc<dyn Platform>,
     driver: RefCell<LocalBoxFuture<'static, ()>>,
     config: RefCell<Option<Rc<ServerConfig>>>,
     authorization: RemoteAuthorization,
@@ -45,6 +49,9 @@ impl PlatformSession {
     pub fn config(&self) -> Option<Rc<ServerConfig>> {
         self.inner.config.borrow().clone()
     }
+    pub fn to_server_clock(&self, client_ms: f64) -> f64 {
+        self.inner.endpoint.to_server_clock(client_ms)
+    }
     pub fn invalidate(&self) {
         self.inner.endpoint.invalidate();
     }
@@ -52,7 +59,11 @@ impl PlatformSession {
         futures::future::poll_fn(|cx| self.inner.driver.borrow_mut().as_mut().poll(cx)).await;
     }
     async fn initial_config(&self) -> Result<(), ClientError> {
-        let operation = self.inner.endpoint.initial_config().boxed_local();
+        let operation = self
+            .inner
+            .endpoint
+            .initial_config_with_clock(self.inner.platform.as_ref())
+            .boxed_local();
         let driver = self.run().boxed_local();
         match select(operation, driver).await {
             Either::Left((config, _)) => {
@@ -209,6 +220,7 @@ impl SessionFactory for PlatformSessionFactory {
             Ok(PlatformSession {
                 inner: Rc::new(SessionScope {
                     endpoint,
+                    platform: self.platform.clone(),
                     driver: RefCell::new(driver),
                     config: RefCell::new(None),
                     authorization: self.authorization.clone(),

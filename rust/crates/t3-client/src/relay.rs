@@ -207,6 +207,66 @@ impl DpopSigner for PlatformDpopSigner {
         }.boxed_local()
     }
 }
+/// The host's DPoP key, read when first needed so a client can be built before the host
+/// answers; a key the host no longer holds is read again on the next use.
+pub struct HostDpopSigner {
+    platform: Rc<dyn Platform>,
+    loaded: RefCell<Option<Rc<PlatformDpopSigner>>>,
+}
+impl fmt::Debug for HostDpopSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HostDpopSigner([REDACTED])")
+    }
+}
+impl HostDpopSigner {
+    pub fn new(platform: Rc<dyn Platform>) -> Self {
+        Self {
+            platform,
+            loaded: RefCell::new(None),
+        }
+    }
+    async fn signer(&self) -> Result<Rc<PlatformDpopSigner>, RelayError> {
+        if let Some(signer) = self.loaded.borrow().clone() {
+            return Ok(signer);
+        }
+        let signer = Rc::new(PlatformDpopSigner::from_host(self.platform.clone()).await?);
+        *self.loaded.borrow_mut() = Some(signer.clone());
+        Ok(signer)
+    }
+    fn forget_on_key_error<T>(&self, result: Result<T, RelayError>) -> Result<T, RelayError> {
+        if matches!(result, Err(RelayError::Key)) {
+            self.loaded.borrow_mut().take();
+        }
+        result
+    }
+}
+impl DpopSigner for HostDpopSigner {
+    fn thumbprint(&self) -> LocalBoxFuture<'_, Result<String, RelayError>> {
+        async move {
+            let result = match self.signer().await {
+                Ok(signer) => signer.thumbprint().await,
+                Err(error) => Err(error),
+            };
+            self.forget_on_key_error(result)
+        }
+        .boxed_local()
+    }
+    fn create_proof<'a>(
+        &'a self,
+        method: &'a str,
+        url: &'a str,
+        access_token: Option<&'a str>,
+    ) -> LocalBoxFuture<'a, Result<Sensitive<String>, RelayError>> {
+        async move {
+            let result = match self.signer().await {
+                Ok(signer) => signer.create_proof(method, url, access_token).await,
+                Err(error) => Err(error),
+            };
+            self.forget_on_key_error(result)
+        }
+        .boxed_local()
+    }
+}
 pub fn normalize_secure_relay_url(value: &str) -> Result<String, RelayError> {
     let url = parse_endpoint(value.trim(), &["https"]).map_err(|_| RelayError::InvalidUrl)?;
     if url.query().is_some() || url.fragment().is_some() || !url.path().chars().all(|c| c == '/') {

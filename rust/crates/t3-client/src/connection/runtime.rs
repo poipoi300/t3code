@@ -272,13 +272,16 @@ pub async fn connect_into<P: Platform + Clone + 'static>(
 /// Supervises an environment saved in the catalogue, with its saved route and credential,
 /// without waiting for a connection: like TypeScript's registry, the supervisor retries with
 /// backoff and publishes its state into the store. A disabled environment is not connected.
+///
+/// `authorization` is shared by every environment of one client, as TypeScript's
+/// `RemoteEnvironmentAuthorization`; a relay route needs one built with a signer and relay.
 pub async fn supervise_saved<P: Platform + Clone + 'static>(
     platform: P,
     store: ClientStore,
+    authorization: RemoteAuthorization,
     environment: &EnvironmentId,
 ) -> Result<(ConnectedClient, ConnectionTask), ClientError> {
     let shared: Rc<dyn Platform> = Rc::new(platform.clone());
-    let authorization = RemoteAuthorization::direct(shared.clone());
     let mut registry = EnvironmentRegistry::load(
         &platform,
         NetworkStatus::Unknown,
@@ -289,7 +292,7 @@ pub async fn supervise_saved<P: Platform + Clone + 'static>(
     let handle = registry
         .get_mut(environment)
         .ok_or(ClientError::EnvironmentMismatch)?;
-    let actions = if handle.registration().enabled {
+    let actions: VecDeque<_> = if handle.registration().enabled {
         handle
             .handle(
                 ConnectionEvent::Connect,
@@ -300,6 +303,13 @@ pub async fn supervise_saved<P: Platform + Clone + 'static>(
     } else {
         VecDeque::new()
     };
+    // A relay route mints for the signed-in account and this device's key, so the attempt's
+    // identity carries both, as TypeScript's supervisor captures them.
+    if !actions.is_empty() && authorization.dpop_signer().is_some() {
+        registry
+            .authorize_attempt(environment, authorization.clone())
+            .await?;
+    }
     Ok(start(
         platform,
         store,

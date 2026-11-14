@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use url::{Host, Url};
 
+pub mod presentation;
 pub mod runtime;
 pub mod socket;
 pub mod threads;
@@ -149,6 +150,9 @@ pub fn map_remote_environment_error(
 ) -> ConnectionFailure {
     use crate::authorization::AuthorizationError as E;
     let kind = match error {
+        E::ApprovalPending(failure) | E::RelayRefused(failure) => {
+            return failure.expose().as_ref().clone();
+        }
         E::Remote { status, details } => {
             return map_declared_remote_error(*status, details.expose(), via);
         }

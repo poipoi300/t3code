@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }
 t3-rpc = { path = "../t3-rpc" }
+t3-shared = { path = "../t3-shared" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"

@@ -112,6 +112,7 @@ pub fn without_environment_themes(mut config: ServerConfig) -> ServerConfig {
 pub fn cacheable_config(config: &ServerConfig) -> ServerConfig {
     let mut config = without_environment_themes(config.clone());
     config.last_event_loop_stall = None;
+    config.server_time = None;
     config
 }
 fn held_catalogs(previous: &[ServerProvider], providers: &mut [ServerProvider]) {

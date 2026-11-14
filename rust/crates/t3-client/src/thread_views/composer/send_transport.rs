@@ -71,6 +71,7 @@ struct ObservedEndpoint<'a, E> {
     endpoint: &'a E,
     failure: Rc<RefCell<Option<Failure>>>,
     command: CommandId,
+    launch: bool,
 }
 impl<E: RpcEndpoint> RpcEndpoint for ObservedEndpoint<'_, E> {
     fn destination(&self) -> Option<EnvironmentId> {
@@ -99,7 +100,13 @@ impl<E: RpcEndpoint> RpcEndpoint for ObservedEndpoint<'_, E> {
         async move {
             let result = call.await;
             let failure = match &result {
-                Err(RpcCallError::NotSent(error)) => Some(Failure::error(error)),
+                Err(RpcCallError::NotSent(error)) => {
+                    let mut failure = Failure::error(error);
+                    if self.launch && matches!(error, ClientError::PermissionDenied { .. }) {
+                        failure.kind = FailureKind::Retry;
+                    }
+                    Some(failure)
+                },
                 Err(RpcCallError::Rejected(errors)) => Some(Failure {
                     kind: if errors.iter().any(should_retry) {
                         FailureKind::Retry
@@ -221,10 +228,13 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         };
         let input = serde_json::to_value(command)?;
         let id: CommandId = serde_json::from_value(input["commandId"].clone())?;
+        let replay = M::TAG == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
+            && self.inner.launches.borrow().get(&message.message_id).is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id));
+        let unknown = matches!(self.inner.commands.status(&id), Some(CommandStatus::UnknownDelivery));
         match self.inner.commands.status(&id) {
             Some(CommandStatus::Accepted { sequence }) => return Ok(Some(sequence)),
             Some(CommandStatus::AcceptedAwaitingEntity) => return Ok(None),
-            Some(CommandStatus::UnknownDelivery) => {
+            Some(CommandStatus::UnknownDelivery) if !replay => {
                 return Err(self.fail(Failure {
                     kind: FailureKind::Unknown,
                     reason: "Waiting for delivery confirmation.".into(),
@@ -277,8 +287,33 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         let observed = ObservedEndpoint {
             endpoint: endpoint.as_ref(),
             failure: failure.clone(),
-            command: id,
+            command: id.clone(),
+            launch: message.creation.is_some(),
         };
+        // Launch is idempotent by command id; only this process's unchanged launch may replay.
+        if unknown && replay {
+            let result = observed.command::<M>(serde_json::from_value(input)?).await;
+            match result {
+                Ok(reply) => {
+                    self.check_current(generation)?;
+                    let committed = sequence(&reply);
+                    if let Some(committed_sequence) = committed {
+                        self.inner.commands.resolve_receipt(self.inner.platform.as_ref(), &crate::operations::CommandReceipt {
+                            command: id, environment: message.environment_id.clone(), committed_sequence,
+                        }, self.projection_epoch(&message.thread_key())).await.map_err(operation_error)?;
+                    } else {
+                        self.inner.commands.resolve_entity(self.inner.platform.as_ref(), &id,
+                            &ProjectionKey::thread(message.environment_id.clone(), message.thread_id.clone()),
+                            self.projection_epoch(&message.thread_key())).await.map_err(operation_error)?;
+                    }
+                    return Ok(committed);
+                }
+                Err(error) => {
+                    let failure = failure.borrow_mut().take().unwrap_or_else(|| Failure::error(&error.into_client_error()));
+                    return Err(self.fail(failure));
+                }
+            }
+        }
         let report = self
             .inner
             .commands
@@ -324,6 +359,16 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .records()
             .into_iter()
             .find(|record| record.command == message.command_id);
+        let launch = self.inner.launches.borrow().get(&message.message_id)
+            .filter(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id))
+            .map(|(_, input)| input.clone());
+        if let Some(input) = launch {
+            let settings = ThreadSettings { model_selection: input.model_selection.clone(), runtime_mode: input.runtime_mode, interaction_mode: input.interaction_mode };
+            if let Some(reason) = super::send_policy::block_reason(&config, Some(&input.project_id), message, &settings) {
+                return Err(ClientError::InvalidPayload(reason));
+            }
+            return self.execute::<WsOrchestrationV2LaunchThreadRpc>(message, &input, true, |reply| reply.sequence).await;
+        }
         if let Some(record) = existing {
             if record.method
                 == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
@@ -649,6 +694,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             let input: OrchestrationV2ThreadLaunchInput = serde_json::from_value(
                 json!({"commandId":message.command_id,"threadId":message.thread_id,"projectId":creation.project_id,"title":title,"generateTitle":true,"modelSelection":settings.model_selection,"runtimeMode":settings.runtime_mode,"interactionMode":settings.interaction_mode,"workspaceStrategy":strategy,"creationSource":self.inner.source,"initialMessage":initial}),
             )?;
+            self.inner.launches.borrow_mut().insert(message.message_id.clone(), (self.inner.outbox.revision(&message.message_id), input.clone()));
             return self
                 .execute::<WsOrchestrationV2LaunchThreadRpc>(message, &input, true, |reply| {
                     reply.sequence
@@ -697,6 +743,10 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             .unwrap_or_else(|| Failure::error(&error));
         match failure.kind {
             FailureKind::Unknown => {
+                if self.inner.launches.borrow().get(&message.message_id).is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id)) {
+                    self.schedule_retry(&message.message_id, failure.reason);
+                    return Ok(DeliveryResult::Retry);
+                }
                 self.set_state(&message.message_id, SendState::AwaitingConfirmation);
                 Ok(DeliveryResult::Wait)
             }
@@ -846,6 +896,22 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         let Some(environment) = snapshot.environments.get(&self.inner.environment) else {
             return Ok(());
         };
+        let messages = self.inner.outbox.messages();
+        self.inner.launches.borrow_mut().retain(|id, _| messages.iter().any(|message| &message.message_id == id));
+        for message in messages.iter().filter(|message| message.creation.is_some()) {
+            let unchanged = self.inner.launches.borrow().get(&message.message_id)
+                .is_some_and(|(revision, _)| *revision == self.inner.outbox.revision(&message.message_id));
+            let exists = environment.shell.status == crate::types::SyncStatus::Live
+                && environment.shell.session == generation
+                && environment.shell.snapshot.as_ref().is_some_and(|shell| shell.threads.iter().any(|thread| thread.id == message.thread_id));
+            if exists && !unchanged && !self.inner.editing.borrow().contains(&message.message_id) {
+                let revision = self.inner.outbox.revision(&message.message_id);
+                if self.restore_message(message, "The task changed after launch; its draft was recovered.").await? {
+                    self.inner.outbox.remove(message, Some(revision), || self.current(generation)).await?;
+                    self.inner.launches.borrow_mut().remove(&message.message_id);
+                }
+            }
+        }
         let mut reset = BTreeSet::new();
         let records = self.inner.commands.records();
         for record in &records {
@@ -899,7 +965,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             let evidence = if record.method
                 == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
             {
-                record.change.apply.0.as_ref().is_some_and(|message|projection.is_some_and(|projection|projection.messages.iter().any(|row|matches!(&row.id,t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) if id==&message.message_id))))
+                record.change.apply.0.as_ref().is_some_and(|message|projection.is_some_and(|projection|projection.messages.iter().any(|row|matches!(&row.id,t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) if id==&message.message_id))) || (shell.is_some() && !self.inner.launches.borrow().contains_key(&message.message_id)))
             } else {
                 let command: OrchestrationV2Command = serde_json::from_value(record.input)?;
                 match &command {

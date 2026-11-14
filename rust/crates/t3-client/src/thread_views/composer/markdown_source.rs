@@ -545,6 +545,43 @@ pub fn collapse(document: &Value, selection: Selection, keep_touched: bool) -> R
     }
 }
 
+pub struct CollapsedSource {
+    pub rewrite: Rewrite,
+    pub stored_marks: Option<Vec<Value>>,
+}
+
+pub fn collapse_shown(
+    document: &Value,
+    selection: Selection,
+    stored_marks: Option<&[Value]>,
+) -> CollapsedSource {
+    let at_end = selection.collapsed()
+        && source_regions(document)
+            .iter()
+            .any(|region| adjacent_delimiters(document, *region).to == selection.head);
+    let mut effective = stored_marks.map(<[Value]>::to_vec);
+    if at_end {
+        let inferred = textblocks(document)
+            .into_iter()
+            .find_map(|(start, block)| {
+                let mut pos = start;
+                children(&block).iter().find_map(|node| {
+                    let end = pos + node_size(node);
+                    let contains = selection.head > pos && selection.head <= end;
+                    pos = end;
+                    contains.then(|| node["marks"].as_array().cloned().unwrap_or_default())
+                })
+            })
+            .unwrap_or_default();
+        let marks = effective.get_or_insert(inferred);
+        marks.retain(|mark| mark["type"] != SOURCE_MARK);
+    }
+    CollapsedSource {
+        rewrite: collapse(document, selection, false),
+        stored_marks: effective,
+    }
+}
+
 pub fn normalize(
     document: &Value,
     selection: Selection,

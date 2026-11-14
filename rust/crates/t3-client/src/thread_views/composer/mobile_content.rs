@@ -466,7 +466,13 @@ pub fn undo_merge(
 pub fn retarget(draft: &Value, environment: &str, project: &str, now: &str) -> Value {
     retarget_with_options(draft, environment, project, now, false)
 }
-pub fn retarget_with_options(draft: &Value, environment: &str, project: &str, now: &str, _keep_pull_request_workspace: bool) -> Value {
+pub fn retarget_with_options(
+    draft: &Value,
+    environment: &str,
+    project: &str,
+    now: &str,
+    keep_pull_request_workspace: bool,
+) -> Value {
     let mut next = normalize(draft);
     if next["project"]["environmentId"] == environment && next["project"]["projectId"] == project {
         return next;
@@ -475,7 +481,13 @@ pub fn retarget_with_options(draft: &Value, environment: &str, project: &str, no
         .as_str()
         .unwrap_or(now)
         .to_owned();
-    if let Some(fields) = next.as_object_mut() {
+    if keep_pull_request_workspace
+        && next["workspaceSelection"]
+            .get("pullRequestReference")
+            .is_some()
+    {
+        next["workspaceSelection"]["worktreePath"] = Value::Null;
+    } else if let Some(fields) = next.as_object_mut() {
         fields.remove("workspaceSelection");
     }
     let attachments = array(&next, "attachments")

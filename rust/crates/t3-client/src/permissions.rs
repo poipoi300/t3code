@@ -34,6 +34,9 @@ impl PermissionPolicy for ContractPermissionPolicy {
     fn required_scopes(&self, method: &str, input: &Value) -> Option<Vec<String>> {
         let descriptor = WS_METHODS.iter().find(|entry| entry.tag == method)?;
         let mut scopes = client_rpc_required_scopes(method, Some(input)).ok()?;
+        if method == "orchestration.launchThread" {
+            scopes.push(AuthEnvironmentScope::OrchestrationOperate);
+        }
         if let Some(scope) = descriptor.required_scope
             && !scopes.contains(&scope)
         {

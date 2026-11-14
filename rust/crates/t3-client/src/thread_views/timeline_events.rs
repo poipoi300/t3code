@@ -234,7 +234,7 @@ fn plain_detail(source: &str) -> String {
     links.push_str(rest);
     links
         .replace('`', "")
-        .lines()
+        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
         .map(|line| {
             let line = line.trim_start_matches([' ', '\t']);
             line.strip_prefix(['-', '*'])
@@ -735,6 +735,10 @@ mod tests {
 
     #[test]
     fn detail_priority_strips_only_the_sources_plain_markup_and_generic_end() {
+        assert_eq!(
+            subagent_timeline_detail(&Status::Completed, Some("a\r- b\u{2028}* c"), None),
+            Some("a b c".into())
+        );
         assert_eq!(
             subagent_timeline_detail(
                 &Status::Running,

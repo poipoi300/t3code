@@ -132,6 +132,14 @@ impl<P: Platform> MobileDraftStore<P> {
         key: &str,
         project: &t3_contracts::environment::ScopedProjectRef,
     ) -> Result<bool, ClientError> {
+        self.retarget_saved_with_options(key, project, false).await
+    }
+    pub async fn retarget_saved_with_options(
+        &self,
+        key: &str,
+        project: &t3_contracts::environment::ScopedProjectRef,
+        keep_pull_request_workspace: bool,
+    ) -> Result<bool, ClientError> {
         self.load().await?;
         let now = crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms());
         let mut found = false;
@@ -141,11 +149,12 @@ impl<P: Platform> MobileDraftStore<P> {
             };
             found = true;
             let mut document = current.clone();
-            document["drafts"][key] = super::mobile_content::retarget(
+            document["drafts"][key] = super::mobile_content::retarget_with_options(
                 draft,
                 &project.environment_id.0,
                 &project.project_id.0,
                 &now,
+                keep_pull_request_workspace,
             );
             Ok(document)
         })?;
