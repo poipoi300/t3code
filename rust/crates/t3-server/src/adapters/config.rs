@@ -503,10 +503,11 @@ pub fn discover_static_dir() -> Option<std::path::PathBuf> {
         })
 }
 
-/// The organisation's managed policy file (`policy/ManagedPolicy.ts`). Source builds may name
-/// another file with `T3CODE_DEV_MANAGED_POLICY_PATH`; release builds never do. A policy that
-/// cannot be read or decoded refuses start. TypeScript also reads the Windows Group Policy
-/// registry key and macOS managed preferences (`readPlatformPolicy`); those are not ported.
+/// The organisation's managed policy (`policy/ManagedPolicy.ts`): the Group Policy registry key
+/// on Windows, the configuration profile on macOS, and the policy file; two of them refuse start
+/// (`t3_config::policy_sources`). Source builds may name other sources through the
+/// `T3CODE_DEV_MANAGED_POLICY_*` variables; release builds never do. A policy that cannot be read
+/// or decoded refuses start.
 pub fn managed_policy(
     env: &std::collections::BTreeMap<String, String>,
 ) -> crate::Result<Option<t3_contracts::managed_policy::ManagedPolicyDocument>> {
@@ -515,14 +516,19 @@ pub fn managed_policy(
         "macos" => "darwin",
         other => other,
     };
-    let path = t3_config::policy::selected_policy_path(platform, cfg!(debug_assertions), env);
-    t3_config::policy::ManagedPolicy::load_file(&path)
+    #[cfg(feature = "providers")]
+    let known_drivers = t3_provider::instances::BUILT_IN_DRIVERS;
+    #[cfg(not(feature = "providers"))]
+    let known_drivers: &[&str] = &[];
+    let dev_build = cfg!(debug_assertions);
+    t3_config::policy_sources::read_selected_managed_policy(platform, dev_build, env, known_drivers)
         .map(|policy| policy.document)
-        .map_err(|error| {
-            crate::Error::Service(format!(
+        .map_err(|error| match error {
+            t3_config::Error::ManagedPolicy { .. } => crate::Error::Service(error.to_string()),
+            error => crate::Error::Service(format!(
                 "The managed policy at {} cannot be read: {error}",
-                path.display()
-            ))
+                t3_config::policy::selected_policy_path(platform, dev_build, env).display()
+            )),
         })
 }
 

@@ -89,6 +89,14 @@ pub struct StartOptions {
     /// source. The binary has no dev mode yet and leaves it off.
     #[cfg(feature = "orchestration")]
     pub dev_replay: bool,
+    /// Project bindings for the pull-request application; `None` binds through the
+    /// environment's forge registry. Tests pass a fake forge here.
+    #[cfg(feature = "pull-requests")]
+    pub pull_request_binder: Option<Arc<dyn crate::adapters::pull_requests::ProjectBinder>>,
+    /// The per-thread MCP credential store; `None` creates one. Tests keep a clone to read the
+    /// credential a provider session was opened with.
+    #[cfg(feature = "mcp")]
+    pub mcp_sessions: Option<Arc<crate::adapters::mcp::McpSessions>>,
 }
 
 pub async fn start(inputs: crate::adapters::config::ConfigInputs) -> crate::Result<RunningServer> {
@@ -382,6 +390,8 @@ async fn start_domains(
             domains,
         )
         .await;
+        // The workspace authority lists worktrees through the same Git root.
+        workspaces.use_git(git.at(&context.local.config.cwd));
         domains.insert_runtime(git)?;
     }
     #[cfg(all(feature = "git", not(feature = "workspace")))]
@@ -411,12 +421,33 @@ async fn start_domains(
     }
     #[cfg(feature = "usage")]
     domains.insert(crate::adapters::usage::UsageAdapter::start(&context).await?)?;
+    // Before orchestration: provider sessions receive their MCP credential from it.
+    #[cfg(feature = "mcp")]
+    let mcp_sessions = {
+        let sessions = options.mcp_sessions.clone().unwrap_or_default();
+        sessions.bind(&context)?;
+        domains.insert(sessions.clone())?;
+        Some(sessions.port())
+    };
+    #[cfg(all(feature = "orchestration", not(feature = "mcp")))]
+    let mcp_sessions = None;
+    // Before orchestration: it supplies the title port; providers are bound once they start.
+    #[cfg(feature = "textgen")]
+    let titles = {
+        let textgen = crate::adapters::textgen::TextGenAdapter::start(&context);
+        domains.insert(textgen.clone())?;
+        Some(textgen.title_generator())
+    };
+    #[cfg(all(feature = "orchestration", not(feature = "textgen")))]
+    let titles = None;
     #[cfg(feature = "orchestration")]
     domains.insert_runtime(
         crate::adapters::orchestration::OrchestrationAdapter::start(
             &context,
             options.providers.clone(),
             options.dev_replay,
+            mcp_sessions,
+            titles,
         )
         .await?,
     )?;
@@ -430,6 +461,10 @@ async fn start_domains(
         .await?;
         domains.insert(providers.domain.clone())?;
         domains.insert(providers.domain.secrets.clone())?;
+        #[cfg(feature = "textgen")]
+        if let Some(textgen) = domains.get::<crate::adapters::textgen::TextGenAdapter>() {
+            textgen.bind_providers(providers.domain.clone());
+        }
         domains.insert_runtime(providers)?;
     }
     // The orchestration runtime offers each thread the modes its provider instance lists.
@@ -441,6 +476,21 @@ async fn start_domains(
         orchestration
             .follow_providers(providers.providers.clone(), context.shutdown.clone())
             .await;
+        if let Some(source) = orchestration.provider_source().cloned() {
+            source.bind(crate::adapters::native_providers::NativeProviders::new(
+                providers.clone(),
+                &context,
+                Arc::new(crate::adapters::orchestration::SystemClock),
+                Arc::new(t3_orchestration::composition::RandomIds),
+            ));
+            // Shuts down before the providers: sessions stop while the domain is alive.
+            domains.insert_runtime(Arc::new(
+                crate::adapters::native_providers::NativeProvidersShutdown {
+                    orchestration: orchestration.clone(),
+                    source,
+                },
+            ))?;
+        }
     }
     // After the providers: devices read secret references through the same resolver.
     #[cfg(feature = "device")]
@@ -484,6 +534,39 @@ async fn start_domains(
             scheduled_tasks,
             clones,
         )?)?;
+    }
+    // After projects and the forge registry, whose project list and drivers it binds.
+    #[cfg(feature = "pull-requests")]
+    if let (Some(projects), Some(binder)) = (
+        domains.get::<crate::adapters::project::ProjectAdapter>(),
+        crate::adapters::pull_requests::binder(domains, options),
+    ) {
+        domains.insert_runtime(
+            crate::adapters::pull_requests::PullRequestAdapter::start(&context, &projects, binder)
+                .await?,
+        )?;
+    }
+    // After pull requests (pushed refreshes), projects, terminals and the forge registry.
+    #[cfg(feature = "git-actions")]
+    if let (Some(projects), Some(orchestration), Some(terminal)) = (
+        domains.get::<crate::adapters::project::ProjectAdapter>(),
+        domains.get::<crate::adapters::orchestration::OrchestrationAdapter>(),
+        domains.get::<crate::adapters::terminal::TerminalAdapter>(),
+    ) && let Some(setup) = crate::adapters::project_setup::ProjectSetupAdapter::start(
+        &context,
+        &projects,
+        &orchestration,
+        &terminal,
+    ) {
+        domains.insert(setup)?;
+        if let Some(actions) = crate::adapters::git_actions::GitActionsAdapter::start(&context, domains) {
+            domains.insert(actions)?;
+        }
+    }
+    // Last: it binds the tools of every domain above.
+    #[cfg(feature = "mcp")]
+    if let Some(mcp) = crate::adapters::mcp::McpAdapter::start(&context, domains).await? {
+        domains.insert_runtime(mcp)?;
     }
     let _ = (&context, domains, options);
     Ok(())

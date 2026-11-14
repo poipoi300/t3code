@@ -23,6 +23,9 @@ mod authority {
         settings: Arc<t3_config::settings::SettingsService>,
         default_worktrees: PathBuf,
         home: PathBuf,
+        /// The environment's one Git root (shared caches, locks and internal-path protection),
+        /// handed over once the git adapter has built it. Unset, no worktree listing grants.
+        git: std::sync::OnceLock<t3_git::Git>,
     }
 
     struct Project {
@@ -67,7 +70,13 @@ mod authority {
                 settings: context.local.settings.clone(),
                 default_worktrees: context.local.config.paths.worktrees(),
                 home: context.account_home.clone(),
+                git: std::sync::OnceLock::new(),
             })
+        }
+
+        /// Takes the environment's Git root; checkout handles come from `root.at(cwd)`.
+        pub fn use_git(&self, root: t3_git::Git) {
+            let _ = self.git.set(root);
         }
 
         /// `project/threadWorkspaceRoot.ts`: the thread's worktree, else its live project's root;
@@ -220,7 +229,11 @@ mod authority {
                     continue;
                 };
                 if !listed.contains_key(&project_id) {
-                    let worktrees = t3_git::Git::new(&project.workspace_root)
+                    let Some(root) = self.git.get() else {
+                        continue;
+                    };
+                    let worktrees = root
+                        .at(&project.workspace_root)
                         .list_worktrees()
                         .await
                         .map(|worktrees| {

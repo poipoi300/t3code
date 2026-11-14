@@ -91,8 +91,82 @@ async fn session(origin: &str, credential: &Value) -> (String, Value) {
     (cookie, response.json().await.unwrap())
 }
 
+/// Methods no group serves yet, in the default test environment (no Node runtime). A group that
+/// silently drops out, or a method that starts being served, fails here: move it in this list
+/// together with `briefs/server-unserved.md`.
+const UNSERVED_WITHOUT_NODE: &[&str] = &[];
+/// With Node and the preview edge present, the devices and preview groups are served too.
+const UNSERVED_WITH_NODE: &[&str] = &[];
+
 #[tokio::test]
 async fn every_served_method_refuses_a_session_missing_one_required_scope() {
+    sweep(Default::default(), UNSERVED_WITHOUT_NODE).await;
+}
+
+/// The same sweep with the optional groups served: the runner's Node on PATH (devices and
+/// preview) and preview's fake Playwright module, as `composition_preview` uses.
+#[tokio::test]
+async fn every_optional_group_is_swept_when_its_runtime_is_present() {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    let Some(node) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(name))
+        .find(|path| path.is_absolute() && path.is_file())
+    else {
+        panic!("this sweep needs Node on the test runner's PATH, as composition_preview does");
+    };
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../t3-preview/driver/tests/worker-fixture.cjs");
+    let module = std::env::temp_dir().join(format!("t3-sweep-playwright-{}.cjs", std::process::id()));
+    // `composition_preview`'s fake Playwright edge: launches resolve, a CDP screencast answers.
+    let edge = r#"
+const launch=chromium.launch;
+chromium.launch=async(...args)=>{
+  const browser=await launch(...args),create=browser.newContext;
+  browser.newContext=async(...args)=>{
+    const context=await create(...args),connect=context.newCDPSession;
+    context.newCDPSession=async(...args)=>{
+      const session=await connect(...args),send=session.send;
+      session.send=async(method,params)=>{
+        if(method==='Page.startScreencast')queueMicrotask(()=>session.emit('Page.screencastFrame',{data:'/9j/2Q==',sessionId:1,metadata:{deviceWidth:1280,deviceHeight:800}}));
+        return send(method,params);
+      };return session;
+    };return context;
+  };return browser;
+};
+chromium.launchPersistentContext=async(_directory,options)=>(await chromium.launch(options)).newContext();
+chromium.connectOverCDP=async()=>{throw Error('unexpected desktop launch')};
+exports.chromium=chromium;
+"#;
+    std::fs::write(
+        &module,
+        format!(
+            "const {{chromium}}=require({});{edge}",
+            serde_json::to_string(&fixture).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut env: std::collections::BTreeMap<String, String> =
+        ["SystemRoot", "ComSpec", "WINDIR"]
+            .into_iter()
+            .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
+            .collect();
+    let homes = tempfile::tempdir().unwrap();
+    for name in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+        env.insert(name.into(), homes.path().to_string_lossy().into_owned());
+    }
+    env.insert(
+        "PATH".into(),
+        node.parent().unwrap().to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "T3_PREVIEW_PLAYWRIGHT_MODULE".into(),
+        module.to_string_lossy().into_owned(),
+    );
+    sweep(env, UNSERVED_WITH_NODE).await;
+    let _ = std::fs::remove_file(module);
+}
+
+async fn sweep(env: std::collections::BTreeMap<String, String>, expected_unserved: &[&str]) {
     let temp = tempfile::tempdir().unwrap();
     let server = t3_server::runtime::start(ConfigInputs {
         flags: ServerFlags {
@@ -101,7 +175,7 @@ async fn every_served_method_refuses_a_session_missing_one_required_scope() {
             port: Some(0),
             ..Default::default()
         },
-        env: Default::default(),
+        env,
         home: temp.path().into(),
         process_cwd: temp.path().into(),
         bootstrap: None,
@@ -115,6 +189,11 @@ async fn every_served_method_refuses_a_session_missing_one_required_scope() {
     })
     .await
     .unwrap();
+    let mut unserved: Vec<&str> = server.unserved_methods.clone();
+    unserved.sort_unstable();
+    let mut expected: Vec<&str> = expected_unserved.to_vec();
+    expected.sort_unstable();
+    assert_eq!(unserved, expected, "the unserved list changed");
     let origin = format!("http://{}", server.address);
     let (admin, body) = session(&origin, &json!(server.pairing_credential)).await;
     let held: Vec<AuthEnvironmentScope> =

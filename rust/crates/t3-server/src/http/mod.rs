@@ -8,6 +8,8 @@ mod body;
 mod cors;
 #[cfg(feature = "local-services")]
 mod error;
+#[cfg(feature = "mcp")]
+mod mcp;
 #[cfg(feature = "local-services")]
 mod mcp_oauth;
 #[cfg(all(feature = "local-services", feature = "orchestration"))]
@@ -34,6 +36,8 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
         );
         let router = router.route("/ws", get(crate::ws::upgrade));
         let router = mcp_oauth::routes(auth::routes(router));
+        #[cfg(feature = "mcp")]
+        let router = mcp::routes(router, &services);
         #[cfg(feature = "preview")]
         let router = router.merge(crate::handlers::preview::http_routes());
         #[cfg(feature = "workspace")]

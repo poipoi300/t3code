@@ -626,6 +626,16 @@ pub mod vcs {
             &self.broadcaster
         }
 
+        /// `vcs.createWorktree`'s folder and submodule settings, for other worktree creators.
+        pub fn worktree_host(&self) -> Arc<dyn WorktreeHost> {
+            self.worktrees.clone()
+        }
+
+        /// The refusal `vcs.createWorktree` answers for an unusable configured folder.
+        pub async fn worktree_directory_refusal(&self) -> Option<String> {
+            self.worktrees.directory_refusal().await
+        }
+
         pub(super) async fn shutdown(&self) {
             self.stop.cancel();
             let follower = self

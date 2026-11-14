@@ -136,13 +136,6 @@ impl Credentials {
         let mut hosts = settings.source_control_hosts.clone();
         #[cfg(feature = "providers")]
         if let Some(resolver) = &self.resolver {
-            use t3_contracts::secret_reference::SecretReference;
-            let reference = |value: &serde_json::Value| {
-                value
-                    .is_object()
-                    .then(|| serde_json::from_value::<SecretReference>(value.clone()).ok())
-                    .flatten()
-            };
             let mut slots = Vec::new();
             for (kind, fields) in &hosts {
                 for (field, value) in fields {
@@ -232,6 +225,16 @@ impl Credentials {
                 environment: Default::default(),
             }
         })
+    }
+}
+
+/// A settings value that is a secret provider reference.
+#[cfg(feature = "providers")]
+fn reference(value: &serde_json::Value) -> Option<t3_contracts::secret_reference::SecretReference> {
+    if value.is_object() {
+        serde_json::from_value(value.clone()).ok()
+    } else {
+        None
     }
 }
 
@@ -601,9 +604,15 @@ impl ForgeAdapter {
         self.configured_host(&input.provider, &input.host.0) && self.sign_in.star(input).await
     }
 
-    /// `server.discoverSourceControl`; its only failure is an invalid probe result.
-    pub async fn discover(&self) -> Option<SourceControlDiscoveryResult> {
-        self.discovery.discover().await.ok()
+    /// `server.discoverSourceControl`; its only failure is an invalid probe result. The forge's
+    /// discovery future is not provably `Send` (its buffered probe stream holds a higher-ranked
+    /// closure), so it runs on a blocking thread through the runtime handle.
+    pub async fn discover(self: Arc<Self>) -> Option<SourceControlDiscoveryResult> {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || handle.block_on(self.discovery.discover()).ok())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// `git.resolvePullRequest` for an authorised checkout, through its own review host.
@@ -736,7 +745,7 @@ impl ForgeAdapter {
         projects
             .start_clone(input)
             .await
-            .map_err(|error| ProjectCloneRefusal::Project(provider, error))
+            .map_err(|error| ProjectCloneRefusal::Project(provider, Box::new(error)))
     }
 }
 
@@ -744,7 +753,7 @@ impl ForgeAdapter {
 #[cfg(feature = "project")]
 pub enum ProjectCloneRefusal {
     Refused(Refusal),
-    Project(SourceControlProviderKind, t3_project::Error),
+    Project(SourceControlProviderKind, Box<t3_project::Error>),
 }
 
 /// Why `git.resolvePullRequest` was refused.

@@ -87,24 +87,48 @@ fn bare(path: &Path, from: Option<&Path>) {
         ),
         None => git(
             parent,
-            &["init", "-q", "--bare", "-b", "main", &path.to_string_lossy()],
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                &path.to_string_lossy(),
+            ],
         ),
     }
 }
 
-/// The directory holding the real `git`, so the server's PATH has Git and nothing else of ours.
-fn git_directory() -> PathBuf {
+/// The directories of the real `git`, so the server's PATH has Git and nothing else of ours.
+/// Git for Windows' `mingw64in` also needs its `usrin` (its helpers crash without it when
+/// the test runs from Git Bash, whose `MSYSTEM` the server inherits).
+fn git_directories() -> Vec<PathBuf> {
     let name = if cfg!(windows) { "git.exe" } else { "git" };
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+    let directory = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .find(|directory| directory.join(name).is_file())
-        .expect("git on PATH")
+        .expect("git on PATH");
+    let mut directories = vec![directory.clone()];
+    if let Some(root) = directory
+        .parent()
+        .filter(|parent| {
+            parent
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("mingw64"))
+        })
+        .and_then(Path::parent)
+    {
+        directories.push(root.join("usr").join("bin"));
+    }
+    directories
 }
 
 /// A fake `glab`: it logs `GITLAB_HOST` and its arguments, answers `mr view` with `mr.json` and
 /// every API call with `project.json`.
 fn fake_glab(bin: &Path, published: &Path) {
     std::fs::create_dir_all(bin).unwrap();
+    // Also the `namespaces/acme` answer when publishing: it needs the namespace id.
     let project = json!({
+        "id": 42,
         "path_with_namespace": "acme/web",
         "web_url": published.to_string_lossy(),
         "ssh_url_to_repo": "git@gitlab.com:acme/web.git",
@@ -218,14 +242,16 @@ impl Server {
         let published = home.join("published.git");
         bare(&published, None);
         fake_glab(&home.join("bin"), &published);
-        std::fs::create_dir_all(home.join("userdata")).unwrap();
+        let base = home.join(".t3");
+        std::fs::create_dir_all(base.join("userdata")).unwrap();
         std::fs::write(
-            home.join("userdata").join("settings.json"),
+            base.join("userdata").join("settings.json"),
             json!({"sourceControlHosts": {"github": {"tokens": {"github.com": "fixture-token"}}}})
                 .to_string(),
         )
         .unwrap();
-        let path = std::env::join_paths([home.join("bin"), git_directory()]).unwrap();
+        let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(git_directories()))
+            .unwrap();
         let env = ["SystemRoot", "ComSpec", "WINDIR"]
             .into_iter()
             .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_owned(), v)))
@@ -234,16 +260,21 @@ impl Server {
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                 (
                     "GIT_CONFIG_GLOBAL".into(),
-                    home.join(".no-global-config").to_string_lossy().into_owned(),
+                    home.join(".no-global-config")
+                        .to_string_lossy()
+                        .into_owned(),
                 ),
                 ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                ("T3CODE_GITHUB_APP_CLIENT_ID".into(), "fixture-client".into()),
+                (
+                    "T3CODE_GITHUB_APP_CLIENT_ID".into(),
+                    "fixture-client".into(),
+                ),
                 ("T3CODE_DEV_GITHUB_ENDPOINT".into(), github.into()),
             ])
             .collect();
         let runtime = t3_server::runtime::start(ConfigInputs {
             flags: ServerFlags {
-                base_dir: Some(home.to_string_lossy().into_owned()),
+                base_dir: Some(base.to_string_lossy().into_owned()),
                 host: Some("127.0.0.1".into()),
                 port: Some(0),
                 ..Default::default()
@@ -305,8 +336,12 @@ impl Server {
         .unwrap()
         .0
     }
+    /// The account home; the T3 base is `~/.t3`, as in production.
     fn home(&self) -> &Path {
         self.temp.path()
+    }
+    fn base(&self) -> PathBuf {
+        self.home().join(".t3")
     }
     /// Replaces this connection with one whose session holds only `scopes`.
     async fn reconnect_with(&mut self, scopes: &[&str]) {
@@ -340,8 +375,8 @@ impl Server {
     }
     fn insert_project(&self, id: &str, root: &Path) {
         let layout = t3_config::home::HomeLayout {
-            base_dir: self.home().into(),
-            state_dir: self.home().join("userdata"),
+            base_dir: self.base(),
+            state_dir: self.base().join("userdata"),
         };
         t3_persistence::rusqlite::Connection::open(layout.database())
             .unwrap()
@@ -355,8 +390,8 @@ impl Server {
     }
     fn project_root(&self, id: &str) -> Option<String> {
         let layout = t3_config::home::HomeLayout {
-            base_dir: self.home().into(),
-            state_dir: self.home().join("userdata"),
+            base_dir: self.base(),
+            state_dir: self.base().join("userdata"),
         };
         t3_persistence::rusqlite::Connection::open(layout.database())
             .unwrap()
@@ -453,13 +488,44 @@ fn failure(exit: Exit) -> Value {
     value.clone()
 }
 
-fn refused(exit: Exit) {
-    assert_eq!(failure(exit)["_tag"], "EnvironmentAuthorizationError");
+/// Refused by the RPC guard for lacking `scope`.
+fn scope_refused(exit: Exit, scope: &str) {
+    let error = failure(exit);
+    assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
+    assert_eq!(error["requiredScope"], scope, "{error}");
+}
+
+/// Refused because the cwd is not one of the environment's workspaces.
+fn outside_workspace(exit: Exit) {
+    let error = failure(exit);
+    assert_eq!(error["_tag"], "EnvironmentAuthorizationError", "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside this session's authorized project workspaces"),
+        "{error}"
+    );
+}
+
+/// Refused because the server does not clone into that folder: a repository failure, not a
+/// missing scope.
+fn destination_refused(exit: Exit) {
+    let error = failure(exit);
+    assert_eq!(error["_tag"], "SourceControlRepositoryError", "{error}");
+    assert_eq!(error["operation"], "cloneRepository", "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("This folder cannot be a clone destination."),
+        "{error}"
+    );
 }
 
 #[tokio::test]
 async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_registry() {
-    let (github, _) = github_stand_in().await;
+    let (github, recorded) = github_stand_in().await;
     let mut s = Server::start(&github).await;
     for method in FORGE_METHODS {
         assert!(
@@ -505,7 +571,7 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
     // A cwd the client names must be a workspace.
     let outside = s.home().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    refused(
+    outside_workspace(
         s.call(
             "sourceControl.lookupRepository",
             json!({"provider": "gitlab", "repository": "acme/web", "cwd": outside.to_string_lossy()}),
@@ -513,6 +579,26 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         .await,
     );
     assert_eq!(glab_calls(s.home()).len(), 1);
+    // A GitHub URL naming a host the server is not configured for gets no request (and so no
+    // github.com token); github.com itself is still asked.
+    let ghe = json!({"provider": "github", "repository": "https://fixture.ghe.com/acme/web"});
+    let before = recorded.all().len();
+    let unconfigured = failure(s.call("sourceControl.lookupRepository", ghe.clone()).await);
+    assert_eq!(unconfigured["_tag"], "SourceControlRepositoryError");
+    assert_eq!(recorded.all().len(), before);
+    let mut ghe_clone = ghe.clone();
+    ghe_clone["destinationPath"] = json!(s.home().join("code").join("ghe").to_string_lossy());
+    let refused_clone = failure(s.call("sourceControl.cloneRepository", ghe_clone).await);
+    assert_eq!(refused_clone["_tag"], "SourceControlRepositoryError");
+    assert_eq!(recorded.all().len(), before);
+    assert!(!s.home().join("code").join("ghe").exists());
+    let _ = s
+        .call(
+            "sourceControl.lookupRepository",
+            json!({"provider": "github", "repository": "https://github.com/acme/web"}),
+        )
+        .await;
+    assert!(recorded.all().len() > before);
 
     // Clone from a local remote into a new folder.
     let seed = s.home().join("seed");
@@ -543,25 +629,41 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         occupied["detail"],
         "Destination path already exists and is not empty."
     );
-    // Network shares and T3's own state are refused before Git runs.
+    // Network shares, T3's own folders and hidden or application folders of the home are refused
+    // before anything is created: a repository there could become Git's global configuration,
+    // an SSH configuration, or a runtime or agent the server trusts.
+    let unc = PathBuf::from(r"\\fixture-server\share\web");
     for refused_destination in [
-        r"\\fixture-server\share\web".to_owned(),
-        s.home()
-            .join("userdata")
-            .join("secrets")
-            .join("web")
-            .to_string_lossy()
-            .into_owned(),
+        unc.clone(),
+        s.base().join("userdata").join("secrets").join("web"),
+        s.home().join(".config").join("git"),
+        s.home().join(".ssh").join("keys"),
+        s.home().join("AppData").join("Roaming").join("fixture"),
+        s.base().join("runtime").join("versions").join("9.9.9"),
+        s.base().join("tools").join("acp-registry").join("fixture"),
     ] {
-        refused(
+        destination_refused(
             s.call(
                 "sourceControl.cloneRepository",
-                json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": refused_destination}),
+                json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": refused_destination.to_string_lossy()}),
             )
             .await,
         );
+        if refused_destination != unc {
+            assert!(!refused_destination.exists(), "{refused_destination:?}");
+        }
     }
-    assert!(!s.home().join("userdata").join("secrets").join("web").exists());
+    assert!(!s.home().join(".config").exists());
+    assert!(!s.home().join(".ssh").exists());
+    assert!(!s.base().join("tools").exists());
+    // T3's managed project folders are ordinary destinations.
+    let managed = s.base().join("projects").join("web");
+    ok(s.call(
+        "sourceControl.cloneRepository",
+        json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": managed.to_string_lossy()}),
+    )
+    .await);
+    assert!(managed.join("hello.txt").is_file());
 
     // Publish creates the repository through glab, adds it as origin and pushes.
     let project = s.home().join("project");
@@ -570,13 +672,19 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         "cwd": project.to_string_lossy(), "provider": "gitlab", "repository": "acme/web",
         "visibility": "private", "protocol": "https",
     });
-    refused(s.call("sourceControl.publishRepository", publish.clone()).await);
+    outside_workspace(
+        s.call("sourceControl.publishRepository", publish.clone())
+            .await,
+    );
     s.insert_project("project-1", &project);
     let published = ok(s.call("sourceControl.publishRepository", publish).await);
     assert_eq!(published["status"], "pushed");
     assert_eq!(published["remoteName"], "origin");
     let pushed = std::process::Command::new("git")
-        .args(["--git-dir", &s.home().join("published.git").to_string_lossy()])
+        .args([
+            "--git-dir",
+            &s.home().join("published.git").to_string_lossy(),
+        ])
         .args(["rev-parse", "--verify", "refs/heads/main"])
         .output()
         .unwrap();
@@ -590,7 +698,7 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         &["remote", "add", "origin", "git@gitlab.com:acme/web.git"],
     );
     let resolve = json!({"cwd": review.to_string_lossy(), "reference": "7"});
-    refused(s.call("git.resolvePullRequest", resolve.clone()).await);
+    outside_workspace(s.call("git.resolvePullRequest", resolve.clone()).await);
     s.insert_project("review-1", &review);
     let resolved = ok(s.call("git.resolvePullRequest", resolve).await);
     assert_eq!(resolved["pullRequest"]["number"], 7);
@@ -605,8 +713,21 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
 
     // Discovery probes Git and every registered forge through the server's PATH.
     let discovered = ok(s.call("server.discoverSourceControl", json!({})).await);
+    // Calls close together share one round of probes.
+    assert_eq!(
+        ok(s.call("server.discoverSourceControl", json!({})).await),
+        discovered
+    );
+    let probes = glab_calls(s.home())
+        .iter()
+        .filter(|call| call.as_str() == "gitlab.com --version")
+        .count();
+    assert_eq!(probes, 1);
     assert_eq!(discovered["versionControlSystems"][0]["kind"], "git");
-    assert_eq!(discovered["versionControlSystems"][0]["status"], "available");
+    assert_eq!(
+        discovered["versionControlSystems"][0]["status"],
+        "available"
+    );
     let gitlab = discovered["sourceControlProviders"]
         .as_array()
         .unwrap()
@@ -626,30 +747,39 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
     // Each method keeps its contract scope.
     s.reconnect_with(&["orchestration:read"]).await;
     let clone_request = json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": s.home().join("code").join("other").to_string_lossy()});
-    refused(s.call("sourceControl.cloneRepository", clone_request).await);
-    refused(
+    scope_refused(
+        s.call("sourceControl.cloneRepository", clone_request).await,
+        "source-control:write",
+    );
+    scope_refused(
         s.call(
             "sourceControl.publishRepository",
             json!({"cwd": project.to_string_lossy(), "provider": "gitlab", "repository": "acme/web", "visibility": "private"}),
         )
         .await,
+        "source-control:write",
     );
     assert!(!s.home().join("code").join("other").exists());
     s.reconnect_with(&["source-control:write"]).await;
-    refused(
+    scope_refused(
         s.call(
             "sourceControl.lookupRepository",
             json!({"provider": "gitlab", "repository": "acme/web"}),
         )
         .await,
+        "orchestration:read",
     );
-    refused(s.call("server.discoverSourceControl", json!({})).await);
-    refused(
+    scope_refused(
+        s.call("server.discoverSourceControl", json!({})).await,
+        "orchestration:read",
+    );
+    scope_refused(
         s.call(
             "git.resolvePullRequest",
             json!({"cwd": review.to_string_lossy(), "reference": "7"}),
         )
         .await,
+        "orchestration:read",
     );
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
@@ -662,15 +792,20 @@ async fn github_sign_in_and_stars_address_only_configured_hosts() {
     let host = |host: &str| json!({"provider": "github", "host": host});
 
     // The device flow starts against github.com (the stand-in) with the server's app client id.
-    let prompt = ok(s.call("sourceControl.signInStart", host("github.com")).await);
+    let prompt = ok(s
+        .call("sourceControl.signInStart", host("github.com"))
+        .await);
     assert_eq!(prompt["userCode"], "ABCD-1234");
     assert_eq!(prompt["verificationUri"], "https://github.com/login/device");
     assert!(recorded.all().iter().any(|(method, path, _, body)| {
-        method == "POST" && path == "/login/device/code" && body.contains("client_id=fixture-client")
+        method == "POST"
+            && path == "/login/device/code"
+            && body.contains("client_id=fixture-client")
     }));
     // Cancel ends the pending flow; waiting on it then reports the cancellation.
     assert_eq!(
-        ok(s.call("sourceControl.signInCancel", host("github.com")).await),
+        ok(s.call("sourceControl.signInCancel", host("github.com"))
+            .await),
         Value::Null
     );
     let waited = failure(s.call("sourceControl.signInWait", host("github.com")).await);
@@ -694,7 +829,8 @@ async fn github_sign_in_and_stars_address_only_configured_hosts() {
     let repository =
         |host: &str| json!({"provider": "github", "host": host, "repository": "acme/web"});
     assert_eq!(
-        ok(s.call("sourceControl.starred", repository("github.com")).await),
+        ok(s.call("sourceControl.starred", repository("github.com"))
+            .await),
         true
     );
     assert_eq!(
@@ -721,22 +857,30 @@ async fn github_sign_in_and_stars_address_only_configured_hosts() {
     // A host the server is not configured for gets nothing: no request, no credential.
     let before = recorded.all().len();
     assert_eq!(
-        ok(s.call("sourceControl.starred", repository("fixture.ghe.com")).await),
+        ok(
+            s.call("sourceControl.starred", repository("fixture.ghe.com"))
+                .await
+        ),
         false
     );
     assert_eq!(
-        ok(s.call("sourceControl.star", repository("fixture.ghe.com")).await),
+        ok(s.call("sourceControl.star", repository("fixture.ghe.com"))
+            .await),
         false
     );
     assert_eq!(
-        ok(s.call("sourceControl.appAccess", repository("fixture.ghe.com")).await)["status"],
-        "signedOut"
+        ok(
+            s.call("sourceControl.appAccess", repository("fixture.ghe.com"))
+                .await
+        )["status"],
+        "signed-out"
     );
     assert_eq!(recorded.all().len(), before);
     // github.com has no app sign-in saved, so the app has no access yet.
     assert_eq!(
-        ok(s.call("sourceControl.appAccess", repository("github.com")).await)["status"],
-        "signedOut"
+        ok(s.call("sourceControl.appAccess", repository("github.com"))
+            .await)["status"],
+        "signed-out"
     );
 
     s.reconnect_with(&["orchestration:read"]).await;
@@ -745,12 +889,23 @@ async fn github_sign_in_and_stars_address_only_configured_hosts() {
         "sourceControl.signInWait",
         "sourceControl.signInCancel",
     ] {
-        refused(s.call(method, host("github.com")).await);
+        scope_refused(s.call(method, host("github.com")).await, "settings:write");
     }
-    refused(s.call("sourceControl.star", repository("github.com")).await);
+    scope_refused(
+        s.call("sourceControl.star", repository("github.com")).await,
+        "source-control:write",
+    );
     s.reconnect_with(&["source-control:write"]).await;
-    refused(s.call("sourceControl.starred", repository("github.com")).await);
-    refused(s.call("sourceControl.appAccess", repository("github.com")).await);
+    scope_refused(
+        s.call("sourceControl.starred", repository("github.com"))
+            .await,
+        "orchestration:read",
+    );
+    scope_refused(
+        s.call("sourceControl.appAccess", repository("github.com"))
+            .await,
+        "orchestration:read",
+    );
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }
@@ -806,11 +961,17 @@ async fn project_clones_stream_start_retry_and_end_with_the_socket() {
     assert!(s.project_root("clone-1").unwrap().ends_with("web"));
     // A finished clone has nothing to cancel or retry.
     assert_eq!(
-        ok(s.call("projectClone.cancel", json!({"projectId": "clone-1"})).await)["applied"],
+        ok(
+            s.call("projectClone.cancel", json!({"projectId": "clone-1"}))
+                .await
+        )["applied"],
         false
     );
     assert_eq!(
-        ok(s.call("projectClone.retry", json!({"projectId": "clone-1"})).await)["applied"],
+        ok(
+            s.call("projectClone.retry", json!({"projectId": "clone-1"}))
+                .await
+        )["applied"],
         false
     );
 
@@ -826,41 +987,59 @@ async fn project_clones_stream_start_retry_and_end_with_the_socket() {
     assert!(!failed["error"].is_null());
     bare(&late, Some(&seed));
     assert_eq!(
-        ok(s.call("projectClone.retry", json!({"projectId": "clone-2"})).await)["applied"],
+        ok(
+            s.call("projectClone.retry", json!({"projectId": "clone-2"}))
+                .await
+        )["applied"],
         true
     );
     until_phase(&mut s, "clone-2", "done").await;
     assert!(late_destination.join("hello.txt").is_file());
 
-    // Destinations in T3's own state are refused before a project or folder exists.
-    let internal = s.home().join("userdata").join("secrets").join("web");
-    refused(
-        s.call("projectClone.start", start("clone-3", &remote, &internal))
+    // Destinations in T3's own state or Git's configuration folder are refused before a project
+    // or folder exists.
+    for (id, refused_destination) in [
+        (
+            "clone-3",
+            s.base().join("userdata").join("secrets").join("web"),
+        ),
+        ("clone-5", s.home().join(".config").join("git")),
+    ] {
+        destination_refused(
+            s.call(
+                "projectClone.start",
+                start(id, &remote, &refused_destination),
+            )
             .await,
-    );
-    assert!(s.project_root("clone-3").is_none());
-    assert!(!internal.exists());
+        );
+        assert!(s.project_root(id).is_none());
+        assert!(!refused_destination.exists());
+    }
 
     s.reconnect_with(&["orchestration:read"]).await;
-    refused(
+    scope_refused(
         s.call(
             "projectClone.start",
             start("clone-4", &remote, &s.home().join("clones").join("other")),
         )
         .await,
+        "source-control:write",
     );
-    refused(
+    scope_refused(
         s.call("projectClone.cancel", json!({"projectId": "clone-1"}))
             .await,
+        "source-control:write",
     );
-    refused(
+    scope_refused(
         s.call("projectClone.retry", json!({"projectId": "clone-1"}))
             .await,
+        "source-control:write",
     );
     s.reconnect_with(&["source-control:write"]).await;
-    refused(
+    scope_refused(
         s.call_as("subscribeProjectClones", json!({}), CallKind::Stream)
             .await,
+        "orchestration:read",
     );
     // The stream held no server handle past its socket: shutdown joins cleanly.
     s.socket.close(None).await.unwrap();

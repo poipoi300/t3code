@@ -69,7 +69,7 @@ mod live {
             ProjectCloneRefusal::Refused(Refusal::Repository(e)) => {
                 Failure::Typed(WsProjectCloneStartError::SourceControlRepositoryError(e))
             }
-            ProjectCloneRefusal::Project(provider, error) => match repository(provider, error) {
+            ProjectCloneRefusal::Project(provider, error) => match repository(provider, *error) {
                 Ok(e) => Failure::Typed(WsProjectCloneStartError::SourceControlRepositoryError(e)),
                 Err(error @ (ProjectError::Invalid(_) | ProjectError::Conflict { .. })) => {
                     dispatch(error.to_string())
@@ -151,6 +151,24 @@ mod live {
             }
         })?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Project errors carry Git stderr, argv and URLs; a client sees fixed text only.
+        #[test]
+        fn internal_failures_reach_the_client_as_fixed_text() {
+            let error = ProjectError::Operation {
+                operation: "cloneRepository",
+                detail: "fatal: https://user:secret@example.invalid/repo.git".into(),
+            };
+            let Failure::<()>::Defect(ServerDefect::Internal { message }) = internal(error) else {
+                panic!("expected an internal defect");
+            };
+            assert_eq!(message, "The project clone could not be updated.");
+        }
     }
 }
 

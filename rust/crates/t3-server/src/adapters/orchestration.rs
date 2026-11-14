@@ -91,6 +91,9 @@ pub struct OrchestrationAdapter {
     /// Provider rows for offered runtime modes; fed by `follow_providers` once the provider
     /// domain has started (it starts after this runtime, before any turn can run).
     provider_snapshots: Option<ProviderSnapshots>,
+    provider_source: Option<Arc<crate::adapters::native_providers::ProviderSource>>,
+    /// Set by the first shutdown; native providers stop this runtime before the provider domain.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 type ProviderSnapshots = tokio::sync::watch::Sender<Arc<Vec<t3_contracts::server::ServerProvider>>>;
@@ -158,6 +161,10 @@ impl OrchestrationAdapter {
         context: &crate::services::DomainContext<'_>,
         providers: Vec<Arc<dyn ProviderAdapter>>,
         dev_replay: bool,
+        credentials: Option<
+            Arc<dyn t3_orchestration::ports::sessions_recovery::provider_session_manager::SessionCredentials>,
+        >,
+        titles: Option<Arc<dyn t3_orchestration::api::TitleGenerator>>,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -189,9 +196,11 @@ impl OrchestrationAdapter {
                 true,
             ));
         }
+        // Native instances join once the provider domain has started (`native_providers`).
+        let provider_source = crate::adapters::native_providers::ProviderSource::new(registrations);
         let mut ports = RuntimePorts::new(
             StoreDatabase(context.database.clone()),
-            Arc::new(AdapterRegistry::new(registrations)),
+            Arc::new(AdapterRegistry::from_instance_source(provider_source.clone())),
             Arc::new(GitCheckpointBackend::new(t3_git::Git::new)),
             clock,
         );
@@ -201,6 +210,10 @@ impl OrchestrationAdapter {
         // The organisation's managed policy has one reader: the runtime caps thread creation and
         // mode changes from it and wraps the turn policy below (`CeilingRuntimePolicy`).
         ports.managed_policy = context.local.managed_policy.clone();
+        // `thread-title.generate` effects (textgen adapter); `None` keeps the typed refusal.
+        ports.titles = titles;
+        // Each provider session opens with its thread's MCP credential (`adapters/mcp.rs`).
+        ports.credentials = credentials;
         // Turns run in the project's root, in the modes their provider instance offers.
         let (provider_snapshots, offered) = tokio::sync::watch::channel(Arc::new(Vec::new()));
         ports.provider_snapshots = Some(offered.clone());
@@ -229,7 +242,16 @@ impl OrchestrationAdapter {
             events: Arc::new(runtime.events.clone()),
             runtime: Some(Arc::new(runtime)),
             provider_snapshots: Some(provider_snapshots),
+            provider_source: Some(provider_source),
+            stopped: Default::default(),
         }))
+    }
+
+    /// The registry's instance source, which the provider domain's instances are bound into.
+    pub fn provider_source(
+        &self,
+    ) -> Option<&Arc<crate::adapters::native_providers::ProviderSource>> {
+        self.provider_source.as_ref()
     }
 
     /// Feeds the runtime's provider snapshot from the provider service until shutdown.
@@ -329,6 +351,8 @@ impl OrchestrationAdapter {
             events,
             runtime: None,
             provider_snapshots: None,
+            provider_source: None,
+            stopped: Default::default(),
         }
     }
 
@@ -726,6 +750,9 @@ impl crate::services::DomainRuntime for OrchestrationAdapter {
     /// provider sessions, worker and reconcile, while the database is still open.
     fn shutdown(&self) -> futures::future::BoxFuture<'_, crate::Result<()>> {
         Box::pin(async move {
+            if self.stopped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
             let stopped = match &self.runtime {
                 Some(runtime) => {
                     log_lifecycle_failures(runtime);

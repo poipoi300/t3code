@@ -239,7 +239,9 @@ mod forge {
         method!(WsSourceControlStarredRpc, |f, _ctx, input| Ok(f
             .starred(input)
             .await));
-        method!(WsSourceControlStarRpc, |f, _ctx, input| Ok(f.star(input).await));
+        method!(WsSourceControlStarRpc, |f, _ctx, input| Ok(f
+            .star(input)
+            .await));
         method!(WsServerDiscoverSourceControlRpc, |f, _ctx, _input| f
             .discover()
             .await

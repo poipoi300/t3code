@@ -1,13 +1,16 @@
 pub mod cloud;
 pub mod core;
 pub mod device;
+pub mod git_actions;
 pub mod host;
+pub mod mcp_apps;
 pub mod optional_services;
 pub mod orchestration;
 pub mod preview;
 pub mod project_clone;
 pub mod projects;
 pub mod providers;
+pub mod pull_requests;
 pub mod source_control;
 pub mod telemetry;
 mod unsupported;
@@ -44,6 +47,9 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     project_clone::register_with(&mut registry, domains)?;
     providers::register_with(&mut registry, domains)?;
     vcs::register_with(&mut registry, domains)?;
+    pull_requests::register_with(&mut registry, domains)?;
+    mcp_apps::register_with(&mut registry, domains)?;
+    git_actions::register_with(&mut registry, domains)?;
     unsupported::register(&mut registry)?;
     registry.validate()?;
     Ok(registry)
