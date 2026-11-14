@@ -104,6 +104,12 @@ pub struct Capture {
 // This fills low-level operations absent from the frozen CheckpointBackend seam.
 #[async_trait]
 pub trait CheckpointMetadata: Send + Sync {
+    /// Records the repository `cwd` belongs to, before any agent writes there (t3-git H-1);
+    /// `replace` is for a trusted recreation of the folder. A backend without Git has nothing to
+    /// record.
+    async fn bind_scope(&self, _cwd: PathBuf, _replace: bool) -> Result<()> {
+        Ok(())
+    }
     async fn query_diff(
         &self,
         _cwd: PathBuf,

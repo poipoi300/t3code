@@ -257,8 +257,7 @@ async fn check_promoted_scheduled_delivery(pinned: bool) -> Result<()> {
         t3_contracts::stored::to_value(queued_message)?.get("followsThreadSelection"),
         (!pinned).then_some(&json!(true))
     );
-    let current =
-        json!({"instanceId":"codex","model":"current-selection","options":{"effort":"medium"}});
+    let current = json!({"instanceId":"codex","model":"current-selection","options":[{"id":"effort","value":"medium"}]});
     dispatcher.dispatch(serde_json::from_value(json!({"type":"thread.model-selection.set","commandId":"select-current","threadId":"thread:test","modelSelection":current}))?).await?;
     dispatcher.dispatch(serde_json::from_value(json!({"type":"queued-message.promote-to-steer","commandId":"promote-scheduled","threadId":"thread:test","queuedRunId":queued.id,"targetRunId":"run:test"}))?).await?;
     let effect=h.database.stores.read(|db| {

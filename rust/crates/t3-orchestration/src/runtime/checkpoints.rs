@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct GitCheckpointBackend {
     factory: Arc<dyn Fn(PathBuf) -> Git + Send + Sync>,
+    bindings: Option<Arc<dyn crate::api::RepositoryBindingStore>>,
 }
 
 pub struct GitRollbackWorkspaceRecovery {
@@ -56,7 +57,7 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
         };
         let git = self
             .backend
-            .git(PathBuf::from(project.workspace_root))
+            .handle(PathBuf::from(project.workspace_root))
             .with_cancellation(cancellation.clone());
         git.execute(&["worktree", "prune"], Default::default())
             .await
@@ -78,6 +79,7 @@ impl Default for GitCheckpointBackend {
     fn default() -> Self {
         Self {
             factory: Arc::new(Git::new),
+            bindings: None,
         }
     }
 }
@@ -86,11 +88,42 @@ impl GitCheckpointBackend {
     pub fn new(factory: impl Fn(PathBuf) -> Git + Send + Sync + 'static) -> Self {
         Self {
             factory: Arc::new(factory),
+            bindings: None,
         }
     }
 
-    fn git(&self, cwd: PathBuf) -> Git {
+    /// Every operation runs against the repository saved for its scope (t3-git H-1). A scope seen
+    /// for the first time is bound and saved; a planted repository then refuses, after restarts too.
+    pub fn with_repository_bindings(
+        mut self,
+        bindings: Arc<dyn crate::api::RepositoryBindingStore>,
+    ) -> Self {
+        self.bindings = Some(bindings);
+        self
+    }
+
+    /// A handle for reads outside checkpoint operations (launch preparation, recreation).
+    fn handle(&self, cwd: PathBuf) -> Git {
         (self.factory)(cwd)
+    }
+
+    async fn git(&self, cwd: PathBuf) -> Result<Git> {
+        self.bound(cwd, false).await
+    }
+
+    async fn bound(&self, cwd: PathBuf, replace: bool) -> Result<Git> {
+        let git = (self.factory)(cwd.clone());
+        let Some(bindings) = &self.bindings else {
+            return Ok(git);
+        };
+        if !replace && let Some(saved) = bindings.get(&cwd).await? {
+            let saved: t3_git::RepositoryBinding = serde_json::from_value(saved)?;
+            return git.with_repository_binding(saved).await.map_err(git_error);
+        }
+        if let Some(binding) = git.bind_repository().await.map_err(git_error)? {
+            bindings.put(&cwd, serde_json::to_value(&binding)?).await?;
+        }
+        Ok(git)
     }
 
     fn reference(scope: &OrchestrationV2CheckpointScope, ordinal: u64) -> Result<CheckpointRef> {
@@ -108,6 +141,13 @@ fn git_error(error: GitError) -> Error {
             detail: t3_git::INDEX_LOCKED_DETAIL.into(),
         },
         GitError::Unsupported(_) => Error::Unsupported("checkpoint filesystem capture"),
+        GitError::RepositoryChanged { ref path, detail } => Error::Service {
+            operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+            detail: format!(
+                "{} no longer belongs to the repository this thread started in: {detail} T3 will not restore, capture or read it until the folder is restored.",
+                path.display()
+            ),
+        },
         error => Error::Service {
             operation: "checkpoint.git",
             detail: error.to_string(),
@@ -145,6 +185,7 @@ impl CheckpointBackend for GitCheckpointBackend {
         let cwd = PathBuf::from(&input.scope.cwd.0);
         let git = self
             .git(cwd.clone())
+            .await?
             .with_cancellation(cancellation.clone());
         let previous = input
             .ordinal
@@ -171,7 +212,7 @@ impl CheckpointBackend for GitCheckpointBackend {
         ordinal: u64,
     ) -> Result<Option<CheckpointRef>> {
         let reference = Self::reference(&scope, ordinal)?;
-        let git = self.git(PathBuf::from(&scope.cwd.0));
+        let git = self.git(PathBuf::from(&scope.cwd.0)).await?;
         if git.detect_repository().await.map_err(git_error)?.is_none() {
             return Ok(None);
         }
@@ -188,7 +229,7 @@ impl CheckpointBackend for GitCheckpointBackend {
         from: CheckpointRef,
         to: CheckpointRef,
     ) -> Result<CheckpointDiff> {
-        let git = self.git(cwd);
+        let git = self.git(cwd).await?;
         let mut options = DiffOptions::new(&from.0, &to.0);
         options.ignore_whitespace = false;
         options.format = DiffFormat::Numstat;
@@ -235,7 +276,7 @@ impl CheckpointBackend for GitCheckpointBackend {
         }
         let reference = Self::reference(&scope, ordinal)?;
         let cwd = PathBuf::from(&scope.cwd.0);
-        let git = self.git(cwd).with_cancellation(cancellation.clone());
+        let git = self.git(cwd).await?.with_cancellation(cancellation.clone());
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -262,6 +303,7 @@ impl CheckpointBackend for GitCheckpointBackend {
             .map(|ordinal| t3_git::checkpoint_ref(&scope_id.0, ordinal))
             .collect::<HashSet<_>>();
         self.git(PathBuf::from(scope.cwd.0))
+            .await?
             .prune_checkpoint_refs(&scope_id.0, &keep)
             .await
             .map_err(git_error)?;
@@ -279,6 +321,7 @@ impl CheckpointMetadata for GitCheckpointBackend {
         ignore_whitespace: bool,
     ) -> Result<String> {
         self.git(cwd)
+            .await?
             .filtered_checkpoint_diff(&from.0, &to.0, ignore_whitespace, t3_git::DIFF_MAX_BYTES)
             .await
             .map_err(git_error)
@@ -291,10 +334,15 @@ impl CheckpointMetadata for GitCheckpointBackend {
     async fn is_repository(&self, cwd: PathBuf) -> Result<bool> {
         Ok(self
             .git(cwd)
+            .await?
             .detect_repository()
             .await
             .map_err(git_error)?
             .is_some())
+    }
+
+    async fn bind_scope(&self, cwd: PathBuf, replace: bool) -> Result<()> {
+        self.bound(cwd, replace).await.map(|_| ())
     }
 
     async fn delete_refs(
@@ -316,6 +364,7 @@ impl CheckpointMetadata for GitCheckpointBackend {
             refs.push(checkpoint.r#ref.0);
         }
         self.git(PathBuf::from(scope.cwd.0))
+            .await?
             .delete_checkpoint_refs(&refs)
             .await
             .map_err(git_error)
@@ -362,28 +411,28 @@ impl LaunchEnvironment for GitLaunchEnvironment {
         self.host.folder_for_thread(project, thread, text).await
     }
     async fn repository_root(&self, cwd: PathBuf) -> Result<Option<PathBuf>> {
-        t3_git::GitWorkflowService::new(self.backend.git(cwd))
+        t3_git::GitWorkflowService::new(self.backend.handle(cwd))
             .repository_root()
             .await
             .map_err(git_error)
     }
     async fn has_commit(&self, cwd: PathBuf, reference: &str) -> Result<bool> {
         self.backend
-            .git(cwd)
+            .handle(cwd)
             .has_commit(reference)
             .await
             .map_err(git_error)
     }
     async fn has_ref(&self, cwd: PathBuf, reference: &str) -> Result<bool> {
         self.backend
-            .git(cwd)
+            .handle(cwd)
             .has_ref_named(reference)
             .await
             .map_err(git_error)
     }
     async fn remote_for_base(&self, cwd: PathBuf, reference: &str) -> Result<Option<String>> {
         self.backend
-            .git(cwd)
+            .handle(cwd)
             .resolve_worktree_base_remote(reference)
             .await
             .map(|target| target.map(|(remote, _)| remote))
@@ -395,7 +444,7 @@ impl LaunchEnvironment for GitLaunchEnvironment {
         reference: &str,
         remote: &str,
     ) -> Result<bool> {
-        let git = self.backend.git(cwd);
+        let git = self.backend.handle(cwd);
         let Some((_, branch)) = git
             .resolve_worktree_base_remote(reference)
             .await
@@ -410,7 +459,7 @@ impl LaunchEnvironment for GitLaunchEnvironment {
     }
     async fn local_branches(&self, cwd: PathBuf) -> Result<Vec<String>> {
         self.backend
-            .git(cwd)
+            .handle(cwd)
             .list_local_branch_names()
             .await
             .map_err(git_error)
@@ -440,7 +489,7 @@ impl LaunchEnvironment for GitLaunchEnvironment {
             return Err(Error::Cancelled);
         }
         self.backend
-            .git(cwd)
+            .handle(cwd)
             .with_cancellation(cancellation)
             .rename_branch(old, &generated.branch, generated.exact_name)
             .await
@@ -499,7 +548,7 @@ mod tests {
             let backend = Arc::new(GitCheckpointBackend::new(move |cwd| {
                 Git::new(cwd).with_environment(environment.clone())
             }));
-            let git = backend.git(root.clone());
+            let git = backend.handle(root.clone());
             let repo = Self {
                 _temp: temp,
                 root,
@@ -548,6 +597,140 @@ mod tests {
                 )
                 .await
         }
+    }
+
+    fn isolated_git(home: &Path) -> impl Fn(PathBuf) -> Git + Send + Sync + 'static {
+        let mut environment = BTreeMap::<OsString, Option<OsString>>::new();
+        for key in ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"] {
+            environment.insert(key.into(), Some(home.as_os_str().to_owned()));
+        }
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            environment.insert(key.into(), Some(home.join("no-config").into_os_string()));
+        }
+        for (key, value) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_CONFIG_COUNT", "0"),
+            ("GIT_AUTHOR_NAME", "Test"),
+            ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+            ("GIT_COMMITTER_NAME", "Test"),
+            ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+        ] {
+            environment.insert(key.into(), Some(value.into()));
+        }
+        for key in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG", "GIT_TEMPLATE_DIR"] {
+            environment.insert(key.into(), None);
+        }
+        move |cwd| Git::new(cwd).with_environment(environment.clone())
+    }
+
+    async fn capture_in(
+        backend: &GitCheckpointBackend,
+        scope: &OrchestrationV2CheckpointScope,
+        ordinal: u64,
+    ) -> Result<CheckpointRef> {
+        backend
+            .capture(
+                CaptureCheckpoint {
+                    scope: scope.clone(),
+                    ordinal,
+                    message: "checkpoint".into(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+    }
+
+    const PLANTED_CHILD: &str = "T3_ORCHESTRATION_PLANTED_REPOSITORY_CHILD";
+
+    /// The after-restart half, in a fresh process: t3-git's first-use memory is empty, so only
+    /// the saved binding can refuse the planted repository.
+    async fn planted_after_restart(temp: PathBuf) -> Result<()> {
+        let scope_dir = temp.join("repo").join("pkg");
+        let bound = GitCheckpointBackend::new(isolated_git(&temp.join("home")))
+            .with_repository_bindings(Arc::new(
+                crate::runtime::repository_bindings::FileRepositoryBindings::new(
+                    temp.join("state").join("repository-bindings.json"),
+                ),
+            ));
+        let mut scope = prepare_root_run_scope(PrepareRootScope {
+            thread_id: ThreadId("thread:test".into()),
+            run_id: RunId("run:test".into()),
+            root_node_id: NodeId("node:test".into()),
+            provider_thread_id: ProviderThreadId("provider:test".into()),
+            cwd: scope_dir.clone(),
+            created_at: t3_contracts::wire::WireDateTime(crate::testing::TEST_TIME.into()),
+        });
+        scope.id = IdOrIndex::Id(CheckpointScopeId("scope:planted".into()));
+        match capture_in(&bound, &scope, 1).await {
+            Err(Error::Service { operation, detail })
+                if operation
+                    == crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION =>
+            {
+                assert!(detail.contains("no longer belongs to the repository"), "{detail}");
+            }
+            other => panic!("the planted repository must be refused, got {other:?}"),
+        }
+        assert!(matches!(
+            bound.restore(scope.clone(), 0, CancellationToken::new()).await,
+            Err(Error::Service { operation, .. })
+                if operation
+                    == crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION
+        ));
+        // Control: without the saved binding the same capture would run in the planted
+        // repository, which is the failure the binding prevents.
+        let unbound = GitCheckpointBackend::new(isolated_git(&temp.join("home")));
+        capture_in(&unbound, &scope, 2).await?;
+        Ok(())
+    }
+
+    /// Review t3-git H-1: a scope bound when its project was bound refuses a repository planted
+    /// in it later, after a server restart too.
+    #[tokio::test]
+    async fn a_repository_planted_after_binding_is_refused_after_a_restart() -> Result<()> {
+        if let Some(temp) = std::env::var_os(PLANTED_CHILD) {
+            return planted_after_restart(PathBuf::from(temp)).await;
+        }
+        let repo = Repository::new().await?;
+        let temp = repo.root.parent().ok_or(Error::Stale)?.to_path_buf();
+        let scope_dir = repo.root.join("pkg");
+        std::fs::create_dir(&scope_dir)?;
+        std::fs::write(scope_dir.join("f"), "user work\n")?;
+        repo.command(&["add", "pkg/f"]).await?;
+        repo.command(&["commit", "-m", "pkg"]).await?;
+        let bound = GitCheckpointBackend::new(isolated_git(&temp.join("home")))
+            .with_repository_bindings(Arc::new(
+                crate::runtime::repository_bindings::FileRepositoryBindings::new(
+                    temp.join("state").join("repository-bindings.json"),
+                ),
+            ));
+        bound.bind_scope(scope_dir.clone(), false).await?;
+        let planted = isolated_git(&temp.join("home"))(scope_dir.clone());
+        for args in [
+            &["init", "--initial-branch=main"][..],
+            &["add", "f"],
+            &["commit", "-m", "planted"],
+        ] {
+            planted
+                .execute(args, Default::default())
+                .await
+                .map_err(git_error)?;
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "runtime::checkpoints::tests::a_repository_planted_after_binding_is_refused_after_a_restart",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(PLANTED_CHILD, &temp)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "after restart: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1042,7 +1225,7 @@ mod tests {
         repo.command(&["branch", "feature"]).await?;
         recovery.recreate(&thread, CancellationToken::new()).await?;
         assert!(worktree.join(".git").is_file());
-        let git = repo.backend.git(worktree.clone());
+        let git = repo.backend.handle(worktree.clone());
         assert_eq!(
             git.current_branch().await.map_err(git_error)?,
             Some("feature".into())

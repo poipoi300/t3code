@@ -245,6 +245,26 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | `sessions` | `SessionManagerOptions::default()` | TS timeouts (30 min idle, 15 s interrupt) |
 | `worker` | `WorkerOptions::default()` | 4 slots, 5 attempts, 30 s liveness poll |
 
+### Host-side callers (MCP, scheduler): who checks what
+
+A caller that is not a WebSocket client submits through `runtime.commands_for(CommandCaller { thread_id, limit, link_fence })`: the one dispatcher, its lanes, receipts and idempotency, behind the same admission gate as client commands. `CallerCommands::threads()` and `intake()` are `runtime.threads` and `runtime.intake` over that caller. Refusals are typed (`Error::CallerRefused`, `CallerRefusal::code()` is TypeScript's MCP failure code).
+
+| Check | Where |
+| --- | --- |
+| Credential, capability, read-only client, live caller run, `assertNotLinked` (projects, settings, scheduled tasks) | The MCP layer only, as in TypeScript |
+| Target already above the caller's modes (`AboveModeLimit`) | Runtime, under the command lock (TypeScript's orchestrator); the MCP layer also prechecks |
+| Requested modes broader than the caller (`Escalation`) | Runtime, on the planned events, as a backstop; the MCP layer refuses first with the same text |
+| Link fence (`OutsideLink`): a caller fenced below full access changes only threads its link started; its own thread is exempt | Runtime, under the command lock; the MCP layer also prechecks |
+| Managed ceiling | Runtime: the caller's limit is narrowed to it, and planned events above it are refused |
+
+### Restoring files: which writers are quiesced (t3-git review H-2)
+
+Git checks paths before it writes, so anything that writes to the folder during a restore can redirect the restore (a junction made after the check). A file restore therefore holds the thread's command lane from the check until the rollback commits (no new turn, send or queue start) and refuses, naming each writer, while any of these run: a turn of the thread (`activeRunId`), a running command item, background work the provider reports, and the writers the host reports through `RuntimePorts::thread_writers` (terminals, dev servers, setup and preview scripts), which it also holds until Git returns. TypeScript restores under live writers; refusing is the Rust hardening. Not covered: processes that left the thread's tracking (fully detached daemons the provider does not report), and anything the user started outside T3 in the same folder. Without `thread_writers` the host's terminals and dev servers are not seen.
+
+### Repository bindings (t3-git review H-1)
+
+`GitCheckpointBackend::with_repository_bindings(store)` makes every checkpoint, restore, clean and diff run against the repository saved for its scope folder; a scope seen for the first time is bound and saved. Bindings are taken when a project is created (`project_command`, or `runtime.bind_repository(cwd)` for hosts that create projects elsewhere), when a launch prepares its workspace (before its setup script and first turn), and on the first checkpoint operation of a scope (the baseline, before any turn). A trusted recreation of a worktree rebinds it. They are stored outside the database in `runtime::repository_bindings::FileRepositoryBindings` (a JSON file under the server's state directory), so the migration head stays TypeScript's. A changed repository refuses (`checkpoint.git.repository-changed`, shown to the user); it is never treated as "not a repository" or rebound automatically. Projects that existed before the store are bound on their next checkpoint operation, trusting what is there then.
+
 ### Start-up and shutdown order
 
 Start (TS order): legacy V1 shells (`legacy.reconcile_shells`), provider recovery (`RuntimeLayer::start`), continuation delivery (05's `ProviderContinuationService`, through `Dispatcher::prepare_continuations`), the two delegated-task recovery sweeps (`runtime.delegated_recovery()` reports their failures for the host to log), the committed-event consumers feeding 04's run, provider-turn and child-work handlers (`runtime.lifecycle_failures()`), the effect worker, then the settlement and PR watch producers. Commands are admitted once recovery succeeds. The host then drives `runtime.legacy.import_pending_transcripts()` and its `legacyThreadMigration` lifecycle events.

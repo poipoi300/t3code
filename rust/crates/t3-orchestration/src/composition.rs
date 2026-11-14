@@ -309,6 +309,135 @@ impl ManagementParts {
     }
 }
 
+/// Binds a launch's workspace before its setup script or first turn can write there; a newly
+/// created worktree replaces any binding a removed one left at the same path (t3-git H-1).
+struct BindingWorkspaces {
+    inner: Arc<dyn WorkspaceBackend>,
+    repositories: Arc<dyn CheckpointMetadata>,
+}
+
+#[async_trait]
+impl WorkspaceBackend for BindingWorkspaces {
+    async fn repository_identity(
+        &self,
+        cwd: std::path::PathBuf,
+    ) -> Result<Option<t3_contracts::environment::RepositoryIdentity>> {
+        self.inner.repository_identity(cwd).await
+    }
+    async fn repository_identity_with_refresh(
+        &self,
+        cwd: std::path::PathBuf,
+        refresh: bool,
+    ) -> Result<Option<t3_contracts::environment::RepositoryIdentity>> {
+        self.inner
+            .repository_identity_with_refresh(cwd, refresh)
+            .await
+    }
+    async fn branch_pull_request(
+        &self,
+        query: BranchPullRequestQuery,
+    ) -> Result<Option<GitBranchPullRequest>> {
+        self.inner.branch_pull_request(query).await
+    }
+    async fn invalidate_status(&self, cwd: std::path::PathBuf) -> Result<()> {
+        self.inner.invalidate_status(cwd).await
+    }
+    async fn default_branch(&self, cwd: std::path::PathBuf) -> Result<Option<String>> {
+        self.inner.default_branch(cwd).await
+    }
+    async fn checked_out_pull_request(
+        &self,
+        cwd: std::path::PathBuf,
+        branch: String,
+        url: String,
+    ) -> Result<bool> {
+        self.inner.checked_out_pull_request(cwd, branch, url).await
+    }
+    async fn prepare(
+        &self,
+        project_id: ProjectId,
+        thread_id: ThreadId,
+        strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+        cancellation: CancellationToken,
+    ) -> Result<Workspace> {
+        let created = matches!(
+            strategy,
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)
+        );
+        let workspace = self
+            .inner
+            .prepare(project_id, thread_id, strategy, cancellation.clone())
+            .await?;
+        if let Err(error) = self
+            .repositories
+            .bind_scope(workspace.cwd.clone(), created)
+            .await
+        {
+            if created {
+                // The binding failure is the cause; a worktree that cannot be bound is not kept.
+                let _ = self.inner.remove(workspace, cancellation).await;
+            }
+            return Err(error);
+        }
+        Ok(workspace)
+    }
+    async fn remove(&self, workspace: Workspace, cancellation: CancellationToken) -> Result<()> {
+        self.inner.remove(workspace, cancellation).await
+    }
+    async fn current_branch(&self, cwd: std::path::PathBuf) -> Result<Option<String>> {
+        self.inner.current_branch(cwd).await
+    }
+}
+
+/// A recreated worktree is a new repository checkout: the trusted recreation rebinds it.
+struct RebindingWorktreeRestore {
+    inner: Arc<dyn ThreadWorktreeRestore>,
+    repositories: Arc<dyn CheckpointMetadata>,
+}
+
+#[async_trait]
+impl ThreadWorktreeRestore for RebindingWorktreeRestore {
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()> {
+        let worktree = thread.worktree_path.clone();
+        self.inner.restore(thread).await?;
+        if let Some(path) = worktree {
+            self.repositories
+                .bind_scope(std::path::PathBuf::from(path.0), true)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+struct RebindingRecovery {
+    inner: Arc<
+        dyn crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery,
+    >,
+    repositories: Arc<dyn CheckpointMetadata>,
+}
+
+#[async_trait]
+impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery
+    for RebindingRecovery
+{
+    async fn is_managed(&self, path: &std::path::Path) -> Result<bool> {
+        self.inner.is_managed(path).await
+    }
+    async fn recreate(
+        &self,
+        thread: &OrchestrationV2AppThread,
+        cancellation: CancellationToken,
+    ) -> Result<()> {
+        self.inner.recreate(thread, cancellation).await?;
+        if let Some(path) = &thread.worktree_path {
+            self.repositories
+                .bind_scope(std::path::PathBuf::from(&path.0), true)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 /// Where workflow scripts are read: the host's contained reader under `projects_root`.
 pub struct WorkflowFiles {
     pub backend: Arc<dyn crate::ports::runs_ingestion::workflow_file_read::WorkflowFileBackend>,
@@ -341,6 +470,7 @@ pub struct OrchestrationRuntime {
     operations: Arc<ComposedThreads>,
     ingestor: Arc<ProviderEventIngestor>,
     launches: Option<ThreadLaunchService>,
+    repositories: Arc<dyn CheckpointMetadata>,
     management_parts: Arc<ManagementParts>,
     caller_attachments: Arc<dyn AttachmentBackend>,
     workflow_files: Option<WorkflowFiles>,
@@ -521,6 +651,7 @@ impl OrchestrationRuntime {
 
         let checkpoint_backend: Arc<dyn CheckpointBackend> = checkpoints.clone();
         let checkpoint_metadata: Arc<dyn CheckpointMetadata> = checkpoints;
+        let repositories = checkpoint_metadata.clone();
         let checkpoint_diffs = Arc::new(
             crate::ports::checkpoints_forks::checkpoint_diff_query::CheckpointDiffQuery::new(
                 reader.clone(),
@@ -571,7 +702,10 @@ impl OrchestrationRuntime {
                 sessions: session_directory.clone(),
                 providers: providers.clone(),
                 policy: Arc::new(ResolvedRollbackPolicy(policy)),
-                workspace_recovery,
+                workspace_recovery: Arc::new(RebindingRecovery {
+                    inner: workspace_recovery,
+                    repositories: repositories.clone(),
+                }),
                 events: events.clone(),
                 database: database.clone(),
                 ids: ids.clone(),
@@ -623,7 +757,10 @@ impl OrchestrationRuntime {
             database: database.clone(),
             settings: settings.clone(),
             hydrator: Arc::new(NoLegacyTranscript),
-            worktree_restore: worktree_restore.unwrap_or_else(|| Arc::new(NoWorktreeRestore)),
+            worktree_restore: Arc::new(RebindingWorktreeRestore {
+                inner: worktree_restore.unwrap_or_else(|| Arc::new(NoWorktreeRestore)),
+                repositories: repositories.clone(),
+            }),
             signals,
             clock: clock.clone(),
         });
@@ -659,7 +796,10 @@ impl OrchestrationRuntime {
                 projections: reader.clone(),
                 events: events.clone(),
                 commands: Arc::new(dispatcher.clone()),
-                workspaces,
+                workspaces: Arc::new(BindingWorkspaces {
+                    inner: workspaces,
+                    repositories: repositories.clone(),
+                }),
                 environment,
                 ids: ids.clone(),
                 clock: clock.clone(),
@@ -751,6 +891,7 @@ impl OrchestrationRuntime {
             operations,
             ingestor,
             launches,
+            repositories,
             management_parts,
             caller_attachments,
             workflow_files,
@@ -1001,7 +1142,15 @@ impl OrchestrationRuntime {
                 });
             }
         };
-        self.dispatcher
+        let created_root = (command_type == "project.create")
+            .then(|| {
+                value["workspaceRoot"]
+                    .as_str()
+                    .map(std::path::PathBuf::from)
+            })
+            .flatten();
+        let receipt = self
+            .dispatcher
             .commit_project(
                 event,
                 CommandReceipt {
@@ -1014,7 +1163,19 @@ impl OrchestrationRuntime {
                     error: None,
                 },
             )
-            .await
+            .await?;
+        if let Some(root) = created_root {
+            // Not part of TypeScript's project creation, so it cannot fail it: the scope's first
+            // checkpoint operation, before any turn, binds the same way.
+            let _ = self.repositories.bind_scope(root, false).await;
+        }
+        Ok(receipt)
+    }
+
+    /// Records the repository a project folder belongs to (t3-git H-1), for hosts that bind
+    /// projects outside `project_command`. Call it before any agent can write there.
+    pub async fn bind_repository(&self, cwd: std::path::PathBuf) -> Result<()> {
+        self.repositories.bind_scope(cwd, false).await
     }
 
     /// Closes admission, stops the settlement, watch and launch producers, stops the effect worker,

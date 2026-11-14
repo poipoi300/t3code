@@ -1260,6 +1260,14 @@ pub trait ThreadWorktreeRestore: Send + Sync {
     async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<()>;
 }
 
+/// Server-owned storage for the Git repository each checkpoint scope was bound to (t3-git H-1),
+/// keyed by the scope's folder. Lives outside the checkout and outside the database schema.
+#[async_trait]
+pub trait RepositoryBindingStore: Send + Sync {
+    async fn get(&self, scope: &std::path::Path) -> Result<Option<serde_json::Value>>;
+    async fn put(&self, scope: &std::path::Path, binding: serde_json::Value) -> Result<()>;
+}
+
 /// Processes the host started for a thread that can write to its workspace: terminals, dev
 /// servers, preview and setup scripts. A file restore holds them for its whole run, because Git
 /// checks paths before it writes and a live writer can change them in between (t3-git H-2).

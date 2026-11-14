@@ -1365,6 +1365,10 @@ struct ApprovalScope {
 struct Pending {
     scope: Option<ApprovalScope>,
     response: PendingResponse,
+    #[cfg_attr(
+        not(any(test, feature = "testkit")),
+        expect(dead_code, reason = "read only by the replay testkit")
+    )]
     wire_id: RequestId,
     request: Value,
     item: Value,
@@ -5746,6 +5750,7 @@ async fn deliver(
 }
 
 impl Projection {
+    #[cfg(any(test, feature = "testkit"))]
     pub(crate) fn recorded_response(
         &mut self,
         frame: &Value,

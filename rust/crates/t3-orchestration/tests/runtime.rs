@@ -168,6 +168,15 @@ impl Workspace {
     /// real checkpoint backend over it.
     #[cfg(feature = "git-backend")]
     async fn repository(root: &Path) -> Result<Self> {
+        Self::repository_with(root, None).await
+    }
+
+    /// `repository`, with the backend keeping each scope's binding in `bindings`.
+    #[cfg(feature = "git-backend")]
+    async fn repository_with(
+        root: &Path,
+        bindings: Option<Arc<dyn RepositoryBindingStore>>,
+    ) -> Result<Self> {
         use std::ffi::OsString;
         let path = root.join("workspace");
         let home = root.join("home");
@@ -194,10 +203,13 @@ impl Workspace {
             environment.insert(key.into(), None);
         }
         let factory_environment = environment.clone();
-        let backend =
+        let mut backend =
             t3_orchestration::runtime::checkpoints::GitCheckpointBackend::new(move |cwd| {
                 t3_git::Git::new(cwd).with_environment(factory_environment.clone())
             });
+        if let Some(bindings) = bindings {
+            backend = backend.with_repository_bindings(bindings);
+        }
         let git = t3_git::Git::new(path.clone()).with_environment(environment);
         let workspace = Self {
             path,
@@ -493,6 +505,9 @@ struct Probe {
     modes: Vec<RuntimeMode>,
     opened: std::sync::Mutex<Vec<(RuntimeMode, Option<RuntimeMode>)>>,
     hold: Option<Hold>,
+    /// Asked at each session open; its answers are kept in `checked`.
+    check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    checked: std::sync::Mutex<Vec<bool>>,
 }
 
 impl Probe {
@@ -502,6 +517,8 @@ impl Probe {
             modes,
             opened: Default::default(),
             hold: None,
+            check: None,
+            checked: Default::default(),
         }
     }
     async fn record(&self, input: &OpenSession) {
@@ -513,6 +530,9 @@ impl Probe {
             let _ = hold.entered.send(());
             let mut release = hold.release.clone();
             let _ = release.wait_for(|released| *released).await;
+        }
+        if let Some(check) = &self.check {
+            self.checked.lock().expect("checked lock").push(check());
         }
         self.opened.lock().expect("modes lock").push((
             input.runtime_policy.runtime_mode,
@@ -862,7 +882,8 @@ impl t3_orchestration::ports::checkpoints_forks::thread_launch_service::LaunchEn
         _: t3_orchestration::ports::checkpoints_forks::thread_launch_service::SetupInput,
         _: CancellationToken,
     ) -> Result<t3_orchestration::ports::checkpoints_forks::thread_launch_service::SetupRun> {
-        Err(Error::Unsupported("root launch: setup"))
+        // No project setup script.
+        Ok(t3_orchestration::ports::checkpoints_forks::thread_launch_service::SetupRun::Skipped)
     }
     async fn close_terminal(&self, _: &ThreadId, _: &str) -> Result<()> {
         Err(Error::Unsupported("root launch: close_terminal"))
@@ -880,17 +901,30 @@ impl WorkspaceBackend for RootWorkspace {
         _: ThreadId,
         strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
         _: CancellationToken,
-    ) -> Result<Workspace> {
+    ) -> Result<t3_orchestration::api::Workspace> {
         match strategy {
-            OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(_) => Ok(Workspace {
-                cwd: self.0.clone(),
-                branch: None,
-                worktree_path: None,
-            }),
-            _ => Err(Error::Unsupported("root workspace: worktrees")),
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::Root(_) => {
+                Ok(t3_orchestration::api::Workspace {
+                    cwd: self.0.clone(),
+                    branch: None,
+                    worktree_path: None,
+                })
+            }
+            OrchestrationV2ThreadLaunchWorkspaceStrategy::ExistingWorktree(existing) => {
+                Ok(t3_orchestration::api::Workspace {
+                    cwd: PathBuf::from(&existing.worktree_path.0),
+                    branch: existing.branch.flatten().map(|branch| branch.0),
+                    worktree_path: Some(PathBuf::from(&existing.worktree_path.0)),
+                })
+            }
+            _ => Err(Error::Unsupported("root workspace: new worktrees")),
         }
     }
-    async fn remove(&self, _: Workspace, _: CancellationToken) -> Result<()> {
+    async fn remove(
+        &self,
+        _: t3_orchestration::api::Workspace,
+        _: CancellationToken,
+    ) -> Result<()> {
         Ok(())
     }
     async fn current_branch(&self, _: PathBuf) -> Result<Option<String>> {
@@ -1068,5 +1102,270 @@ async fn workflow_scripts_are_read_only_under_the_projects_root() -> Result<()> 
         json!("outside-root")
     );
     runtime.shutdown().await?;
+    Ok(())
+}
+
+fn caller(
+    thread: Option<&str>,
+    runtime_mode: RuntimeMode,
+    link_fence: Option<serde_json::Value>,
+) -> Result<t3_orchestration::composition::CommandCaller> {
+    Ok(t3_orchestration::composition::CommandCaller {
+        thread_id: thread.map(|id| ThreadId(id.into())),
+        limit: t3_orchestration::ports::decisions::dispatch_mode_limit::DispatchModes {
+            runtime_mode,
+            interaction_mode: t3_contracts::provider_policy::ProviderInteractionMode::Default,
+        },
+        link_fence: link_fence.map(serde_json::from_value).transpose()?,
+    })
+}
+
+fn set_mode(thread: &str, mode: &str, id: &str) -> Result<OrchestrationV2ServerCommand> {
+    command(
+        json!({"type":"thread.runtime-mode.set","commandId":format!("command:{id}"),"threadId":thread,"runtimeMode":mode}),
+    )
+}
+
+fn refused<T: std::fmt::Debug>(result: Result<T>) -> t3_orchestration::error::CallerRefusal {
+    match result {
+        Err(Error::CallerRefused { refusal, .. }) => refusal,
+        other => panic!("expected a caller refusal, got {other:?}"),
+    }
+}
+
+/// An agent's caller may not reach above its own modes: not a thread already broader than it,
+/// nor a thread it would make broader (TS `DispatchModeLimit`, `resolveRuntimeMode`).
+#[tokio::test]
+async fn a_caller_cannot_change_or_raise_a_thread_above_its_own_modes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let runtime = start(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+    )
+    .await?;
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .dispatch_command(create_thread("thread:caller", "approval-required", MODEL)?)
+        .await?;
+    runtime
+        .dispatch_command(create_thread("thread:broad", "full-access", MODEL)?)
+        .await?;
+    runtime
+        .dispatch_command(create_thread("thread:narrow", "approval-required", MODEL)?)
+        .await?;
+    let commands = runtime.commands_for(caller(
+        Some("thread:caller"),
+        RuntimeMode::ApprovalRequired,
+        None,
+    )?);
+    let above = refused(
+        commands
+            .dispatch(set_mode(
+                "thread:broad",
+                "approval-required",
+                "lower-broad",
+            )?)
+            .await,
+    );
+    assert_eq!(above.code(), "runtime_mode_escalation_denied");
+    assert_eq!(
+        above.to_string(),
+        "Thread thread:broad now runs in full-access/default mode, above what this caller may change."
+    );
+    let escalation = refused(
+        commands
+            .dispatch(set_mode("thread:narrow", "full-access", "raise-narrow")?)
+            .await,
+    );
+    assert_eq!(escalation.code(), "runtime_mode_escalation_denied");
+    assert_eq!(
+        escalation.to_string(),
+        "Child runtime mode full-access is broader than parent mode approval-required."
+    );
+    let created = refused(
+        commands
+            .dispatch(create_thread("thread:child", "auto", MODEL)?)
+            .await,
+    );
+    assert_eq!(
+        created.to_string(),
+        "Child runtime mode auto is broader than parent mode approval-required."
+    );
+    // Within its modes the caller acts through the same dispatcher, with a receipt.
+    commands
+        .dispatch(create_thread("thread:allowed", "approval-required", MODEL)?)
+        .await?;
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// A caller fenced to a link changes only threads that link started (TS `assertSameLink`);
+/// its own thread is exempt, and a thread the link started is allowed.
+#[tokio::test]
+async fn a_fenced_caller_changes_only_threads_its_link_started() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let workspace = Workspace::plain(directory.path())?;
+    let runtime = start(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+    )
+    .await?;
+    create_project(&runtime, &workspace).await?;
+    let origin = json!({"sessionId":"link:laptop","label":"Laptop"});
+    runtime
+        .dispatch_command(create_thread("thread:user", "approval-required", MODEL)?)
+        .await?;
+    let mut linked =
+        serde_json::to_value(create_thread("thread:linked", "approval-required", MODEL)?)?;
+    linked["linkOrigin"] = origin.clone();
+    runtime.dispatch_command(command(linked)?).await?;
+    let commands = runtime.commands_for(caller(None, RuntimeMode::FullAccess, Some(origin))?);
+    let outside = refused(
+        commands
+            .dispatch(set_mode("thread:user", "approval-required", "user")?)
+            .await,
+    );
+    assert_eq!(outside.code(), "capability_denied");
+    assert_eq!(
+        outside.to_string(),
+        "This work was started from Laptop through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way."
+    );
+    commands
+        .dispatch(set_mode("thread:linked", "auto-accept-edits", "linked")?)
+        .await?;
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Under a managed ceiling a caller's write cannot take a thread above it, whatever the
+/// caller's own modes, and a thread already above it is out of the caller's reach.
+#[tokio::test]
+async fn a_callers_write_stays_under_the_managed_ceiling() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("statev2.sqlite");
+    let workspace = Workspace::plain(directory.path())?;
+    let runtime = start(&database, workspace.checkpoints.clone()).await?;
+    create_project(&runtime, &workspace).await?;
+    runtime
+        .dispatch_command(create_thread("thread:old", "full-access", MODEL)?)
+        .await?;
+    runtime.shutdown().await?;
+    drop(runtime);
+    let policy = managed_ceiling()?;
+    let runtime = start_with(
+        &database,
+        workspace.checkpoints.clone(),
+        NOW,
+        |adapter| adapter,
+        |ports| ports.managed_policy = Some(policy),
+    )
+    .await?;
+    runtime
+        .dispatch_command(create_thread(THREAD, "approval-required", MODEL)?)
+        .await?;
+    let commands = runtime.commands_for(caller(None, RuntimeMode::FullAccess, None)?);
+    let raised = commands
+        .dispatch(set_mode(THREAD, "full-access", "raise")?)
+        .await;
+    assert_eq!(refusal(raised), CEILING_REFUSAL);
+    let old = refused(
+        commands
+            .dispatch(set_mode("thread:old", "approval-required", "old")?)
+            .await,
+    );
+    assert_eq!(
+        old.to_string(),
+        "Thread thread:old now runs in full-access/default mode, above what this caller may change."
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Review t3-git H-1: a thread's worktree is bound, and the binding saved, before its first turn
+/// opens a provider session there.
+#[cfg(feature = "git-backend")]
+#[tokio::test]
+async fn a_launched_worktree_is_bound_before_its_first_turn() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store_path = directory
+        .path()
+        .join("state")
+        .join("repository-bindings.json");
+    let store = Arc::new(
+        t3_orchestration::runtime::repository_bindings::FileRepositoryBindings::new(
+            store_path.clone(),
+        ),
+    );
+    let workspace = Workspace::repository_with(directory.path(), Some(store)).await?;
+    let worktree = directory.path().join("feature");
+    workspace
+        .git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            &worktree.to_string_lossy(),
+        ])
+        .await?;
+    let key = worktree.to_string_lossy().into_owned();
+    let bound = move || {
+        std::fs::read(&store_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|saved| saved.get(&key).is_some())
+    };
+    let wrapped = std::sync::Mutex::new(None::<Arc<Probe>>);
+    let root = workspace.path.clone();
+    let runtime = start_with(
+        &directory.path().join("statev2.sqlite"),
+        workspace.checkpoints.clone(),
+        NOW,
+        |inner| {
+            let mut adapter = Probe::new(inner, ALL_MODES.to_vec());
+            adapter.check = Some(Box::new(bound));
+            let adapter = Arc::new(adapter);
+            *wrapped.lock().expect("adapter lock") = Some(adapter.clone());
+            adapter
+        },
+        |ports| {
+            ports.launch = Some(Arc::new(RootLaunch));
+            ports.workspaces = Arc::new(RootWorkspace(root));
+        },
+    )
+    .await?;
+    let adapter = wrapped
+        .lock()
+        .expect("adapter lock")
+        .clone()
+        .expect("adapter wrapped");
+    create_project(&runtime, &workspace).await?;
+    let input = serde_json::from_value(
+        json!({"commandId":"command:launch","threadId":THREAD,"projectId":"project:runtime","title":"Worktree","modelSelection":{"instanceId":DEV_REPLAY_INSTANCE_ID,"model":MODEL},"runtimeMode":"approval-required","interactionMode":"default","workspaceStrategy":{"type":"existing_worktree","worktreePath":worktree,"branch":"feature"},"initialMessage":{"text":"Hello","attachments":[]}}),
+    )?;
+    let mut committed = runtime.events.subscribe();
+    runtime.launch_client_thread(input).await?;
+    loop {
+        let projection = runtime
+            .projections
+            .projection(ThreadId(THREAD.into()))
+            .await?
+            .expect("launched thread");
+        let statuses = serde_json::to_value(&projection.runs)?;
+        if statuses[0]["status"] == "completed" {
+            break;
+        }
+        assert!(
+            !SETTLED.contains(&statuses[0]["status"].as_str().unwrap_or_default()),
+            "{}",
+            serde_json::to_value(&projection.turn_items)?
+        );
+        committed.recv().await.map_err(|error| Error::Service {
+            operation: "worktree launch test",
+            detail: error.to_string(),
+        })?;
+    }
+    runtime.shutdown().await?;
+    assert_eq!(*adapter.checked.lock().expect("checked lock"), vec![true]);
     Ok(())
 }

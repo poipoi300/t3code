@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
 pub const INDEX_LOCKED_OPERATION: &str = "checkpoint.git.index-locked";
 pub const POLICY_CEILING_OPERATION: &str = "runtime-policy.above-ceiling";
+/// The folder no longer belongs to the repository it was bound to (t3-git H-1).
+pub const REPOSITORY_CHANGED_OPERATION: &str = "checkpoint.git.repository-changed";
 /// A file restore refused because the thread still has writers; the detail names them.
 pub const WRITERS_RUNNING_OPERATION: &str = "checkpoint.rollback.writers-running";
 
@@ -33,7 +35,10 @@ pub fn rollback_failure_client_message(error: &Error) -> &str {
         Error::Service { operation, detail }
             if matches!(
                 *operation,
-                INDEX_LOCKED_OPERATION | POLICY_CEILING_OPERATION | WRITERS_RUNNING_OPERATION
+                INDEX_LOCKED_OPERATION
+                    | POLICY_CEILING_OPERATION
+                    | WRITERS_RUNNING_OPERATION
+                    | REPOSITORY_CHANGED_OPERATION
             ) =>
         {
             detail
@@ -156,39 +161,52 @@ impl CheckpointRollbackService {
         session: &dyn SessionRuntime,
         provider: &OrchestrationV2ProviderThread,
     ) -> Result<WriterHold> {
-        let active = |status: &OrchestrationV2TurnItemStatus| {
-            matches!(
-                status,
-                OrchestrationV2TurnItemStatus::Pending
-                    | OrchestrationV2TurnItemStatus::Running
-                    | OrchestrationV2TurnItemStatus::Waiting
-            )
-        };
-        let projection = self
+        // Narrow reads: history may hold payloads older runs no longer decode.
+        let shells = self
             .projections
-            .projection(thread_id.clone())
-            .await?
+            .thread_shells(ShellQuery {
+                archived: true,
+                thread_ids: Some(vec![thread_id.clone()]),
+                ..Default::default()
+            })
+            .await?;
+        let shell = shells
+            .threads
+            .into_iter()
+            .chain(shells.archived_threads)
+            .next()
             .ok_or_else(|| Error::ThreadNotFound(thread_id.clone()))?;
         let mut running = Vec::new();
-        if projection.runs.iter().any(|run| {
-            matches!(
-                run.status,
-                OrchestrationV2RunStatus::Preparing
-                    | OrchestrationV2RunStatus::Starting
-                    | OrchestrationV2RunStatus::Running
-                    | OrchestrationV2RunStatus::Waiting
-            )
-        }) {
+        if shell.active_run_id.is_some() {
             running.push("a running turn".to_owned());
         }
-        for item in &projection.turn_items {
-            if let OrchestrationV2TurnItem::CommandExecution(item) = item
-                && active(&item.status)
-            {
-                running.push(match item.title.as_deref() {
-                    Some(title) if !title.is_empty() => format!("command `{title}`"),
-                    _ => "a command".to_owned(),
-                });
+        let commands = self
+            .projections
+            .records(
+                thread_id.clone(),
+                vec![RecordKind::TurnItems],
+                RecordFilter {
+                    turn_item_types: Some(vec!["command_execution".into()]),
+                    turn_item_statuses: Some(vec![
+                        OrchestrationV2TurnItemStatus::Pending,
+                        OrchestrationV2TurnItemStatus::Running,
+                        OrchestrationV2TurnItemStatus::Waiting,
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        for set in commands.records {
+            let ProjectionRecordSet::TurnItems(items) = set else {
+                continue;
+            };
+            for item in items {
+                if let OrchestrationV2TurnItem::CommandExecution(item) = item {
+                    running.push(match item.title.as_deref() {
+                        Some(title) if !title.is_empty() => format!("command `{title}`"),
+                        _ => "a command".to_owned(),
+                    });
+                }
             }
         }
         if let Some(extensions) = session.extensions()
