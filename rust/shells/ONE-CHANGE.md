@@ -46,3 +46,9 @@ second build. Say in the report which snapshot time the siblings came from.
 
 iOS and macOS: `ui.ps1 ios-simulator`, `ui.ps1 ios` and `ui.ps1 macos` build the same crate with
 the CLI's UIKit and AppKit runners on a Mac with Xcode; they have not been run on this Windows host.
+
+On GitHub's macOS runners, `.github/workflows/rust-rewrite.yml` repeats this proof for macOS and the
+iOS simulator: it captures both apps' connect screens, makes the one-line change
+`rust/tools/ci/one-change.sh apply` defines (a string on that screen, in `crates/t3-ui`), rebuilds,
+captures again, and fails unless the new text is read on both. The scripts run the same on a Mac
+([`tools/ci/README.md`](../tools/ci/README.md)).
