@@ -250,5 +250,9 @@ The temporary direct-source guest harness also passed 2 unit and 5 integration
 tests while a sibling import was broken; the complete crate suite subsequently
 passed, so the harness is not a substitute for crate verification.
 
-Exact Clippy is being verified separately; no dependency warnings are suppressed
-and no sibling crate was edited. No commit was made.
+`cargo clippy -p t3-host --all-targets --no-deps -- -D warnings` passed on the
+review changes. The exact required command without `--no-deps` remains blocked
+by 57 existing diagnostics in `t3-codex-app-server` (log:
+`D:\t3code-rust-target\server-j\t3-host-review-clippy.log`). No warning was
+suppressed and no sibling crate was edited. The final full test rerun also passed
+all 69 tests after the style fixes. No commit was made.
