@@ -353,7 +353,7 @@ async fn start(home: &Path, received: mpsc::UnboundedSender<Received>) -> Server
     t3_persistence::rusqlite::Connection::open(layout.database())
         .unwrap()
         .execute(
-            "INSERT INTO projection_projects
+            "INSERT OR IGNORE INTO projection_projects
              (project_id, title, workspace_root, scripts_json, created_at, updated_at)
              VALUES ('project:attachments', 'Attachments', ?1, '[]', ?2, ?2)",
             [workspace.to_string_lossy().as_ref(), NOW],
@@ -687,19 +687,14 @@ async fn claims_are_once_only_and_only_by_the_uploading_session_for_its_own_thre
     assert_eq!(again.thread, THREAD);
     assert_eq!(again.attachment["id"], claimed.as_str());
 
-    // A link planted as an upload's file is not followed: the claim refuses it and nothing of
-    // the target reaches the provider.
+    // An upload whose stored file is swapped for a link is not followed: the claim refuses it
+    // and nothing of the target reaches the provider.
     let outside = temp.path().join("outside-secret.png");
     std::fs::write(&outside, PNG).unwrap();
-    let grant = ok(unary(
-        &mut socket,
-        &mut client,
-        "attachments.createUploadUrl",
-        json!({"type":"image","name":"linked.png","mimeType":"image/png","sizeBytes":PNG.len()}),
-    )
-    .await);
-    let linked = grant["attachmentId"].as_str().unwrap().to_owned();
-    link_file(&outside, &server.attachments.join(format!("{linked}.png")));
+    let linked = server.upload(&mut socket, &mut client, "linked.png").await;
+    let stored = server.attachments.join(format!("{linked}.png"));
+    std::fs::remove_file(&stored).unwrap();
+    link_file(&outside, &stored);
     refused(
         send(
             &mut socket,
@@ -875,4 +870,79 @@ impl Server {
         let (mut socket, mut client) = self.socket(&cookie).await;
         self.upload(&mut socket, &mut client, "unsent.png").await
     }
+}
+
+/// The owner is recorded beside the upload, so a composer draft restored after a restart still
+/// sends: by the session that uploaded it, once; never by another session.
+#[tokio::test]
+async fn an_upload_survives_a_restart_for_its_own_session_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let (received, mut handed) = mpsc::unbounded_channel();
+    let server = start(temp.path(), received.clone()).await;
+    let mine_cookie = server.admin.clone();
+    let theirs_cookie = server
+        .cookie(&["orchestration:read", "orchestration:operate"])
+        .await;
+    let (mut socket, mut client) = server.socket(&mine_cookie).await;
+    create_thread(&mut socket, &mut client, THREAD).await;
+    let mine = server.upload(&mut socket, &mut client, "mine.png").await;
+    let sent = server.upload(&mut socket, &mut client, "sent.png").await;
+    ok(send(
+        &mut socket,
+        &mut client,
+        THREAD,
+        "before",
+        vec![image(&sent)],
+    )
+    .await);
+    handed.recv().await.unwrap();
+    let (mut their_socket, mut their_client) = server.socket(&theirs_cookie).await;
+    let theirs = server
+        .upload(&mut their_socket, &mut their_client, "theirs.png")
+        .await;
+    drop((socket, their_socket));
+    server.runtime.shutdown().await.unwrap();
+
+    // The same state directory, a new process: the sessions' cookies still hold.
+    let server = start(temp.path(), received).await;
+    let (mut socket, mut client) = server.socket(&mine_cookie).await;
+    refused(
+        send(
+            &mut socket,
+            &mut client,
+            THREAD,
+            "theirs",
+            vec![image(&theirs)],
+        )
+        .await,
+        "attachment not found",
+    );
+    refused(
+        send(
+            &mut socket,
+            &mut client,
+            THREAD,
+            "resent",
+            vec![image(&sent)],
+        )
+        .await,
+        "attachment not found",
+    );
+    ok(send(
+        &mut socket,
+        &mut client,
+        THREAD,
+        "after",
+        vec![image(&mine)],
+    )
+    .await);
+    let got = handed.recv().await.unwrap();
+    assert_eq!(got.bytes, PNG);
+    assert!(
+        got.attachment["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("thread-attachments-")
+    );
+    server.runtime.shutdown().await.unwrap();
 }

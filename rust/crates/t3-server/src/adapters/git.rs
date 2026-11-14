@@ -1126,29 +1126,13 @@ pub mod vcs {
         }
     }
 
-    /// The saved state of `cwd`, by the folder as recorded and, failing that, by its real path.
+    /// The saved state of `cwd` (the store finds a folder under its given or canonical spelling).
     async fn saved_repository(
         bindings: &dyn SavedRepositoryBindings,
         cwd: &Path,
     ) -> Result<SavedRepository, GitError> {
-        let saved = bindings
-            .saved_repository(cwd)
-            .await
-            .map_err(|_| saved_bindings_unreadable(cwd))?;
-        if !matches!(saved, SavedRepository::NotRecorded) {
-            return Ok(saved);
-        }
-        let owned = cwd.to_owned();
-        let Ok(Ok(real)) =
-            tokio::task::spawn_blocking(move || t3_workspace::paths::canonicalize(owned)).await
-        else {
-            return Ok(saved);
-        };
-        if real == cwd {
-            return Ok(saved);
-        }
         bindings
-            .saved_repository(&real)
+            .saved_repository(cwd)
             .await
             .map_err(|_| saved_bindings_unreadable(cwd))
     }

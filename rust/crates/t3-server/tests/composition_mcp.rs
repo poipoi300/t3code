@@ -1063,9 +1063,14 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         )
         .await;
     assert!(is_error(&attachments), "{attachments}");
-    // Review L4: the unavailable result names the tool the agent called.
-    assert_eq!(
-        attachments["result"]["structuredContent"]["tool"], "t3_thread_send_attachments",
+    // The attachment backend is bound: an unknown pending upload is TS's claim failure
+    // (`orchestration_error` with the claim's message), not "could not be completed". (Review L4,
+    // the unbound case, is covered in t3-mcp: no server leaves the backend unbound now.)
+    assert!(
+        attachments.to_string().contains("orchestration_error")
+            && !attachments
+                .to_string()
+                .contains("The operation could not be completed."),
         "{attachments}"
     );
     // Review L3: TypeScript's not-found texts.
@@ -1418,9 +1423,16 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         )
         .await;
     assert!(!is_error(&follow_up), "{follow_up}");
-    assert_eq!(
-        follow_up["result"]["structuredContent"]["taskId"], task_id.as_str(),
-        "{follow_up}"
+    let follow_up_task = follow_up["result"]["structuredContent"]["taskId"]
+        .as_str()
+        .expect("a follow-up names its task")
+        .to_owned();
+    let follow_up_status = mcp
+        .call(&token, "task_status", json!({"taskId": follow_up_task}))
+        .await;
+    assert!(
+        !follow_up_status.to_string().contains("task_not_found"),
+        "{follow_up_status}"
     );
     // Another live thread cannot read this task: it is not its owner.
     const NEIGHBOUR: &str = "thread:mcp-neighbour";

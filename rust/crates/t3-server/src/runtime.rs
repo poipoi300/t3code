@@ -734,19 +734,16 @@ async fn start_domains(
         }
     }
     #[cfg(all(feature = "git-actions", feature = "local-services"))]
-    if let (Some(launch), Some(projects)) = (
+    if let (Some(launch), Some(projects), Some(orchestration)) = (
         launch,
         domains.get::<crate::adapters::project::ProjectAdapter>(),
+        domains.get::<crate::adapters::orchestration::OrchestrationAdapter>(),
     ) {
-        if let Some(orchestration) =
-            domains.get::<crate::adapters::orchestration::OrchestrationAdapter>()
-        {
-            launch.bind(
-                projects,
-                domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
-                orchestration,
-            );
-        }
+        launch.bind(
+            projects,
+            domains.get::<crate::adapters::project_setup::ProjectSetupAdapter>(),
+            orchestration,
+        );
     }
     // After providers (secret resolver), cloud, orchestration and the workspace authority.
     #[cfg(feature = "host")]

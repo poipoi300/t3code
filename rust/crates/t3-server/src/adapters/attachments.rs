@@ -2,20 +2,34 @@
 //! server's attachments directory.
 //!
 //! TypeScript binds a pending upload to nobody: any caller that knows `pending-<uuid>` can claim
-//! it, repeatedly. Here the issuer is recorded at `attachments.createUploadUrl` (the auth session,
-//! or an MCP caller), a claim must come from that issuer, and an upload is claimed once (a claim
-//! the runtime rolls back makes it claimable again). The claimer is the task-local [`CLAIMER`],
-//! set where client calls are dispatched (`registry.rs`); a claim with no claimer is refused.
-//! The ledger is in memory: an upload issued before a restart cannot be claimed after it.
+//! it, repeatedly. Here `attachments.createUploadUrl` signs the issuer into the upload token; the
+//! upload records it beside the stored file (t3-workspace `UploadOwner`, `<file>.owner`), so it
+//! survives a restart and goes with the file. A claim must come from that issuer, once: the
+//! record is marked claimed, and a claim the runtime rolls back unmarks it. A missing, unreadable
+//! or malformed record refuses the claim.
+//!
+//! The claimer is the task-local [`CLAIMER`], set for every unary client call in `registry.rs`;
+//! a claim with no claimer is refused. The runtime's `claim_pending` does not take the caller
+//! yet (orchestration seam request).
 use std::sync::Arc;
 
-/// Who issued, and may claim, a pending upload.
+/// Who issued, and may claim, a pending upload: an identity that survives a restart.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Principal {
-    /// A client's auth session.
+    /// A client's auth session (its stored session id).
     Session(String),
-    /// An MCP caller: the token's thread, or its request namespace (t3-mcp's upload owner).
+    /// An MCP caller: the thread its token is scoped to, else its request namespace.
     Mcp(String),
+}
+
+impl Principal {
+    /// The form recorded beside an upload.
+    pub fn record(&self) -> String {
+        match self {
+            Self::Session(id) => format!("session:{id}"),
+            Self::Mcp(owner) => format!("mcp:{owner}"),
+        }
+    }
 }
 
 tokio::task_local! {
@@ -33,7 +47,7 @@ pub type Now = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct AttachmentOptions {
-    /// The upload and sweep clock; `None` is the system clock.
+    /// The upload, sweep and asset clock; `None` is the system clock.
     pub clock: Option<Now>,
 }
 
@@ -64,12 +78,12 @@ mod claims {
             attachment_is_pending_upload, attachment_path,
         },
     };
-    use t3_workspace::attachments::AttachmentStore;
+    use t3_workspace::{attachments::AttachmentStore, contained_files::ContainedFiles};
 
-    /// Outstanding (issued, unclaimed) uploads one issuer may hold: one message's worth.
+    /// Upload URLs one issuer may hold unclaimed at a time: one message's worth.
     const MAX_PENDING_PER_ISSUER: usize = PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
-    /// The sweep removes a pending file 24 h after its upload, which may come one URL lifetime after
-    /// issue (TypeScript's MCP `UPLOAD_OWNER_TTL_MS`).
+    /// An issued URL counts against its issuer until the sweep could have removed its upload:
+    /// 24 h after an upload made up to one URL lifetime after issue.
     const ISSUE_RECORD_TTL_MS: u64 =
         24 * 60 * 60 * 1000 + t3_contracts::assets::ATTACHMENT_UPLOAD_URL_TTL_MS;
 
@@ -79,10 +93,11 @@ mod claims {
         claimed: bool,
     }
 
+    /// In memory: the per-issuer allowance (a limit, so it may restart empty) and each claimed
+    /// copy's pending id, which a rollback in this process needs. Its lock also serializes claims.
     #[derive(Default)]
     struct Ledger {
         issued: HashMap<String, Issued>,
-        /// A claimed copy's path to the pending id it came from, so a rollback can reopen the upload.
         copies: HashMap<PathBuf, String>,
     }
 
@@ -90,8 +105,11 @@ mod claims {
         fn prune(&mut self, now: u64) {
             self.issued
                 .retain(|_, entry| now.saturating_sub(entry.issued_ms) <= ISSUE_RECORD_TTL_MS);
-            let issued = &self.issued;
-            self.copies.retain(|_, id| issued.contains_key(id));
+        }
+        fn mark(&mut self, id: &str, claimed: bool) {
+            if let Some(entry) = self.issued.get_mut(id) {
+                entry.claimed = claimed;
+            }
         }
     }
 
@@ -116,7 +134,7 @@ mod claims {
             let claims = AttachmentClaimService::with_copy_file(
                 store.base.clone(),
                 Arc::new(NoDocumentText),
-                Arc::new(NoFollowCopy),
+                Arc::new(ContainedCopy(ContainedFiles::new(store.base.clone()))),
             );
             Arc::new(Self {
                 store,
@@ -136,7 +154,8 @@ mod claims {
             let _ = self.projections.set(projections);
         }
 
-        /// `attachments.createUploadUrl` for `issuer`, within its outstanding-upload allowance.
+        /// An upload URL whose upload records `issuer` as its owner, within the issuer's
+        /// allowance. `attachments.createUploadUrl`; MCP's prepare tool uses it too.
         pub async fn create_upload_url(
             &self,
             issuer: Principal,
@@ -153,7 +172,10 @@ mod claims {
             if outstanding >= MAX_PENDING_PER_ISSUER {
                 return Err(UploadRefusal::TooMany);
             }
-            let result = self.store.issue_upload(input, now).await?;
+            let result = self
+                .store
+                .issue_owned_upload(input, now, Some(issuer.record()))
+                .await?;
             ledger.issued.insert(
                 result.attachment_id.0.clone(),
                 Issued {
@@ -165,44 +187,28 @@ mod claims {
             Ok(result)
         }
 
-        /// Records an upload another surface issued (MCP's `t3_attachment_prepare_upload`).
-        pub async fn record_issued(&self, attachment_id: String, issuer: Principal) {
-            let now = self.now();
-            let mut ledger = self.ledger.lock().await;
-            ledger.prune(now);
-            ledger.issued.insert(
-                attachment_id,
-                Issued {
-                    issuer,
-                    issued_ms: now,
-                    claimed: false,
-                },
-            );
-        }
-
-        /// `attachments.delete`: only the issuer removes its pending upload; anything else is a no-op
-        /// that does not reveal whether the id exists.
+        /// `attachments.delete`: only the owner removes its pending upload; anything else is a
+        /// no-op that does not reveal whether the id exists.
         pub async fn delete_pending(
             &self,
             issuer: &Principal,
             attachment_id: &str,
         ) -> Result<(), t3_workspace::Error> {
             let mut ledger = self.ledger.lock().await;
-            if ledger
-                .issued
-                .get(attachment_id)
-                .is_none_or(|entry| entry.issuer != *issuer)
-            {
+            let recorded = self.store.owner(attachment_id).await;
+            let owned = match &recorded {
+                Some(record) => record.owner == issuer.record(),
+                None => ledger
+                    .issued
+                    .get(attachment_id)
+                    .is_some_and(|entry| entry.issuer == *issuer),
+            };
+            if !owned {
                 return Ok(());
             }
             self.store.delete_pending(attachment_id).await?;
             ledger.issued.remove(attachment_id);
             Ok(())
-        }
-
-        /// The upload route's clock-aware token check and storage (`POST /api/attachments/upload`).
-        pub fn store(&self) -> &AttachmentStore {
-            &self.store
         }
 
         async fn thread_attachment_ids(&self, thread: &ThreadId) -> RuntimeResult<Vec<String>> {
@@ -231,6 +237,20 @@ mod claims {
                     _ => vec![],
                 })
                 .collect())
+        }
+
+        /// Marks `ids` claimed (or not) in their owner records; on a failed write, the ones
+        /// already written are put back and the claim is refused.
+        async fn set_claimed(&self, ids: &[String], claimed: bool) -> RuntimeResult<()> {
+            for (done, id) in ids.iter().enumerate() {
+                if self.store.set_claimed(id, claimed).await.is_err() {
+                    for id in &ids[..done] {
+                        let _ = self.store.set_claimed(id, !claimed).await;
+                    }
+                    return Err(claim_error("Failed to record the attachment claim."));
+                }
+            }
+            Ok(())
         }
     }
 
@@ -280,35 +300,23 @@ mod claims {
                 .filter(|a| attachment_is_pending_upload(a))
                 .map(|a| attachment_id(a).to_owned())
                 .collect();
+            let mut ledger = self.ledger.lock().await;
+            for attachment in attachments
+                .iter()
+                .filter(|a| attachment_is_pending_upload(a))
             {
-                let mut ledger = self.ledger.lock().await;
-                ledger.prune(self.now());
-                // Missing, expired, another caller's and already claimed read the same.
-                if let Some(refused) = attachments.iter().find(|a| {
-                    attachment_is_pending_upload(a)
-                        && ledger
-                            .issued
-                            .get(attachment_id(a))
-                            .is_none_or(|entry| entry.issuer != claimer || entry.claimed)
-                }) {
+                // Missing, unreadable, another caller's and already claimed read the same.
+                let record = self.store.owner(attachment_id(attachment)).await;
+                if record.is_none_or(|record| record.owner != claimer.record() || record.claimed) {
                     return Err(claim_error(format!(
                         "Attachment '{}' cannot be sent: attachment not found (removed or expired).",
-                        attachment_name(refused)
+                        attachment_name(attachment)
                     )));
                 }
-                for id in &pending {
-                    if let Some(entry) = ledger.issued.get_mut(id) {
-                        entry.claimed = true;
-                    }
-                }
             }
-            let reopen = |ledger: &mut Ledger| {
-                for id in &pending {
-                    if let Some(entry) = ledger.issued.get_mut(id) {
-                        entry.claimed = false;
-                    }
-                }
-            };
+            self.set_claimed(&pending, true).await?;
+            pending.iter().for_each(|id| ledger.mark(id, true));
+            drop(ledger);
             match self
                 .claims
                 .claim_pending(thread_id, attachments.clone())
@@ -326,22 +334,24 @@ mod claims {
                     Ok(claimed)
                 }
                 Err(error) => {
-                    reopen(&mut *self.ledger.lock().await);
+                    let mut ledger = self.ledger.lock().await;
+                    let _ = self.set_claimed(&pending, false).await;
+                    pending.iter().for_each(|id| ledger.mark(id, false));
                     Err(error)
                 }
             }
         }
 
+        /// A rollback reopens the uploads its copies came from.
         async fn release_claimed_paths(&self, paths: Vec<PathBuf>) -> RuntimeResult<()> {
             {
                 let mut ledger = self.ledger.lock().await;
-                for path in &paths {
-                    if let Some(id) = ledger.copies.remove(path)
-                        && let Some(entry) = ledger.issued.get_mut(&id)
-                    {
-                        entry.claimed = false;
-                    }
-                }
+                let reopened: Vec<String> = paths
+                    .iter()
+                    .filter_map(|path| ledger.copies.remove(path))
+                    .collect();
+                let _ = self.set_claimed(&reopened, false).await;
+                reopened.iter().for_each(|id| ledger.mark(id, false));
             }
             self.claims.release_claimed_paths(paths).await
         }
@@ -369,77 +379,114 @@ mod claims {
         }
     }
 
-    /// Copies a pending upload without following links: the source must be a regular file when
-    /// opened (checked on the handle), and the destination is created exclusively.
-    struct NoFollowCopy;
+    /// Copies a pending upload through a handle opened under the attachments directory without
+    /// following a link (`ContainedFiles`); the opened file must be the entry itself, and the
+    /// destination is created exclusively.
+    struct ContainedCopy(ContainedFiles);
 
     #[async_trait]
-    impl CopyFile for NoFollowCopy {
+    impl CopyFile for ContainedCopy {
         async fn copy(&self, from: PathBuf, to: PathBuf) -> RuntimeResult<()> {
-            tokio::task::spawn_blocking(move || copy_no_follow(&from, &to))
+            let files = self.0.clone();
+            tokio::task::spawn_blocking(move || copy_contained(&files, &from, &to))
                 .await
                 .map_err(|error| claim_error(error.to_string()))?
                 .map_err(|error| claim_error(format!("Failed to claim attachment: {error}")))
         }
     }
 
-    fn copy_no_follow(from: &Path, to: &Path) -> std::io::Result<()> {
-        use std::io::{Read, Write};
-        let mut source = open_regular_no_follow(from)?;
-        let size = source.metadata()?.len();
+    fn copy_contained(files: &ContainedFiles, from: &Path, to: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        const CHUNK: usize = 64 * 1024;
+        let source = files.open(&files.realpath(from)?)?;
+        let stat = source.stat()?;
+        if !stat.regular || files.lstat_identity(from)? != stat.identity {
+            return Err(std::io::Error::other(
+                "attachment is not a regular file of its own",
+            ));
+        }
         let mut target = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(to)?;
-        let copied = std::io::copy(&mut (&mut source).take(size), &mut target)?;
-        if copied != size || source.read(&mut [0])? != 0 {
-            drop(target);
-            let _ = std::fs::remove_file(to);
-            return Err(std::io::Error::other(
-                "attachment changed while it was claimed",
-            ));
+        let mut offset = 0;
+        let result = loop {
+            let chunk = source.read_at(offset, CHUNK)?;
+            if chunk.is_empty() {
+                break if offset == stat.size {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other(
+                        "attachment changed while it was claimed",
+                    ))
+                };
+            }
+            offset += chunk.len() as u64;
+            if offset > stat.size {
+                break Err(std::io::Error::other(
+                    "attachment changed while it was claimed",
+                ));
+            }
+            target.write_all(&chunk)?;
+        };
+        match result.and_then(|()| target.sync_all()) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                drop(target);
+                let _ = std::fs::remove_file(to);
+                Err(error)
+            }
         }
-        target.flush()?;
-        target.sync_all()
-    }
-
-    #[cfg(windows)]
-    fn open_regular_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if metadata.is_symlink() || !metadata.is_file() {
-            return Err(std::io::Error::other("attachment is not a regular file"));
-        }
-        Ok(file)
-    }
-
-    /// No `O_NOFOLLOW` without a new dependency: the entry is checked with `lstat` and the opened
-    /// handle must be that same file, so a link swapped in between is refused.
-    #[cfg(unix)]
-    fn open_regular_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-        use std::os::unix::fs::MetadataExt;
-        let before = std::fs::symlink_metadata(path)?;
-        if !before.is_file() {
-            return Err(std::io::Error::other("attachment is not a regular file"));
-        }
-        let file = std::fs::File::open(path)?;
-        let opened = file.metadata()?;
-        if !opened.is_file() || opened.dev() != before.dev() || opened.ino() != before.ino() {
-            return Err(std::io::Error::other(
-                "attachment changed while it was opened",
-            ));
-        }
-        Ok(file)
     }
 
     fn system_ms() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod tests {
+        use super::*;
+
+        /// A claim reached without a caller in scope (a spawned task, a host path that never set
+        /// one) is refused, never treated as anyone's.
+        #[tokio::test]
+        async fn a_claim_without_a_caller_is_refused() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = AttachmentStore::new(
+                temp.path().into(),
+                t3_workspace::assets::AssetSigner::new(vec![3; 32]).unwrap(),
+                Arc::new(NoDocuments),
+            );
+            let adapter = AttachmentsAdapter::new(store, AttachmentOptions::default());
+            let upload: ChatAttachment = serde_json::from_value(serde_json::json!({
+                "type": "image",
+                "id": "pending-00000000-0000-4000-8000-000000000000",
+                "name": "pixel.png",
+                "mimeType": "image/png",
+                "sizeBytes": 1
+            }))
+            .unwrap();
+            let refused = adapter
+                .claim_pending(ThreadId("thread".into()), vec![upload])
+                .await
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("only by the caller"),
+                "{refused}"
+            );
+        }
+
+        struct NoDocuments;
+        impl t3_workspace::attachments::DocumentText for NoDocuments {
+            fn ensure<'a>(
+                &'a self,
+                _: &'a Path,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+                Box::pin(async {})
+            }
+        }
     }
 }

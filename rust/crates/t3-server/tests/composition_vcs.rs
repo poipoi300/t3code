@@ -918,10 +918,10 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
     std::fs::write(
         home.join("userdata").join("repository-bindings.json"),
-        serde_json::to_vec(&json!({
+        serde_json::to_vec(&json!({"version": 1, "bindings": {
             &changed_key: {"repository": earlier_binding},
             &kept_key: {"repository": kept_binding},
-        }))
+        }}))
         .unwrap(),
     )
     .unwrap();
@@ -947,7 +947,7 @@ fn saved_record(home: &Path, folder: &Path) -> Value {
         &std::fs::read(home.join("userdata").join("repository-bindings.json")).unwrap(),
     )
     .unwrap();
-    saved[folder.to_string_lossy().as_ref()].clone()
+    saved["bindings"][folder.to_string_lossy().as_ref()].clone()
 }
 
 /// Re-review 4, explicit trust: the git panel's Initialize creates the repository at the user's
@@ -964,7 +964,8 @@ async fn initialising_through_the_server_trusts_the_new_repository() {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
     std::fs::write(
         home.join("userdata").join("repository-bindings.json"),
-        serde_json::to_vec(&json!({ &key: {"repository": null} })).unwrap(),
+        serde_json::to_vec(&json!({"version": 1, "bindings": { &key: {"repository": null} }}))
+            .unwrap(),
     )
     .unwrap();
 
