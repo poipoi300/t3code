@@ -46,6 +46,8 @@ pub trait DelegationHost: Send + Sync {
     async fn providers(&self) -> Result<Vec<Value>>;
     async fn orchestration_instances(&self) -> Result<BTreeSet<String>>;
     async fn enabled_for_project(&self, project: &ProjectId, instance: &str) -> Result<bool>;
+    /// TS `ProviderRegistry.refreshInstance`: re-probes one instance and returns the snapshots.
+    async fn refresh_instance(&self, instance: &str) -> Result<Vec<Value>>;
 }
 
 pub struct DelegationAdapter {
@@ -935,14 +937,48 @@ impl DelegationAdapter {
         Ok(result)
     }
 
-    /// `resolveTarget`, without the one-instance refresh TypeScript retries with.
+    /// `resolveTargetRechecking`: a target found unavailable is re-probed once (background agents
+    /// miss the foreground health probes) and resolved again.
     async fn resolve_target(
         &self,
         parent: &Value,
         target: &Value,
         skip_enablement: bool,
     ) -> Result<ResolvedTarget> {
+        let instance = target["providerInstanceId"].as_str().map(str::to_owned).or_else(|| {
+            target["driverKind"]
+                .is_null()
+                .then(|| parent["modelSelection"]["instanceId"].as_str().map(str::to_owned))
+                .flatten()
+        });
         let providers = self.host.providers().await?;
+        match self
+            .resolve_target_with(providers, parent, target, skip_enablement)
+            .await
+        {
+            Err(McpError::Failure { code, .. })
+                if instance.is_some()
+                    && matches!(code.as_str(), "provider_unavailable" | "model_unavailable") =>
+            {
+                let providers = self
+                    .host
+                    .refresh_instance(instance.as_deref().unwrap_or_default())
+                    .await?;
+                self.resolve_target_with(providers, parent, target, skip_enablement)
+                    .await
+            }
+            resolved => resolved,
+        }
+    }
+
+    /// `resolveTarget`.
+    async fn resolve_target_with(
+        &self,
+        providers: Vec<Value>,
+        parent: &Value,
+        target: &Value,
+        skip_enablement: bool,
+    ) -> Result<ResolvedTarget> {
         let capable = self.host.orchestration_instances().await?;
         let inherited = &parent["modelSelection"];
         let requested_driver = target["driverKind"].as_str();
