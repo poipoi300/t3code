@@ -217,17 +217,17 @@ fn concurrent_client_approvals_preserve_provider_options_and_do_not_disable_each
         let mut app = start(size);
         app.wait_for("Run the compiler").expect("complete detail");
         app.press("role:button[Approve]").expect("first request");
-        app.wait_for("calls:1").expect("one submission");
+        app.wait_for("text:calls:1").expect("one submission");
         assert!(app.press("role:button[Approve]").is_err());
         app.press("role:button[Allow once]")
             .expect("other request remains actionable");
-        app.wait_for("calls:2").expect("independent request");
+        app.wait_for("text:calls:2").expect("independent request");
         app.press("role:button[Release]").expect("finish first");
         app.wait_for("Child environment offline: Settings")
             .expect("failure remains visible");
         app.press("role:button[Succeed]").expect("recovery");
         app.press("role:button[Approve]").expect("retry");
-        app.wait_for("calls:3").expect("retried service");
+        app.wait_for("text:calls:3").expect("retried service");
     }
 }
 #[test]
@@ -261,7 +261,7 @@ fn child_request_errors_clear_on_retry_and_preserve_destination_and_literal_titl
         .expect("server detail");
     app.press("role:button[Succeed]").expect("recover");
     app.press("role:button[Approve]").expect("retry");
-    app.wait_for("calls:2")
+    app.wait_for("text:calls:2")
         .expect("correct child received retry");
     assert!(!app.screen().shows("Child environment offline: Settings"));
     app.press("role:button[French]").expect("language change");
@@ -273,7 +273,7 @@ fn default_and_provider_specific_more_options_submit_the_exact_decision() {
     let mut app = start(DESKTOP);
     app.press("role:button[Why am I being asked this?]")
         .expect("explanation");
-    app.wait_for("an ask rule in the agent's own settings")
+    app.wait_for(requests::full_access_override_explanation(true))
         .expect("client explanation");
     app.press("role:button[Why am I being asked this?]")
         .expect("close explanation");
@@ -281,7 +281,7 @@ fn default_and_provider_specific_more_options_submit_the_exact_decision() {
         .expect("default options");
     app.press("role:menuitem[Always allow this session]")
         .expect("session option");
-    app.wait_for("decision:\"acceptForSession\"")
+    app.wait_for("text:decision:\"acceptForSession\"")
         .expect("exact service decision");
     app.press("role:button[Release]")
         .expect("finish first request");
@@ -289,6 +289,6 @@ fn default_and_provider_specific_more_options_submit_the_exact_decision() {
         .expect("provider options");
     app.press("role:menuitem[Always allow app]")
         .expect("provider-specific option");
-    app.wait_for("decision:\"acceptAlways\"")
+    app.wait_for("text:decision:\"acceptAlways\"")
         .expect("option preserved");
 }

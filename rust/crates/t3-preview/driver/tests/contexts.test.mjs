@@ -32,3 +32,15 @@ test("a scratch page setup failure closes its context and preserves peers",async
 test("a closed pool rejects future work and never relaunches",async()=>{
   const test=await setup();await test.pool.contextFor("default","agent");await test.close();await assert.rejects(test.pool.contextFor("default","agent"),/closed/);await assert.rejects(test.pool.scratchPage(),/closed/);assert.equal(fixture.launches.length,1);
 });
+
+test("worker badge APIs are stubbed before Playwright resumes service workers",async()=>{
+  const test=await setup();try{
+    await test.pool.contextFor("default","agent");const persistent=await test.pool.contextFor("work");
+    for(const client of [fixture.browsers[0],persistent]){
+      fixture.cdp=[];const session=client.root.createChildSession("worker");await session.send("Runtime.runIfWaitingForDebugger");
+      assert.deepEqual(fixture.cdp.map(call=>call.method),["Runtime.evaluate","Runtime.runIfWaitingForDebugger"]);
+      const {runInNewContext}=await import("node:vm");class WorkerNavigator{};runInNewContext(fixture.cdp[0].params.expression,{WorkerNavigator,Promise});
+      const navigator=new WorkerNavigator();await navigator.setAppBadge(3);await navigator.clearAppBadge();
+    }
+  }finally{await test.close();}
+});

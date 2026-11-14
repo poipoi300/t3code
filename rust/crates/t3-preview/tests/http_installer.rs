@@ -349,6 +349,49 @@ fn archive_rejects_traversal_absolute_paths_symlinks_and_missing_executable() {
 
 #[test]
 fn pinned_platform_selection_is_complete_and_release_paths_are_validated() {
+    for (os, arch, bytes, hash) in [
+        (
+            "linux",
+            "x64",
+            127965683,
+            "f90329720fb61e5a76da9b6b509b6ad12a484c9c5df0359403e935177c6d153a",
+        ),
+        (
+            "linux",
+            "arm64",
+            128047138,
+            "912fbf877e53de34d7b3cca5104f3b95607d41bd35412ccc6cd2a599ff0c0dbf",
+        ),
+        (
+            "darwin",
+            "arm64",
+            104822985,
+            "17bf66d53c1b1104dcb641c5b331cd4ac5d200c778f5feed0934a0b92deaf8d6",
+        ),
+        (
+            "darwin",
+            "x64",
+            110132547,
+            "f1a6a9561eaf1f409849538de663695d36d72fbf1ebca4d42e47c7b5f2a157f3",
+        ),
+        (
+            "win32",
+            "ia32",
+            120403126,
+            "d9829c59dcc79d9e6e920f8ab841f2a9a055dcf54229d756ac0b42dfec303910",
+        ),
+        (
+            "win32",
+            "x64",
+            126047001,
+            "2138c1583d25d6f3abec5269943b2f430207d87a539895aa9e90cc4697ec0e1f",
+        ),
+    ] {
+        let release = pinned_release(os, arch).unwrap();
+        assert_eq!(release.version, "157.0.8103.78");
+        assert_eq!(release.bytes, bytes);
+        assert_eq!(release.sha256, hash);
+    }
     for (platform, arch, expected) in [
         ("linux", "x64", "linux64"),
         ("linux", "arm64", "linux-arm64"),
@@ -587,4 +630,44 @@ async fn browser_installation_has_its_own_wait_budget_before_the_render_deadline
         .call(BrowserCommand::Shutdown, Duration::from_secs(5))
         .await
         .unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_native_listener_discovery_attributes_only_registered_terminal_pids() {
+    let http = HttpFixture::new(|_| {
+        (
+            200,
+            vec![("Content-Type".into(), "text/html".into())],
+            b"ok".to_vec(),
+        )
+    })
+    .await;
+    let port = url::Url::parse(&http.url).unwrap().port().unwrap();
+    let discovery = PortDiscovery::with_options(true, std::path::PathBuf::new()).unwrap();
+    discovery.register_terminal_processes("thread", "terminal", &[std::process::id() as u64]);
+    let servers = discovery
+        .scan(std::slice::from_ref(&http.url))
+        .await
+        .unwrap();
+    let server = servers.iter().find(|server| server.port == port).unwrap();
+    assert_eq!(server.pid, Some(std::process::id() as u64));
+    let owner = server.terminal.as_ref().unwrap();
+    assert_eq!(owner.thread_id.0.as_str(), "thread");
+    assert_eq!(owner.terminal_id.as_str(), "terminal");
+    assert!(
+        server
+            .process_name
+            .as_ref()
+            .is_some_and(|name| !name.as_str().is_empty())
+    );
+    discovery.unregister_terminal("thread", "terminal");
+    assert!(
+        discovery
+            .scan(&[])
+            .await
+            .unwrap()
+            .iter()
+            .all(|server| server.port != port)
+    );
 }

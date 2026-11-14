@@ -13,11 +13,16 @@ use tokio::sync::{Notify, mpsc};
 struct Ipc {
     commands: mpsc::UnboundedSender<DesktopBrowserCommand>,
     inbound: Mutex<Vec<mpsc::UnboundedReceiver<String>>>,
+    stopped: Mutex<Vec<String>>,
     blocked: AtomicBool,
     relaying: Notify,
 }
 #[async_trait]
 impl DesktopIpc for Ipc {
+    async fn stop_loading(&self, tab_id: &str) -> Result<()> {
+        self.stopped.lock().unwrap().push(tab_id.into());
+        Ok(())
+    }
     async fn send(&self, command: DesktopBrowserCommand) -> Result<()> {
         let _ = self.commands.send(command);
         Ok(())
@@ -47,6 +52,7 @@ fn fixture() -> (
     let ipc = Arc::new(Ipc {
         commands: tx,
         inbound: Mutex::default(),
+        stopped: Mutex::default(),
         blocked: AtomicBool::new(false),
         relaying: Notify::new(),
     });
@@ -140,4 +146,27 @@ async fn stale_desktop_lease_cannot_remove_a_replacement_after_detach() {
         commands.recv().await.unwrap(),
         DesktopBrowserCommand::Release { .. }
     ));
+}
+
+#[tokio::test]
+async fn desktop_stop_targets_the_guest_without_releasing_the_cdp_connection() {
+    let (channel, ipc, mut commands) = fixture();
+    let key = TabKey::new("t", "tab");
+    assert!(channel.stop_loading(&key).await.is_err());
+    attached(&channel);
+    let _connection = channel.endpoint(&key).await.unwrap();
+    channel.stop_loading(&key).await.unwrap();
+    assert_eq!(*ipc.stopped.lock().unwrap(), vec!["tab"]);
+    assert!(channel.is_attached(&key));
+    assert!(commands.try_recv().is_err());
+    channel.receive(DesktopBrowserEvent::Cdp {
+        thread_id: "t".into(),
+        tab_id: "tab".into(),
+        message: "still connected".into(),
+    });
+    assert_eq!(
+        ipc.inbound.lock().unwrap()[0].try_recv().unwrap(),
+        "still connected"
+    );
+    assert_eq!(PREVIEW_STOP_LOADING_CHANNEL, "desktop:preview-stop-loading");
 }

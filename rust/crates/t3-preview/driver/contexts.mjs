@@ -1,35 +1,71 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Owns Playwright resources and their idle timer outside the Effect runtime.
-const INCOGNITO_BROWSER_PROFILE_ID = "incognito";
-const constVoid = () => {};
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-                                                                           
-
+const constVoid = () => {};
+const INCOGNITO_BROWSER_PROFILE_ID = "incognito";
 const sandboxDisabled = env => env.T3CODE_SERVER_BROWSER_SANDBOX === "0";
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Owns Playwright resources and their idle timer outside the Effect runtime.
+
 
 // Playwright needs its files on disk. createRequire also resolves it from a Node SEA executable.
 const requirePlaywright = NodeModule.createRequire(NodePath.join(process.cwd(), "package.json"));
 const loadPlaywright = () =>
   requirePlaywright(process.env.T3_PREVIEW_PLAYWRIGHT_MODULE || "playwright-core")                                    ;
 
-                   
-                               
-                                             
-     
-                                                                                               
-                                                                                                     
-     
-                       
-                       
-                                                                                             
-                                                                               
-                                   
-                                                                             
-                                  
-                                                              
- 
+const BADGE_STUB = `if (typeof WorkerNavigator === "function") for (const name of ["setAppBadge", "clearAppBadge"]) WorkerNavigator.prototype[name] = () => Promise.resolve();`;
+
+
+
+
+
+
+// The headless shell binds no BadgeService for service workers and kills the renderer of a
+// worker that calls navigator.setAppBadge. Playwright resumes each worker itself, so the stub
+// can only go in ahead of that resume through its in-process session; without it nothing is stubbed.
+const stubWorkerBadges = (client                          ) => {
+  const { _connection: connection } = client
+
+
+
+
+
+
+
+   ;
+  const impl = connection?.toImpl?.(client);
+  const root = impl?._browser?._session ?? impl?._session;
+  if (!root) return;
+  const createChildSession = root.createChildSession.bind(root);
+  root.createChildSession = (...args) => {
+    const session = createChildSession(...args);
+    const send = session.send.bind(session);
+    session.send = (method, params) => {
+      if (method === "Runtime.runIfWaitingForDebugger") {
+        void send("Runtime.evaluate", { expression: BADGE_STUB }).catch(constVoid);
+      }
+      return send(method, params);
+    };
+    return session;
+  };
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 const UA_PLATFORMS                                           = {
   darwin: "macOS",
@@ -127,6 +163,7 @@ export class ServerBrowserContexts {
         const browser = await this.launch(executable, (executablePath) =>
           chromium.launch({ ...options, executablePath }),
         );
+        stubWorkerBadges(browser);
         browser.on("disconnected", () => {
           if (this.browser === launched) this.browser = undefined;
         });
@@ -207,13 +244,15 @@ export class ServerBrowserContexts {
     await NodeFSP.mkdir(directory, { recursive: true });
     const { executable, ...options } = await this.launchOptions();
     const { chromium } = loadPlaywright();
-    return this.launch(executable, (executablePath) =>
+    const context = await this.launch(executable, (executablePath) =>
       chromium.launchPersistentContext(directory, {
         ...options,
         ...contextOptions,
         executablePath,
       }),
     );
+    stubWorkerBadges(context);
+    return context;
   }
 
           profileDirectory(profileId        ) {

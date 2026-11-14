@@ -8,9 +8,18 @@ use std::{
 use t3_contracts::{desktop_browser::*, preview_automation::PreviewAutomationLoadError};
 use tokio::sync::mpsc;
 
+pub const PREVIEW_STOP_LOADING_CHANNEL: &str = "desktop:preview-stop-loading";
+
 /// The native shell owns bootstrap descriptors and the authenticated one-client CDP relay.
 #[async_trait]
 pub trait DesktopIpc: Send + Sync {
+    /// Invoke the shell bridge on the guest webContents; preserve the embedder and relay.
+    async fn stop_loading(&self, _tab_id: &str) -> Result<()> {
+        Err(Error::operation(
+            "PreviewDesktopBridgeUnavailableError",
+            "The desktop shell has not implemented stopLoading.",
+        ))
+    }
     async fn send(&self, command: DesktopBrowserCommand) -> Result<()>;
     async fn relay(
         &self,
@@ -180,6 +189,15 @@ impl DesktopBrowserChannel {
             endpoint,
             _registration: registration,
         })
+    }
+    pub async fn stop_loading(&self, key: &TabKey) -> Result<()> {
+        if !self.is_attached(key) {
+            return Err(Error::TabNotFound);
+        }
+        let ipc = self.ipc.as_ref().ok_or(Error::Disconnected)?;
+        tokio::time::timeout(Duration::from_secs(5), ipc.stop_loading(&key.tab_id))
+            .await
+            .map_err(|_| Error::Timeout("desktop stopLoading".into()))?
     }
     pub async fn command(&self, command: DesktopBrowserCommand) {
         if let Some(ipc) = &self.ipc

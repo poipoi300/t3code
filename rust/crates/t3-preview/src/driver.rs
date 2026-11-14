@@ -52,6 +52,7 @@ pub enum BrowserCommand {
         isolated: bool,
         popup_id: Option<String>,
         load_error: Option<t3_contracts::preview_automation::PreviewAutomationLoadError>,
+        crashed_url: Option<String>,
     },
     DiscardPopup {
         popup_id: String,
@@ -141,6 +142,10 @@ pub enum BrowserEvent {
     Closed {
         key: TabKey,
     },
+    Crashed {
+        key: TabKey,
+        url: String,
+    },
     Popup {
         opener: TabKey,
         popup_id: String,
@@ -205,6 +210,12 @@ pub struct PlaywrightDriver {
 
 impl PlaywrightDriver {
     pub async fn start(options: PlaywrightOptions) -> Result<Self> {
+        Self::start_with_environment(options, t3_process::Environment::new()).await
+    }
+    pub async fn start_with_environment(
+        options: PlaywrightOptions,
+        environment: t3_process::Environment,
+    ) -> Result<Self> {
         static GENERATION: AtomicU64 = AtomicU64::new(1);
         let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
         let runtime = tempfile::Builder::new()
@@ -223,12 +234,17 @@ impl PlaywrightDriver {
                 include_str!("../driver/desktop-viewport.mjs"),
             ),
             ("screencast.mjs", include_str!("../driver/screencast.mjs")),
+            (
+                "recording-frames.mjs",
+                include_str!("../driver/recording-frames.mjs"),
+            ),
         ] {
             std::fs::write(runtime.path().join(name), source)?;
         }
         let mut process = t3_process::ProcessOptions::new(options.node);
         process.args = vec![runtime.path().join("worker.mjs").into_os_string()];
         process.cwd = Some(options.cwd);
+        process.env = environment;
         process.timeout = None;
         process.env.insert(
             "T3_PREVIEW_CONFIG".into(),

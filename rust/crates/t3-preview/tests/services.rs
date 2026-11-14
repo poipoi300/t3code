@@ -414,6 +414,7 @@ async fn read_only_viewers_cannot_take_control_type_resize_or_navigate() {
         json!({"type":"text","text":"secret"}),
         json!({"type":"resize","width":390,"height":844}),
         json!({"type":"navigate","url":"http://attacker.test"}),
+        json!({"type":"stopLoading"}),
     ] {
         viewer.input(input).await.unwrap();
     }
@@ -430,6 +431,14 @@ async fn read_only_viewers_cannot_take_control_type_resize_or_navigate() {
     assert_eq!(
         driver.pages.lock().unwrap()[&TabKey::new("thread", &id)]["url"],
         Value::Null
+    );
+    assert!(
+        !driver
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command["command"] == "viewerInput")
     );
 }
 
@@ -1157,4 +1166,144 @@ async fn worker_disconnect_during_open_cannot_leave_a_successful_dead_tab() {
     );
     assert!(result.is_err(), "open returned a dead page");
     assert!(driver.pages.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn renderer_crash_reserves_a_blank_replacement_preserves_identity_and_reconnects_viewers() {
+    let (_root, service, driver, mut started) = make().await;
+    let id = open(&service, "a").await;
+    assert_eq!(started.recv().await.unwrap(), "open");
+    let peer = open(&service, "b").await;
+    assert_eq!(started.recv().await.unwrap(), "open");
+    let viewer = service
+        .attach_viewer(
+            TabKey::new("thread", &id),
+            ViewerOptions {
+                can_operate: true,
+                max_width: 1280,
+                max_height: 800,
+                quality: 80,
+            },
+        )
+        .await
+        .unwrap();
+    let key = TabKey::new("thread", &id);
+    driver.block_open.store(true, Ordering::SeqCst);
+    let event: BrowserEvent = serde_json::from_value(
+        json!({"event":"crashed","key":key,"url":"http://localhost:3000/original"}),
+    )
+    .unwrap();
+    for sender in driver.events.lock().unwrap().iter() {
+        sender.send(event.clone()).unwrap();
+    }
+    assert_eq!(started.recv().await.unwrap(), "open");
+    let mut unrelated = service.manager().subscribe_events();
+    for sender in driver.events.lock().unwrap().iter() {
+        sender.send(BrowserEvent::Status {input:serde_json::from_value(json!({"threadId":"thread","tabId":peer,"navStatus":{"_tag":"Success","url":"http://localhost:3000/peer","title":"Peer"},"canGoBack":false,"canGoForward":false})).unwrap()}).unwrap();
+    }
+    let event = tokio::time::timeout(Duration::from_secs(1), unrelated.recv())
+        .await
+        .expect("a pending replacement must not block other tabs' events")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(event).unwrap()["snapshot"]["tabId"],
+        peer
+    );
+    let listed = service
+        .manager()
+        .list(serde_json::from_value(json!({"threadId":"thread"})).unwrap())
+        .await;
+    assert_eq!(listed.sessions.len(), 2);
+    let crashed = listed
+        .sessions
+        .iter()
+        .find(|snapshot| snapshot.tab_id.as_str() == id)
+        .unwrap();
+    assert_eq!(crashed.tab_id.as_str(), id);
+    assert_eq!(
+        serde_json::to_value(&crashed.nav_status).unwrap()["description"],
+        "Page crashed"
+    );
+    let mut reconnected = false;
+    while let Some(output) = viewer.output.recv().await {
+        reconnected |= matches!(output, t3_preview::stream::ViewerOutput::Reconnect);
+    }
+    assert!(reconnected);
+    let replacement = driver
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|command| command["command"] == "open")
+        .unwrap()
+        .clone();
+    assert_eq!(replacement["snapshot"]["navStatus"]["_tag"], "LoadFailed");
+    assert_eq!(replacement["crashedUrl"], "http://localhost:3000/original");
+    driver.open_gate.add_permits(1);
+    let state = service
+        .execute(request(
+            "a",
+            PreviewAutomationOperation::Status,
+            Some(&id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(state["tabId"], id);
+    assert_eq!(state["available"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_click_receives_only_its_remaining_request_budget() {
+    use futures_util::FutureExt;
+    let (_root, service, driver, mut started) = make().await;
+    let id = open(&service, "a").await;
+    assert_eq!(started.recv().await.unwrap(), "open");
+    driver.block_eval.store(true, Ordering::SeqCst);
+    let owned = service.clone();
+    let tab = id.clone();
+    let running = tokio::spawn(async move {
+        owned
+            .execute(request(
+                "a",
+                PreviewAutomationOperation::Evaluate,
+                Some(&tab),
+                json!({"expression":"hold"}),
+            ))
+            .await
+    });
+    assert_eq!(started.recv().await.unwrap(), "evaluate");
+    let entered = Arc::new(Notify::new());
+    let admission: t3_preview::Admission = {
+        let entered = entered.clone();
+        Arc::new(move || {
+            let entered = entered.clone();
+            async move {
+                entered.notify_one();
+                Ok(())
+            }
+            .boxed()
+        })
+    };
+    let mut click = request(
+        "a",
+        PreviewAutomationOperation::Click,
+        Some(&id),
+        json!({"selector":"#save","timeoutMs":100}),
+    );
+    click.timeout_ms = 100;
+    let queued = tokio::spawn(async move { service.execute_admitted(click, admission).await });
+    entered.notified().await;
+    tokio::time::advance(Duration::from_millis(60)).await;
+    driver.eval_gate.add_permits(1);
+    running.await.unwrap().unwrap();
+    queued.await.unwrap().unwrap();
+    let commands = driver.commands.lock().unwrap();
+    let click = commands
+        .iter()
+        .find(|command| command["operation"] == "click")
+        .unwrap();
+    assert_eq!(click["input"]["timeoutMs"], 40);
+    assert_eq!(click["timeoutMs"], 40);
 }

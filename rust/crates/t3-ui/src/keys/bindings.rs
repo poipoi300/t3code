@@ -313,10 +313,17 @@ impl Keybindings {
     }
 
     pub fn shortcut_label(self, command: &str) -> Option<String> {
-        self.rules.with(|rules| effective_shortcuts_for_command(
-            rules, command, shortcut_platform(), &self.context.read(),
-        ).into_iter().find(|shortcut| native_stroke(shortcut).is_some())
-            .map(|shortcut| keybindings::format_shortcut_label(&shortcut, shortcut_platform())))
+        self.rules.with(|rules| {
+            effective_shortcuts_for_command(
+                rules,
+                command,
+                shortcut_platform(),
+                &self.context.read(),
+            )
+            .into_iter()
+            .find(|shortcut| native_stroke(shortcut).is_some())
+            .map(|shortcut| keybindings::format_shortcut_label(&shortcut, shortcut_platform()))
+        })
     }
 
     fn strokes(self) -> Vec<String> {
@@ -511,11 +518,12 @@ pub fn install_shell_commands(keys: Keybindings, panels: Panels, nav: Navigator)
         Scope {
             phase: Phase::Capture,
             when: Rc::new(move |event| {
-                !(keys.context.read().get("composerRichTextFocus")
-                    && keybindings::is_rich_text_bold_shortcut(
-                        &event.key,
-                        keys.context.selection_collapsed.get(),
-                    ))
+                !nav.top().is_standalone()
+                    && !(keys.context.read().get("composerRichTextFocus")
+                        && keybindings::is_rich_text_bold_shortcut(
+                            &event.key,
+                            keys.context.selection_collapsed.get(),
+                        ))
             }),
             ..Default::default()
         }
@@ -525,11 +533,6 @@ pub fn install_shell_commands(keys: Keybindings, panels: Panels, nav: Navigator)
             true
         }),
     );
-    keys.register(Scope::default().command("navigation.back", move |event| {
-        event.claim();
-        nav.back();
-        true
-    }));
     keys.register_menu("sidebar.toggle", move || {
         panels.sidebar_open.update(|open| *open = !*open)
     });

@@ -1,6 +1,8 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeUtil from "node:util";
 const constVoid = () => {};
 const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 50 * 1024 * 1024;
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 
 
 const isBrowserControlInterrupted = value => value?.name === "BrowserControlInterrupted";
@@ -8,6 +10,7 @@ const isBrowserControlInterrupted = value => value?.name === "BrowserControlInte
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_SCREENSHOT_WIDTH = 1280;
+// Two attempts must fit in a snapshot's 10-second deadline.
 const SCREENSHOT_TIMEOUT_MS = 3_000;
 const WAIT_POLL_MS = 100;
 export const DIAGNOSTIC_BUFFER_LIMIT = 200;
@@ -32,7 +35,7 @@ export const toOperationError = (
   if (cause instanceof Error && cause.name === "TimeoutError") {
     return new ServerBrowserOperationError({
       tag: "PreviewAutomationTimeoutError",
-      message: firstLine,
+      message: withActionabilityReason(firstLine, cause),
       detail: timeoutMs === undefined ? undefined : { timeoutMs },
     });
   }
@@ -54,11 +57,23 @@ export const toOperationError = (
   });
 };
 
+/** Playwright puts why an element was not actionable in its call log, below the first line. */
+const withActionabilityReason = (message        , cause       ) => {
+  // Playwright dims call-log lines with ANSI escapes when colour is on.
+  const reason = NodeUtil.stripVTControlCharacters(cause.message)
+    .split("\n")
+    .map((line) => line.trim())
+    .findLast((line) => line.startsWith("- element is "))
+    ?.slice(2);
+  return reason === undefined ? message : `${message} Playwright last saw: ${reason}.`;
+};
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TARGET_COUNT_MS = 250;
 const MAX_TARGET_CHARS = 200;
 
 const pageRefs = new WeakMap                                                         ();
+// A compact runtime namespace prevents old refs from aliasing after a server restart.
 const refNamespace = NodeCrypto.randomUUID().slice(0, 8);
 let snapshotSequence = 0;
 const nextRefGeneration = () => `${refNamespace}-${(++snapshotSequence).toString(36)}`;
@@ -110,21 +125,38 @@ const targetLocator = (
   return page.locator(selector);
 };
 
-                               
-                                                    
-                          
-                   
+
+
+
+
 const noPointer                  = async () => {};
+
+// Locator.scrollIntoViewIfNeeded resolves its node once and fails when the page replaces it; the
+// input actions after it re-resolve, so the scroll does too, within the same timeout.
+const DETACHED = /^locator\.scrollIntoViewIfNeeded: Element is not attached to the DOM(?:\n|$)/;
+
+const scrollIntoView = async (locator         , timeout        ) => {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    try {
+      return await locator.scrollIntoViewIfNeeded({ timeout: Math.max(1, deadline - Date.now()) });
+    } catch (cause) {
+      if (!(cause instanceof Error && DETACHED.test(cause.message)) || Date.now() >= deadline) {
+        throw cause;
+      }
+    }
+  }
+};
 
 const targetPoint = async (
   page      ,
   locator                ,
   input                                                                      ,
-  timeout        ,
+  timeout              ,
 ) => {
   if (locator === null) return { x: input.x ?? 0, y: input.y ?? 0 };
-  await locator.scrollIntoViewIfNeeded({ timeout });
-  const box = await locator.boundingBox({ timeout });
+  await scrollIntoView(locator, timeout());
+  const box = await locator.boundingBox({ timeout: timeout() });
   if (box) return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const viewport = page.viewportSize();
   return { x: (viewport?.width ?? 0) / 2, y: (viewport?.height ?? 0) / 2 };
@@ -178,6 +210,7 @@ export const consoleText = (message                ) =>
     ? message.text()
     : message.text().replace(/(?<![a-z\d])data:[^,;]*[,;][\s\S]*/i, withoutDataPayload);
 
+// Split on LF alone: a value keeps any U+2028 that a multiline regex would treat as a line end.
 const withoutTreeDataPayloads = (tree        ) =>
   tree
     .split("\n")
@@ -187,9 +220,11 @@ const withoutTreeDataPayloads = (tree        ) =>
     })
     .join("\n");
 
+// The broker waits 15s for the host; a snapshot, retry included, answers well before.
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 const FRAME_ANSWER_MS = 1_000;
 
+// Include password and CSS-masked text in open shadow roots, normalized like accessible text.
 const DOTTED_SCRIPT = `(() => {
   const values = [];
   const visit = (root) => {
@@ -370,6 +405,7 @@ const dottedPattern = (values                       ) => {
   return pattern;
 };
 
+// Playwright single-quotes keys containing ': ' and leaves /.../ names unquoted. Recognize only its attributes so name text cannot spoof them.
 const TREE_LINE =
   /^(\s*- '?[^\s"':]+)( "(?:[^"\\]|\\.)*"| \/(?:.*?\/)?)?((?: \[(?:active|checked(?:=mixed)?|disabled|expanded|level=\d+|pressed(?:=mixed)?|selected|ref=(?:f\d+)?e\d+|cursor=pointer|box=-?\d+,-?\d+,\d+,\d+)\])*'?)(:.*)?$/;
 
@@ -416,10 +452,10 @@ const readPageMetrics = async (cdp            ) => {
     });
     ({ cssVisualViewport } = await cdp.send("Page.getLayoutMetrics"));
     if ((cssVisualViewport.zoom ?? 1) === zoom) {
-      const { ratio, width, height } = result.value     
-                               
-                               
-                                
+      const { ratio, width, height } = result.value
+
+
+
        ;
       return { ratio, width, height, zoom };
     }
@@ -429,6 +465,8 @@ const readPageMetrics = async (cdp            ) => {
   );
 };
 
+// Never pass a clip scale: Chromium mirrors the top-left of the page into a `backdrop-filter`
+// in any capture it shrinks.
 export const captureViewport = async (
   cdp            ,
   options                                                                ,
@@ -512,16 +550,16 @@ const shrinkPng = async (cdp            , png        , scale        ) => {
   return result.value          ;
 };
 
-                      
-                      
-                           
-                                                                                            
-                                           
-                                                
-                                                                        
-                                                                        
-                                                                       
-  
+
+
+
+
+
+
+
+
+
+
 
 /** The scale a page renders at and its viewport in device-independent pixels. */
 const renderingOf = async (input               ) => {
@@ -555,11 +593,11 @@ const capture = async (
   const before = await read();
   // Bracket the tree with value reads to detect changes; await tree completion before retrying failed captures.
   const pageAndScreenshot = Promise.all([
-    input.page.evaluate(SNAPSHOT_SCRIPT)            
-           
-                                  
-                                                                           
-       
+    input.page.evaluate(SNAPSHOT_SCRIPT)
+
+
+
+
      ,
     captureViewport(input.cdp, { format: "png" }).then(async (full) =>
       scale < 1
@@ -657,10 +695,12 @@ export const click = async (
   input                             ,
   pointer                  = noPointer,
 )                                                      => {
-  const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // One deadline across steps keeps the reply inside the broker's grace; Playwright reads 0 as none.
+  const deadline = Date.now() + (input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const remaining = () => Math.max(1, deadline - Date.now());
   const locator = targetLocator(page, input);
   try {
-    return await clickTarget(page, locator, input, timeout, pointer);
+    return await clickTarget(page, locator, input, remaining, pointer);
   } catch (cause) {
     throw locator === null ? cause : await namedTargetTimeout(locator, input, cause);
   }
@@ -696,10 +736,11 @@ const namedTargetTimeout = async (
       : matches === 0
         ? `The click may have happened and removed its target or navigated; check the page before retrying. No element matches ${target} after the timeout; take a fresh snapshot and use its locator.`
         : `The click may have happened; check the page before retrying. ${target} still matches an element after the timeout.`;
+  const message = withActionabilityReason(reason, cause);
   return new ServerBrowserOperationError({
     tag: "PreviewAutomationTimeoutError",
-    message: reason,
-    detail: { reason },
+    message,
+    detail: { reason: message },
     cause,
   });
 };
@@ -708,7 +749,7 @@ const clickTarget = async (
   page      ,
   locator                ,
   input                             ,
-  timeout        ,
+  timeout              ,
   pointer                 ,
 ) => {
   const point = await targetPoint(page, locator, input, timeout);
@@ -717,7 +758,7 @@ const clickTarget = async (
   const clicked =
     locator === null
       ? page.mouse.click(point.x, point.y, options)
-      : locator.click({ ...options, timeout });
+      : locator.click({ ...options, timeout: timeout() });
   let onDialog = constVoid;
   const dialogOpened = new Promise          ((resolve) => {
     onDialog = () => resolve("dialog");
@@ -745,12 +786,12 @@ export const type = async (page      , input                            ) => {
     (await target.evaluate(
       (element) => {
         // Require an enabled, focused text target to avoid losing input or sending it to the previous field.
-        const control = element                
-                                 
-                                      
-                                      
-                                               
-                                      
+        const control = element
+
+
+
+
+
          ;
         const nonText = [
           "button",
@@ -798,7 +839,7 @@ export const hover = async (
 ) => {
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const locator = targetLocator(page, input);
-  await pointer(await targetPoint(page, locator, input, timeout), "move");
+  await pointer(await targetPoint(page, locator, input, () => timeout), "move");
   if (locator === null) {
     await page.mouse.move(input.x ?? 0, input.y ?? 0);
     return;
@@ -849,7 +890,7 @@ export const drag = async (
   const timeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const source = targetLocator(page, { locator: input.source }) ;
   const target = targetLocator(page, { locator: input.target }) ;
-  await pointer(await targetPoint(page, source, {}, timeout), "move");
+  await pointer(await targetPoint(page, source, {}, () => timeout), "move");
   // Observe drag rejection immediately; an unhandled rejection during cursor movement exits the server.
   // Chromium delivers a single move before dragstart; steps give the page mousemoves during the drag.
   const dragFailure = source.dragTo(target, { timeout, steps: 5 }).then(
@@ -882,6 +923,26 @@ export const scroll = async (page      , input                              ) =>
     return;
   }
   await locator.evaluate((element, [x, y]) => element.scrollBy(x, y), delta);
+};
+
+const UNRESPONSIVE_SCRIPT_PROBE_MS = 1_000;
+
+/**
+ * A same-site navigation reuses the renderer, so it never commits while a page script holds it.
+ * Call before starting the navigation: Chrome does not deliver a terminate once one is pending.
+ */
+export const stopUnresponsiveScript = async (cdp            , budgetMs = Infinity) => {
+  let timer                                           ;
+  const answered = cdp.send("Runtime.evaluate", { expression: "0" }).then(
+    () => true,
+    () => true,
+  );
+  const expired = new Promise         ((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.min(budgetMs, UNRESPONSIVE_SCRIPT_PROBE_MS));
+  });
+  const responsive = await Promise.race([answered, expired]).finally(() => clearTimeout(timer));
+  // Not awaited: a renderer blocked on something other than script may never acknowledge it.
+  if (!responsive) void cdp.send("Runtime.terminateExecution").catch(constVoid);
 };
 
 /** Terminate expired page scripts so a hung expression cannot block the tab's control queue. */
@@ -1066,7 +1127,8 @@ export const recordingEncoderScript = (frameRate                           ) => 
   window.__t3Recorder = {
     async frame(base64, cssWidth) {
       if (tooLarge) return false;
-      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      // A per-character atob copy costs ~30 ms on a 3200x1800 frame and throttles recordings.
+      const bytes = Uint8Array.fromBase64(base64);
       const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
       if (tooLarge) { bitmap.close(); return false; }
       if (!recorder) {

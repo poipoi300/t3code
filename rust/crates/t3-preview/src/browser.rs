@@ -49,6 +49,7 @@ struct Tab {
     viewers: Mutex<BTreeMap<String, ViewerState>>,
     cached: Mutex<Value>,
     closed: CancellationToken,
+    recovery_url: Option<String>,
     popup: Option<String>,
     opener: Option<String>,
     viewer_attached: tokio::sync::Notify,
@@ -274,6 +275,9 @@ impl PreviewService {
             BrowserEvent::Status { input } => {
                 let _ = self.inner.manager.report(input, true).await;
             }
+            BrowserEvent::Crashed { key, url } => {
+                self.recover_crash(key, url).await;
+            }
             BrowserEvent::Closed { key } => {
                 self.drop_tab(&key, true).await;
             }
@@ -375,29 +379,149 @@ impl PreviewService {
                 tab.clone()
             } else {
                 state.sequence += 1;
-                let tab = Arc::new(Tab {
-                    worker_generation: std::sync::atomic::AtomicU64::new(0),
-                    key: key.clone(),
-                    control: SessionControl::new(snapshot.automation_owner.clone().flatten()),
-                    created: state.sequence,
-                    used: Mutex::new(Instant::now()),
-                    snapshot: Mutex::new(snapshot),
-                    ready: Mutex::new(None),
-                    desktop: Mutex::new(None),
-                    viewers: Mutex::default(),
-                    cached: Mutex::new(
-                        json!({"url":null,"title":null,"loading":false,"dialog":null,"fileChooser":null,"downloads":[]}),
-                    ),
-                    closed: CancellationToken::new(),
-                    popup,
-                    opener,
-                    viewer_attached: tokio::sync::Notify::new(),
-                });
+                let tab = Self::new_tab(snapshot, state.sequence, popup, opener, None);
                 state.tabs.insert(key, tab.clone());
                 tab
             }
         };
         Ok(tab)
+    }
+    fn new_tab(
+        snapshot: PreviewSessionSnapshot,
+        created: u64,
+        popup: Option<String>,
+        opener: Option<String>,
+        recovery_url: Option<String>,
+    ) -> Arc<Tab> {
+        let key = TabKey::of(&snapshot);
+        Arc::new(Tab {
+            worker_generation: std::sync::atomic::AtomicU64::new(0),
+            key: key.clone(),
+            control: SessionControl::new(snapshot.automation_owner.clone().flatten()),
+            created,
+            used: Mutex::new(Instant::now()),
+            snapshot: Mutex::new(snapshot),
+            ready: Mutex::new(None),
+            desktop: Mutex::new(None),
+            viewers: Mutex::default(),
+            cached: Mutex::new(
+                json!({"url":null,"title":null,"loading":false,"dialog":null,"fileChooser":null,"downloads":[]}),
+            ),
+            closed: CancellationToken::new(),
+            recovery_url,
+            popup,
+            opener,
+            viewer_attached: tokio::sync::Notify::new(),
+        })
+    }
+    async fn recover_crash(&self, key: TabKey, url: String) {
+        let Some(old) = self.get(&key) else {
+            return;
+        };
+        if lock(&old.desktop).is_some() {
+            self.drop_tab(&key, true).await;
+            return;
+        }
+        let crash = PreviewAutomationLoadError {
+            url: redact_crashed_url(&url).chars().take(2048).collect(),
+            code: -2,
+            description: "Page crashed".into(),
+        };
+        let input = PreviewReportStatusInput {
+            thread_id: key.thread_id.as_str().into(),
+            tab_id: key.tab_id.as_str().into(),
+            nav_status: PreviewNavStatus::LoadFailed {
+                url: crash.url.clone().into(),
+                title: String::new(),
+                code: crash.code,
+                description: crash.description.clone(),
+                download: None,
+            },
+            can_go_back: false,
+            can_go_forward: false,
+        };
+        if self.manager().report(input, true).await.is_err() {
+            return;
+        }
+        let Some(mut snapshot) = self
+            .manager()
+            .list(PreviewListInput {
+                thread_id: key.thread_id.as_str().into(),
+            })
+            .await
+            .sessions
+            .into_iter()
+            .find(|snapshot| {
+                snapshot.tab_id.as_str() == key.tab_id
+                    && snapshot.runtime == Some(Some(PreviewRuntime::Server))
+            })
+        else {
+            return;
+        };
+        snapshot.nav_status = PreviewNavStatus::LoadFailed {
+            url: crash.url.into(),
+            title: String::new(),
+            code: -2,
+            description: crash.description,
+            download: None,
+        };
+        snapshot.can_go_back = false;
+        snapshot.can_go_forward = false;
+        let replacement = Self::new_tab(snapshot, old.created, None, old.opener.clone(), Some(url));
+        replacement.worker_generation.store(
+            old.driver_generation(),
+            std::sync::atomic::Ordering::Release,
+        );
+        let service = self.clone();
+        let next = replacement.clone();
+        let previous = old.clone();
+        let reopening = async move {
+            let _ = service
+                .inner
+                .driver
+                .call_on(
+                    previous.driver_generation(),
+                    BrowserCommand::Close {
+                        key: previous.key.clone(),
+                        desktop: false,
+                        unload: false,
+                    },
+                    Duration::from_secs(6),
+                )
+                .await;
+            let result = service.create_tab(next.clone()).await;
+            if result.is_err()
+                && service
+                    .get(&next.key)
+                    .is_some_and(|current| Arc::ptr_eq(&current, &next))
+            {
+                service.drop_tab(&next.key, true).await;
+            }
+            result
+        }
+        .boxed()
+        .shared();
+        *lock(&replacement.ready) = Some(reopening.clone());
+        {
+            let mut state = lock(&self.inner.state);
+            if !state
+                .tabs
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &old))
+            {
+                return;
+            }
+            state.tabs.insert(key, replacement);
+        }
+        old.closed.cancel();
+        old.control.close_now();
+        for viewer in lock(&old.viewers).values() {
+            viewer.queue.push(ViewerOutput::Reconnect);
+            viewer.queue.close();
+        }
+        tokio::spawn(async move {
+            let _ = reopening.await;
+        });
     }
     async fn await_ready(&self, tab: Arc<Tab>) -> Result<Arc<Tab>> {
         let opening = {
@@ -408,7 +532,11 @@ impl PreviewService {
                     let tab = tab.clone();
                     let join = tokio::spawn(async move {
                         let result = service.create_tab(tab.clone()).await;
-                        if result.is_err() {
+                        if result.is_err()
+                            && service
+                                .get(&tab.key)
+                                .is_some_and(|current| Arc::ptr_eq(&current, &tab))
+                        {
                             service.drop_tab(&tab.key, true).await;
                         }
                         result
@@ -480,7 +608,27 @@ impl PreviewService {
         if tab.closed.is_cancelled() {
             return Err(Error::TabNotFound);
         }
-        let result = self
+        let agent = snapshot
+            .automation_owner
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some();
+        let load_error = if let PreviewNavStatus::LoadFailed {
+            url,
+            code,
+            description,
+            ..
+        } = &snapshot.nav_status
+        {
+            Some(PreviewAutomationLoadError {
+                url: url.to_string(),
+                code: *code,
+                description: description.clone(),
+            })
+        } else {
+            self.inner.desktop.load_failure(&tab.key)
+        };
+        let mut result = self
             .inner
             .driver
             .call_on(
@@ -490,12 +638,40 @@ impl PreviewService {
                     desktop_endpoint: endpoint,
                     isolated,
                     popup_id: tab.popup.clone(),
-                    load_error: self.inner.desktop.load_failure(&tab.key),
+                    load_error,
+                    crashed_url: tab.recovery_url.clone(),
                 },
                 DRIVER_TIMEOUT,
             )
             .await;
+        if agent
+            && result
+                .as_ref()
+                .is_ok_and(|value| value["initialPending"] == true)
+        {
+            result = self
+                .inner
+                .driver
+                .call_on(
+                    generation,
+                    BrowserCommand::Operate {
+                        key: tab.key.clone(),
+                        operation: "awaitInitialNavigation".into(),
+                        input: json!({}),
+                        timeout_ms: 16000,
+                        generation: tab.control.generation(),
+                    },
+                    Duration::from_secs(17),
+                )
+                .await;
+        }
         if tab.closed.is_cancelled() {
+            if self
+                .get(&tab.key)
+                .is_some_and(|current| !Arc::ptr_eq(&current, &tab))
+            {
+                return Err(Error::TabNotFound);
+            }
             let desktop = lock(&tab.desktop).is_some();
             let _ = self
                 .inner
@@ -677,7 +853,11 @@ impl PreviewService {
         let key = TabKey::of(&snapshot);
         let result = self.ensure_reserved(snapshot, Some(&reservation)).await;
         lock(&self.inner.state).reservations.remove(&reservation);
-        if result.is_err() {
+        if result.is_err()
+            && self
+                .get(&key)
+                .is_none_or(|current| current.recovery_url.is_none())
+        {
             self.drop_tab(&key, true).await;
         }
         result
@@ -718,7 +898,7 @@ impl PreviewService {
         if let Some(id) = tab {
             let key = TabKey::new(thread, id);
             if let Some(tab) = self.get(&key) {
-                return Ok(tab);
+                return self.await_ready(tab).await;
             }
             let listed = self
                 .manager()
@@ -762,6 +942,7 @@ impl PreviewService {
         let Some(tab) = tab else {
             return Ok(serde_json::from_value(status)?);
         };
+        let tab = self.await_ready(tab).await?;
         let read = self
             .inner
             .driver
@@ -1730,4 +1911,24 @@ impl Drop for PreviewViewer {
             });
         }
     }
+}
+
+fn redact_crashed_url(url: &str) -> String {
+    if !url
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+    {
+        return url.into();
+    }
+    let media = url[5..].split([';', ',']).next().unwrap_or("").trim();
+    let valid = media.split_once('/').is_some_and(|(a, b)| {
+        [a, b].iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 64
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.+-".contains(&c))
+        })
+    });
+    format!("data:{},…", if valid { media } else { "" })
 }

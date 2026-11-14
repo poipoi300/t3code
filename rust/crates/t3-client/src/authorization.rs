@@ -1,4 +1,6 @@
 //! Remote pairing, bearer and DPoP authorization. All transport and key I/O is host supplied.
+#[cfg(test)]
+mod drift_tests;
 use crate::{
     environment::SessionIdentity,
     platform::{

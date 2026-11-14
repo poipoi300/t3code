@@ -6,8 +6,11 @@ automation results and desktop messages come from `t3-contracts`.
 
 The service logic is Rust. The production browser adapter retains Playwright in
 an owned Node process: **Node and `playwright-core` are runtime dependencies**.
-Pass the package entry point in `PlaywrightOptions::playwright_module`, or install
-it in `PlaywrightOptions::cwd`. No package download happens in this crate. Runtime
+Construct `host::PreviewHost::new(HostInputs)` at environment startup. It validates
+Node (or Electron RUN_AS_NODE) and resolves Playwright from an explicit server
+package anchor or absolute entry, returning `PreviewHostConfigurationError` before
+serving requests if either is missing. Chrome installation remains lazy. The
+lower-level `PlaywrightOptions` remains available for injected/fake drivers. No package download happens in this crate. Runtime
 worker modules are embedded in the Rust binary and extracted to a private
 temporary directory held until the owned child exits. Deployment does not depend
 on the build machine's source path.
@@ -26,6 +29,7 @@ on the build machine's source path.
 | `preview.clearProfile` | `PreviewService::clear_profile` |
 | `preview.reportProfiles` | `PreviewService::profile_reporter` → `ProfileReporter::report` |
 | `preview.stopLocalServer` | `PortDiscovery::stop_server` |
+| `subscribeDiscoveredLocalServers` | `PortDiscovery::retain` + `PortDiscovery::subscribe` |
 
 Keep one `PreviewService` per environment, use its `manager()` for these rows,
 and hold one profile reporter per connected client. Dropping the reporter removes
@@ -99,6 +103,25 @@ Use this adapter in `t3-mcp::Services`; there is no second browser service there
 its owner must call `cleanup_thread`. Its existing HTML-render message handling
 does not supply provider recovery ownership.
 
+The desktop bridge adds `DesktopIpc::stop_loading(tab_id)` on
+`desktop:preview-stop-loading`; the shell must stop the guest webContents and
+leave its embedder/CDP relay attached. Root `Page.stopLoading` on the shell relay
+has the same guest-only semantics. Older implementations fail explicitly until
+they supply that method. The streamed worker implements Stop, including late
+initial requests, navigation generation settlement and read-only admission.
+
+Renderer crashes replace headless pages under the same tab/session identity;
+viewers reconnect and status stays LoadFailed until navigation. Reload uses the
+full original URL. Busy-page probes run before navigation, skip dialogs and share
+the agent deadline. Click scroll/geometry/action share one deadline and preserve
+the last Playwright visibility reason. Recording frames ACK immediately and
+coalesce a slow encoder to its newest pending frame. Worker badge APIs are stubbed
+before service-worker resume. The installer pins Chrome 157.0.8103.78.
+
+`tools/sync-browser-helpers.mjs` regenerates the page/context helpers from the
+current TypeScript source using Node's type stripper. It preserves browser logic
+and replaces only Effect/schema wrappers and package-resolution seams.
+
 ## Source coverage and differences
 
 The specification is `apps/server/src/preview/` (Manager, SessionControl,
@@ -116,7 +139,11 @@ Known differences and limits:
 - This is not a Node-free browser implementation. HTML capture uses Playwright
   CDP sessions instead of TypeScript's direct Chrome debugging pipe. Node and
   its Playwright package must be shipped by the host. Real Chrome/Electron rendering
-  has not been exercised here; tests never launch a real browser.
+  has not been exercised here; tests never launch a real browser. Packaged Rust
+  CLI builds must supply an external Node runtime; the TypeScript CLI embeds
+  Node in its SEA. Desktop can supply Electron with RUN_AS_NODE and its ASAR
+  Playwright tree, or external Node with unpacked package files. Startup probes
+  accept virtual ASAR directories through Electron's filesystem implementation.
 - The standalone `PreviewAutomationBroker` host routing, actual HTTP registration,
   Electron bootstrap/relay and privileged setup CLI await their owners above.
   The service methods and explicit integration seams are implemented here.
@@ -160,4 +187,6 @@ sockets, ZIP archives and isolated files. They cover admission revocation,
 ownership/handoff races, popup and pending-launch limits, profiles, URL/file/ZIP
 refusals, publication rollback, relay cancellation, viewport sequencing,
 redaction, stalled CDP cleanup, stream motion/backpressure and installer retry,
-retention and cancellation. They do not access live T3 state or start dev servers.
+retention and cancellation. Native Windows netstat/tasklist discovery is
+exercised against a temporary HTTP listener with exact PID/terminal attribution.
+Windows process stopping remains Unsupported, matching TypeScript. They do not access live T3 state or start dev servers.

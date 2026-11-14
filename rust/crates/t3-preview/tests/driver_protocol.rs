@@ -41,6 +41,7 @@ async fn exercise_worker(module: &str) {
                 isolated: true,
                 popup_id: None,
                 load_error: None,
+                crashed_url: None,
             },
             Duration::from_secs(5),
         )

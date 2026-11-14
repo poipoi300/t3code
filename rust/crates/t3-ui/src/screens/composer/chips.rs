@@ -213,10 +213,19 @@ fn context_chip_class(kind: &str) -> SharedString {
     ]))
 }
 
+fn interactive_chip_class(kind: &str) -> SharedString {
+    let base = context_chip_class(kind);
+    // ContextChipLabel's :is(button:enabled,a):hover selector becomes a named native group.
+    tw(&theme::cn([
+        Some(&base),
+        Some("group/chip cursor-pointer"),
+    ]))
+}
+
 /// Port of ContextChip.tsx ContextChipLabel; NSH text owns single-line truncation.
 pub fn context_chip_label(label: Text) -> impl IntoElement {
     text(move || label.resolve())
-        .app_class(tw("block min-w-0 self-baseline overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none"))
+        .app_class(tw("block min-w-0 self-baseline overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
         .number_of_lines(1_u32)
 }
 
@@ -234,7 +243,7 @@ fn context_chip_popover(
 ) -> AnyElement {
     let handle = popover::popover_create_handle();
     let trigger = nsh_base::button()
-        .app_class(context_chip_class(kind))
+        .app_class(interactive_chip_class(kind))
         .accessibility_label(move || {
             Some(
                 tr(
@@ -269,34 +278,32 @@ fn shell(
     hint: Option<Text>,
     action: Option<Rc<dyn Fn()>>,
 ) -> AnyElement {
-    let children = view()
-        .app_class(tw(
-            "inline-flex min-w-0 max-w-full items-center gap-[0.2em]",
-        ))
-        .child(icon)
-        .child(context_chip_label(label));
-    chip_control(
+    context_chip(
         kind,
-        children.into_element(),
+        icon,
+        context_chip_label(label).into_element(),
         accessible_label,
         hint,
         action,
     )
 }
 
-fn chip_control(
+/// Port of ContextChip.tsx ContextChip's element and child order.
+fn context_chip(
     kind: &str,
-    children: AnyElement,
+    icon: AnyElement,
+    label: AnyElement,
     accessible_label: Text,
     hint: Option<Text>,
     action: Option<Rc<dyn Fn()>>,
 ) -> AnyElement {
     let control = if let Some(action) = action {
         nsh_base::button()
-            .app_class(context_chip_class(kind))
+            .app_class(interactive_chip_class(kind))
             .accessibility_label(move || Some(accessible_label.resolve()))
             .on_press(move || action())
-            .child(children)
+            .child(icon)
+            .child(label)
             .into_element()
     } else {
         view()
@@ -304,7 +311,8 @@ fn chip_control(
             .focusable(true)
             .accessible(true)
             .label(move || accessible_label.resolve())
-            .child(children)
+            .child(icon)
+            .child(label)
             .into_element()
     };
     let Some(hint) = hint else {
@@ -1191,31 +1199,27 @@ fn attachment_chip(
         let id = id.to_owned();
         Rc::new(move || open(&id)) as Rc<dyn Fn()>
     });
-    let content = view()
-        .app_class(tw(
-            "inline-flex min-w-0 max-w-full items-center gap-[0.2em]",
-        ))
-        .child(if kind == "image" {
-            preview.map_or_else(
-                || glyph(Icon::Image),
-                |url| {
-                    image(url)
-                        .app_class(tw(
-                            "size-[1em] shrink-0 self-center rounded-sm object-cover",
-                        ))
-                        .accessible(false)
-                        .into_element()
-                },
-            )
-        } else if video {
-            glyph(Icon::Film)
-        } else {
-            glyph(Icon::File)
-        })
-        .child(file_chip_content(&name, &size));
-    chip_control(
+    let icon = if kind == "image" {
+        preview.map_or_else(
+            || glyph(Icon::Image),
+            |url| {
+                image(url)
+                    .app_class(tw(
+                        "size-[1em] shrink-0 self-center rounded-sm object-cover",
+                    ))
+                    .accessible(false)
+                    .into_element()
+            },
+        )
+    } else if video {
+        glyph(Icon::Film)
+    } else {
+        glyph(Icon::File)
+    };
+    context_chip(
         document_kind(&name).unwrap_or(kind),
-        content.into_element(),
+        icon,
+        file_chip_content(&name, &size).into_element(),
         accessible,
         Some(Text::content(format!("{name}\n{size}"))),
         action,
@@ -1224,7 +1228,7 @@ fn attachment_chip(
 
 /// Port of contextChipParts.tsx FileChipContent and ImageChipButton's label.
 fn file_chip_content(name: &str, size: &str) -> impl IntoElement + use<> {
-    view().app_class(tw("flex min-w-0 self-baseline items-baseline gap-[0.33em] overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none"))
+    view().app_class(tw("flex min-w-0 self-baseline items-baseline gap-[0.33em] overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
         .child(text(SharedString::from(middle_truncate_attachment_name(name, 36))).app_class(tw("min-w-0 max-w-72 overflow-hidden text-ellipsis")).number_of_lines(1_u32))
         .child(text(SharedString::from(size.to_owned())).app_class(tw("shrink-0 text-3xs text-current")))
 }

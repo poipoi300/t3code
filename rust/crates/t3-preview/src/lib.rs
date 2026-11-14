@@ -6,6 +6,7 @@ pub mod control;
 pub mod desktop;
 pub mod discovery;
 pub mod driver;
+pub mod host;
 pub mod html;
 pub mod installer;
 pub mod manager;

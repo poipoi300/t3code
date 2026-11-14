@@ -453,3 +453,49 @@ run `cargo fmt -p t3-forge --check`, `cargo clippy -p t3-forge --all-targets --a
 and `cargo test -p t3-forge`. If an in-progress sibling dependency prevents the
 Clippy command, `--no-deps` isolates diagnostics for this crate; it does not replace
 the required workspace-integrated check. Keep the workspace's two-job Cargo limit.
+
+## Security review follow-up
+
+GitLab destinations are now bound before glab request construction: the default
+or configured server `GITLAB_HOST`, `with_configured_hosts` authorities, and the
+remote in an authorized `CheckoutContext`. Ports are part of the authority.
+Repository/PR URLs, explicit request hosts, `requested_host` and provider base URLs
+do not create trusted hosts. Checkout trust is scoped to the call. Hosts used by
+PR API bindings must be configured by the server. The server must authorize cwd
+and construct checkout contexts from its project records; see the seam requests.
+
+| Finding | Disposition and evidence |
+| --- | --- |
+| GitLab client-selected credential destination | Fixed. `tests/gitlab_hosts.rs` refuses lookup, clone, thread preparation and review clone-URL overrides before any fake CLI request; configured/authorized remote acceptance and scope isolation are covered. All four refusal cases reproduced before the guard. |
+| Cancel after success overwrites completion | Fixed. Completion is changed only while pending, including cancellation, replacement and shutdown. The persistent sign-in service test waits successfully again after cancel; it failed with Cancelled before the fix. |
+| Clone URL and snapshot reserialization | Fixed. Git receives the original operand except TypeScript's pathless-query slash insertion. Snapshot redaction serializes only when removing userinfo or a nonempty query. Unit cases cover drive paths, spaces, dot segments, encoded dot segments and fragments; real clones cover option-like names and spaces. |
+| Fresh app token reads wait on refresh gate | Fixed. Fresh reads bypass the refresh gate; refresh re-reads after acquiring it. A test holds the gate while a fresh read completes. |
+| Coverage cache locked during installation HTTP | Fixed. Separate gates serialize each credential's population; the global map lock covers cache operations only. A stalled loopback request leaves that lock available. |
+| Session marker removal and write snapshot/update race | Confirmed, blocked on an atomic conditional mutation API in `t3-config`. `with_snapshot` holds its write lock but cannot update settings; `update` reacquires it. The precise request is in `server-seam-requests.md`. No claim of completion for this finding. |
+| Tests that never exercise Git operands | Fixed. Real repositories named `--bare` and `--upload-pack=remote-secret` are cloned and checked for contents and normal `.git` layout. Fixed-text error assertions now pin the public error contract instead of presenting secret absence as operand-injection proof. |
+| Missing sign-in/refusal coverage | Added foreign-host refusals, cancel after success, concurrent starts, slow_down continuation, and `SettingsAppSessions` through `SourceControlSignIn`, including persistence/reopen and actual stored-token secrecy. A Forgejo HTTP-refusal assertion is rejected because it contradicts inherited TypeScript behavior; HTTP policy is recorded below. |
+| Windows ACL claim | Corrected. POSIX permissions are applied; Windows protection depends on host-provisioned ACLs and is unverified. |
+
+The repository does not pin a glab binary version; discovery fixtures use
+1.124.0. Its [tagged configuration source](https://github.com/gitlabhq/cli/blob/v1.124.0/internal/config/config.go#L231-L245)
+checks environment values before per-host storage. The current [GitLab authentication documentation](https://docs.gitlab.com/cli/authentication/#token-precedence)
+also explicitly permits environment tokens for `GITLAB_HOST`. Setting that variable
+from client text therefore bypassed even the newer glab host restriction. No real
+glab configuration, token or forge was accessed to verify this.
+
+| Adapter | Credential destination audit against TypeScript |
+| --- | --- |
+| GitHub | At least as strict: per-host saved/app/CLI credentials, pinned-host checks, gh token variables removed, redirects disabled. Inherited: GH_TOKEN/GITHUB_TOKEN apply to github.com and any `*.ghe.com`; enterprise variables require matching GH_HOST. Unconfigured HTTPS hosts can still be contacted by access/star operations, as in TypeScript. |
+| GitLab | The reviewed Rust expansion is fixed: destinations must be configured or come from an authorized checkout remote. TypeScript's repository-name API did not select a host from repository URL text. Rust now refuses foreign URLs before process construction. |
+| Bitbucket | At least as strict: client/response URLs do not change the configured API origin (default api.bitbucket.org). Custom API endpoints are host-constructor inputs. Shared HTTP rejects foreign-origin URLs, pagination and redirects before sending credentials. |
+| Azure DevOps | At least as strict: PR references become numeric IDs; lookup repository text becomes repository/project operands. Network destination comes from authorized cwd/CLI configuration through --detect=true, not input.host or a returned PR URL. |
+| GitCafe | At least as strict: only git.cafe/staging.git.cafe clients and host-bound credentials; response pagination/redirect origins are checked. Staging does not silently acquire production-only settings tokens. |
+| Forgejo/Gitea | At least as strict: an unambiguous configured fj/tea login must serve the remote/alias/mount; credentials attach to that login's base URL. Inherited: an explicit matching HTTP remote can select HTTP, and configured HTTP tea logins are supported. This round preserves that policy. |
+| Cursor Origin | At least as strict: authentication comes from the explicitly configured CLI cwd; bearer requests use the constructor's API base (default api.cursor.com), restrict paths to v1/origin and do not follow redirects. PR/repository hosts do not change that base. |
+
+Inherited clone policy is unchanged: the server must authorize destinations,
+including UNC/device paths and symlink/reparse traversal on Windows; this crate
+sets no `GIT_ALLOW_PROTOCOL`. Local/file clones and credentialed URLs persisted in
+`.git/config` therefore need explicit host policy. Pending app sign-ins remain
+shared by host among settings-write clients. These decisions and the atomic
+settings blocker are recorded for the server integrator in the seam file.

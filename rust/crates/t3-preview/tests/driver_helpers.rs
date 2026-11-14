@@ -5,6 +5,8 @@ async fn browser_helpers_run_against_fake_pages_and_real_refused_socks_connectio
         "--test",
         "--test-concurrency=1",
         "driver/tests/page.test.mjs",
+        "driver/tests/worker.test.mjs",
+        "driver/tests/recording-frames.test.mjs",
         "driver/tests/proxy.test.mjs",
         "driver/tests/contexts.test.mjs",
         "driver/tests/resources.test.mjs",

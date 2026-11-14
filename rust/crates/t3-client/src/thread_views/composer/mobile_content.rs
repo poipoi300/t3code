@@ -464,6 +464,9 @@ pub fn undo_merge(
     put(current, key, draft)
 }
 pub fn retarget(draft: &Value, environment: &str, project: &str, now: &str) -> Value {
+    retarget_with_options(draft, environment, project, now, false)
+}
+pub fn retarget_with_options(draft: &Value, environment: &str, project: &str, now: &str, _keep_pull_request_workspace: bool) -> Value {
     let mut next = normalize(draft);
     if next["project"]["environmentId"] == environment && next["project"]["projectId"] == project {
         return next;
@@ -622,6 +625,16 @@ mod tests {
         assert_eq!(next["project"]["createdAt"], "original");
         assert!(next.get("workspaceSelection").is_none());
         assert_eq!(next["modelSelection"], original["modelSelection"]);
+        let mut pr = original.clone();
+        pr["workspaceSelection"] = json!({"mode":"worktree","branch":"feature/pr-head","worktreePath":"/old-machine/worktrees/pr-42","startFromOrigin":false,"pullRequestReference":"https://github.com/acme/repo/pull/42"});
+        let moved = retarget_with_options(&pr, "new", "p2", "later", true);
+        assert_eq!(moved["text"], "draft");
+        let mut expected = pr["workspaceSelection"].clone();
+        expected["worktreePath"] = Value::Null;
+        assert_eq!(moved["workspaceSelection"], expected);
+        assert!(retarget_with_options(&original, "new", "p2", "later", true)
+            .get("workspaceSelection").is_none());
+        assert!(retarget(&moved, "old", "p", "later").get("workspaceSelection").is_none());
     }
     #[test]
     fn clear_content_preserves_runtime_and_fresh_context_and_optionally_releases_model_and_workspace()

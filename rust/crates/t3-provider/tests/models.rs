@@ -198,6 +198,7 @@ fn cursor_sdk_selection_fills_catalog_defaults_but_only_sends_fast_when_selected
         (json!("2m"), Some(2_000_000)),
         (json!(true), None),
         (json!("0k"), None),
+        (json!("2🙂"), None),
         (json!("9007199254740991m"), None),
     ] {
         let selection=serde_json::from_value(json!({"instanceId":"cursor","model":"missing","options":[{"id":"contextWindow","value":value}]})).unwrap();

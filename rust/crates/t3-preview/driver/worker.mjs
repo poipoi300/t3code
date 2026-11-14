@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import readline from "node:readline";
+import {fileURLToPath} from "node:url";
 import {ServerBrowserContexts,presentAsChrome} from "./contexts.mjs";
 import * as Page from "./page.mjs";
 import {installPdfDocumentNavigation,isPdfAssetUrl} from "./pdf.mjs";
@@ -10,6 +11,7 @@ import {publicProxy} from "./proxy.mjs";
 import {withResources} from "./resources.mjs";
 import {DesktopViewport} from "./desktop-viewport.mjs";
 import {Screencast} from "./screencast.mjs";
+import {recordingFrames} from "./recording-frames.mjs";
 import {CLIPBOARD_SCRIPT,CLIPBOARD_WORLD,EDITABLE_AT_POINT_SCRIPT,editingCommand,num,modifiersOf,asRecord} from "./scripts.mjs";
 
 const config=JSON.parse(process.env.T3_PREVIEW_CONFIG || "{}");
@@ -50,7 +52,7 @@ function dialogOf(tab) {return tab.dialog?{type:tab.dialog.type(),message:tab.di
 function broadcastDialog(tab) {viewerEvent(tab,null,{type:"dialogState",dialog:dialogOf(tab)});}
 function report(tab,navStatus) {
   void tab.cdp.send("Page.getNavigationHistory").catch(()=>null).then(history=>{
-    if(tab.closing)return;
+    if(tab.closing||tab.crash)return;
     const index=history?.currentIndex??0;
     emit("status",{input:{...tab.key,navStatus,canGoBack:index>0,canGoForward:index<(history?.entries.length??0)-1}});
   });
@@ -67,7 +69,7 @@ async function desktopSize(tab) {
 }
 async function status(tab) {
   const raw=Page.withoutDataPayload(tab.page.url());
-  const loadError=raw.startsWith("chrome-error://")?tab.loadError:undefined;
+  const loadError=tab.crash??(raw.startsWith("chrome-error://")?tab.loadError:undefined);
   const url=loadError?.url??(raw==="about:blank"?null:raw);
   const title=url===null||tab.dialog?null:await bounded(tab.page.title().catch(()=>""),250,"").then(value=>value||null);
   const viewport=tab.desktop?await bounded(tab.desktopSizing.status(),250,tab.desktopSizing.value):tab.page.viewportSize();
@@ -151,6 +153,34 @@ function settleAborted(tab,generation,url,download) {
   if(tab.page.url()!=="about:blank"){void reportLoaded(tab);return;}
   report(tab,{_tag:"LoadFailed",url:Page.withoutDataPayload(url).slice(0,2048),title:"",code:-3,description:"ERR_ABORTED",...(download?{download}:{})});
 }
+function settleStopped(tab,generation) {
+  if(tab.navigationGeneration!==generation||!tab.loading)return;
+  clearTimeout(tab.aborted?.timer);tab.aborted=null;tab.loading=false;
+  if(tab.page.url()==="about:blank")report(tab,{_tag:"Idle"});else void reportLoaded(tab);
+}
+function observeNavigation(tab) {
+  const page=tab.page,generations=new WeakMap(),main=request=>request.isNavigationRequest()&&request.frame()===page.mainFrame();
+  page.on("request",request=>{
+    if(!main(request))return;
+    const stopped=tab.pendingInitialRequestUrl===request.url().split("#")[0]&&tab.stoppedGeneration===tab.navigationGeneration;
+    tab.pendingInitialRequestUrl=null;generations.set(request,++tab.navigationGeneration);clearTimeout(tab.aborted?.timer);tab.aborted=null;
+    if(stopped){tab.stoppedGeneration=tab.navigationGeneration;tab.loading=true;settleStopped(tab,tab.navigationGeneration);return;}
+    tab.crash=null;tab.crashedUrl=null;tab.loading=true;tab.loadError=null;report(tab,{_tag:"Loading",url:Page.withoutDataPayload(request.url()).slice(0,2048),title:""});
+  });
+  page.on("load",()=>{tab.pendingInitialRequestUrl=null;tab.loading=false;void reportLoaded(tab);});
+  page.on("framenavigated",frame=>{const open=tab.chooser;if(open)void chooserCurrent(open.value).then(current=>{if(!current&&tab.chooser?.value===open.value)closeChooser(tab);});if(frame===page.mainFrame()&&!tab.loading)void reportLoaded(tab);if(!tab.desktop)void recordFrame(tab,frame);});
+  page.on("requestfailed",request=>{
+    const errorText=request.failure()?.errorText??"";
+    limited(tab.networkEntries,{url:Page.withoutDataPayload(request.url()),method:request.method(),status:null,failed:true,errorText,timestamp:new Date().toISOString()});
+    if(!main(request)||(generations.get(request)??0)!==tab.navigationGeneration)return;
+    if(errorText.includes("ERR_ABORTED")){
+      const url=request.url(),generation=tab.navigationGeneration;
+      if(tab.stoppedGeneration===generation){settleStopped(tab,generation);return;}
+      clearTimeout(tab.aborted?.timer);tab.aborted={url,generation,timer:setTimeout(()=>{if(tab.aborted?.generation!==generation)return;tab.aborted=null;if(!tab.closing)settleAborted(tab,generation,url);},5000)};return;
+    }
+    tab.loading=false;const {code,description}=Page.parseNetError(errorText);const url=Page.withoutDataPayload(request.url()).slice(0,2048);tab.loadError={url,code,description};report(tab,{_tag:"LoadFailed",url,title:"",code,description});
+  });
+}
 async function open(command) {
   const snapshot=command.snapshot;const key={threadId:snapshot.threadId,tabId:snapshot.tabId};
   if(tabs.has(keyOf(key)))return status(tabs.get(keyOf(key)));
@@ -163,21 +193,11 @@ async function open(command) {
     else {context=await contexts.contextFor(snapshot.profileId??"default",isolated?keyOf(key):undefined);await context.grantPermissions(["clipboard-write"]);page=await context.newPage();}
     cdp=await context.newCDPSession(page);await installPdfDocumentNavigation(cdp);
     if(!desktop){await presentAsChrome(cdp,host);await recordCopies(cdp);}
-    const tab={key,page,cdp,desktop,isolated,profileId:snapshot.profileId,setting:snapshot.viewport??{_tag:"fill"},colorScheme:"system",zoomFactor:1,viewers:new Map(),frameSessions:new Map(),downloads:[],chooser:null,dialog:null,controller:null,generation:0,loading:false,loadError:command.loadError??null,closing:false,recording:null,consoleEntries:[],networkEntries:[],actionTimeline:[],navigationGeneration:0,aborted:null,desktopViewport:null,captureTail:Promise.resolve(),copyReads:Promise.resolve(),copyKeyedUntil:0};
+    const tab={key,page,cdp,desktop,isolated,profileId:snapshot.profileId,setting:snapshot.viewport??{_tag:"fill"},colorScheme:"system",zoomFactor:1,viewers:new Map(),frameSessions:new Map(),downloads:[],chooser:null,dialog:null,controller:null,generation:0,loading:false,loadError:command.loadError??null,crash:snapshot.navStatus._tag==="LoadFailed"&&snapshot.navStatus.description==="Page crashed"?command.loadError:null,crashedUrl:command.crashedUrl??null,pendingInitialRequestUrl:null,stoppedGeneration:null,closing:false,recording:null,consoleEntries:[],networkEntries:[],actionTimeline:[],navigationGeneration:0,aborted:null,desktopViewport:null,captureTail:Promise.resolve(),copyReads:Promise.resolve(),copyKeyedUntil:0};
     page.setDefaultTimeout(15000);page.setDefaultNavigationTimeout(15000);
     if(!desktop)await viewport(tab,tab.setting);await rendering(tab,snapshot);
     if(desktop){tab.desktopSizing=new DesktopViewport(cdp,()=>tab.dialog!==null);const remeasure=()=>{tab.desktopSizing.changed();if(tab.viewers.size)void broadcastViewport(tab).catch(noop);};cdp.on("Page.frameResized",remeasure);cdp.on("Page.loadEventFired",remeasure);cdp.on("Page.javascriptDialogClosed",()=>{tab.dialog=null;broadcastDialog(tab);remeasure();});await cdp.send("Page.enable");}
-    const generations=new WeakMap();const main=request=>request.isNavigationRequest()&&request.frame()===page.mainFrame();
-    page.on("request",request=>{if(!main(request))return;generations.set(request,++tab.navigationGeneration);clearTimeout(tab.aborted?.timer);tab.aborted=null;tab.loading=true;tab.loadError=null;report(tab,{_tag:"Loading",url:Page.withoutDataPayload(request.url()).slice(0,2048),title:""});});
-    page.on("load",()=>{tab.loading=false;void reportLoaded(tab);});
-    page.on("framenavigated",frame=>{const open=tab.chooser;if(open)void chooserCurrent(open.value).then(current=>{if(!current&&tab.chooser?.value===open.value)closeChooser(tab);});if(frame===page.mainFrame()&&!tab.loading)void reportLoaded(tab);if(!desktop)void recordFrame(tab,frame);});
-    page.on("requestfailed",request=>{
-      const errorText=request.failure()?.errorText??"";
-      limited(tab.networkEntries,{url:Page.withoutDataPayload(request.url()),method:request.method(),status:null,failed:true,errorText,timestamp:new Date().toISOString()});
-      if(!main(request)||(generations.get(request)??0)!==tab.navigationGeneration)return;
-      if(errorText.includes("ERR_ABORTED")){const url=request.url(),generation=tab.navigationGeneration;clearTimeout(tab.aborted?.timer);tab.aborted={url,generation,timer:setTimeout(()=>{if(tab.aborted?.generation!==generation)return;tab.aborted=null;if(!tab.closing)settleAborted(tab,generation,url);},5000)};return;}
-      tab.loading=false;const {code,description}=Page.parseNetError(errorText);const url=Page.withoutDataPayload(request.url()).slice(0,2048);tab.loadError={url,code,description};report(tab,{_tag:"LoadFailed",url,title:"",code,description});
-    });
+    observeNavigation(tab);
     page.on("response",response=>limited(tab.networkEntries,{url:Page.withoutDataPayload(response.url()),method:response.request().method(),status:response.status(),failed:false,timestamp:new Date().toISOString()}));
     page.on("console",message=>limited(tab.consoleEntries,{level:message.type(),text:Page.consoleText(message).slice(0,2000),timestamp:new Date().toISOString()}));
     page.on("dialog",dialog=>{if(tab.closing&&dialog.type()==="beforeunload"){void dialog.accept().catch(noop);return;}tab.dialog=dialog;broadcastDialog(tab);});
@@ -185,14 +205,15 @@ async function open(command) {
     let chooserTail=Promise.resolve();
     tab.onChooser=chooser=>{chooserTail=chooserTail.then(async()=>{const accept=await chooser.element().getAttribute("accept").catch(()=>"");if(!await chooserCurrent(chooser))return;closeChooser(tab);tab.chooser={id:crypto.randomUUID(),value:chooser,accept:(accept??"").slice(0,1024),offeredTo:null};offerChooser(tab);}).catch(noop);};updateChooserInterception(tab);
     page.on("popup",popup=>{if(tab.closing){void popup.close().catch(noop);return;}const popupId=crypto.randomUUID();popups.set(popupId,popup);emit("popup",{opener:key,popupId,url:/^https?:/i.test(popup.url())?popup.url():null});});
-    page.on("close",()=>emit("closed",{key}));page.on("crash",()=>emit("closed",{key}));
+    page.on("close",()=>{if(!tab.closing&&!tab.crash)emit("closed",{key});});page.on("crash",()=>{if(tab.closing||tab.crash)return;if(desktop){emit("closed",{key});return;}tab.loading=false;tab.crash={url:Page.withoutDataPayload(page.url()).slice(0,2048),code:-2,description:"Page crashed"};emit("crashed",{key,url:page.url()});});
     tabs.set(keyOf(key),tab);
     if(popup)for(const frame of page.frames())void recordFrame(tab,frame);
     if(!popup&&snapshot.navStatus._tag==="Loading"&&(!desktop||isPdfAssetUrl(snapshot.navStatus.url))){
-      try {await navigate(tab,{url:snapshot.navStatus.url,timeoutMs:15000});}
-      catch(error){if(String(error).includes("Download is starting")){tab.openError={tag:"PreviewAutomationExecutionError",message:String(error)};}else{await closeTab(key);throw error;}}
+      tab.loading=true;tab.pendingInitialRequestUrl=snapshot.navStatus.url.split("#")[0];
+      tab.initialNavigation=navigate(tab,{url:snapshot.navStatus.url,timeoutMs:15000},true).catch(error=>{tab.openError={tag:"PreviewAutomationExecutionError",message:String(error)};throw error;});
+      void tab.initialNavigation.catch(noop);
     }else if(desktop)void page.waitForLoadState("load").then(()=>reportLoaded(tab),noop);
-    return status(tab);
+    return {...await status(tab),initialPending:!!tab.initialNavigation};
   }catch(error){if(desktop)await desktop.browser.close().catch(noop);else {await page?.close().catch(noop);if(isolated)await context?.close().catch(noop);}throw error;}
 }
 function assertNavigation(tab) {
@@ -201,9 +222,12 @@ function assertNavigation(tab) {
   try{const parsed=new URL(detail.url);parsed.username="";parsed.password="";parsed.search="";parsed.hash="";url=Page.withoutDataPayload(parsed.href);}catch{url="the requested page";}
   throw failure("PreviewAutomationExecutionError",`Navigation to ${url} failed: ${detail.description}`,{...detail,url});
 }
-async function navigate(tab,input) {
+async function leaveBusyPage(tab,cdp,budgetMs) {if(!tab.dialog)await Page.stopUnresponsiveScript(cdp,budgetMs);}
+async function navigate(tab,input,initial=false) {
+  if(!initial)tab.pendingInitialRequestUrl=null;
   const timeout=input.timeoutMs??15000;const started=performance.now();
-  const navigation=tab.page.goto(input.url,{timeout,waitUntil:"commit"});
+  await leaveBusyPage(tab,tab.cdp,timeout/2);
+  const navigation=tab.page.goto(input.url,{timeout:Math.max(1,timeout-(performance.now()-started)),waitUntil:"commit"});
   if(input.readiness==="none")return pendingWork(tab,navigation);
   await navigation;
   await tab.page.waitForLoadState(input.readiness==="domContentLoaded"?"domcontentloaded":"load",{timeout:Math.max(1,timeout-(performance.now()-started))}).catch(error=>{if(error.name!=="TimeoutError")throw error;});
@@ -226,7 +250,7 @@ async function closeTab(key,unload=false) {
   else {
     const closed=tab.page.isClosed()?Promise.resolve():new Promise(resolve=>tab.page.once("close",resolve));
     const timer=setTimeout(()=>void tab.page.close().catch(noop),5000);
-    void tab.page.close({runBeforeUnload:tab.dialog===null}).catch(()=>tab.page.close()).catch(noop);
+    void tab.page.close({runBeforeUnload:tab.dialog===null&&!tab.crash}).catch(()=>tab.page.close()).catch(noop);
     await closed.finally(()=>clearTimeout(timer));if(tab.isolated)await tab.page.context().close().catch(noop);
   }
   await tab.recording?.encoder.close().catch(noop);
@@ -262,10 +286,7 @@ async function startRecording(tab,input) {
       await encoder.evaluate(Page.recordingEncoderScript(input.frameRate??30));
       const first=await Page.captureViewport(tab.cdp,{format:"jpeg",quality:90});
       await encoder.evaluate(([data,width])=>globalThis.__t3Recorder.frame(data,width),[first,tab.page.viewportSize()?.width??1280]);
-      session=await tab.page.context().newCDPSession(tab.page);const frames=new Set();
-      session.on("Page.screencastFrame",frame=>{
-        const delivered=encoder.evaluate(([data,width])=>globalThis.__t3Recorder.frame(data,width),[frame.data,tab.page.viewportSize()?.width??frame.metadata.deviceWidth]).then(async accepted=>{if(!accepted)await session.send("Page.stopScreencast");}).catch(noop).finally(()=>{frames.delete(delivered);void session.send("Page.screencastFrameAck",{sessionId:frame.sessionId}).catch(noop);});frames.add(delivered);
-      });
+      session=await tab.page.context().newCDPSession(tab.page);const frames=recordingFrames(session,encoder,()=>tab.page.viewportSize()?.width);
       await session.send("Page.startScreencast",{format:"jpeg",quality:90,everyNthFrame:1});
       if(tab.closing)throw new Error("Tab closed while recording started");
       tab.recording={encoder,session,frames,startedAt:new Date().toISOString()};return {tabId:tab.key.tabId,recording:true,startedAt:tab.recording.startedAt};
@@ -296,6 +317,7 @@ async function operate(command) {
   if(command.generation!==tab.generation){Page.invalidateRefs(tab.page);tab.generation=command.generation;}
   const input=command.input;const operation=command.operation;
   if(operation==="status")return status(tab);
+  if(operation==="awaitInitialNavigation"){await tab.initialNavigation;return status(tab);}
   if(operation==="invalidate"){Page.invalidateRefs(tab.page);if(Object.hasOwn(input,"controller")){tab.controller=input.controller;updateChooserInterception(tab);offerChooser(tab);}return {};}
   if(operation==="waitPending"){const item=pending.get(input.id);if(item?.tab!==tab)return {};try{await item.work;}finally{pending.delete(input.id);}return {};}
   if(operation==="prepareResize")return tab.desktop?{resizeToken:tab.desktopSizing.prepare(tab.setting)}:{};
@@ -380,9 +402,10 @@ async function viewerInput(command) {
       viewer.requested={width,height,order:++resizeOrder};if(tab.setting._tag!=="fill"||tab.desktop)break;await tab.page.setViewportSize({width,height});await broadcastViewport(tab);break;
     }
     case "viewport":await viewport(tab,message.setting);break;
-    case "navigate":return pendingWork(tab,tab.page.goto(message.url,{waitUntil:"commit",timeout:15000}));
-    case "history":return pendingWork(tab,num(message.delta)<0?tab.page.goBack({waitUntil:"commit",timeout:15000}):tab.page.goForward({waitUntil:"commit",timeout:15000}));
-    case "reload":return pendingWork(tab,message.ignoreCache===true?session.send("Page.reload",{ignoreCache:true}):tab.page.reload({waitUntil:"commit",timeout:15000}));
+    case "stopLoading":{const generation=tab.navigationGeneration;tab.stoppedGeneration=generation;await session.send("Page.stopLoading");settleStopped(tab,generation);break;}
+    case "navigate":tab.pendingInitialRequestUrl=null;await leaveBusyPage(tab,session);return pendingWork(tab,tab.page.goto(message.url,{waitUntil:"commit",timeout:15000}));
+    case "history":tab.pendingInitialRequestUrl=null;await leaveBusyPage(tab,session);return pendingWork(tab,num(message.delta)<0?tab.page.goBack({waitUntil:"commit",timeout:15000}):tab.page.goForward({waitUntil:"commit",timeout:15000}));
+    case "reload":tab.pendingInitialRequestUrl=null;await leaveBusyPage(tab,session);return pendingWork(tab,tab.crashedUrl?tab.page.goto(tab.crashedUrl,{waitUntil:"commit",timeout:15000}):message.ignoreCache===true?session.send("Page.reload",{ignoreCache:true}):tab.page.reload({waitUntil:"commit",timeout:15000}));
     case "probe": {const x=num(message.x),y=num(message.y);const result=await session.send("Runtime.evaluate",{expression:`(${EDITABLE_AT_POINT_SCRIPT})(${x},${y})`,returnByValue:true});viewerEvent(tab,viewer.id,{type:"probe",x,y,editable:result.result.value===true});break;}
   }return {};
 }
@@ -436,7 +459,7 @@ async function dispatch(command) {
     case "open":return open(command);
     case "discardPopup": {const popup=popups.get(command.popupId);popups.delete(command.popupId);await popup?.close().catch(noop);return {};}
     case "operate":return operate(command);
-    case "adjust": {const tab=tabs.get(keyOf(command.snapshot));if(!tab)return {};await viewport(tab,command.snapshot.viewport??{_tag:"fill"});await rendering(tab,command.snapshot);if(command.request?.clear==="cookies")await tab.cdp.send("Network.clearBrowserCookies");if(command.request?.clear==="cache")await tab.cdp.send("Network.clearBrowserCache");if(command.request?.hardReload)await tab.cdp.send("Page.reload",{ignoreCache:true});return {};}
+    case "adjust": {const tab=tabs.get(keyOf(command.snapshot));if(!tab)return {};await viewport(tab,command.snapshot.viewport??{_tag:"fill"});await rendering(tab,command.snapshot);if(command.request?.clear==="cookies")await tab.cdp.send("Network.clearBrowserCookies");if(command.request?.clear==="cache")await tab.cdp.send("Network.clearBrowserCache");if(command.request?.hardReload){tab.pendingInitialRequestUrl=null;await leaveBusyPage(tab,tab.cdp);await tab.cdp.send("Page.reload",{ignoreCache:true});}return {};}
     case "close":await closeTab(command.key,command.unload);return {};
     case "clearProfile":await contexts.clearProfile(command.profileId);return {};
     case "viewerAttach":return attachViewer(command);
@@ -449,6 +472,7 @@ async function dispatch(command) {
     default:throw new Error("Unknown driver command");
   }
 }
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 await fs.rm(config.downloadsDir,{recursive:true,force:true}).catch(error=>emit("diagnostic",{message:`Could not clear earlier downloads: ${error}`}));
 const lines=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
 lines.on("line",line=>{
@@ -457,3 +481,6 @@ lines.on("line",line=>{
   void dispatch(command).then(result=>{write({id:command.id,ok:true,result:result??null});},cause=>{const error=Page.toOperationError(cause,command.timeoutMs);write({id:command.id,ok:false,error:{tag:error.tag,message:error.message,...(error.detail===undefined?{}:{detail:error.detail})}});});
 });
 lines.on("close",()=>void contexts.close().finally(()=>process.exit()));
+
+}
+export {dispatch,tabs,navigate,status,observeNavigation};

@@ -2,6 +2,33 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import * as Page from "../page.mjs";
 
+test("click retries a scroll target replaced by the page",async()=>{
+  let scrolls=0,clicks=0;const page={locator:()=>({scrollIntoViewIfNeeded:async()=>{if(scrolls++===0)throw new Error("locator.scrollIntoViewIfNeeded: Element is not attached to the DOM");},boundingBox:async()=>({x:0,y:0,width:20,height:20}),click:async()=>{clicks++;},count:async()=>1}),once:()=>{},off:()=>{}};
+  assert.deepEqual(await Page.click(page,{selector:"#save"}),{x:10,y:10});assert.equal(scrolls,2);assert.equal(clicks,1);
+});
+test("scroll retries and every click stage share the remaining deadline",async t=>{
+  t.mock.timers.enable({apis:["Date","setTimeout"],now:1000});const budgets=[];let clicks=0;
+  const detached=new Error("locator.scrollIntoViewIfNeeded: Element is not attached to the DOM");
+  await assert.rejects(Page.click({locator:()=>({scrollIntoViewIfNeeded:async({timeout})=>{budgets.push(timeout);t.mock.timers.tick(60);throw detached;},click:async()=>{clicks++;}})},{selector:"#save",timeoutMs:100}),error=>error===detached);
+  assert.deepEqual(budgets,[100,40]);assert.equal(clicks,0);
+  budgets.length=0;const page={locator:()=>({scrollIntoViewIfNeeded:async({timeout})=>{budgets.push(timeout);t.mock.timers.tick(60);},boundingBox:async({timeout})=>{budgets.push(timeout);t.mock.timers.tick(20);return {x:0,y:0,width:20,height:20};},click:async({timeout})=>{budgets.push(timeout);},count:async()=>1}),once:()=>{},off:()=>{}};
+  await Page.click(page,{selector:"#save",timeoutMs:100},async()=>{t.mock.timers.tick(5);});assert.deepEqual(budgets,[100,40,15]);
+});
+test("click failures retain the final Playwright actionability reason without ANSI",async()=>{
+  const timeout=Object.assign(new Error("locator.click: Timeout 100ms exceeded.\n - element is not enabled\n \u001b[2m- element is not visible\u001b[0m"),{name:"TimeoutError"});
+  const page={locator:()=>({scrollIntoViewIfNeeded:async()=>{},boundingBox:async()=>({x:0,y:0,width:10,height:10}),click:async()=>{throw timeout;},count:async()=>1}),once:()=>{},off:()=>{}};
+  await assert.rejects(Page.click(page,{selector:"#save",timeoutMs:100}),error=>error.tag==="PreviewAutomationTimeoutError"&&error.message.endsWith("Playwright last saw: element is not visible."));
+  assert(Page.toOperationError(timeout,100).message.endsWith("Playwright last saw: element is not visible."));
+});
+test("responsive and failed script probes leave execution alone",async()=>{
+  for(const fails of [false,true]) {const calls=[];await Page.stopUnresponsiveScript({send:async(method)=>{calls.push(method);if(fails)throw new Error("context replaced");return {};}});assert.deepEqual(calls,["Runtime.evaluate"]);}
+});
+test("an unresponsive script is terminated without awaiting termination or exhausting the caller budget",async t=>{
+  t.mock.timers.enable({apis:["setTimeout"]});const calls=[];const started=Promise.withResolvers();
+  const cdp={send:(method)=>{calls.push(method);if(method==="Runtime.evaluate")started.resolve();return new Promise(()=>{});}};
+  const probe=Page.stopUnresponsiveScript(cdp,40);await started.promise;t.mock.timers.tick(40);await probe;assert.deepEqual(calls,["Runtime.evaluate","Runtime.terminateExecution"]);
+});
+
 test("net errors preserve names containing digits",()=>{
   for(const [text,description,code]of [["net::ERR_CONNECTION_REFUSED","ERR_CONNECTION_REFUSED",-102],["page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://localhost/","ERR_HTTP2_PROTOCOL_ERROR",-2],["net::ERR_TLS13_DOWNGRADE_DETECTED","ERR_TLS13_DOWNGRADE_DETECTED",-2]])assert.deepEqual(Page.parseNetError(text),{description,code});
 });
