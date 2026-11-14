@@ -270,9 +270,13 @@ async fn composition_root_follows_a_thread(
         .and_then(|client| client.session())
         .ok_or("thread creation: no session")?;
     use t3_client::rpc::RpcEndpoint;
-    // The server serves no project methods yet (`projects.*` are registered unimplemented), so
-    // the thread names a project id directly; the orchestrator decides whether it accepts that.
-    let project = t3_client::types::ProjectId("composition-root-proof-project".into());
+    // As the web app does: the server's scratch project hosts a thread made outside a project.
+    let project = session
+        .call::<t3_contracts::rpc::WsProjectsEnsureScratchRpc>(t3_contracts::rpc::Empty {})
+        .await
+        .map_err(|error| format!("thread creation (projects.ensureScratch): {error}"))?
+        .project_id;
+    println!("composition root: scratch project {}", project.0);
     let thread = ThreadId("composition-root-proof".into());
     let command: t3_contracts::orchestration_v2::OrchestrationV2Command =
         serde_json::from_value(serde_json::json!({
