@@ -210,17 +210,70 @@ impl<P: Platform + Clone + 'static> ComposerActionsSession<P> {
                 }
             }
         };
-        let compaction_running = projection.is_some_and(|p| p.turn_items.iter().any(|item| {
-            matches!(item, OrchestrationV2TurnItem::Compaction(c) if c.status == OrchestrationV2TurnItemStatus::Running && c.run_id == runtime.as_ref().and_then(|r| r.active_run_id.clone()))
+        let activity = projection.and_then(|p| execution::derive_thread_activity_run(p, &millis));
+        let activity_id = activity.as_ref().map(|run| &run.run_id);
+        let activity_view = activity
+            .as_ref()
+            .map(|run| crate::view_logic::session::RunView {
+                run_id: run.run_id.clone(),
+                status: run.status.clone(),
+                started_at: run.started_at.as_ref().map(|at| at.0.clone()),
+                requested_at: Some(run.requested_at.0.clone()),
+                completed_at: run.completed_at.as_ref().map(|at| at.0.clone()),
+            });
+        let compact_request_active = (busy
+            && pending.last().is_some_and(|message| {
+                crate::view_logic::chat_view::is_compact_command_message(
+                    true,
+                    &message.message.text,
+                    message.message.attachments.len(),
+                )
+            }))
+            || projection.is_some_and(|p| {
+                p.visible_turn_items
+                    .iter()
+                    .rev()
+                    .find_map(|row| match &row.item {
+                        OrchestrationV2TurnItem::UserMessage(message) => Some(message),
+                        _ => None,
+                    })
+                    .is_some_and(|message| {
+                        crate::view_logic::chat_view::is_compact_command_message(
+                            true,
+                            &message.text,
+                            message.attachments.len(),
+                        ) && message.run_id.as_ref() == activity_id
+                            && !crate::view_logic::session::is_latest_run_settled(
+                                activity_view.as_ref(),
+                                runtime_view.as_ref(),
+                            )
+                    })
+            });
+        let compaction_settled = projection.is_some_and(|p| p.visible_turn_items.iter().any(|row| {
+            matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
+                if item.run_id.as_ref() == activity_id && matches!(item.status,
+                    OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
+                    | OrchestrationV2TurnItemStatus::Interrupted | OrchestrationV2TurnItemStatus::Cancelled))
         }));
+        let active_run_id = runtime.as_ref().and_then(|run| run.active_run_id.as_ref());
+        let compaction_running = projection.is_some_and(|p| {
+            p.visible_turn_items.iter().any(|row| {
+                matches!(&row.item, OrchestrationV2TurnItem::Compaction(item)
+                if item.run_id.is_some() && item.run_id.as_ref() == active_run_id
+                    && item.status == OrchestrationV2TurnItemStatus::Running)
+            })
+        });
+        let run_message = projection.and_then(|p| {
+            let run = p.runs.iter().find(|run| Some(&run.id) == active_run_id)?;
+            p.messages
+                .iter()
+                .find(|message| message.id == run.user_message_id)
+        });
         let can_steer = !crate::operations::compaction_blocks_steering(
-            false,
+            compact_request_active && !compaction_settled,
             compaction_running,
             workflows::thread_steers_during_compaction(projection),
-            Some((
-                draft["prompt"].as_str().unwrap_or_default(),
-                count("images") + count("files"),
-            )),
+            run_message.map(|message| (message.text.as_str(), message.attachments.len())),
         );
         let reason = if !can_operate {
             Some("This connection cannot change threads.".into())

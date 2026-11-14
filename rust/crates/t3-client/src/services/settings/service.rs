@@ -6,23 +6,25 @@
 //! Client settings live in the one client-settings record (`t3code:client-settings:v1`) that
 //! `ClientRuntime::composer_preferences` already owns; this service never keeps a second copy.
 use super::{
+    panels::{LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, last_enabled_project_grouping_mode},
     scope::{
         ResolvedSettingsScope, ScopeEnvironment, ScopeGroup, SettingsScopeSearch,
         resolve_settings_scope, scope_groups, select_single_environment_scope,
     },
     scoped::{
         ProjectOverrideEntry, ScopedEnvironments, ScopedSettingsPlan, ScopedSettingsTarget,
-        SettingsPatch, SettingsText, dropped_setting_keys, required_scopes_for_server_settings_patch, plan_project_overrides_clear,
-        plan_scoped_settings_clear, plan_scoped_settings_patch, resolve_scoped_settings_targets,
+        SettingsPatch, SettingsText, dropped_setting_keys, plan_project_overrides_clear,
+        plan_scoped_settings_clear, plan_scoped_settings_patch,
+        required_scopes_for_server_settings_patch, resolve_scoped_settings_targets,
         select_scoped_settings_environments,
     },
-    panels::{LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, last_enabled_project_grouping_mode},
     search::{is_device_only_settings_page, is_single_environment_settings_page},
 };
 use crate::{
     ClientError,
     composition::ClientRuntime,
     connection::ConnectionMode,
+    navigation::SettingsPage,
     platform::{Platform, StorageArea, StorageKey, StorageWrite},
     rpc::RpcEndpoint,
     services::resources::LocalLimiter,
@@ -31,7 +33,6 @@ use crate::{
         projects::{EnvironmentProject, GroupingMode, GroupingSettings, PhysicalProjectKey},
         sidebar::build_sidebar_snapshots,
     },
-    navigation::SettingsPage,
 };
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use serde_json::{Value, json};
@@ -66,7 +67,11 @@ impl SettingsScopeView {
             .iter()
             .find(|candidate| {
                 Some(&candidate.environment_id)
-                    == self.selected.representative.as_ref().map(|e| &e.environment_id)
+                    == self
+                        .selected
+                        .representative
+                        .as_ref()
+                        .map(|e| &e.environment_id)
             })
             .or_else(|| self.targets.first())
     }
@@ -84,7 +89,9 @@ impl SettingsScopeView {
 pub enum SettingsWriteAccess {
     Writable,
     /// `This connection lacks permission to change settings on {labels}.`
-    Denied { labels: String },
+    Denied {
+        labels: String,
+    },
     /// `Reconnect the selected environment to change this setting.`
     Disconnected,
 }
@@ -139,7 +146,11 @@ const MISSING_PERMISSION: &str = "This connection lacks permission to change the
 const DROPPED: &str = "This environment does not support this setting. Update T3 Code on it.";
 
 fn grouping_mode(mode: &SidebarProjectGroupingMode) -> GroupingMode {
-    match serde_json::to_value(mode).ok().as_ref().and_then(Value::as_str) {
+    match serde_json::to_value(mode)
+        .ok()
+        .as_ref()
+        .and_then(Value::as_str)
+    {
         Some("repository_path") => GroupingMode::RepositoryPath,
         Some("separate") => GroupingMode::Separate,
         _ => GroupingMode::Repository,
@@ -156,7 +167,11 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
     }
 
     fn grouping_key() -> StorageKey {
-        StorageKey::new("ui-preference", None, LAST_ENABLED_PROJECT_GROUPING_MODE_KEY)
+        StorageKey::new(
+            "ui-preference",
+            None,
+            LAST_ENABLED_PROJECT_GROUPING_MODE_KEY,
+        )
     }
 
     /// `readLastEnabledProjectGroupingMode`: "repository" when unset or unreadable.
@@ -249,7 +264,12 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         self.runtime
             .environments()
             .into_iter()
-            .find(|entry| entry.routes.iter().any(|route| route.mode == ConnectionMode::Local))
+            .find(|entry| {
+                entry
+                    .routes
+                    .iter()
+                    .any(|route| route.mode == ConnectionMode::Local)
+            })
             .map(|entry| entry.id)
     }
 
@@ -396,7 +416,11 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         view: &SettingsScopeView,
         keys: &[&str],
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome> {
-        self.run(plan_scoped_settings_clear(&view.scope, &view.selected.environments, keys))
+        self.run(plan_scoped_settings_clear(
+            &view.scope,
+            &view.selected.environments,
+            keys,
+        ))
     }
 
     /// `useClearProjectOverrides()(entries, keys)`.
@@ -406,11 +430,18 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         entries: &[ProjectOverrideEntry],
         keys: &[&str],
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome> {
-        self.run(plan_project_overrides_clear(&view.selected.environments, entries, keys))
+        self.run(plan_project_overrides_clear(
+            &view.selected.environments,
+            entries,
+            keys,
+        ))
     }
 
     /// `updateClientSettings(patch)`: a device setting outside any scope.
-    pub fn update_client(&self, patch: SettingsPatch) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    pub fn update_client(
+        &self,
+        patch: SettingsPatch,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let preferences = self.runtime.composer_preferences();
         async move { persist_client_patch(&preferences, patch).await }.boxed_local()
     }
@@ -473,7 +504,11 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
                 })
                 .collect();
             if !saved.is_empty() {
-                description.push(SettingsText::with("Saved on {labels}.", "labels", saved.join(", ")));
+                description.push(SettingsText::with(
+                    "Saved on {labels}.",
+                    "labels",
+                    saved.join(", "),
+                ));
             }
             SettingsUpdateOutcome {
                 failed: true,
@@ -562,4 +597,3 @@ async fn persist_client_patch<P: Platform + 'static>(
         .await?;
     decoded
 }
-

@@ -931,7 +931,7 @@ mod tests {
             &v(&["a", "b"])
         ));
         assert!(!should_reconcile_terminal_ids(&v(&["a"]), &v(&["a", "b"])));
-        assert!(should_reconcile_terminal_ids(&v(&[]), &v(&[])) == false);
+        assert!(!should_reconcile_terminal_ids(&v(&[]), &v(&[])));
         assert!(should_reconcile_terminal_ids(
             &v(&["a", "c"]),
             &v(&["a", "b"])

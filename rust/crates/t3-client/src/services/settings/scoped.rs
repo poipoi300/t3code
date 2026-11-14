@@ -70,7 +70,9 @@ fn keys_of(value: Value) -> Vec<String> {
 /// `Struct.keys(ServerSettings.fields)`.
 pub fn server_setting_keys() -> &'static [String] {
     static KEYS: OnceLock<Vec<String>> = OnceLock::new();
-    KEYS.get_or_init(|| keys_of(serde_json::to_value(ServerSettings::default()).unwrap_or_default()))
+    KEYS.get_or_init(|| {
+        keys_of(serde_json::to_value(ServerSettings::default()).unwrap_or_default())
+    })
 }
 
 /// `Object.keys(ClientSettingsSchema.fields)`.
@@ -115,7 +117,11 @@ pub struct ResolvedProjectSettings {
     pub sources: BTreeMap<&'static str, ProjectSettingSource>,
 }
 
-fn provider_instance_enabled(settings: &Value, project: Option<&ProjectId>, instance: &str) -> bool {
+fn provider_instance_enabled(
+    settings: &Value,
+    project: Option<&ProjectId>,
+    instance: &str,
+) -> bool {
     if let Some(project) = project
         && let Some(enabled) = settings["projectSettingsOverrides"][&project.0]["providerInstances"]
             [instance]["enabled"]
@@ -132,10 +138,13 @@ fn provider_instance_enabled(settings: &Value, project: Option<&ProjectId>, inst
             if config["enabled"].as_bool() == Some(false) || config_enabled == Some(false) {
                 return false;
             }
-            config["enabled"].as_bool().or(config_enabled).unwrap_or(!matches!(
-                config["driver"].as_str().unwrap_or_default(),
-                "cursor" | "grok" | "fx" | "kiro" | "muse" | "pi" | "opencode" | "antigravity"
-            ))
+            config["enabled"]
+                .as_bool()
+                .or(config_enabled)
+                .unwrap_or(!matches!(
+                    config["driver"].as_str().unwrap_or_default(),
+                    "cursor" | "grok" | "fx" | "kiro" | "muse" | "pi" | "opencode" | "antigravity"
+                ))
         }
         None => matches!(instance, "codex" | "claudeAgent"),
     }
@@ -192,8 +201,10 @@ pub fn resolve_project_settings(
         let Some(value) = overrides.get(key) else {
             continue;
         };
-        if matches!(key, "textGenerationModelSelection" | "defaultModelSelection")
-            && let Some(instance) = value["instanceId"].as_str()
+        if matches!(
+            key,
+            "textGenerationModelSelection" | "defaultModelSelection"
+        ) && let Some(instance) = value["instanceId"].as_str()
         {
             let enabled = if key == "textGenerationModelSelection" {
                 text_generation_enabled(&original, project, instance)
@@ -348,7 +359,8 @@ pub fn resolve_scoped_settings_targets(
                 let environment = connected
                     .iter()
                     .find(|e| e.environment_id == member.environment_id)?;
-                let resolved = resolve_project_settings(&settings_of(environment)?, Some(&member.id));
+                let resolved =
+                    resolve_project_settings(&settings_of(environment)?, Some(&member.id));
                 Some(ScopedSettingsTarget {
                     environment_id: member.environment_id.clone(),
                     label: environment.label.clone(),
@@ -381,13 +393,17 @@ pub fn scoped_settings_are_mixed(targets: &[ScopedSettingsTarget], keys: &[&str]
     let Some(first) = targets.first() else {
         return false;
     };
-    targets
-        .iter()
-        .any(|candidate| keys.iter().any(|key| first.json[*key] != candidate.json[*key]))
+    targets.iter().any(|candidate| {
+        keys.iter()
+            .any(|key| first.json[*key] != candidate.json[*key])
+    })
 }
 
 /// `scopedSettingsSource`.
-pub fn scoped_settings_source(targets: &[ScopedSettingsTarget], keys: &[&str]) -> ScopedSettingSource {
+pub fn scoped_settings_source(
+    targets: &[ScopedSettingsTarget],
+    keys: &[&str],
+) -> ScopedSettingSource {
     let scoped: Vec<_> = keys
         .iter()
         .filter(|key| is_project_scoped_setting_key(key))
@@ -398,9 +414,13 @@ pub fn scoped_settings_source(targets: &[ScopedSettingsTarget], keys: &[&str]) -
     let mut sources: Vec<ProjectSettingSource> = targets
         .iter()
         .flat_map(|target| {
-            scoped
-                .iter()
-                .map(|key| target.sources.get(**key).copied().unwrap_or(ProjectSettingSource::Environment))
+            scoped.iter().map(|key| {
+                target
+                    .sources
+                    .get(**key)
+                    .copied()
+                    .unwrap_or(ProjectSettingSource::Environment)
+            })
         })
         .collect();
     sources.sort();
@@ -425,7 +445,10 @@ pub struct SettingsText {
 
 impl SettingsText {
     pub fn key(key: &'static str) -> Self {
-        Self { key, args: Vec::new() }
+        Self {
+            key,
+            args: Vec::new(),
+        }
     }
     pub fn with(key: &'static str, name: &'static str, value: impl Into<String>) -> Self {
         Self {
@@ -487,7 +510,8 @@ fn project_override_writes(
         else {
             continue;
         };
-        let (Some(config), Some(json)) = (&environment.config, environment_json(environment)) else {
+        let (Some(config), Some(json)) = (&environment.config, environment_json(environment))
+        else {
             continue;
         };
         let current = json["projectSettingsOverrides"]
@@ -495,7 +519,12 @@ fn project_override_writes(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let entry = update(&current, &json, &member.id, &Rc::new(config.settings.clone()));
+        let entry = update(
+            &current,
+            &json,
+            &member.id,
+            &Rc::new(config.settings.clone()),
+        );
         match writes
             .iter_mut()
             .find(|write| write.environment_id == member.environment_id)
@@ -578,7 +607,11 @@ pub fn plan_scoped_settings_patch(
             .iter()
             .copied()
             .filter(|_| refuses_client_keys)
-            .chain(server_patch.keys().filter(|key| !is_project_scoped_setting_key(key)))
+            .chain(
+                server_patch
+                    .keys()
+                    .filter(|key| !is_project_scoped_setting_key(key)),
+            )
             .collect()
     } else {
         Vec::new()
@@ -614,7 +647,8 @@ pub fn plan_scoped_settings_patch(
                         next.insert(key.clone(), json!({"mode": "custom", "rules": rules}));
                         continue;
                     }
-                    if value.is_null() && !NULLABLE_PROJECT_SETTINGS_OVERRIDES.contains(&key.as_str())
+                    if value.is_null()
+                        && !NULLABLE_PROJECT_SETTINGS_OVERRIDES.contains(&key.as_str())
                     {
                         next.remove(key);
                         continue;
@@ -704,7 +738,9 @@ pub fn plan_scoped_settings_patch(
             scope.label.english(),
         ))
     } else {
-        Some(SettingsText::key("Connect an environment to save this setting."))
+        Some(SettingsText::key(
+            "Connect an environment to save this setting.",
+        ))
     };
     ScopedSettingsPlan {
         client_patch,
@@ -909,7 +945,9 @@ pub fn required_scopes_for_server_settings_patch(
 
 #[cfg(test)]
 mod tests {
-    use super::super::scope::{ScopeGroup, ScopeLabel, ScopeMember, SettingsScopeSearch, resolve_settings_scope};
+    use super::super::scope::{
+        ScopeGroup, ScopeLabel, ScopeMember, SettingsScopeSearch, resolve_settings_scope,
+    };
     use super::*;
     use t3_contracts::server::ServerConfig;
 
@@ -968,60 +1006,119 @@ mod tests {
 
     #[test]
     fn client_keys_write_for_this_device_unless_a_project_is_selected() {
-        let environments = [environment("a", "A", json!({})), environment("b", "B", json!({}))];
+        let environments = [
+            environment("a", "A", json!({})),
+            environment("b", "B", json!({})),
+        ];
         let all = resolve_settings_scope(&SettingsScopeSearch::default(), &[], &environments);
-        let plan = plan_scoped_settings_patch(&all, &environments, &patch(json!({"confirmThreadDelete": false})), false);
-        assert_eq!(plan.client_patch, patch(json!({"confirmThreadDelete": false})));
+        let plan = plan_scoped_settings_patch(
+            &all,
+            &environments,
+            &patch(json!({"confirmThreadDelete": false})),
+            false,
+        );
+        assert_eq!(
+            plan.client_patch,
+            patch(json!({"confirmThreadDelete": false}))
+        );
         assert!(plan.server_writes.is_empty() && plan.unavailable_reason.is_none());
         let project = project_scope(&environments);
-        let refused = plan_scoped_settings_patch(&project, &environments, &patch(json!({"confirmThreadDelete": false})), false);
+        let refused = plan_scoped_settings_patch(
+            &project,
+            &environments,
+            &patch(json!({"confirmThreadDelete": false})),
+            false,
+        );
         assert!(refused.client_patch.is_empty());
         assert_eq!(
             refused.unavailable_reason.map(|r| r.key),
             Some("This setting is environment-wide and cannot be overridden by a project.")
         );
-        let device = plan_scoped_settings_patch(&project, &environments, &patch(json!({"confirmThreadDelete": false})), true);
+        let device = plan_scoped_settings_patch(
+            &project,
+            &environments,
+            &patch(json!({"confirmThreadDelete": false})),
+            true,
+        );
         assert!(device.has_client_write());
     }
 
     #[test]
     fn server_keys_write_to_every_connected_environment_in_scope() {
-        let mut environments = vec![environment("a", "A", json!({})), environment("b", "B", json!({}))];
+        let mut environments = vec![
+            environment("a", "A", json!({})),
+            environment("b", "B", json!({})),
+        ];
         environments[1].phase = Phase::Backoff;
         let all = resolve_settings_scope(&SettingsScopeSearch::default(), &[], &environments);
-        let plan = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false);
+        let plan = plan_scoped_settings_patch(
+            &all,
+            &environments,
+            &patch(json!({"responseStreamingMode": "paragraph"})),
+            false,
+        );
         assert_eq!(plan.server_writes.len(), 1);
         assert_eq!(plan.server_writes[0].environment_id.0, "a");
         environments[0].phase = Phase::Offline;
-        let none = plan_scoped_settings_patch(&all, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false);
+        let none = plan_scoped_settings_patch(
+            &all,
+            &environments,
+            &patch(json!({"responseStreamingMode": "paragraph"})),
+            false,
+        );
         assert_eq!(
             none.unavailable_reason.map(|r| r.key),
             Some("Connect an environment to save this setting.")
         );
         let one = resolve_settings_scope(
-            &SettingsScopeSearch { machine: Some("b".into()), ..Default::default() },
+            &SettingsScopeSearch {
+                machine: Some("b".into()),
+                ..Default::default()
+            },
             &[],
             &environments,
         );
         assert_eq!(one.label, ScopeLabel::Content("B".into()));
-        let reason = plan_scoped_settings_patch(&one, &environments, &patch(json!({"responseStreamingMode": "paragraph"})), false)
-            .unavailable_reason
-            .expect("disconnected");
+        let reason = plan_scoped_settings_patch(
+            &one,
+            &environments,
+            &patch(json!({"responseStreamingMode": "paragraph"})),
+            false,
+        )
+        .unavailable_reason
+        .expect("disconnected");
         assert_eq!(reason.english(), "Connect B to save this setting.");
     }
 
     #[test]
     fn project_overrides_complete_partial_objects_and_inherit_with_null() {
         let environments = [
-            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"sidebarAutoSettleOnMerge": true, "responseStreamingMode": "paragraph"}}})),
+            environment(
+                "a",
+                "A",
+                json!({"projectSettingsOverrides": {"p1": {"sidebarAutoSettleOnMerge": true, "responseStreamingMode": "paragraph"}}}),
+            ),
             environment("b", "B", json!({})),
         ];
         let scope = project_scope(&environments);
-        let plan = plan_scoped_settings_patch(&scope, &environments, &patch(json!({"responseStreamingMode": null, "sidebarAutoSettleAfterDays": null})), false);
+        let plan = plan_scoped_settings_patch(
+            &scope,
+            &environments,
+            &patch(json!({"responseStreamingMode": null, "sidebarAutoSettleAfterDays": null})),
+            false,
+        );
         assert_eq!(plan.server_writes.len(), 2);
         let a = &plan.server_writes[0].patch["projectSettingsOverrides"]["p1"];
-        assert_eq!(a, &json!({"sidebarAutoSettleOnMerge": true, "sidebarAutoSettleAfterDays": null}));
-        let selection = plan_scoped_settings_patch(&scope, &environments, &patch(json!({"textGenerationModelSelection": {"model": "gpt"}})), false);
+        assert_eq!(
+            a,
+            &json!({"sidebarAutoSettleOnMerge": true, "sidebarAutoSettleAfterDays": null})
+        );
+        let selection = plan_scoped_settings_patch(
+            &scope,
+            &environments,
+            &patch(json!({"textGenerationModelSelection": {"model": "gpt"}})),
+            false,
+        );
         let entry = &selection.server_writes[1].patch["projectSettingsOverrides"]["p2"]["textGenerationModelSelection"];
         assert_eq!(entry["model"], "gpt");
         assert!(entry.get("instanceId").is_some() && entry.get("options").is_none());
@@ -1030,23 +1127,48 @@ mod tests {
     #[test]
     fn sources_and_mixed_values_follow_the_targets() {
         let environments = [
-            environment("a", "A", json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}})),
+            environment(
+                "a",
+                "A",
+                json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}}),
+            ),
             environment("b", "B", json!({})),
         ];
         let scope = project_scope(&environments);
         let targets = resolve_scoped_settings_targets(&scope, &environments);
         assert_eq!(targets.len(), 2);
-        assert!(scoped_settings_are_mixed(&targets, &["responseStreamingMode"]));
-        assert!(!scoped_settings_are_mixed(&targets, &["sidebarAutoSettleOnMerge"]));
-        assert_eq!(scoped_settings_source(&targets, &["responseStreamingMode"]), ScopedSettingSource::Mixed);
-        assert_eq!(scoped_settings_source(&targets[..1], &["responseStreamingMode"]), ScopedSettingSource::Project);
-        assert_eq!(scoped_settings_source(&targets, &["confirmThreadDelete"]), ScopedSettingSource::Environment);
+        assert!(scoped_settings_are_mixed(
+            &targets,
+            &["responseStreamingMode"]
+        ));
+        assert!(!scoped_settings_are_mixed(
+            &targets,
+            &["sidebarAutoSettleOnMerge"]
+        ));
+        assert_eq!(
+            scoped_settings_source(&targets, &["responseStreamingMode"]),
+            ScopedSettingSource::Mixed
+        );
+        assert_eq!(
+            scoped_settings_source(&targets[..1], &["responseStreamingMode"]),
+            ScopedSettingSource::Project
+        );
+        assert_eq!(
+            scoped_settings_source(&targets, &["confirmThreadDelete"]),
+            ScopedSettingSource::Environment
+        );
         assert_eq!(
             list_project_overrides(&environments, &["responseStreamingMode"]),
-            vec![ProjectOverrideEntry { environment_id: EnvironmentId("a".into()), project_id: ProjectId("p1".into()) }]
+            vec![ProjectOverrideEntry {
+                environment_id: EnvironmentId("a".into()),
+                project_id: ProjectId("p1".into())
+            }]
         );
         let clear = plan_scoped_settings_clear(&scope, &environments, &["responseStreamingMode"]);
-        assert_eq!(clear.server_writes[0].patch["projectSettingsOverrides"]["p1"], Value::Null);
+        assert_eq!(
+            clear.server_writes[0].patch["projectSettingsOverrides"]["p1"],
+            Value::Null
+        );
     }
 
     #[test]
@@ -1054,27 +1176,40 @@ mod tests {
         let settings = Rc::new(
             serde_json::from_value::<ServerSettings>({
                 let mut base = serde_json::to_value(ServerSettings::default()).unwrap_or_default();
-                base["projectSettingsOverrides"] = json!({"p": {"defaultModelSelection": {"instanceId": "cursor", "model": "m"}}});
+                base["projectSettingsOverrides"] =
+                    json!({"p": {"defaultModelSelection": {"instanceId": "cursor", "model": "m"}}});
                 base
             })
             .expect("settings"),
         );
         let resolved = resolve_project_settings(&settings, Some(&ProjectId("p".into())));
-        assert_eq!(resolved.sources["defaultModelSelection"], ProjectSettingSource::Environment);
+        assert_eq!(
+            resolved.sources["defaultModelSelection"],
+            ProjectSettingSource::Environment
+        );
     }
 
     #[test]
     fn idle_compaction_is_sent_in_the_form_each_server_reads() {
         assert_eq!(
-            for_destination(&json!({"idleCompaction": "never"}), patch(json!({"idleCompaction": "beforeCacheExpires"}))),
+            for_destination(
+                &json!({"idleCompaction": "never"}),
+                patch(json!({"idleCompaction": "beforeCacheExpires"}))
+            ),
             patch(json!({"idleCompaction": "beforeCacheExpires"}))
         );
         assert_eq!(
-            for_destination(&json!({"compactIdleThreads": "never"}), patch(json!({"idleCompaction": "never"}))),
+            for_destination(
+                &json!({"compactIdleThreads": "never"}),
+                patch(json!({"idleCompaction": "never"}))
+            ),
             patch(json!({"compactIdleThreads": "never"}))
         );
         assert_eq!(
-            for_destination(&json!({"compactIdleThreads": true}), patch(json!({"idleCompaction": "beforeCacheExpires"}))),
+            for_destination(
+                &json!({"compactIdleThreads": true}),
+                patch(json!({"idleCompaction": "beforeCacheExpires"}))
+            ),
             patch(json!({"compactIdleThreads": true}))
         );
     }
@@ -1082,17 +1217,24 @@ mod tests {
     #[test]
     fn patch_scopes_follow_the_keys_they_change() {
         use t3_contracts::auth::AuthEnvironmentScope as Scope;
-        assert_eq!(required_scopes_for_server_settings_patch(&patch(json!({}))), vec![Scope::SettingsWrite]);
+        assert_eq!(
+            required_scopes_for_server_settings_patch(&patch(json!({}))),
+            vec![Scope::SettingsWrite]
+        );
         assert_eq!(
             required_scopes_for_server_settings_patch(&patch(json!({"providerInstances": {}}))),
             vec![Scope::ProvidersManage]
         );
         assert_eq!(
-            required_scopes_for_server_settings_patch(&patch(json!({"requireConnectDeviceApproval": false, "wordWrap": true}))),
+            required_scopes_for_server_settings_patch(&patch(
+                json!({"requireConnectDeviceApproval": false, "wordWrap": true})
+            )),
             vec![Scope::SettingsWrite, Scope::AccessWrite]
         );
         assert_eq!(
-            required_scopes_for_server_settings_patch(&patch(json!({"secretProviders": {"x": null}}))),
+            required_scopes_for_server_settings_patch(&patch(
+                json!({"secretProviders": {"x": null}})
+            )),
             vec![Scope::SettingsWrite, Scope::ProvidersManage]
         );
     }
@@ -1105,7 +1247,13 @@ mod tests {
             patch: patch(json!({"newKey": true, "kept": "x "})),
             previous: Rc::new(json!({"kept": "y"})),
         };
-        assert_eq!(dropped_setting_keys(&write, &json!({"kept": "x"})), vec!["newKey".to_string()]);
-        assert_eq!(dropped_setting_keys(&write, &json!({"kept": "y", "newKey": true})), vec!["kept".to_string()]);
+        assert_eq!(
+            dropped_setting_keys(&write, &json!({"kept": "x"})),
+            vec!["newKey".to_string()]
+        );
+        assert_eq!(
+            dropped_setting_keys(&write, &json!({"kept": "y", "newKey": true})),
+            vec!["kept".to_string()]
+        );
     }
 }

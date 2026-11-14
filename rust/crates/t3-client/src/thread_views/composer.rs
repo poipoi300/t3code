@@ -35,6 +35,8 @@ pub mod path_search;
 pub mod policy;
 pub mod preferences;
 pub mod questions_service;
+pub mod reply;
+pub mod resolvers;
 pub mod send;
 mod send_commands;
 mod send_policy;

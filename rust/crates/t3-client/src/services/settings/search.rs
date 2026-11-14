@@ -174,7 +174,15 @@ pub fn settings_nav_groups(secrets_enabled: bool) -> Vec<SettingsNavGroup> {
         SettingsNavGroup {
             heading: "Preferences",
             heading_hidden: true,
-            pages: vec![General, Appearance, Chat, Diffs, Keybindings, Voice, SnapShot],
+            pages: vec![
+                General,
+                Appearance,
+                Chat,
+                Diffs,
+                Keybindings,
+                Voice,
+                SnapShot,
+            ],
         },
         SettingsNavGroup {
             heading: "Agents",
@@ -581,12 +589,18 @@ mod tests {
 
     #[test]
     fn normalizes_marks_case_and_spacing() {
-        assert_eq!(normalize_search_text("  Café   Ｆont\tsize "), "cafe font size");
+        assert_eq!(
+            normalize_search_text("  Café   Ｆont\tsize "),
+            "cafe font size"
+        );
     }
 
     #[test]
     fn breadcrumb_labels_canonical_pages_and_detail_pages_highlight_their_parent() {
-        assert_eq!(settings_breadcrumb_label("/settings/general/"), Some("General"));
+        assert_eq!(
+            settings_breadcrumb_label("/settings/general/"),
+            Some("General")
+        );
         assert_eq!(
             settings_breadcrumb_label("/settings/open-source-licenses"),
             Some("Open source licenses")
@@ -620,7 +634,10 @@ mod tests {
     fn platform_filters_hide_desktop_and_secret_rows_elsewhere() {
         let all: Vec<_> = SETTINGS_SEARCH_ITEMS.iter().collect();
         let web = settings_for_this_platform(&all, SettingsSearchPlatform::default());
-        assert!(web.iter().all(|item| !item.desktop_only && !item.secrets_feature_only));
+        assert!(
+            web.iter()
+                .all(|item| !item.desktop_only && !item.secrets_feature_only)
+        );
         let desktop = settings_for_this_platform(
             &all,
             SettingsSearchPlatform {

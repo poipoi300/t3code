@@ -1539,6 +1539,50 @@ fn primary_actions_and_interrupt_recheck_destination_permission_and_preserve_rej
             .to_string()
             .contains("No orchestration provider adapter is registered for codex.")
     );
+    let generation = runtime.store().snapshot().environments[&target.environment].session;
+    runtime
+        .store()
+        .update_thread(&target, generation, |thread| {
+            let projection = Rc::make_mut(thread.projection.as_mut().unwrap());
+            projection.runs.push(serde_json::from_value(json!({
+            "id":"compact-run", "threadId":"t1", "ordinal":1,
+            "providerInstanceId":"codex", "modelSelection":{"instanceId":"codex","model":"gpt-5.4"},
+            "providerThreadId":null, "userMessageId":"compact-message", "rootNodeId":null,
+            "activeAttemptId":null, "status":"running", "requestedAt":fake_server::NOW,
+            "startedAt":fake_server::NOW, "completedAt":null, "checkpointId":null,
+            "contextHandoffId":null
+        })).unwrap());
+            let mut item = serde_json::to_value(&projection.visible_turn_items[0].item).unwrap();
+            item.as_object_mut().unwrap().extend(
+                json!({
+                    "type":"user_message", "runId":"compact-run", "messageId":"compact-message",
+                    "text":"  /COMPACT  ", "attachments":[], "inputIntent":"turn_start",
+                    "createdBy":"user", "creationSource":"web"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            projection.visible_turn_items[0].item = serde_json::from_value(item).unwrap();
+            true
+        });
+    assert!(!actions.snapshot().can_steer);
+    drafts
+        .set_prompt(&target, "a different follow-up".into(), 21)
+        .unwrap();
+    assert!(!actions.snapshot().can_steer);
+    runtime
+        .store()
+        .update_thread(&target, generation, |thread| {
+            let projection = Rc::make_mut(thread.projection.as_mut().unwrap());
+            if let t3_contracts::orchestration_v2::OrchestrationV2TurnItem::UserMessage(message) =
+                &mut projection.visible_turn_items[0].item
+            {
+                message.text = "ordinary work".into();
+            }
+            true
+        });
+    assert!(actions.snapshot().can_steer);
     h.server().state.borrow_mut().permissions = Some(vec!["orchestration:read".into()]);
     h.run(runtime.reconnect(&target.environment)).unwrap();
     h.settle();

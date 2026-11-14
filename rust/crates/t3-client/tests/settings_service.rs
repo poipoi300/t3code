@@ -121,7 +121,10 @@ fn device_settings_save_to_the_client_record_without_a_server_call() {
     assert!(changes.next().now_or_never().is_some());
     assert!(update_calls(&h).is_empty());
     // A second service reads the same record: there is one authority.
-    assert_eq!(runtime.settings().client_settings().confirm_thread_delete, !before);
+    assert_eq!(
+        runtime.settings().client_settings().confirm_thread_delete,
+        !before
+    );
 }
 
 #[test]
@@ -142,7 +145,10 @@ fn server_settings_save_through_update_settings_and_report_refusals() {
     let outcome = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": true}))));
     assert!(!outcome.failed, "{outcome:?}");
     assert_eq!(outcome.saved_environments, vec!["Fake host".to_string()]);
-    assert_eq!(update_calls(&h), vec![json!({"autoResumeLimitedThreads": true})]);
+    assert_eq!(
+        update_calls(&h),
+        vec![json!({"autoResumeLimitedThreads": true})]
+    );
 
     // A server that answers without the key is an older server that dropped it.
     let unchanged = serde_json::to_value(saved.as_ref()).unwrap();
@@ -171,7 +177,10 @@ fn server_settings_save_through_update_settings_and_report_refusals() {
         .push_back(Err(json!({"_tag":"ServerSettingsError","settingsPath":"settings.json","operation":"normalize","message":"Settings refused","detail":"read-only mount"})));
     let rejected = h.run(settings.update(&view, patch(json!({"autoResumeLimitedThreads": false}))));
     let description = rejected.toast.unwrap().description[0].english();
-    assert!(description.starts_with("Could not save on Fake host: "), "{description}");
+    assert!(
+        description.starts_with("Could not save on Fake host: "),
+        "{description}"
+    );
     assert!(description.contains("read-only mount"), "{description}");
 }
 
@@ -231,7 +240,9 @@ fn project_scope_writes_overrides_and_refuses_device_settings() {
     assert!(!outcome.failed, "{outcome:?}");
     assert_eq!(
         update_calls(&h),
-        vec![json!({"projectSettingsOverrides": {"project": {"responseStreamingMode": "paragraph", "sidebarAutoSettleOnMerge": true}}})]
+        vec![
+            json!({"projectSettingsOverrides": {"project": {"responseStreamingMode": "paragraph", "sidebarAutoSettleOnMerge": true}}})
+        ]
     );
 }
 
@@ -242,5 +253,8 @@ fn the_last_enabled_grouping_mode_is_remembered() {
     assert_eq!(h.run(settings.last_enabled_grouping_mode()), "repository");
     h.run(settings.remember_enabled_grouping_mode("repository_path"));
     h.run(settings.remember_enabled_grouping_mode("separate"));
-    assert_eq!(h.run(settings.last_enabled_grouping_mode()), "repository_path");
+    assert_eq!(
+        h.run(settings.last_enabled_grouping_mode()),
+        "repository_path"
+    );
 }

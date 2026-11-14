@@ -27,20 +27,22 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         let lease: Option<crate::composition::QueryLease<M::Output>> = None;
         let updates: Option<LocalBoxStream<'static, ()>> = None;
         futures::stream::unfold(
-            (this, target, input, view, changes, lease, updates, true),
-            |(this, target, input, view, mut changes, mut lease, mut updates, first)| async move {
-                if !first {
+            (this, target, input, view, changes, lease, updates, 0u8),
+            |(this, target, input, view, mut changes, mut lease, mut updates, phase)| async move {
+                if phase==2{return None;}
+                let mut ended=false;
+                if phase==1 {
                     if let Some(events) = updates.as_mut() {
                         match futures::future::select(events.next(), changes.next()).await {
                             futures::future::Either::Left((None, _))
-                            | futures::future::Either::Right((None, _)) => return None,
+                            | futures::future::Either::Right((None, _)) => ended=true,
                             _ => {}
                         }
                     } else {
-                        changes.next().await?;
+                        ended=changes.next().await.is_none();
                     }
                 }
-                if this.access(&target).allowed {
+                if !ended && this.access(&target).allowed {
                     if lease.is_none() {
                         let query = this.runtime.query::<M>(
                             &target.thread.environment,
@@ -56,15 +58,20 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                         );
                         lease = Some(query);
                     }
-                } else {
+                } else if !ended {
                     updates = None;
                     lease = None;
                 }
-                let snapshot = lease.as_ref().map(|lease| lease.resource().snapshot());
+                let mut snapshot = lease.as_ref().map(|lease| lease.resource().snapshot());
+                if ended {
+                    let state=snapshot.get_or_insert_with(||QueryState {value:None,loading:false,error:None,revision:0});
+                    state.loading=false;
+                    if state.error.is_none(){state.error=Some(ClientError::Disconnected.to_string());}
+                }
                 let value = view(snapshot.as_ref());
                 Some((
                     value,
-                    (this, target, input, view, changes, lease, updates, false),
+                    (this, target, input, view, changes, lease, updates, if ended {2}else{1}),
                 ))
             },
         )
@@ -140,13 +147,26 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         };
         let value = state
             .and_then(|s| s.value.as_ref())
-            .filter(|_| access.allowed && has_query && !long).cloned();
-        if let Some(value)=&value {*self.content_cache.borrow_mut()=Some((target.clone(),value.clone()));}
-        let value=value.or_else(||{
-            (access.allowed&&has_query&&!long).then(||self.content_cache.borrow().as_ref().filter(|(prior,_)|prior==target).map(|(_,value)|value.clone())).flatten()
+            .filter(|_| access.allowed && has_query && !long)
+            .cloned();
+        if let Some(value) = &value {
+            *self.content_cache.borrow_mut() = Some((target.clone(), value.clone()));
+        }
+        let value = value.or_else(|| {
+            (access.allowed && has_query && !long)
+                .then(|| {
+                    self.content_cache
+                        .borrow()
+                        .as_ref()
+                        .filter(|(prior, _)| prior == target)
+                        .map(|(_, value)| value.clone())
+                })
+                .flatten()
         });
         ContentSearchView {
-            matches: value.as_ref().map_or_else(Rc::default, |v| Rc::new(v.matches.clone())),
+            matches: value
+                .as_ref()
+                .map_or_else(Rc::default, |v| Rc::new(v.matches.clone())),
             can_read_files: access.allowed,
             checking_access: access.pending,
             has_query,
@@ -157,7 +177,9 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     && state.is_none_or(|s| s.loading || (s.value.is_none() && s.error.is_none()))),
             error,
             invalid_regex: options.use_regex
-                && value.as_ref().is_some_and(|v| v.regex_fallback_error.is_some()),
+                && value
+                    .as_ref()
+                    .is_some_and(|v| v.regex_fallback_error.is_some()),
             truncated: value.as_ref().is_some_and(|v| v.truncated),
         }
     }
@@ -166,7 +188,6 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         let query = t3_contracts::wire::trim_js(raw);
         if !(2..=t3_contracts::thread_search::THREAD_SEARCH_QUERY_MAX_LENGTH)
             .contains(&query.encode_utf16().count())
-            || t3_shared::search_policy::message_tokens(query).0.is_empty()
         {
             return Ok(vec![]);
         }
@@ -187,7 +208,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 query,
                 &Default::default(),
                 &environment.id,
-                None,
+                self.runtime.store().shared_shell(&environment.id).and_then(|shell|shell.older_settled.as_ref().map(|older|older.before.clone())),
             ) else {
                 continue;
             };
@@ -214,7 +235,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 let shell = self.runtime.store().shared_shell(&environment);
                 let thread = shell
                     .as_ref()
-                    .and_then(|s| s.threads.iter().find(|t| t.id == found.thread_id))
+                    .and_then(|s| s.threads.iter().find(|t| t.id == found.thread_id).map(Rc::as_ref))
                     .or_else(|| {
                         reply
                             .threads
@@ -242,6 +263,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     },
                     title,
                 );
+                let subject_view=subject.clone();
                 let canonical = t3_shared::palette_search::ThreadSubject {
                     id: subject.id,
                     title: subject.title,
@@ -261,6 +283,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                         .collect(),
                 };
                 let value = serde_json::to_value(&found)?;
+                let title_match=value["source"]=="title"||t3_shared::palette_search::score_thread(query,&canonical,self.platform.now_epoch_ms() as f64,false,false).is_some();
                 candidates.push(t3_shared::palette_search::MessageMatchCandidate {
                     subject: Some(canonical),
                     quality: value["quality"].as_f64(),
@@ -271,12 +294,14 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     format!("thread:{}:{}", environment.0, key.thread.0),
                     &thread.title,
                 );
+                item.thread_search=title_match.then_some(subject_view);
                 item.thread = Some(key);
                 item.description = Some(found.snippet);
                 items.push(item);
             }
         }
-        Ok(t3_shared::palette_search::rank_message_matches(
+        let mut result=items.iter().filter(|item|item.thread_search.is_some()).cloned().collect::<Vec<_>>();
+        result.extend(t3_shared::palette_search::rank_message_matches(
             &candidates,
             query,
             self.platform.now_epoch_ms() as f64,
@@ -284,8 +309,10 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             true,
         )
         .into_iter()
+        .filter(|index|items[*index].thread_search.is_none())
         .map(|index| items[index].clone())
-        .collect())
+        );
+        Ok(result)
     }
 }
 impl<P: Platform + Clone + 'static> PaletteSearchClient for PaletteService<P> {

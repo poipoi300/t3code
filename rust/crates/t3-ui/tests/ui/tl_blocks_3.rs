@@ -869,8 +869,17 @@ fn MixedRowsFixture() -> impl IntoElement {
         projection.with(|projection| {
             let mut input = mixed_input(mode.get(), projection.as_ref().expect("projection"));
             groups.apply_to_input(&mut input);
-            input.pending_approval_request_ids =
-                pending_approvals.with(|pending| pending.keys().cloned().collect());
+            input.pending_approval_request_ids = pending_approvals.with(|pending| {
+                pending
+                    .values()
+                    .filter_map(|pending| match &pending.request.id {
+                        t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
+                            Some(id.0.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            });
             Shared(derive_messages_timeline_rows_with_state(&input, None).rows)
         })
     });
@@ -969,6 +978,20 @@ fn every_client_row_kind_uses_its_owner_or_an_explicit_unrendered_arm() {
                 .unwrap_or_else(|error| panic!("{control}: {text}: {error:?}"));
         }
         if control == "Mixed" {
+            let screen = app.screen();
+            let shown = screen.texts();
+            let approval = shown
+                .iter()
+                .position(|&text| text == "Run mixed command")
+                .expect("matched approval");
+            let event = shown
+                .iter()
+                .position(|&text| text == "Mixed interruption")
+                .expect("following event");
+            assert!(
+                approval < event,
+                "matched approval must render in its work row, before the event and footer"
+            );
             assert_eq!(
                 app.screen()
                     .texts()

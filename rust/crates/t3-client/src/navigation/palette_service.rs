@@ -21,7 +21,10 @@ use std::{
 };
 #[path = "palette_queries.rs"]
 mod queries;
-type ContentCache = Option<(SearchTarget, Rc<t3_contracts::project::ProjectSearchContentsResult>)>;
+type ContentCache = Option<(
+    SearchTarget,
+    Rc<t3_contracts::project::ProjectSearchContentsResult>,
+)>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HostCommand {
@@ -191,6 +194,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         })
     }
     pub fn catalogue(&self) -> Catalogue {
+        let environments=self.runtime.settings().environments();
         let physical = self.runtime.new_threads().projects();
         let logical = self.runtime.settings().groups();
         let representatives = logical
@@ -289,8 +293,8 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             }]);
             actions.push(item);
         }
-        if self.runtime.environments().iter().any(|e| {
-            e.state.phase == crate::connection::Phase::Connected
+        if environments.iter().any(|e| {
+            e.phase == crate::connection::Phase::Connected
                 && e.config
                     .as_ref()
                     .is_some_and(|c| c.scratch_workspace_root.is_some())
@@ -349,16 +353,13 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             );
             actions.push(item);
         }
-        if self
-            .runtime
-            .environments()
-            .iter()
+        if environments.iter()
             .any(|e| e.config.is_some())
         {
             actions.push(Item::action("action:pull-requests", "Open pull requests"));
         }
-        if self.runtime.environments().iter().any(|e| {
-            e.state.phase == crate::connection::Phase::Connected
+        if environments.iter().any(|e| {
+            e.phase == crate::connection::Phase::Connected
                 && e.config
                     .as_ref()
                     .is_some_and(|c| c.new_projects_root.is_some())
@@ -438,6 +439,12 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
     }
     pub fn filter(&self, query: &str, active: Option<&[Group]>, messages: &[Item]) -> Vec<Group> {
         let catalogue = self.catalogue();
+        let mut threads=catalogue.threads.as_ref().clone();
+        let mut listed=threads.iter().filter_map(|item|item.thread.clone()).collect::<BTreeSet<_>>();
+        for item in messages.iter().filter(|item|item.thread_search.is_some()) {
+            if let Some(key)=&item.thread && listed.insert(key.clone()) {threads.push(item.clone());}
+        }
+        let messages=messages.iter().filter(|item|item.thread_search.is_none()).cloned().collect::<Vec<_>>();
         let root = catalogue.groups.as_ref();
         let nested = palette::nested_items(
             &root
@@ -454,8 +461,8 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             nested: &nested,
             projects: &catalogue.projects,
             settings: &catalogue.settings,
-            threads: &catalogue.threads,
-            messages,
+            threads: &threads,
+            messages: &messages,
             now: self.platform.now_epoch_ms() as f64,
         })
     }

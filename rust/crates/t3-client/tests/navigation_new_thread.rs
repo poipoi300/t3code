@@ -1281,3 +1281,49 @@ fn new_project_folder_names_match_the_typescript_path_cases() {
         "a".repeat(63)
     );
 }
+
+#[test]
+fn prompt_link_replays_follow_platform_entry_keys_when_back_then_push_reuses_an_index() {
+    use t3_client::navigation::{AppUrlSnapshot, RoutePolicy};
+    let (mut h, _, service, _, _) = link_setup();
+    let raw = "?repo=acme/missing&prompt=Read%20this&entry_key=untrusted".to_owned();
+    let snapshot = |key: Option<&str>| AppUrlSnapshot {
+        path: format!("/new{raw}"),
+        history_index: 1,
+        entry_key: key.map(str::to_owned),
+        can_go_back: true,
+        can_go_forward: false,
+        policy: RoutePolicy::default(),
+    };
+    let first = snapshot(Some("platform-first"));
+    let pushed = snapshot(Some("platform-next"));
+    assert_eq!(first.history_index, pushed.history_index);
+    assert_ne!(first.entry_identity(), pushed.entry_identity());
+    let mut watch = service.watch_link(raw.clone(), first.entry_identity());
+    let (view, watch) = h.run(async move { (watch.next().await.unwrap(), watch) });
+    assert!(matches!(view.as_ref(), NewThreadView::LinkChoice { .. }));
+    drop(watch);
+    let mut revisit = service.watch_link(raw.clone(), first.entry_identity());
+    let (view, mut revisit) = h.run(async move { (revisit.next().await.unwrap(), revisit) });
+    assert!(matches!(view.as_ref(), NewThreadView::LinkOpened));
+    let retry = service.clone();
+    let query = raw.clone();
+    h.run(async move { retry.retry(Target::Link(query)).await })
+        .unwrap();
+    let view = h.run(async move { revisit.next().await.unwrap() });
+    assert!(matches!(view.as_ref(), NewThreadView::LinkChoice { .. }));
+    let mut fresh = service.watch_link(raw.clone(), pushed.entry_identity());
+    let view = h.run(async move { fresh.next().await.unwrap() });
+    assert!(matches!(view.as_ref(), NewThreadView::LinkChoice { .. }));
+    let fallback = snapshot(None);
+    assert_eq!(fallback.entry_identity(), "index:1");
+    assert_ne!(fallback.entry_identity(), first.entry_identity());
+    let mut old_platform = service.watch_link(raw.clone(), fallback.entry_identity());
+    h.run(async move { old_platform.next().await.unwrap() });
+    let mut same_index = service.watch_link(raw, fallback.entry_identity());
+    assert!(matches!(
+        h.run(async move { same_index.next().await.unwrap() })
+            .as_ref(),
+        NewThreadView::LinkOpened
+    ));
+}

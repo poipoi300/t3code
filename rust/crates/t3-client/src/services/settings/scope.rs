@@ -379,7 +379,11 @@ pub fn resolve_settings_scope(
 
 /// `settingsScopeEnvironmentAddress`.
 pub fn settings_scope_environment_address(environment: &ScopeEnvironment) -> String {
-    match environment.display_url.as_deref().filter(|url| !url.is_empty()) {
+    match environment
+        .display_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+    {
         None => environment.environment_id.0.clone(),
         Some(display) => url::Url::parse(display)
             .ok()
@@ -734,7 +738,11 @@ mod tests {
         ];
         (environments, [first, second, third, other], groups)
     }
-    fn search(project: Option<&str>, machine: Option<&str>, checkout: Option<&str>) -> SettingsScopeSearch {
+    fn search(
+        project: Option<&str>,
+        machine: Option<&str>,
+        checkout: Option<&str>,
+    ) -> SettingsScopeSearch {
         SettingsScopeSearch {
             project: project.map(Into::into),
             machine: machine.map(Into::into),
@@ -749,7 +757,10 @@ mod tests {
             "?checkout={}",
             crate::navigation::encode_search_string(&first.physical_project_key)
         ));
-        assert_eq!(parsed, search(None, None, Some(&first.physical_project_key)));
+        assert_eq!(
+            parsed,
+            search(None, None, Some(&first.physical_project_key))
+        );
         let scope = resolve_settings_scope(&parsed, &groups, &environments);
         assert!(matches!(
             scope.kind,
@@ -764,7 +775,8 @@ mod tests {
     #[test]
     fn keeps_all_physical_members_in_a_project_aggregate() {
         let (environments, [first, second, third, _], groups) = fixture();
-        let scope = resolve_settings_scope(&search(Some("t3code"), None, None), &groups, &environments);
+        let scope =
+            resolve_settings_scope(&search(Some("t3code"), None, None), &groups, &environments);
         assert!(matches!(
             scope.kind,
             ScopeKind::Project {
@@ -775,7 +787,10 @@ mod tests {
         assert_eq!(scope.members, vec![first, second, third]);
         assert_eq!(
             scope.environment_ids,
-            vec![EnvironmentId("laptop".into()), EnvironmentId("server".into())]
+            vec![
+                EnvironmentId("laptop".into()),
+                EnvironmentId("server".into())
+            ]
         );
     }
 
@@ -818,10 +833,18 @@ mod tests {
     #[test]
     fn leaves_a_removed_checkout_unavailable_while_siblings_remain() {
         let (environments, [first, second, third, _], groups) = fixture();
-        let target = search(Some("t3code"), Some("laptop"), Some(&first.physical_project_key));
+        let target = search(
+            Some("t3code"),
+            Some("laptop"),
+            Some(&first.physical_project_key),
+        );
         let scope = resolve_settings_scope(&target, &groups, &environments);
         assert_eq!(scope.members, vec![first.clone()]);
-        let scope = resolve_settings_scope(&target, &[group("t3code", &[&second, &third])], &environments);
+        let scope = resolve_settings_scope(
+            &target,
+            &[group("t3code", &[&second, &third])],
+            &environments,
+        );
         assert_eq!(scope.kind_name(), ScopeKindName::Unavailable);
     }
 
@@ -834,7 +857,8 @@ mod tests {
             vec![first, second]
         );
         assert_eq!(
-            resolve_settings_scope(&target, &[group("t3code", &[&third])], &environments).kind_name(),
+            resolve_settings_scope(&target, &[group("t3code", &[&third])], &environments)
+                .kind_name(),
             ScopeKindName::Unavailable
         );
     }
@@ -867,8 +891,14 @@ mod tests {
             select_project_axis(&checkout, "app"),
             search(Some("app"), Some("first"), None)
         );
-        assert_eq!(select_project_axis(&checkout, ALL_VALUE), search(None, Some("first"), None));
-        assert_eq!(select_environment_axis(&checkout, ALL_VALUE), search(Some("app"), None, None));
+        assert_eq!(
+            select_project_axis(&checkout, ALL_VALUE),
+            search(None, Some("first"), None)
+        );
+        assert_eq!(
+            select_environment_axis(&checkout, ALL_VALUE),
+            search(Some("app"), None, None)
+        );
     }
 
     #[test]
@@ -884,10 +914,18 @@ mod tests {
             settings_scope_checkout_choices(&all, &search(None, Some("laptop"), None)),
             vec![&all.members[0], &all.members[1]]
         );
-        assert_eq!(settings_scope_checkout_choices(&pair, &search(None, None, None)).len(), 2);
-        assert_eq!(settings_scope_checkout_choices(&all, &search(None, None, Some("b"))).len(), 2);
+        assert_eq!(
+            settings_scope_checkout_choices(&pair, &search(None, None, None)).len(),
+            2
+        );
+        assert_eq!(
+            settings_scope_checkout_choices(&all, &search(None, None, Some("b"))).len(),
+            2
+        );
         assert!(settings_scope_checkout_choices(&all, &search(None, None, None)).is_empty());
-        assert!(settings_scope_checkout_choices(&all, &search(None, Some("server"), None)).is_empty());
+        assert!(
+            settings_scope_checkout_choices(&all, &search(None, Some("server"), None)).is_empty()
+        );
     }
 
     #[test]
@@ -900,7 +938,10 @@ mod tests {
         let second = with_root("b", "C:\\work\\two\\app");
         let other = with_root("c", "/work/tools");
         let all = [&first, &second, &other];
-        assert_eq!(settings_scope_checkout_label(&second, &all), "C:\\work\\two\\app");
+        assert_eq!(
+            settings_scope_checkout_label(&second, &all),
+            "C:\\work\\two\\app"
+        );
         assert_eq!(settings_scope_checkout_label(&other, &all), "tools");
     }
 
@@ -914,7 +955,10 @@ mod tests {
             validate_settings_route_search("?environmentId=remote&project=p"),
             search(Some("p"), None, None)
         );
-        assert_eq!(validate_settings_route_search("?project=123"), SettingsScopeSearch::default());
+        assert_eq!(
+            validate_settings_route_search("?project=123"),
+            SettingsScopeSearch::default()
+        );
         assert_eq!(
             validate_settings_route_search("?project=%22123%22&machine=%20"),
             search(Some("123"), None, None)
@@ -936,8 +980,14 @@ mod tests {
             retain_settings_scope(&previous, "?tab=x"),
             "?project=repository%3At3code&machine=remote-server&tab=x"
         );
-        assert_eq!(retain_settings_scope(&previous, "?machine=other"), "?machine=other");
-        assert_eq!(retain_settings_scope(&previous, "?environmentId=e"), "?environmentId=e");
+        assert_eq!(
+            retain_settings_scope(&previous, "?machine=other"),
+            "?machine=other"
+        );
+        assert_eq!(
+            retain_settings_scope(&previous, "?environmentId=e"),
+            "?environmentId=e"
+        );
         assert_eq!(
             validate_settings_route_search(&settings_scope_query(&previous)),
             previous
@@ -951,7 +1001,9 @@ mod tests {
         let all = search(None, None, None);
         let scope = resolve_settings_scope(&all, &groups, &environments);
         assert_eq!(
-            select_single_environment_scope(&all, &scope, &environments, None).machine.as_deref(),
+            select_single_environment_scope(&all, &scope, &environments, None)
+                .machine
+                .as_deref(),
             Some("server")
         );
         assert_eq!(
@@ -975,7 +1027,10 @@ mod tests {
         b.display_url = Some("http://10.0.0.2:3773".into());
         let c = environment("c", "Linux");
         let all = [a.clone(), b.clone(), c.clone()];
-        assert_eq!(settings_scope_environment_label(&a, &all), "Mac · 10.0.0.1:3773");
+        assert_eq!(
+            settings_scope_environment_label(&a, &all),
+            "Mac · 10.0.0.1:3773"
+        );
         assert_eq!(settings_scope_environment_label(&c, &all), "Linux");
     }
 }

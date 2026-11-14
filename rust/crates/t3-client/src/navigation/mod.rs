@@ -4,13 +4,13 @@ pub use crate::view_logic::shell::navigation::{
     Direction, HistoryAvailability, RouteTarget, encode_component, route_target,
 };
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+pub mod ignored_selection;
 pub mod link_targets;
 #[cfg(test)]
 mod link_targets_tests;
 pub mod new_thread;
-pub mod project_flow;
-pub mod ignored_selection;
 mod normalize;
+pub mod project_flow;
 pub mod prompt_links;
 pub use normalize::normalize_app_path;
 mod service;
@@ -527,9 +527,20 @@ pub enum AppUrlRequest {
 pub struct AppUrlSnapshot {
     pub path: String,
     pub history_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_key: Option<String>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub policy: RoutePolicy,
+}
+
+pub fn history_entry_identity(key: Option<&str>, index: u64) -> String {
+    key.map_or_else(|| format!("index:{index}"), |key| format!("key:{key}"))
+}
+impl AppUrlSnapshot {
+    pub fn entry_identity(&self) -> String {
+        history_entry_identity(self.entry_key.as_deref(), self.history_index)
+    }
 }
 
 impl Route {

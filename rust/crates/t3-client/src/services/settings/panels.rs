@@ -22,7 +22,8 @@ pub fn project_grouping_mode_from_toggle(enabled: bool, last_enabled: &str) -> &
 }
 
 /// `LAST_ENABLED_PROJECT_GROUPING_MODE_KEY`, a raw value in ordinary storage.
-pub const LAST_ENABLED_PROJECT_GROUPING_MODE_KEY: &str = "t3code:last-enabled-project-grouping-mode";
+pub const LAST_ENABLED_PROJECT_GROUPING_MODE_KEY: &str =
+    "t3code:last-enabled-project-grouping-mode";
 
 /// `readLastEnabledProjectGroupingMode` over the stored bytes.
 pub fn last_enabled_project_grouping_mode(stored: Option<&[u8]>) -> &'static str {
@@ -200,7 +201,10 @@ const RESTORE_LABELS: &[(&str, &str)] = &[
     ("effortDisplay", "Effort display"),
     ("mathRenderingEnabled", "Render math"),
     ("panelAnimationDurationMs", "Panel animations"),
-    ("environmentIdentificationMode", "Environment identification"),
+    (
+        "environmentIdentificationMode",
+        "Environment identification",
+    ),
     ("language", "Language"),
     ("timestampFormat", "Time format"),
     ("notificationMode", "Thread notifications"),
@@ -209,7 +213,10 @@ const RESTORE_LABELS: &[(&str, &str)] = &[
     ("sidebarProjectSortOrder", "Project order"),
     ("sidebarWorkingShelfEnabled", "Working section"),
     ("sidebarAutoSettleAfterDays", "Auto-settle inactive threads"),
-    ("sidebarAutoSettleKeepPullRequests", "Keep threads with a PR"),
+    (
+        "sidebarAutoSettleKeepPullRequests",
+        "Keep threads with a PR",
+    ),
     ("sidebarAutoSettleOnMerge", "Auto-settle merged threads"),
     ("autoResumeLimitedThreads", "Resume after usage limits"),
     ("snoozeLimitedThreads", "Snooze until limits reset"),
@@ -242,7 +249,10 @@ const RESTORE_LABELS_AFTER_TYPOGRAPHY: &[(&str, &str)] = &[
 const RESTORE_LABELS_AFTER_BACKGROUND: &[(&str, &str)] = &[
     ("keepAwakeWhileAgentsWork", "Keep awake while agents work"),
     ("defaultThreadEnvMode", "New thread mode"),
-    ("newWorktreesStartFromOrigin", "New worktrees start from remote"),
+    (
+        "newWorktreesStartFromOrigin",
+        "New worktrees start from remote",
+    ),
     ("addProjectBaseDirectory", "Add project base directory"),
     ("ghqCloneLayout", "Clone into host folders"),
     ("confirmThreadUnpin", "Unpin confirmation"),
@@ -342,7 +352,9 @@ pub fn changed_typography_setting_labels(settings: &Value, defaults: &Value) -> 
         ("fontFamilyTerminal", "fontSizeTerminal", "Terminal font"),
     ]
     .into_iter()
-    .filter(|(family, size, _)| differs(settings, defaults, family) || differs(settings, defaults, size))
+    .filter(|(family, size, _)| {
+        differs(settings, defaults, family) || differs(settings, defaults, size)
+    })
     .map(|(_, _, label)| label)
     .collect()
 }
@@ -369,7 +381,10 @@ fn same_preview_viewport(left: &Value, right: &Value) -> bool {
 /// `getChangedBrowserSettingLabels`.
 pub fn changed_browser_setting_labels(settings: &Value, defaults: &Value) -> Vec<&'static str> {
     let mut labels = Vec::new();
-    if !same_preview_viewport(&settings["browserDefaultViewport"], &defaults["browserDefaultViewport"]) {
+    if !same_preview_viewport(
+        &settings["browserDefaultViewport"],
+        &defaults["browserDefaultViewport"],
+    ) {
         labels.push("Browser viewport");
     }
     for (key, label) in [
@@ -445,7 +460,11 @@ pub fn restore_defaults_patch() -> SettingsPatch {
     let defaults = default_unified_settings();
     RESTORE_PATCH_KEYS
         .iter()
-        .filter_map(|key| defaults.get(*key).map(|value| ((*key).to_owned(), value.clone())))
+        .filter_map(|key| {
+            defaults
+                .get(*key)
+                .map(|value| ((*key).to_owned(), value.clone()))
+        })
         .collect()
 }
 
@@ -456,11 +475,26 @@ mod tests {
     #[test]
     fn grouping_toggle_restores_the_last_enabled_mode() {
         assert!(!is_project_grouping_enabled("separate"));
-        assert_eq!(project_grouping_mode_from_toggle(false, "repository_path"), "separate");
-        assert_eq!(project_grouping_mode_from_toggle(true, "repository_path"), "repository_path");
-        assert_eq!(project_grouping_mode_from_toggle(true, "separate"), "repository");
-        assert_eq!(last_enabled_project_grouping_mode(Some(b"repository_path")), "repository_path");
-        assert_eq!(last_enabled_project_grouping_mode(Some(b"garbage")), "repository");
+        assert_eq!(
+            project_grouping_mode_from_toggle(false, "repository_path"),
+            "separate"
+        );
+        assert_eq!(
+            project_grouping_mode_from_toggle(true, "repository_path"),
+            "repository_path"
+        );
+        assert_eq!(
+            project_grouping_mode_from_toggle(true, "separate"),
+            "repository"
+        );
+        assert_eq!(
+            last_enabled_project_grouping_mode(Some(b"repository_path")),
+            "repository_path"
+        );
+        assert_eq!(
+            last_enabled_project_grouping_mode(Some(b"garbage")),
+            "repository"
+        );
         assert_eq!(last_enabled_project_grouping_mode(None), "repository");
     }
 
@@ -475,7 +509,10 @@ mod tests {
         assert_eq!(committed.revision, 1);
         // Confirmation clears the pending submission.
         let confirmed = committed.sync(30);
-        assert_eq!((confirmed.saved, confirmed.pending, confirmed.draft.as_str()), (30, None, "30"));
+        assert_eq!(
+            (confirmed.saved, confirmed.pending, confirmed.draft.as_str()),
+            (30, None, "30")
+        );
     }
 
     #[test]
@@ -511,7 +548,8 @@ mod tests {
     fn restore_lists_changed_settings_and_resets_them_to_defaults() {
         let mut settings = default_unified_settings();
         assert!(changed_setting_labels(&settings).is_empty());
-        settings["confirmThreadDelete"] = Value::Bool(!settings["confirmThreadDelete"].as_bool().unwrap_or(true));
+        settings["confirmThreadDelete"] =
+            Value::Bool(!settings["confirmThreadDelete"].as_bool().unwrap_or(true));
         settings["language"] = Value::String("fr".into());
         settings["browserRecordingShowKeyPresses"] = Value::Bool(true);
         assert_eq!(
@@ -519,7 +557,10 @@ mod tests {
             vec!["Language", "Delete confirmation", "Recording key presses"]
         );
         let patch = restore_defaults_patch();
-        assert_eq!(patch["confirmThreadDelete"], default_unified_settings()["confirmThreadDelete"]);
+        assert_eq!(
+            patch["confirmThreadDelete"],
+            default_unified_settings()["confirmThreadDelete"]
+        );
         assert!(patch.contains_key("sidebarAutoSettleAfterDays"));
     }
 }

@@ -110,6 +110,7 @@ fn snapshot(path: &str, index: u64) -> AppUrlSnapshot {
     AppUrlSnapshot {
         path: path.into(),
         history_index: index,
+        entry_key: None,
         can_go_back: index > 0,
         can_go_forward: false,
         policy: Default::default(),

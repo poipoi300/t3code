@@ -440,6 +440,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         crate::view_logic::shell::sidebar_width::SidebarWidth::new(self.inner.platform.clone())
     }
 
+    /// The sidebar shelves' expanded flags (`t3code:sidebar:{working,snoozed,settled}-expanded`).
+    pub fn sidebar_shelves(&self) -> crate::view_logic::shell::sidebar_list::SidebarShelves<P> {
+        crate::view_logic::shell::sidebar_list::SidebarShelves::new(self.inner.platform.clone())
+    }
+
     /// Threads' terminals: tabs and groups, sessions, known sessions and commands.
     pub fn terminals(&self) -> crate::services::terminal_sessions::TerminalSessions<P> {
         crate::services::terminal_sessions::TerminalSessions::new(

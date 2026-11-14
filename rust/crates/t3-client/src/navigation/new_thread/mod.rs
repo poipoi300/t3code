@@ -93,6 +93,7 @@ pub enum NewThreadView {
         title: String,
         message: String,
     },
+    LinkOpened,
     LinkChoice {
         title: LinkText,
         message: LinkText,
@@ -113,6 +114,8 @@ pub struct NewThreadState {
     project_order: RefCell<Vec<String>>,
     last_used: RefCell<Option<String>>,
     links: RefCell<BTreeMap<String, links::LinkSession>>,
+    link_entry: RefCell<Option<(String, String)>>,
+    opened_links: RefCell<BTreeSet<String>>,
 }
 impl Default for NewThreadState {
     fn default() -> Self {
@@ -128,6 +131,8 @@ impl Default for NewThreadState {
             project_order: RefCell::default(),
             last_used: RefCell::default(),
             links: RefCell::default(),
+            link_entry: RefCell::default(),
+            opened_links: RefCell::default(),
         }
     }
 }
@@ -187,6 +192,50 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
                     }
                 };
                 Some((Rc::new(view), (this, target, changes)))
+            },
+        )
+        .boxed_local()
+    }
+    pub fn watch_link(
+        &self,
+        search: String,
+        entry: String,
+    ) -> LocalBoxStream<'static, Rc<NewThreadView>> {
+        let target = Target::Link(search.clone());
+        self.state.links.borrow_mut().remove(&search);
+        self.state.destinations.borrow_mut().remove(&target);
+        self.state.errors.borrow_mut().remove(&target);
+        *self.state.link_entry.borrow_mut() = Some((search.clone(), entry.clone()));
+        let opened = self.state.opened_links.borrow().contains(&entry);
+        let this = self.clone();
+        let changes = self.changes();
+        futures::stream::unfold(
+            (this, search, entry, changes, opened),
+            |(this, search, entry, mut changes, mut opened)| async move {
+                changes.next().await?;
+                if opened && !this.state.opened_links.borrow().contains(&entry) {
+                    opened = false;
+                }
+                let view = if opened {
+                    NewThreadView::LinkOpened
+                } else {
+                    match this.resolve(&Target::Link(search.clone())).await {
+                        Ok(view) => {
+                            if matches!(
+                                view,
+                                NewThreadView::LinkChoice { .. } | NewThreadView::Navigate(_)
+                            ) {
+                                this.state.opened_links.borrow_mut().insert(entry.clone());
+                            }
+                            view
+                        }
+                        Err(error) => NewThreadView::LinkFailed {
+                            title: "Could not open the link".into(),
+                            message: error.to_string(),
+                        },
+                    }
+                };
+                Some((Rc::new(view), (this, search, entry, changes, opened)))
             },
         )
         .boxed_local()
@@ -370,6 +419,18 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
         }
     }
     pub async fn retry(&self, target: Target) -> Result<(), ClientError> {
+        if let Target::Link(search) = &target {
+            self.state.links.borrow_mut().remove(search);
+            if let Some((_, entry)) = self
+                .state
+                .link_entry
+                .borrow()
+                .as_ref()
+                .filter(|(raw, _)| raw == search)
+            {
+                self.state.opened_links.borrow_mut().remove(entry);
+            }
+        }
         self.state.errors.borrow_mut().remove(&target);
         self.state.destinations.borrow_mut().remove(&target);
         let result = self.resolve(&target).await;

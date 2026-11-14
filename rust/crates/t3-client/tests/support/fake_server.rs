@@ -111,10 +111,12 @@ fn relay_response(server: &FakeServer, request: &HttpRequest, path: &str) -> Htt
 }
 pub const NOW: &str = "2026-06-20T00:00:00.000Z";
 
+type RpcOverride = Rc<dyn Fn(&Request) -> Option<HandlerOutput>>;
+
 #[derive(Default)]
 pub struct ServerState {
     pub extra_methods: Vec<(&'static str, t3_rpc::CallKind)>,
-    pub extra_rpc: Option<Rc<dyn Fn(&Request) -> Option<HandlerOutput>>>,
+    pub extra_rpc: Option<RpcOverride>,
     pub sockets_opened: usize,
     pub sockets_open: usize,
     /// Every `subscribeThread` request, in order.

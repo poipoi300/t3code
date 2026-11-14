@@ -40,6 +40,8 @@ pub mod shortcuts;
 pub mod shortcut_config;
 #[path = "shell/sidebar.rs"]
 pub mod sidebar;
+#[path = "shell/sidebar_list.rs"]
+pub mod sidebar_list;
 #[path = "shell/sidebar_width.rs"]
 pub mod sidebar_width;
 #[path = "shell/skill_search.rs"]
