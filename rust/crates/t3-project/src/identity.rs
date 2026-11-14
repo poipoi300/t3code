@@ -73,6 +73,7 @@ pub struct RepositoryIdentityResolver {
     lanes: Arc<KeyedLanes>,
     refiner: Option<Arc<dyn IdentityRefiner>>,
     environment: t3_process::Environment,
+    git: Option<Git>,
     capacity: usize,
 }
 impl Default for RepositoryIdentityResolver {
@@ -83,6 +84,7 @@ impl Default for RepositoryIdentityResolver {
             lanes: Default::default(),
             refiner: None,
             environment: Default::default(),
+            git: None,
             capacity: 512,
         }
     }
@@ -167,6 +169,17 @@ pub fn pick_primary_remote(
 }
 
 impl RepositoryIdentityResolver {
+    pub fn with_git(mut self, git: Git) -> Self {
+        self.git = Some(git);
+        let capacity = self.capacity;
+        self.with_cache_capacity(capacity)
+    }
+    fn git_at(&self, cwd: &str) -> Git {
+        self.git
+            .as_ref()
+            .map_or_else(|| Git::new(cwd), |git| git.at(cwd))
+            .with_environment(self.environment.clone())
+    }
     pub fn with_environment(mut self, environment: t3_process::Environment) -> Self {
         self.environment = environment;
         let capacity = self.capacity;
@@ -203,7 +216,7 @@ impl RepositoryIdentityResolver {
         {
             return Ok(None);
         }
-        let git = Git::new(cwd).with_environment(self.environment.clone());
+        let git = self.git_at(cwd);
         let options = || ExecuteOptions {
             allow_nonzero: true,
             ..Default::default()
@@ -280,7 +293,7 @@ impl RepositoryIdentityResolver {
             return Ok(value);
         }
         drop(cache);
-        let git = Git::new(Path::new(&root)).with_environment(self.environment.clone());
+        let git = self.git_at(&root);
         let options = || ExecuteOptions {
             allow_nonzero: true,
             ..Default::default()
@@ -302,15 +315,17 @@ impl RepositoryIdentityResolver {
             None
         };
         let identity = picked.map(|(name,url)| -> Result<RepositoryIdentity> {
-            let key = t3_git::remote_repository_key(&url);
-            let remote=t3_forge::remote::parse_remote(&url);
+            let safe_url = crate::redaction::remote_url(&url);
+            let key = t3_git::remote_repository_key(&safe_url);
+            let remote=t3_forge::remote::parse_remote(&safe_url);
             let display=remote.as_ref().and_then(|r|r.repository.as_deref());
             let canonical_path=key.split_once('/').map(|(_,p)|p).unwrap_or("");
             let repository_path=display.filter(|p|p.to_lowercase()==canonical_path).unwrap_or(canonical_path);
-            let origin = remotes.get("origin").filter(|url| t3_git::remote_repository_key(url) != key).map(|url| {
-                let key = t3_git::remote_repository_key(url);
+            let origin = remotes.get("origin").filter(|url| t3_git::remote_repository_key(&crate::redaction::remote_url(url)) != key).map(|url| {
+                let safe_url = crate::redaction::remote_url(url);
+                let key = t3_git::remote_repository_key(&safe_url);
                 let canonical = key.split_once('/').map(|(_,p)|p).unwrap_or("");
-                let display = t3_forge::remote::parse_remote(url).and_then(|r|r.repository)
+                let display = t3_forge::remote::parse_remote(&safe_url).and_then(|r|r.repository)
                     .filter(|path|path.to_lowercase()==canonical).unwrap_or_else(||canonical.into());
                 serde_json::json!({"canonicalKey":key,"remoteUrl":url,"displayName":display})
             });
@@ -335,6 +350,7 @@ impl RepositoryIdentityResolver {
             } else {
                 identity
             };
+        let identity = identity.map(crate::redaction::identity);
         let ttl = if identity.is_some() { 900 } else { 60 };
         self.cache.lock().await.put(key, identity.clone(), ttl);
         Ok(identity)

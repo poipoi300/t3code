@@ -77,19 +77,22 @@ impl Fixture {
             )),
         );
         let settings = t3_config::settings::SettingsService::new(temp.path().join("settings.json"));
-        let service = ProjectService::new(ProjectServices {
-            database: database.clone(),
-            sink: sink.clone(),
-            projections: projections.clone(),
-            legacy,
-            thread_lanes: Arc::new(KeyedLanes::default()),
-            clock: clock.clone(),
-            ids,
-            settings,
-            enrichment,
-            clones: clones.clone(),
-            home: temp.path().into(),
-        });
+        let service = ProjectService::new_with_git(
+            ProjectServices {
+                database: database.clone(),
+                sink: sink.clone(),
+                projections: projections.clone(),
+                legacy,
+                thread_lanes: Arc::new(KeyedLanes::default()),
+                clock: clock.clone(),
+                ids,
+                settings,
+                enrichment,
+                clones: clones.clone(),
+                home: temp.path().into(),
+            },
+            t3_git::Git::new(temp.path()).with_environment(git_environment(temp.path())),
+        );
         Self {
             temp,
             service,

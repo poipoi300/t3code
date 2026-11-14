@@ -417,7 +417,12 @@ impl ProjectEnrichmentService {
             identities,
             Duration::from_secs(60),
             remember_identity,
-            move || async move { backend.repository_identity(&owned, false).await },
+            move || async move {
+                backend
+                    .repository_identity(&owned, false)
+                    .await
+                    .map(|value| value.map(crate::redaction::identity))
+            },
         )
         .await
     }

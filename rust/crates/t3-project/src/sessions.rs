@@ -31,7 +31,7 @@ pub struct SessionCandidates {
 }
 pub enum RecentSession {
     Importable {
-        thread: SessionThread,
+        thread: Box<SessionThread>,
         source: AgentSessionImportSource,
         worktree: Option<SessionWorktree>,
     },
@@ -303,7 +303,11 @@ impl AgentSessionImporter {
             match self
                 .import_one(
                     &id,
-                    ImportTarget { project: &input.project_id, root: &project.workspace_root.0, worktree: worktree.as_ref() },
+                    ImportTarget {
+                        project: &input.project_id,
+                        root: &project.workspace_root.0,
+                        worktree: worktree.as_ref(),
+                    },
                     &source,
                     &thread,
                     mode,
@@ -354,7 +358,8 @@ impl AgentSessionImporter {
                 return Ok(Some(false));
             }
         } else {
-            let (events, provider_thread) = import_events(id, target.project, source, thread, mode, target.worktree)?;
+            let (events, provider_thread) =
+                import_events(id, target.project, source, thread, mode, target.worktree)?;
             let result = self
                 .sink
                 .commit_with_options(
@@ -377,7 +382,15 @@ impl AgentSessionImporter {
             }
         }
         self.runtimes
-            .persist_runtime(id, source, thread, target.worktree.map_or(target.root, |worktree| worktree.path.as_str()), mode)
+            .persist_runtime(
+                id,
+                source,
+                thread,
+                target
+                    .worktree
+                    .map_or(target.root, |worktree| worktree.path.as_str()),
+                mode,
+            )
             .await?;
         self.runtimes.record_imported_transcript(id, source).await?;
         Ok(Some(true))
@@ -458,4 +471,3 @@ fn import_events(
         serde_json::from_value(provider)?,
     ))
 }
-

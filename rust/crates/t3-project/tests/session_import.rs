@@ -62,7 +62,7 @@ impl SessionInventory for Inventory {
         )
         .unwrap();
         Ok(vec![RecentSession::Importable {
-            thread,
+            thread: Box::new(thread),
             source: self.source.clone(),
             worktree: self.worktree.clone(),
         }])

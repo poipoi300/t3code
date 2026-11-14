@@ -52,7 +52,10 @@ impl ManagedProjectFolders {
         }
     }
     fn git(&self, cwd: &Path) -> Git {
-        Git::new(cwd).with_environment(self.git_environment.clone())
+        self.projects
+            .git()
+            .at(cwd)
+            .with_environment(self.git_environment.clone())
     }
     pub async fn scratch_root(&self) -> Option<PathBuf> {
         let mut probe = self.probe.lock().await;

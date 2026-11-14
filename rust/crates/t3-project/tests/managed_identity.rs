@@ -213,7 +213,13 @@ async fn cleanup_refuses_a_real_junction_pointing_outside() {
         outside.clone().into_os_string(),
     ]);
     t3_process::run(options).await.unwrap();
-    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "server HostFolders must recognize junctions as links");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "server HostFolders must recognize junctions as links"
+    );
     folders.cleanup_unowned(&link).await;
     assert!(std::fs::symlink_metadata(&link).is_ok());
     assert_eq!(
@@ -221,6 +227,30 @@ async fn cleanup_refuses_a_real_junction_pointing_outside() {
         "outside data"
     );
     std::fs::remove_dir(link).unwrap();
+    let claim = folders.named_projects_root.join("nested-link-claim");
+    std::fs::create_dir(&claim).unwrap();
+    let nested = claim.join("outside");
+    let options = t3_process::ProcessOptions::new("cmd.exe").args(vec![
+        std::ffi::OsString::from("/d"),
+        "/c".into(),
+        "mklink".into(),
+        "/J".into(),
+        nested.into_os_string(),
+        outside.clone().into_os_string(),
+    ]);
+    t3_process::run(options).await.unwrap();
+    assert!(
+        std::fs::symlink_metadata(claim.join("outside"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    folders.cleanup_unowned(&claim).await;
+    assert!(!claim.exists());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep")).unwrap(),
+        "outside data"
+    );
     f.shutdown().await;
 }
 

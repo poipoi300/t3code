@@ -6,6 +6,7 @@ pub mod identity;
 pub mod managed;
 mod projection;
 pub mod promotion;
+mod redaction;
 pub mod scripts;
 pub mod service;
 pub mod session_json;

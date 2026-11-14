@@ -113,6 +113,27 @@ impl WorktreeSetupTracker {
                 if let Some(s) = s {
                     let next = s.sequence + 1;
                     f(s);
+                    s.error = s
+                        .error
+                        .as_ref()
+                        .map(|v| clamp_text(&crate::redaction::text(v), 1000));
+                    if let Some(script) = &mut s.setup_script {
+                        script.command.0 = crate::redaction::text(&script.command.0);
+                    }
+                    for stage in &mut s.stages {
+                        stage.detail = stage
+                            .detail
+                            .as_ref()
+                            .map(|v| clamp_text(&crate::redaction::text(v), 200));
+                        stage.tail = stage
+                            .tail
+                            .iter()
+                            .rev()
+                            .take(4)
+                            .map(|v| clamp_text(&crate::redaction::text(v), 400))
+                            .collect();
+                        stage.tail.reverse();
+                    }
                     s.sequence = next;
                 }
             });
@@ -127,7 +148,6 @@ impl WorktreeSetupTracker {
         self.update(id, |s| {
             if let Some(stage) = s.stages.iter_mut().find(|e| e.id == stage) {
                 f(stage);
-                stage.detail = stage.detail.as_ref().map(|s| clamp_text(s, 200));
             }
         });
     }
@@ -159,7 +179,7 @@ impl WorktreeSetupTracker {
     }
     pub fn append_tail(&self, id: &ThreadId, stage: WorktreeSetupStageId, line: &str) {
         self.stage(id, stage, |s| {
-            s.tail.push(clamp_text(line, 400));
+            s.tail.push(line.into());
             if s.tail.len() > 4 {
                 s.tail.remove(0);
             }
@@ -178,7 +198,7 @@ impl WorktreeSetupTracker {
         self.update(id, |s| {
             s.phase = phase;
             s.ended_at = Some(now.clone());
-            s.error = error.map(|s| clamp_text(s, 1000));
+            s.error = error.map(String::from);
             for e in &mut s.stages {
                 if e.status == WorktreeSetupStageStatus::Running {
                     e.ended_at = Some(now.clone());

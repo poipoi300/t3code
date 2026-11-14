@@ -1,96 +1,39 @@
-# t3-project hand-off — upstream 817a9186f9 round
+# t3-project review round — M1/M2/L5
 
-Status: blocked before changed tests can execute. No subagents, commits, pushes,
-foreign-crate edits, network clone tests, real provider-home reads or live T3
-reads occurred. The coordinator's shared seam file was edited as explicitly
-requested; all source/test changes are inside t3-project.
+Source: C:\Users\Administrator\t3code-rust\rust\crates\t3-project.
+The previous dependency-blocked hand-off is superseded. No subagents or commits.
 
-## Workspace and checks
+Implemented and observed red-to-green: container refusal before project commit;
+linked-session branch/worktreePath/runtime cwd; project-ID warning on settings
+cleanup failure; credential stripping before identity/enrichment publication and
+setup progress/error publication. Native t3-git container probe and its real
+repository/Windows junction matrix were added under explicit coordinator permission;
+no safety.rs/checkpoint.rs edits. Other siblings are read-only.
 
-C:\Users\Administrator\t3code-rust\rust\crates\t3-project is authoritative.
-Run scoped Cargo from C:\Users\Administrator\t3code-rust\rust with
-CARGO_TARGET_DIR=D:\t3code-rust-target\project. Keep TWO jobs and sccache from
-.cargo/config.toml. This round used sccache successfully; no wrapper error or
-memory-allocation failure occurred. Never restore the stale server-j staging
-snapshot. The installed crate already built before its original installation.
+The server already supplies native ManagedFolderIo as HostFolders; no duplicate
+backend was added. Tests pin its Windows junction predicate and exercise managed
+cleanup through the temp fixture backend. New nested-junction assertions ensure
+the std::fs::remove_dir_all primitive preserves the outside sentinel.
 
-cargo fmt -p t3-project passes. Initial cargo test -p t3-project --no-fail-fast
-and a later focused linked-worktree test both stopped in a dependency:
-t3-orchestration/src/composition.rs:457 constructs ThreadManagementServices
-without its newly required worktree_restore field (E0063). This belongs to the
-orchestration composition integrator; do not edit it. No command remains running.
-No current test pass or observed-red claim is made. The older 38-test full green
-and three enrichment-focused greens predate this wave; 47 cases are expected now.
+Server/owner actions are in briefs/server-seam-requests.md, section
+"t3-project review follow-up — M1/M2/L5": inject the single environment Git via
+ProjectService::new_with_git / RepositoryIdentityResolver::with_git; automatic
+startup must call bootstrap_automatic and skip only None; Git setup owner must
+redact its independent setup tracker before clients subscribe. RecentSession
+Importable now boxes SessionThread (Preview owner's Clippy request).
 
-## Current source changes (changed tests FIRST)
+Native SessionInventory still needs the workspace owner's public descriptor-
+bound discovery/streaming/restat outside registered roots; scoped.rs remains
+private. Import runtime repository and native-history locking/policy need the
+persistence/provider-runtime and orchestration 05/04 owners. Discovery budgets,
+zstd decompression and selection remain project-owned once those seams exist.
+No real provider home/live T3 directory or network remote was used.
 
-- tests/project_service.rs: real bare and nonbare worktree containers must be
-  rejected on create/root-change without project mutation. This is the changed
-  upstream refusal case; it has not executed yet, and behavior is not patched.
-- sessions.rs: added SessionWorktree { path, branch } and optional worktree on
-  RecentSession::Importable. The importer intentionally ignores the new metadata
-  until its changed test is observed red. Next fix: pass it to import_events,
-  persist branch/worktreePath on the imported app thread, and persist runtime
-  cwd as worktree.path instead of project root.
-- tests/session_import.rs: added a real Git linked-worktree import test asserting
-  stored path, branch and runtime cwd. Existing tests pass worktree=None. Fixture
-  transcripts now live under an explicit TEMP .codex/sessions tree, not real home.
-- tests/trackers.rs: strengthened the existing concrete ForgeCloneRepository
-  test to use a TEMP file:// remote, assert real progress callbacks, remove a
-  partial initialized repository, and preserve/refuse foreign non-clone contents.
-- managed.rs: exported scratch_folder_root(base_dir), reused by scratch_root;
-  source semantics unchanged. Cleanup/recovery owners can reuse that convention.
-- README: latest drift state and worktreeContainer coverage row added. The
-  earlier full ownership audit/RPC ledger and limitations remain present.
-
-## Shared seam file (explicitly requested by coordinator)
-
-C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md has a
-"t3-project next round" section with exact server construction/calls:
-- Replace CloningUnavailable with existing ForgeCloneRepository over one shared
-  registry/Git/cwd/account_home; ONE ProjectCloneTracker inside the shared service.
-  start through ProjectService::start_clone; cancel/retry through clones(); watch
-  the borrowed initial snapshot then changes; shutdown owned work before SQLite.
-- Promotion already has MoveThreadTasks for ScheduledTaskService. Server G/A
-  must expose/retain its existing scheduler Arc (SchedulerAdapter.service is
-  private), then use ScratchThreadPromotion::new and join shutdown.
-- ONE Arc-backed ProjectService must be shared by runtime bootstrap, launch,
-  handlers, managed folders and promotion. Do not reconstruct an independent one.
-- Automatic bootstrap must skip specifically a refused worktree container;
-  explicit mutations still fail. Do not swallow unrelated startup errors.
-- Native SessionInventory is still missing; explicit provider homes alone do
-  not create it. Workspace/provider owners need to expose bounded descriptor-
-  bound listing/streaming/restat outside registered workspaces. Scanner discovery,
-  zstd decoding/decompressed limits, fairness and selection remain t3-project
-  work once the public I/O primitives exist. No empty-success inventory.
-- ProviderSessionRuntime domain repository (completed/per-thread identities,
-  stopped insert-ignore preserving imports, atomic source recording) needs an
-  assigned persistence/provider-runtime owner. Native-history import needs
-  orchestration 05's session-mutation lock/history port and policy composition.
-
-## Request to active t3-git owner (in same seam file)
-
-Expose conservative Git::is_worktree_container() -> Result<bool, GitError> using
-current apps/server/src/project/worktreeContainer.ts and its real-repo test matrix:
-.git must be a gitfile targeting canonical metadata strictly inside root; either
-bare, or committed with no index; a linked worktree (skip main) must be strictly
-inside root. Normal .git directories, valid linked/fresh/orphan/separate-git-dir
-checkouts, outside worktrees and inconclusive failures return false. Include
-container aliases through Windows junctions/symlinks. The privileged metadata
-reader is not public in t3-workspace; do not duplicate its filesystem internals.
-Once supplied, call it before create and only changed update roots, returning
-Project Invalid with the upstream explanation before committing.
-
-## First on resume
-
-1. After composition owner supplies worktree_restore, run the changed session
-   and container cases and observe failures BEFORE changing behavior.
-2. Fix linked import path/branch/runtime cwd; assert red then green.
-3. Consume the Git owner's probe, complete project refusal and automatic-bootstrap
-   integration without a second service instance; record exact server follow-up.
-4. Execute the strengthened local-clone test and all previously pending identity,
-   enrichment, promotion and service tests. Fix OWN failures only.
-5. Native scanner/importer remain blocked on the named public I/O/runtime APIs;
-   never read real ~/.codex or ~/.claude and never duplicate sibling internals.
-6. Run scoped fmt, exact all-target clippy -D warnings, and full tests; update
-   README/seam results with actual evidence, not historical counts.
+Checks use D:\t3code-rust-target\project, TWO configured jobs and the configured
+rustc-gate wrapper, with 30-minute cargo deadlines and no bypass. Final scoped
+format (including --check), exact all-target Clippy with -D warnings and all 50
+project tests pass, including the exact-value, legacy-root and nested-junction
+assertions. The final Git container matrix also passes (one test). Every cargo
+run is finished; no background work remains. See README for coverage/differences
+and the seam file for the next server/Git-owner actions.
+No report should claim the prior external compilation errors are still blockers.

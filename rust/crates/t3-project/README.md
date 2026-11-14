@@ -12,18 +12,16 @@ Specification was re-read after the head-91 upstream merge. The server now uses
 this service for ensureScratch/mutate/createNew. Remaining server construction
 and exact RPC calls are recorded in the t3-project next-round section of
 C:\Users\Administrator\t3code-rust-notes\briefs\server-seam-requests.md.
-ForgeCloneRepository already supplies the real Git backend; the server still
-constructs CloningUnavailable. Promotion's scheduler adapter also exists, but
-server G/A must retain/expose its existing Arc<ScheduledTaskService>.
+ForgeCloneRepository supplies the real Git backend; the server forge adapter now
+exposes its registry for injection. Promotion's scheduler adapter also exists.
 
-Changed tests were added before behavior: imported linked worktrees must retain
-path/branch/runtime cwd; container create/root-change must refuse without commits.
-These cannot yet execute: orchestration composition.rs:457 is missing the new
-ThreadManagementServices.worktree_restore field. No behavior fix is claimed.
-RecentSession::Importable now carries optional SessionWorktree metadata, but the
-importer still ignores it pending the required observed-red test. The active
-t3-git owner has a precise worktree-container probe request in the seam file;
-the privileged metadata read API needed for that conservative probe is absent.
+Review M1/M2/L5 are fixed with observed red-to-green tests: create and changed-root
+update refuse metadata/worktree containers before commit; automatic bootstrap has
+a refusal-only skip API; imported linked worktrees retain branch/path/runtime cwd;
+failed settings cleanup logs the project ID without undoing deletion. The new
+t3-git container probe and real-repository test matrix were added under explicit
+coordinator authorization. Server composition must call bootstrap_automatic and
+share one ProjectService and environment Git handle (see the seam file).
 Native provider inventory (including bounded decompressed .jsonl.zst processing)
 and the runtime repository remain blocked as described below.
 
@@ -32,9 +30,9 @@ checks partial-repository cleanup, then verifies foreign contents are preserved.
 Session fixtures now live inside an explicit temp .codex/sessions tree. No real
 provider home is read. scratch_folder_root is exported for cleanup/recovery;
 the existing scratch-root behavior is unchanged. Current build output is
-D:\t3code-rust-target\project with two configured jobs and sccache. No sccache
-error or memory-allocation failure occurred. Format passes; current tests/clippy
-are not green because the dependency does not type-check (47 tests expected).
+D:\t3code-rust-target\project with two configured jobs and the configured
+rustc-gate wrapper. No wrapper bypass or memory-allocation retry was needed.
+The review regressions and previous dependency-blocked tests now execute.
 
 ## Coverage audit (initial state)
 
@@ -60,15 +58,17 @@ behavioral completeness, not the mere presence of a similarly named type.
 | AgentSessionImporter.ts | None; legacy_v1_thread_importer handles a different format | No |
 | http.ts | None; ports::transport::http handles thread routes, not project routes | No; service targets snapshot/mutate |
 | threadWorkspaceRoot.ts | Equivalent workspace lookup inside thread launch/title services, no exported helper | Partial |
-| worktreeContainer.ts (upstream addition) | No current home; requested t3-git public probe, consumed by t3-project validation | Blocked on active Git owner |
+| worktreeContainer.ts (upstream addition) | No home at initial audit | Additive Git module now recorded in current coverage below |
 
 Tests alongside these TypeScript files are the specification. Existing sibling
-implementations will be reused and never edited here.
+implementations are reused; this review round explicitly permits the additive
+t3-git container module, declaration and tests.
 
 ## Current coverage and handler API
 
-This is an incomplete port: managed filesystem and native session
-inventory/runtime adapters remain blocked on sibling public APIs. All are
+This is an incomplete port: native session inventory/runtime adapters remain
+blocked on sibling public APIs. Managed filesystem operations now have the
+server's native HostFolders backend. All backend seams are
 required constructor inputs; no empty-success default exists.
 
 The forge owner added clone services/progress during this task. The final code
@@ -78,22 +78,22 @@ uses those APIs; the initially necessary local progress parser was removed.
 | --- | --- | --- |
 | ProjectService.ts | t3-project::service; orchestration project stores/planners/EventSink | Core service implemented; metadata differences below |
 | ProjectMutation.ts | t3-project::service::mutate | Implemented, shielded delete/clone discard |
-| ManagedProjectFolders.ts | t3-project::managed | Service implemented; native ManagedFolderIo missing |
+| ManagedProjectFolders.ts | t3-project::managed; t3-server::adapters::project::HostFolders | Service and native backend implemented; cleanup refusal tests include an outside Windows junction |
 | ProjectCloneTracker.ts | t3-project::clones | Tracker + concrete ForgeCloneRepository adapter implemented; full parity unverified |
 | gitCloneProgress.ts | t3-forge::clone_progress; t3-project forwarding adapter | Existing sibling port reused |
-| ProjectEnrichmentService.ts | t3-project::enrichment | Separate bounded lanes/caches, options, remembered identities, single-flight lookups and publication; latest tests partly blocked |
+| ProjectEnrichmentService.ts | t3-project::enrichment | Bounded lanes/caches, options, remembered identities, single-flight and redacted publication; tests pass |
 | ProjectFaviconResolver.ts | t3-workspace::project::FaviconResolver | Partial sibling port reused; differences below |
 | ProjectSetupScriptRunner.ts | t3-workspace::scripts/project; t3-project::scripts | Execution reused; settings/projection/trust composition added |
-| WorktreeSetupTracker.ts | t3-project::setup | Implemented: sliding subscriptions/cancel acknowledgement/retention |
-| RepositoryIdentityResolver.ts | t3-project::identity; t3-git keys/execution; t3-forge remote recognition | Cwd/root LRU caches, coalescing and optional refiner added; post-fix verification blocked; host normalization gaps remain |
+| WorktreeSetupTracker.ts | t3-project::setup; t3-git::setup_tracker | Legacy tracker implemented with redacted output; server must use one authoritative tracker; Git owner's redaction request recorded |
+| RepositoryIdentityResolver.ts | t3-project::identity; t3-git keys/execution; t3-forge remote recognition | Cwd/root caches, coalescing, optional refiner and credential redaction verified; host normalization gaps remain |
 | T3ProjectFileLoader.ts | t3-workspace::project::{load_project_file,parse_project_file}, t3-contracts | Partial sibling port reused; bounds/parser differences below |
-| ScratchThreadPromotion.ts | t3-project::promotion; t3-scheduler task-movement adapter | Service with joined shutdown implemented; managed folders required; lifecycle regression awaits dependency build |
+| ScratchThreadPromotion.ts | t3-project::promotion; t3-scheduler task-movement adapter | Service with joined shutdown implemented; real SQLite lifecycle regression passes |
 | AgentSessionScanner.ts | t3-project::sessions::AgentSessionScanner and transcript | Partial: merge/exclusions/import flags and interpretation; discovery/streaming missing |
 | AgentSessionJson.ts | t3-project::session_json | Streaming bounded projection; accounting/scalar differences below |
-| AgentSessionImporter.ts | t3-project::sessions::AgentSessionImporter | Recent history import; runtime adapter/native history missing |
+| AgentSessionImporter.ts | t3-project::sessions::AgentSessionImporter | Recent history and linked-worktree metadata/runtime cwd verified; native runtime adapter/history remain missing |
 | http.ts | t3-project::service::{snapshot,mutate} | Service targets implemented; transport wiring remains with handler owner |
 | threadWorkspaceRoot.ts | t3-project::promotion::thread_workspace_root | Implemented |
-| worktreeContainer.ts | t3-git requested probe; t3-project create/root-change validation consumer | New upstream refusal test staged; Git API and observed-red execution pending |
+| worktreeContainer.ts | t3-git::worktree_container; t3-project::service | Implemented and verified against real repositories and Windows aliases; inconclusive probes accept, matching TS |
 
 Implemented does not mean every original acceptance test has been ported.
 
@@ -115,6 +115,11 @@ and account home. Thread lanes MUST be the dispatcher's own KeyedLanes. Watch
 receivers deliver the current borrowed value first, then changed/newest values.
 Cancel/retry return the inner boolean for the handler envelope. All wire payloads
 use t3-contracts; no local type needs moving there.
+
+Use ProjectService::new_with_git and RepositoryIdentityResolver::with_git with
+clones of the environment's single configured Git root. Managed folders derive
+checkout handles from that service. bootstrap_automatic returns None only for a
+positively identified container; explicit bootstrap retains its existing Result.
 
 EnrichmentOptions supplies cache_capacity/max_pending/concurrency (512/512/4;
 each clamped to at least one). with_backend accepts a required ProjectMetadata
@@ -139,19 +144,20 @@ low-level create/update/delete after closing admission.
 
 | Blocked work | Named owner / requested home |
 | --- | --- |
-| Native managed-directory operations, descriptor-bound streaming/listing outside registered workspaces | t3-workspace security-fixes owner; t3-workspace public API |
+| Descriptor-bound streaming/listing outside registered workspaces | t3-workspace security-fixes owner; t3-workspace public API |
 | ProviderSessionRuntime domain repository | Coordinator/persistence owner must supply or assign this missing home; it is explicitly outside orchestration package 01's store seams |
 | Native-history import session mutation locks, registry/runtime policy composition | Orchestration 05 sessions/recovery, with t3-provider and orchestration 04 policy owners |
 | Canonical provider identity/refinement and post-clone authoritative status notification | t3-forge owner and server D/F composition owners; t3-git owner for remote-key normalization |
-| Dependency compilation and final crate verification | Orchestration 04 decisions/dispatch owner: latest exact clippy fails in runtime/dispatch.rs; t3-forge owner: last full-test diagnostics listed under Checks |
+| Redaction in the authoritative Git setup tracker | t3-git setup owner; current tracker clamps raw submodule tails/errors; precise seam request recorded |
 
 Scanner discovery and budget enforcement remain t3-project work blocked on the
 workspace reader primitives; this table does not reassign that business logic.
 
-- ManagedFolderIo: t3-workspace needs atomic nonrecursive mkdir/claim, recursive
-  mkdir, managed-root writes and no-follow removal. Known-workspace preview/write
-  APIs cannot claim/remove unmanaged directories. Tests implement this backend
-  only for temporary fixtures, including an actual external Windows junction.
+- ManagedFolderIo now has server HostFolders: symlink_metadata refuses link or
+  non-directory roots and std::fs::remove_dir_all does not traverse nested links.
+  Crate tests exercise the service with a temp backend and verify the Windows
+  junction FileType predicate used by HostFolders; they do not call the private
+  server adapter. No ancestor-swap descriptor guarantee is claimed.
 - SessionInventory: workspace/provider composition needs bounded home discovery,
   multi-instance fairness, Codex state_5.sqlite roots/index tail, metadata scans,
   linked-worktree folding, descriptor-bound streaming/restat, and inherited
@@ -187,19 +193,21 @@ of the pure transcript helper.
 | ProjectCloneTracker.test.ts | trackers.rs | Real clones/project-first/private URLs/cancel/retry/late success/failure/duplicate/order/concrete adapter/stall/retention; full takeover matrix remains |
 | WorktreeSetupTracker.test.ts | trackers.rs and setup unit test | Stages/tails/deadline retention/null/restart subscription/cancel acknowledgement/uncancellable/abandoned subscription reclamation |
 | RepositoryIdentityResolver.test.ts | managed_identity.rs | Real upstream/origin/marks/cache/bare/local URLs; full host/mark matrix remains |
-| ProjectEnrichmentService.test.ts | enrichment.rs and ProjectService integration | Real Git eviction, independent saturated lanes, pending bound/dedupe, invalidation and disconnected caller passed; null/failure/expiry cases added awaiting build |
-| ScratchThreadPromotion.ts lifecycle | promotion.rs | Real SQLite/project creation with gated task-store failure; asserts shutdown remains pending until admitted work finishes; awaiting build |
+| ProjectEnrichmentService.test.ts | enrichment.rs and ProjectService integration | Real Git eviction, saturated lanes, pending bound/dedupe, invalidation, disconnected caller, null/failure/expiry and private URL redaction pass |
+| ScratchThreadPromotion.ts lifecycle | promotion.rs | Real SQLite/project creation with gated task-store failure; shutdown joins admitted work |
 | ProjectFaviconResolver.test.ts | Existing t3-workspace tests/project.rs | Sibling tests, not rerun here |
 | ProjectSetupScriptRunner.test.ts | Existing t3-workspace tests/scripts.rs and project.rs | Execution reused; composition wrapper lacks PTY integration test |
 | T3ProjectFileLoader.test.ts | Existing t3-workspace tests/project.rs | Sibling JSONC/schema/trimming/bounds/malformed tests |
 | AgentSessionJson.test.ts | parsing.rs | Original duplicate-key examples/five chunk sizes/projection/malformed/depth/allocation/large skipped payload |
 | AgentSessionScanner.test.ts | parsing.rs and session_import.rs | Claude/Codex/Pi/message window/identity/known-project scan; discovery matrix blocked |
 | AgentSessionImporter.test.ts | session_import.rs | Real projections/runtime/retry/repair/root check; policy/ownership/native-history matrices remain |
+| worktreeContainer.test.ts | t3-git tests/worktree_container.rs; project_service.rs | Bare/nonbare containers, checkout/index/unborn/outside refusals, Windows aliases, automatic-only skip and exact user text |
 
 ## Behavior differences / remaining parity
 
-- Transport auth/startup/error mapping, metrics/tracing/warning logs stay with
-  owners. Native errors are thiserror enums, not exact TS tagged serialization
+- Transport auth/startup/error mapping and metrics stay with owners. Settings
+  cleanup now logs the source warning with project ID. Native errors are
+  thiserror enums, not exact TS tagged serialization
   or all source user-facing explanations.
 - Mutate shields all mutations after caller drop; TS explicitly shields deletion.
   Clone start shields preparation too; TS begins after preparation/claim. Direct
@@ -208,8 +216,7 @@ of the pure transcript helper.
   remembered identities independent of eviction, five-second failure caching,
   single-flight lookups and cancellation-safe owned resolution. Source-equivalent
   warning logs remain absent. Background requests use bounded tracked tasks
-  waiting on permits instead of Effect queues. Three new behavioral tests pass;
-  the remaining new cases await dependency compilation.
+  waiting on permits instead of Effect queues. Behavioral tests pass.
 - Identity now caches cwd/root separately, coalesces misses and preserves origin
   display case when the sibling parser recovers it. t3-git normalization lacks some host rewrites and
   distinct HTTP ports. Registry refinement is missing. Remote/path tie sorting
@@ -224,6 +231,13 @@ of the pure transcript helper.
 - Setup uses cancellation token/completion acknowledgement rather than an Effect
   fiber. Subscribed channels survive retention. Empty unsubscribed entries are
   reclaimed on later access/retention, not a separate sweeper.
+- Identity/enrichment and this crate's setup snapshots deliberately remove URL
+  userinfo, query and fragment before publication. Current TS identity returns
+  raw remotes; this is an intentional security improvement, not exact parity.
+  Private Git remotes and executable scripts are unchanged. Git's independent
+  setup tracker still requires its owner's redaction fix before subscription.
+- Container probes add a 64-KiB regular-file read bound and reject truncated or
+  non-UTF-8 Git output as inconclusive. The source has no equivalent byte bound.
 - Existing workspace differences are inherited untouched: project files over
   1 MiB, non-UTF-8 and escaped t3.json links are rejected; TS has no whole-file
   byte cap. Contract trimming/enums/optional-key validation, iconPath's 512
@@ -259,38 +273,23 @@ of the pure transcript helper.
 
 ## Checks
 
-From rust, use CARGO_TARGET_DIR=D:\t3code-rust-target\server-j and retain the
-configured Cargo job limit (currently two):
+From rust, use CARGO_TARGET_DIR=D:\t3code-rust-target\project and retain the
+configured two-job limit and rustc-gate wrapper (30-minute command deadline):
 
     cargo fmt -p t3-project
     cargo clippy -p t3-project --all-targets -- -D warnings
     cargo test -p t3-project
 
-Earlier full Windows verification passed 38 tests (one unit, 37 integration,
-zero ignored; zero doc tests), before the latest enrichment/identity/hydration/
-promotion changes. Integration counts then: managed/identity 8, parsing 9,
-project service 8, session import 3, trackers 9. This includes real
-Git/SQLite/processes, an outside-pointing Windows junction, ownership-query
-failure refusal and actual scratch recreation. The retention regression was
-observed failing before the captured-deadline fix and passing afterwards; the
-absent-inode versus literal-string regression was also observed red then green.
+Current Windows full test run passed 50 tests: one unit; integration enrichment
+6, managed/identity 9, parsing 9, project service 9, promotion 1, session import 4,
+settings cleanup 1 and trackers 10; zero ignored/doc tests. The additive Git
+container matrix passed separately (one test with real repository variants and
+Windows junction aliases). M1, M2, L5, identity redaction and setup redaction were
+each observed failing before their behavior fix, then passing. Final tests also
+pin exact text, retained sanitized values, unchanged-root legacy updates and
+nested-junction target preservation.
 
-Latest format passes. Three focused enrichment regressions passed after the
-rewrite. The cwd-cache regression was observed red before its fix. Four newly
-added cases still need execution/post-fix green: null/failure, expiry, cwd cache,
-promotion shutdown (45 total tests expected). Do not treat the older 38-test
-suite or older passing --no-deps clippy as verification of the current source.
-
-Last full cargo test was blocked before reaching this crate by t3-forge:
-bitbucket/checkout.rs:3-4 calls absent remote::parse_change_request_url;
-bitbucket/checkout.rs:6 names absent ExecuteOptions::check_exit;
-bitbucket/read.rs:6 borrows a temporary; http.rs:45 calls private
-github::transport::is_interactive (E0603). The same dependency build blocks
-clippy in that snapshot. These are t3-forge-owner files and were not changed here.
-The subsequent exact clippy attempt instead failed in orchestration 04's
-runtime/dispatch.rs:1669 (extra .0 on Arc<Inner>), with cascading type/lint
-errors at 1701-1707. Forge emitted no errors in that later attempt; do not assume
-its older diagnostics still apply. Earlier transient GitLab and orchestration
-06 compilation failures were repaired by their owners. Re-run all three required
-checks once dependencies compile. No verification command remains running.
+Format, exact all-target warnings-denied Clippy and the final full project suite
+pass through the configured gate. The additive Git matrix also passes after the
+final first-line parser parity adjustment. No verification command remains running.
 No actual provider home or live T3 database was read, copied or modified.

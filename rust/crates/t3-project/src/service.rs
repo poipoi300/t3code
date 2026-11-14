@@ -55,6 +55,7 @@ pub struct ProjectServices {
     pub home: PathBuf,
 }
 struct Inner {
+    git: t3_git::Git,
     services: ProjectServices,
     project_lanes: KeyedLanes,
     workspace_lanes: KeyedLanes,
@@ -66,7 +67,12 @@ pub struct ProjectService(Arc<Inner>);
 
 impl ProjectService {
     pub fn new(services: ProjectServices) -> Self {
+        let git = t3_git::Git::new(&services.home);
+        Self::new_with_git(services, git)
+    }
+    pub fn new_with_git(services: ProjectServices, git: t3_git::Git) -> Self {
         Self(Arc::new(Inner {
+            git,
             services,
             project_lanes: KeyedLanes::default(),
             workspace_lanes: KeyedLanes::default(),
@@ -76,6 +82,9 @@ impl ProjectService {
     }
     pub fn database(&self) -> &StoreDatabase {
         &self.0.services.database
+    }
+    pub fn git(&self) -> &t3_git::Git {
+        &self.0.git
     }
     pub fn now(&self) -> t3_contracts::base_schemas::IsoDateTime {
         self.0.services.clock.now()
@@ -248,8 +257,28 @@ impl ProjectService {
         }
         Ok((self.create(input).await?, true))
     }
-    pub async fn bootstrap_automatic(&self, input: ProjectMutationMember1) -> Result<Option<(Project, bool)>> {
-        self.bootstrap(input).await.map(Some)
+    pub async fn bootstrap_automatic(
+        &self,
+        input: ProjectMutationMember1,
+    ) -> Result<Option<(Project, bool)>> {
+        if let Some(existing) = self
+            .get_by_workspace_root(&input.workspace_root.0, false)
+            .await?
+        {
+            return Ok(Some((existing, false)));
+        }
+        let root = self
+            .normalize(
+                &input.workspace_root.0,
+                input.create_workspace_root_if_missing.flatten() == Some(true),
+            )
+            .await?;
+        if self.git().at(&root).is_worktree_container().await {
+            return Ok(None);
+        }
+        self.create_at_root(input, root)
+            .await
+            .map(|project| Some((project, true)))
     }
     pub async fn create(&self, input: ProjectMutationMember1) -> Result<Project> {
         let root = self
@@ -258,6 +287,18 @@ impl ProjectService {
                 input.create_workspace_root_if_missing.flatten() == Some(true),
             )
             .await?;
+        self.reject_worktree_container(&root).await?;
+        self.create_at_root(input, root).await
+    }
+    async fn reject_worktree_container(&self, root: &str) -> Result<()> {
+        if self.git().at(root).is_worktree_container().await {
+            return Err(Error::Invalid(format!(
+                "{root} holds a repository's worktrees but is not a checkout itself. Add one of its worktrees as the project instead."
+            )));
+        }
+        Ok(())
+    }
+    async fn create_at_root(&self, input: ProjectMutationMember1, root: String) -> Result<Project> {
         self.commit(ProjectCommand::Create {
             command_id: input.command_id,
             project_id: input.project_id.clone(),
@@ -278,6 +319,9 @@ impl ProjectService {
             Some(root) => self.normalize(&root.0, false).await?,
             None => previous.workspace_root.clone(),
         };
+        if root != previous.workspace_root {
+            self.reject_worktree_container(&root).await?;
+        }
         let invalidate = root != previous.workspace_root || input.favicon_path.is_some();
         self.commit(ProjectCommand::Update {
             command_id: input.command_id,

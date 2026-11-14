@@ -326,22 +326,80 @@ async fn credential_urls_are_redacted_from_identities_cache_and_publication() {
     let root = repository(&f, "private").await;
     let git = Git::new(&root).with_environment(git_environment(f.temp.path()));
     let remote = "https://fixture-user:fixture-secret@github.com/Fixture/Origin.git?token=fixture-query#fixture-fragment";
-    git.execute(&["remote", "set-url", "origin", remote], ExecuteOptions::default()).await.unwrap();
-    git.execute(&["remote", "add", "upstream", "https://other-user:other-secret@github.com/Fixture/Upstream.git?auth=other-query"], ExecuteOptions::default()).await.unwrap();
+    git.execute(
+        &["remote", "set-url", "origin", remote],
+        ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
+    git.execute(
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://other-user:other-secret@github.com/Fixture/Upstream.git?auth=other-query",
+        ],
+        ExecuteOptions::default(),
+    )
+    .await
+    .unwrap();
     let service = ProjectEnrichmentService::new(
         RepositoryIdentityResolver::default().with_environment(git_environment(f.temp.path())),
-        Arc::new(t3_workspace::project::FaviconResolver::new(f.temp.path().into())),
+        Arc::new(t3_workspace::project::FaviconResolver::new(
+            f.temp.path().into(),
+        )),
     );
     let mut changes = service.subscribe_changes();
     service.request(&root).await;
     let published = changes.recv().await.unwrap();
     let cached = service.read_repository_identity(&root).await.unwrap();
-    for value in [serde_json::to_string(&published.enrichment.repository_identity).unwrap(), serde_json::to_string(&cached).unwrap(), serde_json::to_string(&service.peek(&root).await.repository_identity).unwrap()] {
-        for secret in ["fixture-user", "fixture-secret", "fixture-query", "fixture-fragment", "other-user", "other-secret", "other-query"] {
-            assert!(!value.contains(secret), "credential reached a client identity: {secret}");
+    assert_eq!(
+        cached.locator.remote_url.0,
+        "https://github.com/Fixture/Upstream.git"
+    );
+    assert_eq!(cached.canonical_key.0, "github.com/fixture/upstream");
+    assert_eq!(
+        cached
+            .origin
+            .as_ref()
+            .unwrap()
+            .remote_url
+            .as_ref()
+            .unwrap()
+            .0,
+        "https://github.com/Fixture/Origin.git"
+    );
+    for value in [
+        serde_json::to_string(&published.enrichment.repository_identity).unwrap(),
+        serde_json::to_string(&cached).unwrap(),
+        serde_json::to_string(&service.peek(&root).await.repository_identity).unwrap(),
+    ] {
+        for secret in [
+            "fixture-user",
+            "fixture-secret",
+            "fixture-query",
+            "fixture-fragment",
+            "other-user",
+            "other-secret",
+            "other-query",
+        ] {
+            assert!(
+                !value.contains(secret),
+                "credential reached a client identity: {secret}"
+            );
         }
     }
-    assert_eq!(git.execute(&["config", "--get", "remote.origin.url"], ExecuteOptions::default()).await.unwrap().stdout_text().trim(), remote);
+    assert_eq!(
+        git.execute(
+            &["config", "--get", "remote.origin.url"],
+            ExecuteOptions::default()
+        )
+        .await
+        .unwrap()
+        .stdout_text()
+        .trim(),
+        remote
+    );
     service.shutdown().await;
     f.shutdown().await;
 }

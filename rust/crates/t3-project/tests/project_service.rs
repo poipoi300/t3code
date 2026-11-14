@@ -56,8 +56,25 @@ async fn refuses_worktree_containers_on_create_and_root_change_without_committin
             matches!(error, Err(Error::Invalid(_))),
             "container core.bare={bare} was accepted"
         );
+        assert_eq!(
+            error.unwrap_err().to_string(),
+            format!(
+                "{} holds a repository's worktrees but is not a checkout itself. Add one of its worktrees as the project instead.",
+                container.display()
+            )
+        );
         assert!(f.service.snapshot().await.unwrap().projects.is_empty());
-        assert!(f.service.bootstrap_automatic(f.create("automatic", &format!("automatic-{bare}"), &container)).await.unwrap().is_none());
+        assert!(
+            f.service
+                .bootstrap_automatic(f.create(
+                    "automatic",
+                    &format!("automatic-{bare}"),
+                    &container
+                ))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
     let worktree = container.join("develop");
     let project = f
@@ -80,10 +97,62 @@ async fn refuses_worktree_containers_on_create_and_root_change_without_committin
         project.workspace_root
     );
     let ordinary = f.root("ordinary-auto");
-    assert!(matches!(f.service.bootstrap_automatic(f.create("checkout", "duplicate-auto", &ordinary)).await, Err(Error::Invalid(_))), "unrelated invariant errors must propagate");
-    let (automatic, created) = f.service.bootstrap_automatic(f.create("ordinary", "ordinary-auto", &ordinary)).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            f.service
+                .bootstrap_automatic(f.create("checkout", "duplicate-auto", &ordinary))
+                .await,
+            Err(Error::Invalid(_))
+        ),
+        "unrelated invariant errors must propagate"
+    );
+    let (automatic, created) = f
+        .service
+        .bootstrap_automatic(f.create("ordinary", "ordinary-auto", &ordinary))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(created);
-    assert_eq!(f.service.bootstrap_automatic(f.create("other-id", "reuse-auto", &ordinary)).await.unwrap().unwrap().0.id, automatic.id);
+    let (reused, created) = f
+        .service
+        .bootstrap_automatic(f.create("other-id", "reuse-auto", &ordinary))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reused.id, automatic.id);
+    assert!(!created);
+    let legacy = f.root("legacy-container");
+    let legacy_project = f
+        .service
+        .create(f.create("legacy", "legacy-create", &legacy))
+        .await
+        .unwrap();
+    git.execute(
+        &[
+            "clone",
+            "--bare",
+            &source.to_string_lossy(),
+            &legacy.join(".bare").to_string_lossy(),
+        ],
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    std::fs::write(legacy.join(".git"), "gitdir: ./.bare\n").unwrap();
+    let legacy_git = f.service.git().at(&legacy);
+    legacy_git
+        .execute(
+            &["worktree", "add", "checkout", "develop"],
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(legacy_git.is_worktree_container().await);
+    let rename = serde_json::from_value(json!({"type":"project.update", "commandId":"legacy-rename", "projectId":legacy_project.id, "workspaceRoot":legacy_project.workspace_root, "title":"Renamed legacy project"})).unwrap();
+    assert_eq!(
+        f.service.update(rename).await.unwrap().title.0,
+        "Renamed legacy project"
+    );
     f.shutdown().await;
 }
 

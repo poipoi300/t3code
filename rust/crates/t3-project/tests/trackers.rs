@@ -505,14 +505,52 @@ async fn setup_cancel_waits_for_finalization_and_uncancellable_keeps_running() {
 async fn setup_progress_and_failure_do_not_publish_remote_credentials() {
     let tracker = WorktreeSetupTracker::new(Arc::new(ManualClock::new("2026-01-01T00:00:00.000Z")));
     let id = ThreadId("private-setup".into());
-    tracker.begin(id.clone(), None, None, &[WorktreeSetupStageId::Fetch], None).unwrap();
+    tracker
+        .begin(id.clone(), None, None, &[WorktreeSetupStageId::Fetch], None)
+        .unwrap();
     let url = "https://fixture-user:fixture-secret@example.test/team/repo.git?token=fixture-query#fixture-fragment";
-    tracker.stage_status(&id, WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Running, Some(Some(format!("Fetching {url}"))));
+    tracker.stage_status(
+        &id,
+        WorktreeSetupStageId::Fetch,
+        WorktreeSetupStageStatus::Running,
+        Some(Some(format!("Fetching {url}"))),
+    );
+    tracker.update(&id, |snapshot| {
+        snapshot.setup_script = Some(WorktreeSetupScript {
+            name: "Prepare".into(),
+            command: format!("git fetch {url}").into(),
+            terminal_id: "fixture-terminal".into(),
+        });
+    });
     tracker.append_tail(&id, WorktreeSetupStageId::Fetch, &format!("remote: {url}"));
-    tracker.finish(&id, WorktreeSetupPhase::Failed, Some(&format!("could not fetch {url}")));
-    let snapshot = serde_json::to_string(&tracker.get(&id).unwrap()).unwrap();
-    for secret in ["fixture-user", "fixture-secret", "fixture-query", "fixture-fragment"] {
-        assert!(!snapshot.contains(secret), "setup snapshot exposed {secret}");
+    tracker.finish(
+        &id,
+        WorktreeSetupPhase::Failed,
+        Some(&format!("could not fetch {url}")),
+    );
+    let snapshot = tracker.get(&id).unwrap();
+    let safe_url = "https://example.test/team/repo.git";
+    assert_eq!(
+        snapshot.stages[0].detail,
+        Some(format!("Fetching {safe_url}"))
+    );
+    assert_eq!(snapshot.stages[0].tail, vec![format!("remote: {safe_url}")]);
+    assert_eq!(snapshot.error, Some(format!("could not fetch {safe_url}")));
+    assert_eq!(
+        snapshot.setup_script.as_ref().unwrap().command.0,
+        format!("git fetch {safe_url}")
+    );
+    let snapshot = serde_json::to_string(&snapshot).unwrap();
+    for secret in [
+        "fixture-user",
+        "fixture-secret",
+        "fixture-query",
+        "fixture-fragment",
+    ] {
+        assert!(
+            !snapshot.contains(secret),
+            "setup snapshot exposed {secret}"
+        );
     }
     tracker.shutdown().await;
 }
