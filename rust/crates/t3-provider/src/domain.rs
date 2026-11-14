@@ -89,6 +89,11 @@ pub struct DomainPorts {
     pub factories: BTreeMap<ProviderDriverKind, Arc<dyn ProviderFactory>>,
     pub installations: BTreeMap<String, Arc<dyn ManagedInstallation>>,
     pub usage_sources: Option<Arc<dyn GlobalProviderSources>>,
+    pub maintenance_probe: Option<Arc<dyn crate::maintenance_resolution::MaintenanceProbe>>,
+    pub maintenance_executor: Option<Arc<dyn crate::service::MaintenanceExecutor>>,
+    pub registry_fetch: Option<Arc<dyn crate::registry::RegistryFetch>>,
+    pub registry_commands: Option<Arc<dyn crate::registry_installation::RegistryCommands>>,
+    pub registry_downloads: Option<Arc<dyn crate::registry_installation::RegistryDownloads>>,
 }
 impl DomainPorts {
     pub fn native_probes(
@@ -227,7 +232,9 @@ impl ProviderDomain {
         let auth = Arc::new(AuthService::default());
         let providers = ProviderService::new(
             auth.clone(),
-            Arc::new(ProcessMaintenanceExecutor),
+            ports
+                .maintenance_executor
+                .unwrap_or_else(|| Arc::new(ProcessMaintenanceExecutor)),
             Arc::new(RefreshCatalog {
                 manifest: manifest.clone(),
                 settings: ports.settings.clone(),
@@ -295,6 +302,7 @@ impl ProviderDomain {
             manifest: manifest.source(),
             http: ports.http.clone(),
             versions: Arc::new(crate::maintenance::LatestVersions::default()),
+            maintenance_probe: ports.maintenance_probe,
             update_checks: settings.enable_provider_update_checks,
             background: ports.background.clone(),
             managed: managed_codex.clone(),
@@ -343,12 +351,22 @@ impl ProviderDomain {
                 architecture: options.architecture,
                 environment: options.context.environment.clone(),
             },
-            Arc::new(RegistryCatalog::new(client, None)),
-            ports.settings.clone(),
-            Arc::new(ProcessRegistryCommands {
-                cwd: options.context.cwd.clone(),
+            Arc::new(match ports.registry_fetch {
+                Some(fetch) => RegistryCatalog::with_fetcher(fetch, None),
+                None => RegistryCatalog::new(client, None),
             }),
-            Arc::new(ReqwestRegistryDownloads::new().map_err(|_| ServiceError::Response)?),
+            ports.settings.clone(),
+            ports.registry_commands.unwrap_or_else(|| {
+                Arc::new(ProcessRegistryCommands {
+                    cwd: options.context.cwd.clone(),
+                })
+            }),
+            match ports.registry_downloads {
+                Some(downloads) => downloads,
+                None => {
+                    Arc::new(ReqwestRegistryDownloads::new().map_err(|_| ServiceError::Response)?)
+                }
+            },
             ports.clock.clone(),
         ));
         let coordinator = Arc::new(AcpRuntimeCoordinator::new(ports.clock));
@@ -607,6 +625,7 @@ struct DomainNativeFactory {
     manifest: crate::catalog::ManifestSource,
     http: Arc<dyn HttpTransport>,
     versions: Arc<crate::maintenance::LatestVersions>,
+    maintenance_probe: Option<Arc<dyn crate::maintenance_resolution::MaintenanceProbe>>,
     update_checks: bool,
     background: watch::Receiver<BackgroundPolicy>,
     managed: Arc<ManagedCodexFactory>,
@@ -644,8 +663,10 @@ impl ProviderFactory for DomainNativeFactory {
                 platform: self.context.platform,
                 shared_codex_home: self.context.home.join(".codex"),
             },
-            Arc::new(crate::maintenance_resolution::ProcessMaintenanceProbe {
-                cwd: self.context.cwd.clone(),
+            self.maintenance_probe.clone().unwrap_or_else(|| {
+                Arc::new(crate::maintenance_resolution::ProcessMaintenanceProbe {
+                    cwd: self.context.cwd.clone(),
+                })
             }),
             self.http.clone(),
             self.clock.clone(),

@@ -187,6 +187,11 @@ async fn startup_publishes_real_registry_keeps_checks_deferred_and_watches_curre
             factories: BTreeMap::new(),
             installations: BTreeMap::new(),
             usage_sources: None,
+            maintenance_probe: None,
+            maintenance_executor: None,
+            registry_fetch: None,
+            registry_commands: None,
+            registry_downloads: None,
         },
     )
     .await

@@ -384,3 +384,23 @@ zeroSpendCap cases also pass in the full suite. The native ledger backend,
 adapter changes, MSP bridge and title runner bindings above remain the named
 cross-crate blockers; no additional owned service edits are in flight.
 No real provider home, credentials, provider network or provider turns were used.
+
+
+## Native server wiring
+
+`t3-server` starts `ProvidersAdapter` after the existing orchestration session
+manager, inserts the same `ProviderDomain` and `SecretResolver` handles into
+Domains, and merges provider rows into configuration snapshots/status streams.
+Its optional `ProviderEffects` replaces only network/process edges in socket
+fixtures. `DomainPorts` also accepts optional maintenance probe/executor and
+registry fetch/command/download ports; `None` retains the native implementation.
+
+The server serves auth/setup and installation RPCs, provider updates, ACP catalog
+search/prepare/uninstall and text-generator model lists. Authorized reconnect
+exports only the contract-defined hint; profile import strips that hint before
+saving registration. Handoff remains unsupported pending the server/cloud
+owner's trusted destination binding. Global refresh/reset awaits the shared usage
+runtime and source-command projection; eight native ACP session/consent RPCs
+await `AcpSessionHost` from the orchestration/native adapter owner. Configuration
+editor IDs await the host/process owner's shared editor discovery/launch bridge.
+These server bindings are distinct from the domain implementations in the table.
