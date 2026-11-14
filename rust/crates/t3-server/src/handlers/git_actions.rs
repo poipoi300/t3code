@@ -5,6 +5,7 @@ use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
 pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
+    register_review_guides(registry, domains)?;
     #[cfg(feature = "git-actions")]
     if let Some(adapter) = domains.get::<crate::adapters::git_actions::GitActionsAdapter>() {
         return live::register(registry, adapter);
@@ -12,6 +13,50 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     let _ = domains;
     registry.unimplemented::<WsGitRunStackedActionRpc>()?;
     registry.unimplemented::<WsGitPreparePullRequestThreadRpc>()
+}
+
+/// `pullRequests.generateReviewGuide` (`ws.ts`: `reviewGuides.generate`) over the pull-request
+/// adapter's guide service, served only with the production generator; without the
+/// pull-request adapter, `handlers/pull_requests.rs` registers it as unimplemented.
+fn register_review_guides(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
+    #[cfg(feature = "pull-requests")]
+    if let Some(adapter) = domains.get::<crate::adapters::pull_requests::PullRequestAdapter>() {
+        #[cfg(feature = "textgen-native")]
+        if domains
+            .get::<crate::adapters::review_guide::ReviewGuideGenerator>()
+            .is_some()
+        {
+            use crate::registry::Failure;
+            return registry.register::<WsPullRequestsGenerateReviewGuideRpc, _, _>(
+                move |_, input| {
+                    let adapter = adapter.clone();
+                    async move {
+                        adapter
+                            .guides
+                            .generate(input)
+                            .await
+                            .map(|(result, _)| result)
+                            .map_err(|error| {
+                                Failure::Typed(match error.unavailable_error() {
+                                    Some(unavailable) => {
+                                        PullRequestRpcError::PullRequestUnavailableError(Box::new(
+                                            unavailable,
+                                        ))
+                                    }
+                                    None => PullRequestRpcError::PullRequestOperationError(
+                                        Box::new(error.operation_error()),
+                                    ),
+                                })
+                            })
+                    }
+                },
+            );
+        }
+        let _ = adapter;
+        return registry.unimplemented::<WsPullRequestsGenerateReviewGuideRpc>();
+    }
+    let _ = (registry, domains);
+    Ok(())
 }
 
 #[cfg(feature = "git-actions")]

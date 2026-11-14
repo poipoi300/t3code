@@ -34,9 +34,12 @@ impl HostLeftoversAdapter {
         let _ = (context, domains);
         let adapter = Arc::new(Self {
             #[cfg(feature = "workspace")]
-            editors: editors::Editors::start(context, domains, options.editors.clone()).map(Arc::new),
+            editors: editors::Editors::start(context, domains, options.editors.clone())
+                .map(Arc::new),
             #[cfg(feature = "providers")]
-            secrets: secrets::Secrets::start(context, domains).await?.map(Arc::new),
+            secrets: secrets::Secrets::start(context, domains)
+                .await?
+                .map(Arc::new),
             #[cfg(all(feature = "cloud", feature = "project"))]
             peers: peers::Peers::start(context, domains).await?.map(Arc::new),
         });
@@ -195,16 +198,11 @@ pub mod editors {
             for (key, value) in t3_host::editor::graphical_session_env().await {
                 options.env.insert(key.into(), Some(value.into()));
             }
-            let powershell = command
-                .command
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("powershell.exe"));
-            let console = if powershell {
-                t3_process::DetachedConsole::Hidden
-            } else {
-                t3_process::DetachedConsole::None
-            };
-            t3_process::spawn_detached(&options, console)
+            t3_process::spawn_detached(
+                &options,
+                t3_process::DetachedConsole::None,
+                command.verbatim,
+            )
                 .await
                 .map(|_| ())
                 .map_err(|error| {
@@ -282,7 +280,9 @@ pub mod secrets {
         secret_request::SecretRequestFailureReason as Reason,
     };
     use t3_host::{
-        secret_requests::{RequestCard, RequestCards, RequestError, SecretExpiryWorker, SecretRequests},
+        secret_requests::{
+            RequestCard, RequestCards, RequestError, SecretExpiryWorker, SecretRequests,
+        },
         secrets::{ProviderSecrets, Secret, SecretBackend, SecretCheck, SecretRefresh},
     };
     use t3_orchestration::{
@@ -415,7 +415,11 @@ pub mod secrets {
     }
     #[async_trait]
     impl RequestCards for Cards {
-        async fn read(&self, thread: &ThreadId, item: &TurnItemId) -> Result<RequestCard, RequestError> {
+        async fn read(
+            &self,
+            thread: &ThreadId,
+            item: &TurnItemId,
+        ) -> Result<RequestCard, RequestError> {
             let records = self.records(thread).await?;
             let card = Self::item(&records, item)?;
             let decode = |value: &Value| {
@@ -565,10 +569,9 @@ pub mod peers {
                 let _ = follower.await;
             }
             if let Some(forwarder) = self.forwarder.lock().await.take() {
-                forwarder
-                    .shutdown()
-                    .await
-                    .map_err(|_| crate::Error::Service("peer link event forwarder failed".into()))?;
+                forwarder.shutdown().await.map_err(|_| {
+                    crate::Error::Service("peer link event forwarder failed".into())
+                })?;
             }
             Ok(())
         }

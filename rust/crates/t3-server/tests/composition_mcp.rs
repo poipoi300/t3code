@@ -839,6 +839,70 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     let tasks = mcp.call(&token, "list_scheduled_tasks", json!({})).await;
     assert!(!is_error(&tasks), "{tasks}");
 
+    // t3_thread_list: the caller's project, newest activity first, with T3 thread links.
+    let environment = config.scope.environment_id.0.clone();
+    let listed = mcp.call(&token, "t3_thread_list", json!({})).await;
+    assert!(!is_error(&listed), "{listed}");
+    let page = &listed["result"]["structuredContent"];
+    assert_eq!(page["projectId"], "project:mcp", "{page}");
+    assert_eq!(page["currentThreadId"], CALLER, "{page}");
+    assert_eq!(page["total"], 2, "{page}");
+    let caller_item = page["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["threadId"] == CALLER)
+        .unwrap();
+    assert_eq!(
+        caller_item["link"],
+        format!("[{CALLER}](t3-thread://v2/{environment}/{CALLER})")
+    );
+    assert_eq!(caller_item["runtimeMode"], "approval-required");
+    let filtered = mcp
+        .call(&token, "t3_thread_list", json!({"titleContains":"FULL-ACCESS","limit":1}))
+        .await;
+    let filtered = &filtered["result"]["structuredContent"];
+    assert_eq!(filtered["total"], 1, "{filtered}");
+    assert_eq!(filtered["threads"][0]["threadId"], OTHER, "{filtered}");
+    assert_eq!(filtered["nextCursor"], Value::Null, "{filtered}");
+    let absent = mcp
+        .call(&token, "t3_thread_list", json!({"projectId":"project:absent"}))
+        .await;
+    assert!(is_error(&absent), "{absent}");
+    assert!(
+        absent.to_string().contains("invalid_request")
+            && absent.to_string().contains("Project project:absent was not found."),
+        "{absent}"
+    );
+
+    // t3_thread_read: newest first for a thread caller, the user's message included.
+    let read = mcp
+        .call(&token, "t3_thread_read", json!({"threadId": CALLER}))
+        .await;
+    assert!(!is_error(&read), "{read}");
+    let read = &read["result"]["structuredContent"];
+    assert_eq!(read["thread"]["threadId"], CALLER, "{read}");
+    assert_eq!(read["thread"]["runCount"], 1, "{read}");
+    assert!(
+        read["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "user_message" && item["text"] == "Hello"),
+        "{read}"
+    );
+    let missing = mcp
+        .call(&token, "t3_thread_read", json!({"threadId":"thread:absent"}))
+        .await;
+    assert!(is_error(&missing), "{missing}");
+    assert!(
+        missing.to_string().contains("thread_not_found")
+            && missing
+                .to_string()
+                .contains("Thread thread:absent is no longer available."),
+        "{missing}"
+    );
+
     // Thread A's credential cannot change thread B, whose mode is above A's.
     let raised = mcp
         .call(
@@ -905,7 +969,9 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
     );
 
     // A tool whose host service is not bound says so, with the missing method.
-    let unbound = mcp.call(&token, "t3_thread_list", json!({})).await;
+    let unbound = mcp
+        .call(&token, "t3_thread_search", json!({"query":"Hello"}))
+        .await;
     assert!(is_error(&unbound), "{unbound}");
     assert_eq!(unbound["result"]["structuredContent"]["available"], false);
 

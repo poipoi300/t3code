@@ -224,7 +224,9 @@ impl Inner {
     }
 
     /// A client's existing worktree: a local-disk path (decided from its text before any
-    /// filesystem call) that Git lists as a worktree of the project's repository.
+    /// filesystem call) that resolves without a link to a network target, a remote drive or a
+    /// device name (the workspace rule, `t3_workspace::paths::canonicalize`), and that Git
+    /// lists as a worktree of the project's repository. Git runs only after the path passed.
     async fn registered_worktree(
         &self,
         project: &ProjectId,
@@ -237,17 +239,14 @@ impl Inner {
         let Ok(project) = self.project(project).await else {
             return Err("Project not found.".into());
         };
-        let Ok(target) = tokio::fs::canonicalize(path).await else {
+        let Some(target) = local_real_path(PathBuf::from(path)).await else {
             return Err(REFUSED.into());
         };
         let Ok(trees) = self.git.at(&project.workspace_root).list_worktrees().await else {
             return Err(REFUSED.into());
         };
         for tree in trees {
-            if tokio::fs::canonicalize(&tree.path)
-                .await
-                .is_ok_and(|tree| tree == target)
-            {
+            if local_real_path(tree.path).await.is_some_and(|tree| tree == target) {
                 return Ok(());
             }
         }
@@ -500,6 +499,14 @@ impl Inner {
             settings.text_generation_model_selection.clone()
         }
     }
+}
+
+/// `t3_workspace::paths::canonicalize` off the reactor: `None` for a path it refuses.
+async fn local_real_path(path: PathBuf) -> Option<PathBuf> {
+    tokio::task::spawn_blocking(move || t3_workspace::paths::canonicalize(path).ok())
+        .await
+        .ok()
+        .flatten()
 }
 
 fn naming(settings: &ServerSettings) -> t3_textgen::prompts::BranchNaming {

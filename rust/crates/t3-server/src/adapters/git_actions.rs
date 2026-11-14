@@ -76,6 +76,10 @@ impl GitActionsAdapter {
             host: Arc::new(ActionHost {
                 orchestration: orchestration.clone(),
                 database: database.clone(),
+                projects: domains
+                    .get::<crate::adapters::project::ProjectAdapter>()?
+                    .service()
+                    .clone(),
                 pull_requests: domains.get::<crate::adapters::pull_requests::PullRequestAdapter>(),
             }),
             orchestration,
@@ -257,6 +261,8 @@ fn service_error(error: GitError, operation: &str, cwd: &str) -> Box<GitManagerS
 struct ActionHost {
     orchestration: Arc<OrchestrationAdapter>,
     database: StoreDatabase,
+    /// Project shells with their repository identity (`ProjectService.getShell`).
+    projects: t3_project::ProjectService,
     pull_requests: Option<Arc<crate::adapters::pull_requests::PullRequestAdapter>>,
 }
 
@@ -289,13 +295,10 @@ impl GitActionHost for ActionHost {
         &self,
         project: &ProjectId,
     ) -> Result<Option<OrchestrationProjectShell>, GitError> {
-        let ids = vec![project.clone()];
-        let shells = self
-            .database
-            .read(move |db| t3_orchestration::stores::projects::list_shells(db, Some(&ids)))
+        self.projects
+            .get_shell(project)
             .await
-            .map_err(|_| unavailable("project"))?;
-        Ok(shells.into_iter().next())
+            .map_err(|_| unavailable("project"))
     }
     async fn projects(&self) -> Result<Vec<OrchestrationProjectShell>, GitError> {
         self.database
@@ -751,6 +754,7 @@ pub(crate) fn writer_selection(
 
 /// `resolveReviewGuideModelSelection`: text generators cannot investigate a checkout, so they
 /// never write review guides.
+#[cfg_attr(not(feature = "textgen-native"), allow(dead_code))]
 pub(crate) fn review_guide_selection(
     settings: &t3_contracts::settings::ServerSettings,
     providers: &[t3_contracts::server::ServerProvider],
@@ -758,7 +762,9 @@ pub(crate) fn review_guide_selection(
 ) -> ModelSelection {
     if let Some(selection) = &settings.review_guide_model_selection {
         let json = serde_json::to_value(settings).unwrap_or_default();
-        if !settings.text_generators.contains_key(&selection.instance_id)
+        if !settings
+            .text_generators
+            .contains_key(&selection.instance_id)
             && t3_shared::project_settings::project_provider_instance_enabled(
                 &json,
                 project.map(|id| id.0.as_str()),

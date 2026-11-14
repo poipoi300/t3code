@@ -203,6 +203,14 @@ impl Server {
         self.chunks.clear();
         self.exits.clear();
     }
+    /// Opens a second connection for the same session and returns the current one, still open.
+    async fn another_connection(&mut self) -> Socket {
+        let next = connect(&self.origin, self.runtime().address, &self.cookie).await;
+        self.client = Client::new(0, Default::default());
+        self.chunks.clear();
+        self.exits.clear();
+        std::mem::replace(&mut self.socket, next)
+    }
     /// Replaces this connection with one whose session holds only `scopes`.
     async fn reconnect_with(&mut self, scopes: &[&str]) {
         let http = reqwest::Client::new();
@@ -761,6 +769,104 @@ async fn each_method_refuses_a_session_missing_exactly_its_scope() {
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&listed.stdout).contains("feature/x"));
+    s.socket.close(None).await.unwrap();
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// Re-review finding 4: a link inside an authorised workspace whose target is a share is refused
+/// before it is followed, so neither the network nor Git is reached. The link names a host
+/// under `.invalid`, so no real share can answer even without the fix.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_link_to_a_share_inside_a_workspace_is_refused_before_it_is_followed() {
+    let mut s = Server::start().await;
+    let repo = s.home().join("worktrees").join("repo");
+    repository(&repo);
+    let link = repo.join("share");
+    std::os::windows::fs::symlink_dir(r"\\attacker.invalid\x", &link).unwrap();
+    for cwd in [link.clone(), link.join("nested")] {
+        let cwd = cwd.to_string_lossy().into_owned();
+        let status = s.subscribe("subscribeVcsStatus", json!({"cwd": cwd}));
+        not_local_disk(s.next(&status).await.unwrap_err());
+        not_local_disk(s.call("vcs.refreshStatus", json!({"cwd": cwd})).await);
+        not_local_disk(s.call("vcs.listRefs", json!({"cwd": cwd})).await);
+        not_local_disk(
+            s.call(
+                "vcs.createWorktree",
+                json!({"cwd": cwd, "refName": "main", "newRefName": "feature/link", "path": null}),
+            )
+            .await,
+        );
+    }
+    // The workspace itself still resolves (Git does not follow the link).
+    let refreshed = ok(s
+        .call("vcs.refreshStatus", json!({"cwd": repo.to_string_lossy()}))
+        .await);
+    assert_eq!(refreshed["isRepo"], true, "{refreshed}");
+    s.socket.close(None).await.unwrap();
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+/// Each live status or branch subscription keeps a status worker per distinct checkout, so
+/// their number is bounded per connection and per server (TypeScript has no bound).
+const SUBSCRIPTIONS_PER_CONNECTION: usize = 128;
+const SUBSCRIPTIONS_PER_SERVER: usize = 512;
+
+fn over_the_limit(exit: Exit, scope: &str) {
+    let error = failure(exit);
+    assert_eq!(error["_tag"], "GitCommandError", "{error}");
+    let detail = error["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("Too many VCS status subscriptions") && detail.contains(scope),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn status_subscriptions_are_bounded_per_connection_and_per_server() {
+    let mut s = Server::start().await;
+    let repo = s.home().join("worktrees").join("repo");
+    repository(&repo);
+    let cwd = json!({"cwd": repo.to_string_lossy()});
+
+    let mut open = Vec::new();
+    for index in 0..SUBSCRIPTIONS_PER_CONNECTION {
+        let method = if index % 2 == 0 {
+            "subscribeVcsBranch"
+        } else {
+            "subscribeVcsStatus"
+        };
+        let id = s.subscribe(method, cwd.clone());
+        s.next(&id).await.unwrap();
+        open.push(id);
+    }
+    let over = s.subscribe("subscribeVcsStatus", cwd.clone());
+    over_the_limit(s.next(&over).await.unwrap_err(), "connection");
+    let over = s.subscribe("subscribeVcsBranch", cwd.clone());
+    over_the_limit(s.next(&over).await.unwrap_err(), "connection");
+    // Unary methods are not subscriptions.
+    ok(s.call("vcs.refreshBranch", cwd.clone()).await);
+    // Ending one makes room on this connection.
+    let ended = open.pop().unwrap();
+    s.client.interrupt(&ended);
+    let again = s.subscribe("subscribeVcsBranch", cwd.clone());
+    s.next(&again).await.unwrap();
+
+    // Further connections fill the server; each earlier one stays open meanwhile.
+    let mut kept = Vec::new();
+    for _ in 1..SUBSCRIPTIONS_PER_SERVER / SUBSCRIPTIONS_PER_CONNECTION {
+        kept.push(s.another_connection().await);
+        for _ in 0..SUBSCRIPTIONS_PER_CONNECTION {
+            let id = s.subscribe("subscribeVcsBranch", cwd.clone());
+            s.next(&id).await.unwrap();
+        }
+    }
+    kept.push(s.another_connection().await);
+    let over = s.subscribe("subscribeVcsBranch", cwd);
+    over_the_limit(s.next(&over).await.unwrap_err(), "server");
+    for mut socket in kept {
+        socket.close(None).await.unwrap();
+    }
     s.socket.close(None).await.unwrap();
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }

@@ -1,9 +1,9 @@
 //! The `pullRequests.*` RPCs over the one `PullRequestAdapter` (`ws.ts` pull-request block). The
 //! RPC guard has already applied each method's scope.
 //!
-//! Unserved even with the adapter: `generateReviewGuide` (no production `GuideGenerator`: text
-//! generation backend and isolated checkout service) and `subscribeLinkedThreadRefreshes` (its
-//! only producer, orchestration's thread pull-request service, is not composed).
+//! `generateReviewGuide` is registered beside its generator (`handlers/git_actions.rs`).
+//! Unserved even with the adapter: `subscribeLinkedThreadRefreshes` (its only producer,
+//! orchestration's thread pull-request service, is not composed).
 use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
@@ -144,7 +144,7 @@ mod live {
                 })
             }
         })?;
-        registry.unimplemented::<WsPullRequestsGenerateReviewGuideRpc>()?;
+        // `generateReviewGuide` is registered with the generator (`handlers/git_actions.rs`).
         registry.unimplemented::<WsPullRequestsSubscribeLinkedThreadRefreshesRpc>()
     }
 }

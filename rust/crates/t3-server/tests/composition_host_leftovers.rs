@@ -102,7 +102,12 @@ impl Server {
             .unwrap();
         assert_eq!(grant.status(), 200);
         let grant = grant.json::<Value>().await.unwrap();
-        pair(&self.http, &self.base, grant["credential"].as_str().unwrap()).await
+        pair(
+            &self.http,
+            &self.base,
+            grant["credential"].as_str().unwrap(),
+        )
+        .await
     }
     async fn socket(&self, cookie: &str) -> (Socket, Client) {
         let ticket = ticket(&self.http, &self.base, cookie, "rpc").await;
@@ -156,11 +161,7 @@ fn missing_scope(exit: Exit, scope: &str) {
 
 fn settings(home: &Path, settings: Value) {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
-    std::fs::write(
-        home.join("userdata/settings.json"),
-        settings.to_string(),
-    )
-    .unwrap();
+    std::fs::write(home.join("userdata/settings.json"), settings.to_string()).unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -220,7 +221,11 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
     let launched = launches.try_recv().expect("the editor was launched");
     assert_eq!(launched.command, editor);
     assert_eq!(launched.args[0], "--goto");
-    assert!(launched.args[1].ends_with("notes.md:3:2"), "{:?}", launched.args);
+    assert!(
+        launched.args[1].ends_with("notes.md:3:2"),
+        "{:?}",
+        launched.args
+    );
 
     // UNC, device and verbatim paths never reach a process; neither does a path outside every
     // workspace the server owns. The launcher has answered before the RPC does.
@@ -242,7 +247,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         )
         .await;
         let error = failure(exit);
-        assert_eq!(error["_tag"], "ExternalLauncherUnsupportedTargetError", "{cwd}: {error}");
+        assert_eq!(
+            error["_tag"], "ExternalLauncherUnsupportedTargetError",
+            "{cwd}: {error}"
+        );
         assert_eq!(error["editor"], "vscode");
         assert!(launches.try_recv().is_err(), "{cwd} started a process");
     }
@@ -253,7 +261,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
         json!({"cwd": target, "editor": "vscode", "projectRoot": "//attacker.invalid/share"}),
     )
     .await;
-    assert_eq!(failure(exit)["_tag"], "ExternalLauncherUnsupportedTargetError");
+    assert_eq!(
+        failure(exit)["_tag"],
+        "ExternalLauncherUnsupportedTargetError"
+    );
     assert!(launches.try_recv().is_err());
 
     // An editor this machine does not have.
@@ -265,7 +276,10 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
     )
     .await;
     let error = failure(exit);
-    assert_eq!(error["_tag"], "ExternalLauncherUnsupportedEditorError", "{error}");
+    assert_eq!(
+        error["_tag"], "ExternalLauncherUnsupportedEditorError",
+        "{error}"
+    );
     assert!(launches.try_recv().is_err());
 
     let reader = server.cookie(&["orchestration:read"]).await;
@@ -292,6 +306,7 @@ async fn the_production_launcher_starts_a_detached_process() {
         .launch(EditorCommand {
             command: PathBuf::from("git"),
             args: vec!["ls-remote".into(), url, "refs/heads/a b".into()],
+            verbatim: false,
         })
         .await
         .unwrap();
@@ -377,7 +392,9 @@ async fn a_secret_source_check_reads_fresh_and_never_returns_the_value() {
         json!({"_tag": "Failed", "detail": "Could not read this secret from \"Team vault\". Check the provider's settings and that its store is unlocked."})
     );
 
-    let reader = server.cookie(&["orchestration:read", "providers:manage"]).await;
+    let reader = server
+        .cookie(&["orchestration:read", "providers:manage"])
+        .await;
     let (mut socket, mut client) = server.socket(&reader).await;
     let exit = unary(
         &mut socket,
@@ -665,13 +682,13 @@ async fn cards_are_answered_once_and_a_pending_link_request_grants_nothing_acros
         serde_json::from_value(json!({"commandId":"secret-request:turn-item:secret-1:pending","threadId":THREAD,"runId":turn.run_id,"nodeId":turn.root_node_id,"turnItemId":"turn-item:secret-1","label":"Deploy key","reason":"To deploy","secretStatus":"pending"})).unwrap();
     let receipt = runtime
         .threads
-        .dispatch(t3_contracts::orchestration_v2::OrchestrationV2ServerCommand::Internal(
-            Box::new(
+        .dispatch(
+            t3_contracts::orchestration_v2::OrchestrationV2ServerCommand::Internal(Box::new(
                 t3_contracts::orchestration_v2::OrchestrationV2InternalCommand::SecretRequestRecord(
                     Box::new(pending),
                 ),
-            ),
-        ))
+            )),
+        )
         .await
         .unwrap();
     assert!(
@@ -693,7 +710,10 @@ async fn cards_are_answered_once_and_a_pending_link_request_grants_nothing_acros
     let requests = secrets.requests.clone().expect("requests");
     assert!(
         requests
-            .saved_ref(&THREAD.to_owned().into(), &"turn-item:secret-1".to_owned().into())
+            .saved_ref(
+                &THREAD.to_owned().into(),
+                &"turn-item:secret-1".to_owned().into()
+            )
             .unwrap()
             .is_some(),
         "the answer is in the secret store behind a one-use ref"
@@ -741,7 +761,11 @@ async fn cards_are_answered_once_and_a_pending_link_request_grants_nothing_acros
         json!({"threadId": THREAD, "turnItemId": card, "answer": {"type": "grant-everything"}}),
     )
     .await;
-    assert!(failure(exit).to_string().contains("peerLinks.answerRequest"));
+    assert!(
+        failure(exit)
+            .to_string()
+            .contains("peerLinks.answerRequest")
+    );
     let reader = server.cookie(&["orchestration:read", "access:read"]).await;
     let (mut read_socket, mut read_client) = server.socket(&reader).await;
     let exit = unary(
@@ -786,9 +810,15 @@ async fn cards_are_answered_once_and_a_pending_link_request_grants_nothing_acros
             json!({"threadId": THREAD, "turnItemId": card, "answer": {"type": "decline"}}),
         )
         .await);
-        assert_eq!(cards(&adapter, "link_request").await[0]["linkStatus"], "declined");
+        assert_eq!(
+            cards(&adapter, "link_request").await[0]["linkStatus"],
+            "declined"
+        );
     }
-    for (item, reason) in [(card.as_str(), "already_answered"), ("turn-item:absent", "not_found")] {
+    for (item, reason) in [
+        (card.as_str(), "already_answered"),
+        ("turn-item:absent", "not_found"),
+    ] {
         let exit = unary(
             &mut socket,
             &mut client,
@@ -818,7 +848,12 @@ struct Remote {
 /// A loopback stand-in for another environment: its descriptor and MCP OAuth endpoints. The
 /// pairing code `PAIR-OK` is accepted; any other is refused.
 async fn remote() -> (String, Arc<Remote>, tokio::task::JoinHandle<()>) {
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        routing::{get, post},
+    };
     let state = Arc::new(Remote::default());
     let app = Router::new()
         .route(
@@ -918,9 +953,16 @@ async fn peer_links_are_listed_linked_with_the_requested_access_and_unlinked() {
     assert_eq!(linked["access"], "read-only", "{linked}");
     assert_eq!(*remote.decisions.lock().unwrap(), vec![json!("read-only")]);
     let exit = unary(&mut socket, &mut client, "peerLinks.list", json!({})).await;
-    assert!(!serde_json::to_string(&exit).unwrap().contains("remote-token-value"));
+    assert!(
+        !serde_json::to_string(&exit)
+            .unwrap()
+            .contains("remote-token-value")
+    );
     let listed = ok(exit);
-    assert_eq!(listed["links"][0]["environmentId"], "env-remote", "{listed}");
+    assert_eq!(
+        listed["links"][0]["environmentId"], "env-remote",
+        "{listed}"
+    );
     assert_eq!(listed["links"][0]["status"], "reachable", "{listed}");
     assert_eq!(listed["links"][0]["access"], "read-only", "{listed}");
 
@@ -934,7 +976,13 @@ async fn peer_links_are_listed_linked_with_the_requested_access_and_unlinked() {
     let reader = server.cookie(&["orchestration:read", "access:read"]).await;
     let (mut other, mut other_client) = server.socket(&reader).await;
     missing_scope(
-        unary(&mut other, &mut other_client, "peerLinks.link", link("PAIR-OK")).await,
+        unary(
+            &mut other,
+            &mut other_client,
+            "peerLinks.link",
+            link("PAIR-OK"),
+        )
+        .await,
         "access:write",
     );
     missing_scope(

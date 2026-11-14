@@ -40,6 +40,8 @@ git-actions = ["textgen", "forge", "project", "pull-requests", "terminal", "dep:
 # never in a shipped binary: it lets a user point the policy reader away from the machine's
 # policy. Tests get it through the `t3-config` dev-dependency below.
 dev-policy-overrides = ["t3-config?/dev-policy-overrides"]
+# Round-2 text generation (native runners, review guides, title links); not default until it compiles and its tests pass.
+textgen-native = ["git-actions", "providers"]
 project = ["dep:t3-project", "orchestration", "workspace", "dep:t3-process", "dep:async-trait"]
 # The `/mcp` endpoint and per-thread provider credentials (`adapters/mcp.rs`).
 mcp = ["dep:t3-mcp", "t3-mcp/orchestration", "t3-mcp/scheduler", "t3-mcp/workspace", "local-services", "orchestration", "dep:async-trait", "dep:t3-shared", "t3-device?/mcp"]
@@ -115,9 +117,20 @@ tokio-tungstenite = "0.28"
 tokio = { version = "1", features = ["process"] }
 # Its own `main`: the test binary doubles as the fake provider CLI it launches.
 [[test]]
+name = "composition_mcp_native"
+harness = false
+required-features = ["providers", "mcp"]
+
+[[test]]
 name = "native_providers"
 harness = false
 required-features = ["providers"]
+
+# Its own `main`: the test binary doubles as the fake `codex` and `claude` it launches.
+[[test]]
+name = "textgen_native"
+harness = false
+required-features = ["textgen-native"]
 
 [[bin]]
 name = "t3"

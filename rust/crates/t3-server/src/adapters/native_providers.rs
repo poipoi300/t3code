@@ -142,6 +142,8 @@ mod native {
         attachments: PathBuf,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
+        /// Each thread's T3 MCP server (`McpProviderSessions`), read when a session configures it.
+        t3_mcp: Option<Arc<dyn t3_orchestration::provider::T3McpSessions>>,
     }
 
     /// The provider domain's prepared Codex and Claude instances as adapter registrations.
@@ -160,6 +162,7 @@ mod native {
             context: &crate::services::DomainContext<'_>,
             clock: Arc<dyn Clock>,
             ids: Arc<dyn IdGenerator>,
+            t3_mcp: Option<Arc<dyn t3_orchestration::provider::T3McpSessions>>,
         ) -> Arc<Self> {
             Arc::new(Self {
                 domain,
@@ -171,6 +174,7 @@ mod native {
                     attachments: context.local.config.paths.attachments(),
                     clock,
                     ids,
+                    t3_mcp,
                 },
                 built: Mutex::new(BTreeMap::new()),
             })
@@ -253,11 +257,14 @@ mod native {
             &host.home,
             &host.cwd,
         );
-        let options = CodexAdapterOptions::new(
-            spec.instance_id.clone(),
-            host.clock.clone(),
-            host.ids.clone(),
-        );
+        let options = CodexAdapterOptions {
+            t3_mcp: host.t3_mcp.clone(),
+            ..CodexAdapterOptions::new(
+                spec.instance_id.clone(),
+                host.clock.clone(),
+                host.ids.clone(),
+            )
+        };
         if config["setupMode"] == "managed" {
             let adapter = ManagedCodexAdapter {
                 options,
@@ -382,6 +389,7 @@ mod native {
                 home_directory: Some(host.home.clone()),
                 settings_directory: Some(claude_home.clone()),
                 attachment_directory: Some(host.attachments.clone()),
+                t3_mcp: host.t3_mcp.clone(),
                 ..Default::default()
             },
         };
@@ -548,10 +556,7 @@ mod native {
                         .await
                 }
                 None => adapter.open_session(input, session.clone()).await,
-            };
-            if opened.is_err() {
-                return opened;
-            }
+            }?;
             // The session manager cancels the token it passed when it closes the session.
             tokio::spawn(async move {
                 tokio::select! {
@@ -560,7 +565,7 @@ mod native {
                 }
                 drop(effective);
             });
-            opened
+            Ok(opened)
         }
     }
 

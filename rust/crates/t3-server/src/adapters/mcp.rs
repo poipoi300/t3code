@@ -164,6 +164,16 @@ impl McpSessions {
     }
 }
 
+/// What a provider adapter reads when it configures a thread's native session.
+impl t3_orchestration::provider::T3McpSessions for McpSessions {
+    fn read(&self, thread: &ThreadId) -> Option<t3_orchestration::provider::T3McpSession> {
+        McpSessions::read(self, thread).map(|config| t3_orchestration::provider::T3McpSession {
+            endpoint: config.endpoint,
+            authorization_header: config.authorization_header,
+        })
+    }
+}
+
 /// `resolveProjectSettings(...).enableAgent{Browser,Device}Access`: a project override wins,
 /// otherwise the environment's setting.
 fn agent_access(settings: &t3_contracts::settings::ServerSettings, project: &str) -> (bool, bool) {
@@ -647,3 +657,4 @@ impl t3_mcp::apps::AppSession for LiveAppSession {
         Ok(t3_contracts::mcp_apps::McpAppReadResourceResult { contents })
     }
 }
+

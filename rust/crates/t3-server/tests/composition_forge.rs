@@ -237,8 +237,16 @@ impl Server {
     /// A server whose PATH holds the fake glab and Git only, with a GitHub token in settings for
     /// github.com and the stand-in in place of github.com.
     async fn start(github: &str) -> Self {
+        Self::start_with(github, |_| (Vec::new(), Vec::new())).await
+    }
+    /// `extra` gives environment entries (later ones win) and PATH folders, from the home.
+    async fn start_with(
+        github: &str,
+        extra: impl FnOnce(&Path) -> (Vec<(String, String)>, Vec<PathBuf>),
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
+        let (extra_env, extra_path) = extra(home);
         let published = home.join("published.git");
         bare(&published, None);
         fake_glab(&home.join("bin"), &published);
@@ -250,8 +258,12 @@ impl Server {
                 .to_string(),
         )
         .unwrap();
-        let path = std::env::join_paths(std::iter::once(home.join("bin")).chain(git_directories()))
-            .unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(home.join("bin"))
+                .chain(git_directories())
+                .chain(extra_path),
+        )
+        .unwrap();
         let env = ["SystemRoot", "ComSpec", "WINDIR"]
             .into_iter()
             .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_owned(), v)))
@@ -272,6 +284,7 @@ impl Server {
                 ("T3CODE_DEV_GITHUB_ENDPOINT".into(), github.into()),
                 ("GH_TOKEN".into(), "fixture-environment-token".into()),
             ])
+            .chain(extra_env)
             .collect();
         let runtime = t3_server::runtime::start(ConfigInputs {
             flags: ServerFlags {
@@ -673,7 +686,11 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         .find(|provider| provider["kind"] == "gitlab")
         .unwrap();
     assert_eq!(gitlab["status"], "available");
-    assert!(providers.iter().any(|provider| provider["kind"] == "github"));
+    assert!(
+        providers
+            .iter()
+            .any(|provider| provider["kind"] == "github")
+    );
 
     // Each method keeps its contract scope.
     s.reconnect_with(&["orchestration:read"]).await;
@@ -716,32 +733,209 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
     s.runtime.shutdown().await.unwrap();
 }
 
-/// Review L2: a GitHub URL naming a host the server is not configured for gets no request, so the
-/// server's `GH_TOKEN` (which gh sends to any `*.ghe.com`) never leaves; github.com is still asked.
+/// Review L2 and re-review finding 3: whatever names a GitHub host the server is not configured
+/// for (a URL, `host/owner/repo`, an SCP or `ssh://` remote, odd case or a trailing dot, or a
+/// checkout's remote), the server's `GH_TOKEN` (which gh sends to any `*.ghe.com`) never leaves:
+/// lookup, clone, publish, project clone and pull-request resolution. github.com is still asked.
 #[tokio::test]
-async fn github_urls_naming_unconfigured_hosts_get_no_request_or_token() {
+async fn github_hosts_the_server_is_not_configured_for_never_get_its_token() {
     let (github, recorded) = github_stand_in().await;
     let mut s = Server::start(&github).await;
-    let ghe = json!({"provider": "github", "repository": "https://fixture.ghe.com/acme/web"});
-    let unconfigured = failure(s.call("sourceControl.lookupRepository", ghe.clone()).await);
-    assert_eq!(unconfigured["_tag"], "SourceControlRepositoryError");
-    let mut ghe_clone = ghe.clone();
-    ghe_clone["destinationPath"] = json!(s.home().join("code").join("ghe").to_string_lossy());
-    let refused_clone = failure(s.call("sourceControl.cloneRepository", ghe_clone).await);
-    assert_eq!(refused_clone["_tag"], "SourceControlRepositoryError");
-    assert!(!s.home().join("code").join("ghe").exists());
-    assert_eq!(
-        recorded.all(),
-        Vec::new(),
-        "an unconfigured host was contacted"
+    let leaked = |recorded: &Recorded| {
+        recorded
+            .all()
+            .into_iter()
+            .filter(|(_, _, authorization, _)| authorization.contains("fixture-environment-token"))
+            .collect::<Vec<_>>()
+    };
+    let forms = [
+        "https://fixture.ghe.com/acme/web",
+        "fixture.ghe.com/acme/web",
+        "FIXTURE.GHE.com/acme/web",
+        "https://Fixture.GHE.com/acme/web",
+        "https://fixture.ghe.com./acme/web",
+        "git@fixture.ghe.com:acme/web.git",
+        "ssh://git@fixture.ghe.com/acme/web.git",
+    ];
+    for (index, form) in forms.iter().enumerate() {
+        let _ = s
+            .call(
+                "sourceControl.lookupRepository",
+                json!({"provider": "github", "repository": form}),
+            )
+            .await;
+        let destination = s.home().join("code").join(format!("ghe-{index}"));
+        let _ = s
+            .call(
+                "sourceControl.cloneRepository",
+                json!({"provider": "github", "repository": form, "destinationPath": destination.to_string_lossy()}),
+            )
+            .await;
+        assert!(!destination.join(".git").exists(), "{form}");
+        assert_eq!(leaked(&recorded), Vec::new(), "{form}");
+    }
+    let _ = s
+        .call(
+            "projectClone.start",
+            json!({
+                "projectId": "ghe-project", "title": "Web", "createdAt": "2026-11-14T00:00:00.000Z",
+                "provider": "github", "repository": "fixture.ghe.com/acme/web",
+                "destinationPath": s.home().join("clones").join("ghe").to_string_lossy(),
+            }),
+        )
+        .await;
+    assert_eq!(leaked(&recorded), Vec::new(), "projectClone.start");
+    let project = s.home().join("project");
+    repository(&project);
+    s.insert_project("project-1", &project);
+    let _ = s
+        .call(
+            "sourceControl.publishRepository",
+            json!({"cwd": project.to_string_lossy(), "provider": "github", "repository": "fixture.ghe.com/acme/web", "visibility": "private"}),
+        )
+        .await;
+    assert_eq!(leaked(&recorded), Vec::new(), "publishRepository");
+    let review = s.home().join("review");
+    repository(&review);
+    git(
+        &review,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@fixture.ghe.com:acme/web.git",
+        ],
     );
+    s.insert_project("review-1", &review);
+    let _ = s
+        .call(
+            "git.resolvePullRequest",
+            json!({"cwd": review.to_string_lossy(), "reference": "7"}),
+        )
+        .await;
+    assert_eq!(leaked(&recorded), Vec::new(), "git.resolvePullRequest");
+    // github.com keeps its own (settings) credential.
+    let before = recorded.all().len();
     let _ = s
         .call(
             "sourceControl.lookupRepository",
             json!({"provider": "github", "repository": "https://github.com/acme/web"}),
         )
         .await;
-    assert!(!recorded.all().is_empty());
+    assert!(
+        recorded.all()[before..]
+            .iter()
+            .any(|(_, _, authorization, _)| authorization.contains("Bearer fixture-token")),
+        "{:?}",
+        recorded.all()
+    );
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}
+
+/// Re-review finding 1: a clone never creates a folder whose contents something later runs or
+/// trusts, and ordinary folders stay destinations.
+#[tokio::test]
+async fn clones_never_land_where_code_or_configuration_is_trusted() {
+    let (github, _) = github_stand_in().await;
+    let mut s = Server::start_with(&github, |home| {
+        (
+            vec![
+                // Git for Windows reads HOME when it differs from USERPROFILE.
+                (
+                    "HOME".into(),
+                    home.join("git-home").to_string_lossy().into_owned(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    home.join("xdg").to_string_lossy().into_owned(),
+                ),
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    home.join("git-global")
+                        .join("config")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "PROGRAMDATA".into(),
+                    home.join("program-data").to_string_lossy().into_owned(),
+                ),
+            ],
+            // A PATH folder that does not exist yet.
+            vec![home.join("future-tools").join("bin")],
+        )
+    })
+    .await;
+    let seed = s.home().join("seed");
+    repository(&seed);
+    let remote = s.home().join("remote.git");
+    bare(&remote, Some(&seed));
+    // An existing project, with no agent, hook or editor folders yet.
+    let project = s.home().join("project");
+    repository(&project);
+    std::fs::remove_dir_all(project.join(".git").join("hooks")).unwrap();
+    s.insert_project("project-1", &project);
+    let mut refused = vec![
+        project.join(".claude"),
+        project.join(".git").join("hooks"),
+        project.join(".husky").join("_"),
+        project.join(".vscode"),
+        project.join("src"),
+        s.home().join("git-home").join(".config").join("git"),
+        s.home().join("xdg").join("git"),
+        s.home().join("git-global"),
+        s.home().join("program-data").join("Git"),
+        s.home().join("future-tools").join("bin"),
+        s.home().join("future-tools"),
+        s.home().join(".local").join("src").join("x"),
+        s.base().join("worktrees").join("x"),
+    ];
+    if cfg!(windows) {
+        let documents = s.home().join("Documents");
+        refused.extend([
+            documents.join("PowerShell"),
+            documents
+                .join("WindowsPowerShell")
+                .join("Modules")
+                .join("x"),
+            // Windows drops a trailing dot and reads a stream suffix as the folder itself.
+            documents.join("PowerShell."),
+            documents.join("PowerShell::$INDEX_ALLOCATION"),
+        ]);
+    } else {
+        refused.push(s.home().join("bin"));
+    }
+    for destination in &refused {
+        destination_refused(
+            s.call(
+                "sourceControl.cloneRepository",
+                json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": destination.to_string_lossy()}),
+            )
+            .await,
+        );
+    }
+    for destination in &refused[..4] {
+        assert!(!destination.exists(), "{destination:?}");
+    }
+    assert!(!s.home().join("Documents").exists());
+    assert!(!s.home().join("xdg").exists());
+    assert!(!s.home().join("program-data").exists());
+    assert!(!s.home().join("future-tools").exists());
+    // Ordinary folders: under home, and folders of the T3 base that are not T3's own (a base may
+    // be a work folder), with a managed folder written in another case.
+    for destination in [
+        s.home().join("code").join("web"),
+        s.base().join("work").join("web"),
+        s.base().join("PROJECTS").join("web"),
+    ] {
+        ok(s.call(
+            "sourceControl.cloneRepository",
+            json!({"remoteUrl": remote.to_string_lossy(), "destinationPath": destination.to_string_lossy()}),
+        )
+        .await);
+        assert!(destination.join("hello.txt").is_file(), "{destination:?}");
+    }
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }

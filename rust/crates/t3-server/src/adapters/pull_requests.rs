@@ -251,6 +251,7 @@ impl PullRequestAdapter {
         context: &crate::services::DomainContext<'_>,
         projects: &crate::adapters::project::ProjectAdapter,
         binder: Arc<dyn ProjectBinder>,
+        generator: Option<Arc<dyn GuideGenerator>>,
     ) -> crate::Result<Arc<Self>> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let stop = context.shutdown.child_token();
@@ -301,7 +302,7 @@ impl PullRequestAdapter {
         );
         let guides = PullRequestReviewGuideService::new(
             service.clone(),
-            Arc::new(GenerationUnavailable),
+            generator.unwrap_or_else(|| Arc::new(GenerationUnavailable)),
             records.clone(),
             clock,
         );

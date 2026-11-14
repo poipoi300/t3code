@@ -97,6 +97,9 @@ pub struct StartOptions {
     /// credential a provider session was opened with.
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Option<Arc<crate::adapters::mcp::McpSessions>>,
+    /// Test seam: the review-guide generator reports each finished cleanup's run id here.
+    #[cfg(feature = "textgen-native")]
+    pub review_guide_cleanups: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// The scheduled-task clock; `None` is the system clock. Tests drive due tasks with it.
     #[cfg(feature = "scheduler")]
     pub scheduler_clock: Option<Arc<dyn crate::adapters::scheduler::Clock>>,
@@ -501,11 +504,19 @@ async fn start_domains(
             .follow_providers(providers.providers.clone(), context.shutdown.clone())
             .await;
         if let Some(source) = orchestration.provider_source().cloned() {
+            // Each native session reads its thread's T3 MCP server from here.
+            #[cfg(feature = "mcp")]
+            let t3_mcp = domains
+                .get::<crate::adapters::mcp::McpSessions>()
+                .map(|sessions| sessions as Arc<dyn t3_orchestration::provider::T3McpSessions>);
+            #[cfg(not(feature = "mcp"))]
+            let t3_mcp = None;
             source.bind(crate::adapters::native_providers::NativeProviders::new(
                 providers.clone(),
                 &context,
                 Arc::new(crate::adapters::orchestration::SystemClock),
                 Arc::new(t3_orchestration::composition::RandomIds),
+                t3_mcp,
             ));
             // Shuts down before the providers: sessions stop while the domain is alive.
             domains.insert_runtime(Arc::new(
@@ -530,6 +541,10 @@ async fn start_domains(
     // The one forge registry; source control, project clones and pull requests derive from it.
     #[cfg(feature = "forge")]
     if let Some(forge) = crate::adapters::forge::ForgeAdapter::start(&context, domains).await? {
+        #[cfg(feature = "textgen-native")]
+        if let Some(textgen) = domains.get::<crate::adapters::textgen::TextGenAdapter>() {
+            textgen.bind_forge(forge.registry());
+        }
         domains.insert_runtime(forge)?;
     }
     // Before projects: promoting a scratch thread moves its scheduled tasks.
@@ -570,10 +585,38 @@ async fn start_domains(
         domains.get::<crate::adapters::project::ProjectAdapter>(),
         crate::adapters::pull_requests::binder(domains, options),
     ) {
-        domains.insert_runtime(
-            crate::adapters::pull_requests::PullRequestAdapter::start(&context, &projects, binder)
-                .await?,
-        )?;
+        // The review-guide generator: text generation and the Git root; bound to the service below.
+        #[cfg(feature = "textgen-native")]
+        let guides = domains
+            .get::<crate::adapters::textgen::TextGenAdapter>()
+            .zip(domains.get::<crate::adapters::git::GitAdapter>())
+            .map(|(textgen, git)| {
+                crate::adapters::review_guide::ReviewGuideGenerator::new(
+                    &context,
+                    textgen,
+                    git,
+                    projects.service().clone(),
+                )
+            });
+        #[cfg(feature = "textgen-native")]
+        let generator = guides
+            .clone()
+            .map(|guides| guides as Arc<dyn t3_pull_request::guide::GuideGenerator>);
+        #[cfg(not(feature = "textgen-native"))]
+        let generator = None;
+        let adapter = crate::adapters::pull_requests::PullRequestAdapter::start(
+            &context, &projects, binder, generator,
+        )
+        .await?;
+        #[cfg(feature = "textgen-native")]
+        if let Some(guides) = guides {
+            if let Some(sender) = &options.review_guide_cleanups {
+                guides.report_cleanups(sender.clone());
+            }
+            guides.bind(adapter.service.clone());
+            domains.insert(guides)?;
+        }
+        domains.insert_runtime(adapter)?;
     }
     // After pull requests (pushed refreshes), projects, terminals and the forge registry.
     #[cfg(feature = "git-actions")]

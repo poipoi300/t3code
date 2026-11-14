@@ -1047,3 +1047,45 @@ fn resolved_or_lexical(path: &Path) -> PathBuf {
     resolved.extend(missing.iter().rev());
     resolved
 }
+
+/// Creates `resolved`, the destination the rules accepted, before Git runs. Answers whether
+/// this call created it.
+fn create_verified(resolved: &Path) -> std::io::Result<bool> {
+    let existed = resolved.exists();
+    std::fs::create_dir_all(resolved)?;
+    Ok(!existed)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// Re-review finding 1: a link that appears inside the accepted path after the check (a
+    /// concurrent clone can check one out) must not redirect the new folder.
+    #[test]
+    fn a_link_planted_after_the_check_does_not_redirect_the_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("config");
+        std::fs::create_dir(&target).unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let destination = resolved_or_lexical(&work).join("link").join("git");
+        let link = work.join("link");
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_verified(&destination).is_err());
+        assert!(!target.join("git").exists());
+    }
+}

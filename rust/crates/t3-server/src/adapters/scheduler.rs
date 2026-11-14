@@ -514,9 +514,7 @@ mod runtime_intake {
         scheduled_task::ScheduledTask,
     };
     use t3_orchestration::{
-        api::{
-            MessageFilter, ProjectionReader, ProjectionRecordQuery, RecordFilter, RecordKind,
-        },
+        api::{MessageFilter, ProjectionReader, ProjectionRecordQuery, RecordFilter, RecordKind},
         composition::OrchestrationRuntime,
         error::Error as OrchestrationError,
         ports::{
@@ -701,9 +699,11 @@ mod runtime_intake {
                     None,
                 )
                 .await?;
-            let Some(dispatched) = runs.runs.iter().find(|run| {
-                expanded_id(&run.user_message_id).is_ok_and(|id| id == message_id)
-            }) else {
+            let Some(dispatched) = runs
+                .runs
+                .iter()
+                .find(|run| expanded_id(&run.user_message_id).is_ok_and(|id| id == message_id))
+            else {
                 return Ok(None);
             };
             let run_id = expanded_id(&dispatched.id).map_err(read_failure)?;
@@ -769,8 +769,11 @@ mod runtime_intake {
         records: &OrchestrationV2ThreadProjection,
     ) -> Option<String> {
         let run = serde_json::to_value(run).ok()?;
-        let millis =
-            |value: &serde_json::Value| value.as_str().and_then(t3_shared::search_policy::epoch_millis);
+        let millis = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .and_then(t3_shared::search_policy::epoch_millis)
+        };
         records
             .turn_items
             .iter()

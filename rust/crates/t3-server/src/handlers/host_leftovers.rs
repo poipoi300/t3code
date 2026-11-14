@@ -119,11 +119,15 @@ mod peer_links {
             Error::Disabled => (Reason::Disabled, LINKED_ENVIRONMENTS_OFF.to_owned()),
             Error::Configuration => (
                 Reason::Unreachable,
-                at("is not an https address, this machine or a Tailscale address, so the link's credentials would travel unencrypted. Use its https address, or its Tailscale address."),
+                at(
+                    "is not an https address, this machine or a Tailscale address, so the link's credentials would travel unencrypted. Use its https address, or its Tailscale address.",
+                ),
             ),
             Error::Identity => (
                 Reason::Incompatible,
-                at("is this environment, already linked at another address, or runs a T3 Code version that cannot keep a linked agent's limits."),
+                at(
+                    "is this environment, already linked at another address, or runs a T3 Code version that cannot keep a linked agent's limits.",
+                ),
             ),
             Error::Proof
             | Error::Remote {
@@ -132,7 +136,9 @@ mod peer_links {
             } => (Reason::PairingRejected, at("refused the sign-in.")),
             Error::Protocol => (
                 Reason::Incompatible,
-                at("answered in a shape this version does not understand. Update both environments."),
+                at(
+                    "answered in a shape this version does not understand. Update both environments.",
+                ),
             ),
             Error::Expired => (
                 Reason::Expired,
@@ -206,8 +212,7 @@ mod peer_links {
             async move {
                 let context = c.request_context(&ctx.session_id, &ctx.scopes);
                 let address = input.url.0.clone();
-                a
-                    .service
+                a.service
                     .link(&context, Sensitive::new(input))
                     .await
                     .map_err(|error| {
@@ -223,15 +228,11 @@ mod peer_links {
             let (a, c) = (a.clone(), c.clone());
             async move {
                 let context = c.request_context(&ctx.session_id, &ctx.scopes);
-                a
-                    .service
-                    .unlink(&context, input)
-                    .await
-                    .map_err(|error| {
-                        Failure::Typed(WsPeerLinksListError::PeerLinkError(Box::new(link_error(
-                            error, None,
-                        ))))
-                    })
+                a.service.unlink(&context, input).await.map_err(|error| {
+                    Failure::Typed(WsPeerLinksListError::PeerLinkError(Box::new(link_error(
+                        error, None,
+                    ))))
+                })
             }
         })?;
         let (a, c) = (peers, cloud);
@@ -239,8 +240,7 @@ mod peer_links {
             let (a, c) = (a.clone(), c.clone());
             async move {
                 let context = c.request_context(&ctx.session_id, &ctx.scopes);
-                a
-                    .service
+                a.service
                     .answer_request(&context, Sensitive::new(input))
                     .await
                     .map_err(|error| {

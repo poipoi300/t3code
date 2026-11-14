@@ -6,7 +6,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use t3_contracts::model::{ProviderOptionDescriptor, ProviderOptionSelection, ProviderOptionSelectionValue};
+use t3_contracts::model::{
+    ProviderOptionDescriptor, ProviderOptionSelection, ProviderOptionSelectionValue,
+};
 use t3_provider::{
     domain::ProviderDomain,
     environment::{
@@ -18,8 +20,8 @@ use t3_provider::{
 use t3_textgen::{
     CancellationToken, GenerationError, GenerationRequest,
     provider_runners::{
-        ClaudeRun, CodexModel, CodexRun, DEFAULT_TEXT_GENERATION_REASONING_EFFORT, resolve_codex_model,
-        run_claude, run_codex,
+        ClaudeRun, CodexModel, CodexRun, DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+        resolve_codex_model, run_claude, run_codex,
     },
 };
 
@@ -81,8 +83,14 @@ fn text<'a>(config: &'a serde_json::Value, key: &str) -> &'a str {
     config[key].as_str().unwrap_or_default()
 }
 
-fn option<'a>(options: &'a [ProviderOptionSelection], id: &str) -> Option<&'a ProviderOptionSelectionValue> {
-    options.iter().find(|option| option.id == id).map(|option| &option.value)
+fn option<'a>(
+    options: &'a [ProviderOptionSelection],
+    id: &str,
+) -> Option<&'a ProviderOptionSelectionValue> {
+    options
+        .iter()
+        .find(|option| option.id == id)
+        .map(|option| &option.value)
 }
 fn string_option(options: &[ProviderOptionSelection], id: &str) -> Option<String> {
     match option(options, id) {
@@ -119,7 +127,12 @@ async fn codex(
     } else {
         configured.to_owned()
     };
-    let layout = codex_home_layout(&home_path, text(config, "shadowHomePath"), &host.home, &host.cwd);
+    let layout = codex_home_layout(
+        &home_path,
+        text(config, "shadowHomePath"),
+        &host.home,
+        &host.cwd,
+    );
     t3_provider::homes::materialize_codex_shadow(&layout).map_err(|_| GenerationError::Provider)?;
     if let Some(home) = &layout.effective_home {
         if host.platform == Platform::Windows {
@@ -169,14 +182,20 @@ async fn codex(
         .unwrap_or_else(|| DEFAULT_TEXT_GENERATION_REASONING_EFFORT.to_owned());
     let service_tier = (!fell_back)
         .then(|| {
-            string_option(&options, "serviceTier")
-                .or_else(|| (boolean_option(&options, "fastMode") == Some(true)).then(|| "fast".into()))
+            string_option(&options, "serviceTier").or_else(|| {
+                (boolean_option(&options, "fastMode") == Some(true)).then(|| "fast".into())
+            })
         })
         .flatten();
     let image_paths = request
         .attachments
         .iter()
-        .filter(|attachment| matches!(attachment, t3_contracts::chat_attachment::ChatAttachment::Image(_)))
+        .filter(|attachment| {
+            matches!(
+                attachment,
+                t3_contracts::chat_attachment::ChatAttachment::Image(_)
+            )
+        })
         .filter_map(|attachment| {
             t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
                 &host.attachments,
@@ -219,11 +238,16 @@ async fn claude(
     let home_path = text(config, "homePath");
     if !t3_contracts::wire::trim_js(home_path).is_empty() {
         let home = claude_home(home_path, &environment, &host.home, &host.cwd);
-        environment.insert("CLAUDE_CONFIG_DIR".into(), home.to_string_lossy().into_owned());
+        environment.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.to_string_lossy().into_owned(),
+        );
     }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
     let catalog = domain
         .manifest
         .current()
@@ -246,12 +270,15 @@ async fn claude(
     let descriptors = catalog::option_descriptors(&caps, &options);
     let boolean = |id: &str| {
         descriptors.iter().find_map(|descriptor| match descriptor {
-            ProviderOptionDescriptor::Boolean(descriptor) if descriptor.id == id => Some(descriptor),
+            ProviderOptionDescriptor::Boolean(descriptor) if descriptor.id == id => {
+                Some(descriptor)
+            }
             _ => None,
         })
     };
     let raw_effort = string_option(&options, "effort");
-    let resolved = claude_catalog::resolve_effort(&catalog, Some(&selection.model), raw_effort.as_deref());
+    let resolved =
+        claude_catalog::resolve_effort(&catalog, Some(&selection.model), raw_effort.as_deref());
     let effort = claude_catalog::normalize_effort(&catalog, &selection.model, resolved.as_deref());
     let program = match text(config, "binaryPath") {
         "" => "claude".to_owned(),

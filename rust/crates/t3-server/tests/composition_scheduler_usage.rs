@@ -298,7 +298,8 @@ async fn start(
         },
         StartOptions {
             provider_effects: Some(provider_effects(effects)),
-            scheduler_clock: clock.map(|clock| clock as Arc<dyn t3_server::adapters::scheduler::Clock>),
+            scheduler_clock: clock
+                .map(|clock| clock as Arc<dyn t3_server::adapters::scheduler::Clock>),
             ..Default::default()
         },
     )
@@ -536,7 +537,13 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let home = temp.path().join("home");
     let no_policy = temp.path().join("no-policy.json");
     let clock = ManualClock::at(T0);
-    let server = start(&home, Some(clock.clone()), Effects::new(Rates::Table), &no_policy).await;
+    let server = start(
+        &home,
+        Some(clock.clone()),
+        Effects::new(Rates::Table),
+        &no_policy,
+    )
+    .await;
     for method in SCHEDULER_COMMANDS {
         assert!(!server.unserved_methods.contains(&method), "{method}");
     }
@@ -555,11 +562,23 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     // Typed failures with TypeScript's messages; nothing is saved.
     for (input, message) in [
         (
-            upsert("task:x", &project, Some("thread:absent"), true, EVERY_MINUTE()),
+            upsert(
+                "task:x",
+                &project,
+                Some("thread:absent"),
+                true,
+                EVERY_MINUTE(),
+            ),
             "That thread no longer exists.",
         ),
         (
-            upsert("task:x", "project:absent", Some(THREAD), true, EVERY_MINUTE()),
+            upsert(
+                "task:x",
+                "project:absent",
+                Some(THREAD),
+                true,
+                EVERY_MINUTE(),
+            ),
             "That thread belongs to a different project.",
         ),
         (
@@ -595,14 +614,26 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
     let draft_task = &value(&draft_run)["task"];
     assert_eq!(draft_task["enabled"], false, "{draft_run}");
     assert_eq!(draft_task["lastRunStatus"], "failed", "{draft_run}");
-    assert_eq!(draft_task["lastRunError"], LAUNCH_UNAVAILABLE, "{draft_run}");
-    assert!(draft_task.get("threadId").is_none_or(Value::is_null), "{draft_run}");
+    assert_eq!(
+        draft_task["lastRunError"], LAUNCH_UNAVAILABLE,
+        "{draft_run}"
+    );
+    assert!(
+        draft_task.get("threadId").is_none_or(Value::is_null),
+        "{draft_run}"
+    );
 
     // Success: bound tasks queue in their thread.
     let interval = admin
         .call(
             "scheduledTasks.upsert",
-            upsert("task:interval", &project, Some(THREAD), true, EVERY_MINUTE()),
+            upsert(
+                "task:interval",
+                &project,
+                Some(THREAD),
+                true,
+                EVERY_MINUTE(),
+            ),
         )
         .await;
     assert_eq!(value(&interval)["task"]["nextRunAt"], at(60));
@@ -706,7 +737,9 @@ async fn scheduled_tasks_run_through_the_runtime_intake_over_the_socket() {
         refused_for(&reader.call(tag, payload).await, "orchestration:operate");
     }
     let reader_tasks = reader.stream("scheduledTasks.subscribe", json!({}));
-    let read = reader.until(&reader_tasks, |list| list["tasks"].is_array()).await;
+    let read = reader
+        .until(&reader_tasks, |list| list["tasks"].is_array())
+        .await;
     assert!(
         task(&read, "task:off")["enabled"] == false && task(&read, "task:manual")["runCount"] == 1,
         "{read}"
@@ -813,7 +846,8 @@ async fn scheduled_task_webhook_urls_reach_only_operate_sessions() {
     let listed = admin.until(&tasks, |list| list["tasks"].is_array()).await;
     assert_eq!(task(&listed, "task:hook")["webhook"]["path"], path.as_str());
 
-    let mut reader = Session::without(&server, &cookie, &permissions, "orchestration:operate").await;
+    let mut reader =
+        Session::without(&server, &cookie, &permissions, "orchestration:operate").await;
     let reader_tasks = reader.stream("scheduledTasks.subscribe", json!({}));
     let read = reader
         .until(&reader_tasks, |list| list["tasks"].is_array())
@@ -832,7 +866,9 @@ async fn scheduled_task_webhook_urls_reach_only_operate_sessions() {
             .await,
     );
     let changed = reader
-        .until(&reader_tasks, |list| task(list, "task:hook")["enabled"] == false)
+        .until(&reader_tasks, |list| {
+            task(list, "task:hook")["enabled"] == false
+        })
         .await;
     assert!(!changed.to_string().contains(&path), "{changed}");
     drop((admin, reader));
@@ -855,7 +891,11 @@ async fn usage_rates_refresh_over_the_shared_transport_within_its_bounds() {
     );
     let (mut admin, cookie, permissions) = Session::admin(&server).await;
     let unavailable = admin.call("server.refreshUsageRates", json!({})).await;
-    assert_eq!(value(&unavailable)["status"], "unavailable", "{unavailable}");
+    assert_eq!(
+        value(&unavailable)["status"],
+        "unavailable",
+        "{unavailable}"
+    );
     assert_eq!(value(&unavailable)["knownModels"], 0, "{unavailable}");
     assert_eq!(
         effects.requests(),
@@ -865,8 +905,8 @@ async fn usage_rates_refresh_over_the_shared_transport_within_its_bounds() {
         ]
     );
     // The scope the contract assigns the method.
-    let scope = t3_auth::authorization::required_scope_for_rpc_method("server.refreshUsageRates")
-        .unwrap();
+    let scope =
+        t3_auth::authorization::required_scope_for_rpc_method("server.refreshUsageRates").unwrap();
     let scope = serde_json::to_value(scope).unwrap();
     let mut refused =
         Session::without(&server, &cookie, &permissions, scope.as_str().unwrap()).await;
@@ -874,7 +914,11 @@ async fn usage_rates_refresh_over_the_shared_transport_within_its_bounds() {
         &refused.call("server.refreshUsageRates", json!({})).await,
         scope.as_str().unwrap(),
     );
-    assert_eq!(effects.requests().len(), 2, "a refused call fetches nothing");
+    assert_eq!(
+        effects.requests().len(),
+        2,
+        "a refused call fetches nothing"
+    );
     drop((admin, refused));
     server.shutdown().await.unwrap();
 

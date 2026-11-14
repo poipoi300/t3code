@@ -27,13 +27,15 @@ use t3_textgen::{
 pub struct TextGenAdapter {
     host: Arc<Host>,
     generation: Arc<TextGeneration>,
+    #[cfg(all(feature = "forge", feature = "textgen-native"))]
+    links: Arc<crate::adapters::title_links::TitleLinks>,
 }
 
 struct Host {
     settings: Arc<SettingsService>,
     #[cfg(feature = "providers")]
     providers: OnceLock<Arc<t3_provider::domain::ProviderDomain>>,
-    #[cfg(feature = "providers")]
+    #[cfg(all(feature = "providers", feature = "textgen-native"))]
     native: crate::adapters::textgen_native::NativeHost,
 }
 
@@ -43,11 +45,22 @@ impl TextGenAdapter {
             settings: context.local.settings.clone(),
             #[cfg(feature = "providers")]
             providers: OnceLock::new(),
-            #[cfg(feature = "providers")]
+            #[cfg(all(feature = "providers", feature = "textgen-native"))]
             native: crate::adapters::textgen_native::NativeHost::new(context),
         });
         let generation = Arc::new(TextGeneration::new(host.clone()));
-        Arc::new(Self { host, generation })
+        Arc::new(Self {
+            host,
+            generation,
+            #[cfg(all(feature = "forge", feature = "textgen-native"))]
+            links: Arc::default(),
+        })
+    }
+
+    /// Title link context reads linked issues and change requests through this registry.
+    #[cfg(all(feature = "forge", feature = "textgen-native"))]
+    pub fn bind_forge(&self, registry: Arc<t3_forge::registry::ForgeRegistry>) {
+        self.links.bind(registry);
     }
 
     /// Provider snapshots, the managed policy's limits and the secret resolver come from here.
@@ -58,10 +71,10 @@ impl TextGenAdapter {
 
     /// `RuntimePorts::titles`: the runtime calls `generate_with_input` for each title effect.
     pub fn title_generator(&self) -> Arc<dyn t3_orchestration::api::TitleGenerator> {
-        Arc::new(OrchestrationTitleGenerator::new(HostTitleGenerator::new(
-            self.generation.clone(),
-            self.host.clone(),
-        )))
+        let titles = HostTitleGenerator::new(self.generation.clone(), self.host.clone());
+        #[cfg(all(feature = "forge", feature = "textgen-native"))]
+        let titles = titles.with_links(self.links.clone());
+        Arc::new(OrchestrationTitleGenerator::new(titles))
     }
 
     /// One routed generation (`TextGeneration.generate`): the selection in `context` is replaced
@@ -132,10 +145,15 @@ impl TextRunner for Host {
             .get(&request.model_selection.instance_id)
             .cloned()
         else {
-            #[cfg(feature = "providers")]
+            #[cfg(all(feature = "providers", feature = "textgen-native"))]
             if let Some(domain) = self.providers.get() {
-                return crate::adapters::textgen_native::run(domain, &self.native, request, cancellation)
-                    .await;
+                return crate::adapters::textgen_native::run(
+                    domain,
+                    &self.native,
+                    request,
+                    cancellation,
+                )
+                .await;
             }
             return Err(GenerationError::Unavailable);
         };

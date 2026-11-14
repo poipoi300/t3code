@@ -40,6 +40,8 @@ pub mod project_setup;
 pub mod providers;
 #[cfg(feature = "pull-requests")]
 pub mod pull_requests;
+#[cfg(feature = "textgen-native")]
+pub mod review_guide;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 #[cfg(feature = "local-services")]
@@ -48,8 +50,10 @@ pub mod telemetry;
 pub mod terminal;
 #[cfg(feature = "textgen")]
 pub mod textgen;
-#[cfg(all(feature = "textgen", feature = "providers"))]
+#[cfg(all(feature = "textgen-native", feature = "providers"))]
 pub mod textgen_native;
+#[cfg(all(feature = "textgen-native", feature = "forge"))]
+pub mod title_links;
 #[cfg(feature = "usage")]
 pub mod usage;
 #[cfg(feature = "workspace")]
