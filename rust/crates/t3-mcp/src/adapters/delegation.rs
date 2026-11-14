@@ -65,8 +65,38 @@ fn management_failure(error: t3_orchestration::error::Error) -> McpError {
         t3_orchestration::error::Error::CallerRefused { refusal, .. } => {
             failure(refusal.code(), refusal.to_string())
         }
+        t3_orchestration::error::Error::Service { operation, detail }
+            if operation == "ThreadManagementProviderInstanceDisabledError" =>
+        {
+            failure("invalid_request", detail)
+        }
         error => failure("orchestration_error", error.to_string()),
     }
+}
+
+fn is_instance_disabled(error: &t3_orchestration::error::Error) -> bool {
+    matches!(error, t3_orchestration::error::Error::Service { operation, .. }
+        if *operation == "ThreadManagementProviderInstanceDisabledError")
+}
+
+/// `threadTitle`: the title asked for, else the prompt, cut at 80 UTF-16 units.
+fn thread_title(parent: &str, prompt: Option<&str>, title: Option<&str>, index: usize) -> String {
+    let detail = title
+        .map(t3_contracts::wire::trim_js)
+        .filter(|t| !t.is_empty())
+        .or_else(|| prompt.map(t3_contracts::wire::trim_js).filter(|t| !t.is_empty()));
+    let Some(detail) = detail else {
+        return format!("{parent} thread {}", index + 1);
+    };
+    let units: Vec<u16> = detail.encode_utf16().collect();
+    if units.len() <= 80 {
+        return detail.to_owned();
+    }
+    let mut end = 77;
+    if (0xd800..=0xdbff).contains(&units[end - 1]) && (0xdc00..=0xdfff).contains(&units[end]) {
+        end -= 1;
+    }
+    format!("{}...", String::from_utf16_lossy(&units[..end]))
 }
 
 /// `encodeURIComponent`.
@@ -835,12 +865,7 @@ impl DelegationAdapter {
         let mut result = json!({
             "taskId": task["id"],
             "childThreadId": task["childThreadId"],
-            "link": format!(
-                "[{}](t3-thread://v2/{}/{})",
-                title.replace(['[', ']', '\\', '\r', '\n'], " ").split_whitespace().collect::<Vec<_>>().join(" "),
-                context.scope.environment_id.0,
-                child_id.0
-            ),
+            "link": super::threads::thread_link(&context.scope, &child_id.0, Some(&title)),
             "childRunId": child_run.as_ref().map_or(Value::Null, |run| id_value(&run.id)),
             "childNodeId": task["id"],
             "status": status,
@@ -1294,5 +1319,192 @@ impl OrchestratorService for DelegationAdapter {
         let input = encoded(input)?;
         let task = NodeId(input["taskId"].as_str().unwrap_or_default().into());
         decoded(self.read_task(&context, &task, false, true).await?)
+    }
+
+    /// `createThreads`: ordinary threads in the parent's project, at most the parent's modes, with
+    /// its checkout and link origin, each recorded in the parent's timeline.
+    async fn create_threads(
+        &self,
+        context: CallContext,
+        input: OrchestratorMcpCreateThreadsInput,
+    ) -> Result<OrchestratorMcpCreateThreadsResult> {
+        let input = encoded(input)?;
+        let caller = context.scope.require_thread("create_threads")?.clone();
+        let threads = self.threads(&context)?;
+        let parent = threads
+            .records(
+                caller.thread_id.clone(),
+                vec![RecordKind::Runs],
+                RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!("Unable to read thread {}: {error}", caller.thread_id.0),
+                )
+            })?;
+        let parent_thread = id_value(&parent.thread);
+        let parent_run = parent
+            .runs
+            .iter()
+            .filter(|run| is_active_run(run))
+            .max_by_key(|run| run.ordinal)
+            .filter(|run| {
+                !id_value(&run.root_node_id).is_null()
+                    && id_value(&run.provider_instance_id) == id_value(&caller.provider_instance_id)
+            })
+            .ok_or_else(|| {
+                failure(
+                    "parent_not_active",
+                    "Thread creation requires an active run owned by this MCP provider session.",
+                )
+            })?;
+        let key = request_key(&input);
+        let ns = stable_part(&context.scope.request_namespace);
+        let project = ProjectId(parent_thread["projectId"].as_str().unwrap_or_default().into());
+        let mut created = Vec::new();
+        for (index, request) in input["threads"].as_array().into_iter().flatten().enumerate() {
+            let number = index + 1;
+            let command_id = format!(
+                "{}:{index}",
+                stable_command_id(&context.scope, &key, "create-thread")
+            );
+            let thread_id = ThreadId(format!("thread:mcp:{ns}:{}:{index}", stable_part(&key)));
+            let retry = threads
+                .has_receipt(t3_contracts::base_schemas::CommandId(command_id.clone()))
+                .await;
+            let mut target = request.get("target").cloned().unwrap_or_else(|| json!({}));
+            if retry
+                && let Some(committed) = threads
+                    .reader()
+                    .shell(thread_id.clone())
+                    .await
+                    .map_err(management_failure)?
+            {
+                target["providerInstanceId"] = id_value(&committed.model_selection.instance_id);
+            }
+            let resolved = self.resolve_target(&parent_thread, &target, retry).await?;
+            let runtime_mode = resolve_runtime_mode(
+                parent_thread["runtimeMode"].as_str().unwrap_or("approval-required"),
+                request["runtimeMode"].as_str(),
+                Some((
+                    resolved.model_selection["instanceId"].as_str().unwrap_or_default(),
+                    &resolved.supported_runtime_modes,
+                )),
+            )?;
+            let interaction_mode = resolve_interaction_mode(
+                parent_thread["interactionMode"].as_str().unwrap_or("default"),
+                request["interactionMode"].as_str(),
+            )?;
+            threads
+                .assert_provider_instance_enabled(
+                    project.clone(),
+                    t3_contracts::base_schemas::CommandId(command_id.clone()),
+                    decoded(resolved.model_selection["instanceId"].clone())?,
+                )
+                .await
+                .map_err(management_failure)?;
+            let title = thread_title(
+                parent_thread["title"].as_str().unwrap_or_default(),
+                request["prompt"].as_str(),
+                request["title"].as_str(),
+                index,
+            );
+            let mut create = json!({
+                "type": "thread.create",
+                "createdBy": "agent",
+                "creationSource": "mcp",
+                "commandId": command_id,
+                "threadId": thread_id,
+                "projectId": project,
+                "title": title,
+                "modelSelection": resolved.model_selection,
+                "runtimeMode": runtime_mode,
+                "interactionMode": interaction_mode,
+                "branch": parent_thread["branch"],
+                "worktreePath": parent_thread["worktreePath"],
+            });
+            if let Some(origin) = parent_thread.get("linkOrigin").filter(|o| !o.is_null()) {
+                create["linkOrigin"] = origin.clone();
+            }
+            threads.dispatch(decoded(create)?).await.map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!("Unable to create thread {number}: {error}"),
+                )
+            })?;
+            let selection = id_value(
+                &threads
+                    .records(thread_id.clone(), Vec::new(), RecordFilter::default())
+                    .await
+                    .map_err(management_failure)?
+                    .thread
+                    .model_selection,
+            );
+            if let Some(prompt) = request["prompt"].as_str() {
+                let dispatch = json!({
+                    "type": "message.dispatch",
+                    "createdBy": "agent",
+                    "creationSource": "mcp",
+                    "commandId": format!("{}:{index}", stable_command_id(&context.scope, &key, "dispatch-thread")),
+                    "threadId": thread_id,
+                    "senderThreadId": caller.thread_id,
+                    "messageId": format!("message:mcp:{ns}:{}:{index}", stable_part(&key)),
+                    "text": prompt,
+                    "attachments": [],
+                    "modelSelection": selection,
+                    "dispatchMode": {"type": "start_immediately"},
+                });
+                threads.dispatch(decoded(dispatch)?).await.map_err(|error| {
+                    if is_instance_disabled(&error) {
+                        management_failure(error)
+                    } else {
+                        failure(
+                            "orchestration_error",
+                            format!("Unable to start thread {number}: {error}"),
+                        )
+                    }
+                })?;
+            }
+            let projection = threads
+                .records(thread_id.clone(), vec![RecordKind::Runs], RecordFilter::default())
+                .await
+                .map_err(|error| {
+                    failure(
+                        "orchestration_error",
+                        format!("Unable to read thread {}: {error}", thread_id.0),
+                    )
+                })?;
+            let run = projection.runs.last().map(id_value);
+            let record = json!({
+                "type": "thread.created.record",
+                "commandId": format!("{}:{index}", stable_command_id(&context.scope, &key, "record-created-thread")),
+                "parentThreadId": caller.thread_id,
+                "parentRunId": parent_run.id,
+                "parentNodeId": parent_run.root_node_id,
+                "targetThreadId": thread_id,
+                "targetRunId": run.as_ref().map_or(Value::Null, |run| run["id"].clone()),
+            });
+            threads.dispatch(decoded(record)?).await.map_err(|error| {
+                failure(
+                    "orchestration_error",
+                    format!("Unable to record thread {number} in the parent timeline: {error}"),
+                )
+            })?;
+            let thread = id_value(&projection.thread);
+            created.push(json!({
+                "threadId": thread_id,
+                "link": super::threads::thread_link(&context.scope, &thread_id.0, thread["title"].as_str()),
+                "runId": run.as_ref().map_or(Value::Null, |run| run["id"].clone()),
+                "status": run.as_ref().map_or(json!("idle"), |run| run["status"].clone()),
+                "title": thread["title"],
+                "createdBy": thread["createdBy"],
+                "creationSource": thread["creationSource"],
+                "providerInstanceId": selection["instanceId"],
+                "model": selection["model"],
+            }));
+        }
+        decoded(json!({"threads": created}))
     }
 }

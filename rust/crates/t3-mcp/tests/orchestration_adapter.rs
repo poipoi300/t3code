@@ -346,3 +346,93 @@ async fn a_typed_refusal_under_the_command_lock_keeps_its_code() {
         other => panic!("{other}"),
     }
 }
+
+/// Review L1: TypeScript's `dispatchFailure` cuts a dispatch cause at 1,000 characters and answers
+/// a disabled provider instance as `invalid_request`.
+#[tokio::test]
+async fn dispatch_failures_keep_typescripts_codes_and_cut() {
+    use t3_mcp::adapters::orchestration::CallerCommandSource;
+    use t3_orchestration::{api::CommandDispatcher, composition::CommandCaller};
+    struct Failing(Arc<dyn CallerCommandSource>, fn(&str) -> error::Error);
+    struct FailingDispatcher(fn(&str) -> error::Error);
+    #[async_trait]
+    impl CommandDispatcher for FailingDispatcher {
+        async fn dispatch(
+            &self,
+            _: t3_contracts::orchestration_v2::OrchestrationV2ServerCommand,
+        ) -> error::Result<t3_orchestration::stores::receipts::CommandReceipt> {
+            Err((self.0)("command"))
+        }
+    }
+    impl CallerCommandSource for Failing {
+        fn threads(
+            &self,
+            caller: CommandCaller,
+        ) -> t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService
+        {
+            self.0.threads(caller)
+        }
+        fn dispatcher(&self, _: CommandCaller) -> Arc<dyn CommandDispatcher> {
+            Arc::new(FailingDispatcher(self.1))
+        }
+        fn intake(
+            &self,
+            caller: CommandCaller,
+        ) -> Option<t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake>
+        {
+            self.0.intake(caller)
+        }
+        fn stop(
+            &self,
+        ) -> Option<
+            &t3_orchestration::ports::thread_project::thread_management_service::ThreadStopService,
+        > {
+            None
+        }
+    }
+    let base = adapter();
+    create(&base, "caller").await;
+    create(&base, "target").await;
+    let organize = |make: fn(&str) -> error::Error| {
+        let adapter = Arc::new(OrchestrationAdapter {
+            reader: base.reader.clone(),
+            database: base.database.clone(),
+            commands: Arc::new(Failing(base.commands.clone(), make)),
+        });
+        async move {
+            let input = json!({"threadId":"target","action":"pin"});
+            let admitted = context(adapter.clone(), "t3_thread_organize", &input).await;
+            adapter
+                .t3_thread_organize(admitted, decode_input("t3_thread_organize", input).unwrap())
+                .await
+                .unwrap_err()
+        }
+    };
+    let long = organize(|_| error::Error::Rejected {
+        command_id: t3_contracts::base_schemas::CommandId("command".into()),
+        reason: "é".repeat(1500),
+    })
+    .await;
+    match long {
+        McpError::Failure { code, message } => {
+            assert_eq!(code, "orchestration_error");
+            assert_eq!(message.chars().count(), 1000);
+        }
+        other => panic!("{other}"),
+    }
+    let disabled = organize(|_| error::Error::Service {
+        operation: "ThreadManagementProviderInstanceDisabledError",
+        detail: "Provider instance \"codex\" is disabled for project project.".into(),
+    })
+    .await;
+    match disabled {
+        McpError::Failure { code, message } => {
+            assert_eq!(code, "invalid_request");
+            assert_eq!(
+                message,
+                "Provider instance \"codex\" is disabled for project project."
+            );
+        }
+        other => panic!("{other}"),
+    }
+}
