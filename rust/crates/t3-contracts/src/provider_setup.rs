@@ -56,6 +56,7 @@ pub struct ProviderCredentialField {
 pub enum ProviderAuthInteraction {
     Browser {
         id: TrimmedNonEmptyString,
+        #[serde(deserialize_with = "deserialize_sign_in_url")]
         url: TrimmedNonEmptyString,
         requires_consent: bool,
         #[serde(
@@ -67,6 +68,7 @@ pub enum ProviderAuthInteraction {
     },
     DeviceCode {
         id: TrimmedNonEmptyString,
+        #[serde(deserialize_with = "deserialize_sign_in_url")]
         url: TrimmedNonEmptyString,
         user_code: TrimmedNonEmptyString,
     },
@@ -194,7 +196,7 @@ pub struct ProviderAuthState {
     pub phase: ProviderAuthPhase,
     #[serde(with = "crate::wire::nullable")]
     pub flow_id: Option<TrimmedNonEmptyString>,
-    #[serde(with = "crate::wire::nullable")]
+    #[serde(with = "authorization_url")]
     pub authorization_url: Option<String>,
     #[serde(with = "crate::wire::nullable")]
     pub expires_at: Option<IsoDateTime>,
@@ -413,3 +415,33 @@ pub enum ChatGptHandoffState {
 
 crate::redacted_debug!(ChatGptReconnectProfile { client_id, subject, email, redirect_uri, connection_label, sharing_enabled } redact { id_token_hint });
 crate::redacted_debug!(ChatGptTransferredCredentials { client_id, issuer, expires_at, earliest_refresh_at, scopes, subject, email } redact { access_token, refresh_token, id_token });
+
+#[derive(Deserialize)]
+#[serde(try_from = "TrimmedNonEmptyString")]
+struct SignInUrl(TrimmedNonEmptyString);
+impl TryFrom<TrimmedNonEmptyString> for SignInUrl {
+    type Error = &'static str;
+    fn try_from(value: TrimmedNonEmptyString) -> Result<Self, Self::Error> {
+        let prefix = value.0.get(..7).unwrap_or_default();
+        let secure_prefix = value.0.get(..8).unwrap_or_default();
+        if value.0.encode_utf16().count() <= 16_384
+            && (prefix.eq_ignore_ascii_case("http://")
+                || secure_prefix.eq_ignore_ascii_case("https://"))
+        {
+            Ok(Self(value))
+        } else {
+            Err("expected an HTTP(S) sign-in URL of at most 16384 UTF-16 units")
+        }
+    }
+}
+fn deserialize_sign_in_url<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<TrimmedNonEmptyString, D::Error> {
+    SignInUrl::deserialize(d).map(|v| v.0)
+}
+mod authorization_url {
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        crate::wire::nullable::deserialize::<D, super::SignInUrl>(d).map(|v| v.map(|v| v.0.0))
+    }
+    pub use crate::wire::nullable::serialize;
+}

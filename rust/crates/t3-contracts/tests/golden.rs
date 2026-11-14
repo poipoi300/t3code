@@ -249,6 +249,17 @@ fn differential() -> Result<(), Box<dyn Error>> {
         fs::write(path, serde_json::to_string_pretty(&failures)?)?;
     }
     let fixed: Vec<_> = known.difference(&actual).collect();
+    if let Ok(path) = std::env::var("T3_CONTRACT_DIFF_FIXED_REPORT") {
+        fs::write(
+            path,
+            fixed
+                .iter()
+                .map(|key| key.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
+    }
+
     assert!(
         failures.is_empty(),
         "{} / {total} new differential mismatches; first: {:?}",

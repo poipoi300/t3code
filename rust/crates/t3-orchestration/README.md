@@ -18,6 +18,7 @@ The host injects:
 - `options.attachments: CodexAttachmentResolver` for authoritative saved paths, document extraction sidecars and readable native image data URLs.
 - `options.background: CodexBackgroundHost` for app-owned continuation offers, pending delegated wakes and confirmation that untracked provider-owned processes exited.
 - `options.turn_context: CodexTurnContextProvider` for shared provider/MCP instructions, current browser/device availability, cyber-access defaults and managed-runtime service-tier policy.
+- `options.usage_policy: CodexUsagePolicy` bound to `t3-provider::account_usage::{merge_codex, codex_reset_at, codex_update}` and the host usage-update sink. Its callbacks must enqueue work without blocking the native reader. This enables ordinary-allowance reset reads and later failure-card updates; sharing caps keep an unknown reset.
 - `options.mcp_apps: CodexMcpAppHost` for validated/CSP-filtered stored snapshot leases, and `options.generated_image_markdown` for the shared Markdown image formatter.
 
 These optional host traits and their inputs live in `adapters::codex`; omitted integrations remain
@@ -25,6 +26,9 @@ unavailable. The adapter owns native protocol translation, process supervision/s
 initialization and awaited cleanup. A session serves multiple workspaces: process cwd is cleared,
 and cwd/app-thread identity travel on each thread RPC. `CodexAdapterV2::open_connected` accepts
 an externally owned native transport; the recorded `CodexReplayAdapter` uses it without Codex turns.
+
+Decoded protocol logging still needs a native-client frame observer plus the host's bounded logger.
+The local `CodexProtocolLogger` routing/redaction shim is tested but is not connected during session construction.
 
 ## Package 05 session lifecycle integration
 
@@ -102,33 +106,50 @@ management dispatcher's `command_lanes()`. The stop service exposes
 
 Use `ThreadTitleRegenerationService::new(management, database, settings, generator)`
 instead of a struct literal. Execute titles with the effect's original command ID
-and the runtime cancellation token. Construct settlement with
-`ThreadSettlementService::new(ThreadSettlementServices { projections, dispatcher,
-committer, settings, clock, ids })`, wrap it in `Arc`, then call `start().await`.
-Its current sweeps cover inactivity and persisted links; branch lookup, merge
-feeds and settle cleanup remain blocked on the backend ports listed in the
-package-08 takeover report.
+and the runtime cancellation token.
+
+Production settlement uses `ThreadSettlementService::with_backends(core,
+ThreadSettlementBackends { workspaces, pull_requests, identities, resources,
+scripts, closes_pull_request })`. The matcher must use the configured host's
+close/merge command definitions. `new(core)` supports persisted-link/inactivity
+sweeps without host lookup or cleanup. Wrap the service in `Arc` and call `start`
+after server activation. Its merge receiver currently supplies a reference,
+so the service obtains terminal timestamps through a strict summary read.
 
 Construct `PullRequestWatchReactor::new(PullRequestWatchServices { projections,
-commands, pull_requests, clock, ids })`, wrap it in `Arc`, and call `start().await`
-for immediate and two-minute sweeps. `sweep()` is also directly awaitable. Inject
-the same dispatcher and projection store used by the runtime. Its current host
-port supports grouped detail/activity/fingerprint reads and paginated comments;
-typed host failure policies and host change/invalidation feeds still require
-seam additions. PR sync and branch discovery are not yet available to compose.
+commands, pull_requests, clock, ids }).with_identity_registry(identities)` and
+`PullRequestSyncReactor::new(PullRequestSyncServices { projections, commands,
+committer, pull_requests, identities, policy, clock, ids })`. Both take an `Arc`
+for `start`. The watch starts immediately and every two minutes, with scoped host
+change subscriptions; sync starts immediately and every minute. Bridge the host's
+PR and Git global state changes to `request_sync`. The required
+`PullRequestSyncPolicy` supplies authoritative sibling URLs, avatar identity and
+shell command observations. No approximate production policy is installed.
 
-Shutdown order: close external admission; await watch and settlement `shutdown()`
-to stop their producers; stop and join the effect worker; await title `shutdown()`;
-await stop `shutdown()`; await management `shutdown()`; then shut down provider
-sessions and drain the event sink before closing SQLite. Each service shutdown is
-idempotent. Management shutdown closes transcript admission and cancels/awaits
-active exports, waits, settlement requests and dispatches. Stop shutdown first
-cancels/awaits foreground calls, then cancels/joins its owned release/detach tasks.
-Title shutdown cancels its backend token and awaits active generations. An
-accepted SQLite commit can outlive its canceled caller; the sink must still drain.
-Settlement shutdown also cancels/joins direct sweeps, stops subscriptions, then
-joins both coalescing workers. Project and deletion planners are pure functions;
-resource cleanup has an injected constructor and owns no background tasks.
+Construct `ThreadPullRequestService::new(ThreadPullRequestServices { projections,
+commands, committer, workspaces, pull_requests, identities, repository_selector,
+linked_threads_change, opportunistic_work, ids })` in an `Arc`. The repository
+selector must preserve each host's rules, including Azure's decoded repository
+name. The linked-thread detector comes from the PR application's event policy;
+it distinguishes changes from reorder-only notifications. Call `start` after
+activation and use the host background policy for `opportunistic_work`.
+
+Inject the optional `t3-pull-request::OrchestrationPullRequestBackend` through the
+existing `PullRequestBackend` seam. That crate owns application reads, host caches
+and registration; these services own orchestration scheduling and dispatch.
+`t3-project` owns `ProjectService` and managed scratch folders and consumes the
+pure project/deletion planners here.
+
+Shutdown order: close external admission and global-feed bridges; await discovery,
+sync, watch and settlement `shutdown()`; stop and join the effect worker; await
+title `shutdown()`; await stop `shutdown()`; await management `shutdown()`; then
+shut down provider sessions and drain the event sink before closing SQLite.
+Each service closes admission, cancels active calls and joins owned work.
+Management clones share export admission and shutdown. Settlement also cancels
+its settle-script token and joins completion observers. The backend must honor
+that token and join its own script processes. An accepted SQLite commit can
+outlive its canceled caller, so the sink must still drain. Pure project/deletion
+planners and the injected deletion cleanup runner own no background tasks.
 
 Native orchestration server core over canonical `t3-contracts` types and migrated
 `t3-persistence` SQLite. Twelve packages are implemented concurrently; ownership
@@ -175,10 +196,11 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | --- | --- | --- |
 | `ids` | `RandomIds` (`<prefix>:<uuid v4>`) | Production-ready |
 | `settings` | Unsupported | `thread.create`, `message.dispatch` with a new provider, launches and settlement fail: they read provider enablement. Supply the settings service (`StaticSettings` for fixed settings) |
-| `policy` | `BaseRuntimePolicy` | Turns run with the thread's own runtime and interaction modes; no project override, managed ceiling or reasoning effort (04 owns the real resolver) |
+| `policy` | `BaseRuntimePolicy` | Turns run with the thread's own runtime and interaction modes, with no project root, managed ceiling or reasoning effort. Production: `ports::decisions::runtime_policy::ProjectRuntimePolicy::configured(database, Arc::new(SnapshotRuntimeModes::new(provider_snapshots)), managed_policy, overrides, reasoning_effort)` over the host's provider snapshot watch and managed policy |
 | `attachments` | Unsupported | Messages and launches carrying attachments fail before dispatch; messages without attachments work |
 | `cleanup` | Unsupported | Terminal, preview, scheduled-task and attachment cleanup effects fail and retry; thread deletion leaves those resources |
 | `workspaces` | Unsupported | Worktree launches fail; settlement branch and PR confirmation is unavailable |
+| `credentials` | `None` | Provider sessions start without T3 MCP credentials (05's `SessionCredentials`, `prepare_reserved` for managed leases) |
 | `agent_scope` | `None` | Force-stop cannot kill thread-owned agent processes; OOM detection is off |
 | `telemetry` | `None` | No usage refresh or completed-turn analytics |
 | `titles` | `None` | Title-generation effects fail and retry; threads keep their given title |
@@ -191,23 +213,15 @@ reach a stand-in that fails with `Error::Unsupported("<Trait>.<method>")`.
 | `pull_requests` | `None` | No PR watch reactor runs |
 | `rollback_workspaces` | `None` | Provider-thread rollback effects fail Unsupported |
 | `finalization_observer` | Unsupported | After each run, VCS status refresh is skipped (the failure is not surfaced) |
+| `runtime_mode_ceiling` | `None` | Thread creation and mode changes are not capped; load it from the same managed policy given to `ProjectRuntimePolicy::configured` |
 | `sessions` | `SessionManagerOptions::default()` | TS timeouts (30 min idle, 15 s interrupt) |
 | `worker` | `WorkerOptions::default()` | 4 slots, 5 attempts, 30 s liveness poll |
 
 ### Start-up and shutdown order
 
-Start (TS order): legacy V1 shells (`legacy.reconcile_shells`), provider recovery
-(`RuntimeLayer::start`), effect worker daemon, then the settlement and PR watch producers.
-Commands are admitted once recovery succeeds. The host then drives
-`runtime.legacy.import_pending_transcripts()` and its `legacyThreadMigration` lifecycle
-events. Delegated-task recovery is not composed yet.
+Start (TS order): legacy V1 shells (`legacy.reconcile_shells`), provider recovery (`RuntimeLayer::start`), continuation delivery (05's `ProviderContinuationService`, through `Dispatcher::prepare_continuations`), the two delegated-task recovery sweeps (`runtime.delegated_recovery()` reports their failures for the host to log), the committed-event consumers feeding 04's run, provider-turn and child-work handlers (`runtime.lifecycle_failures()`), the effect worker, then the settlement and PR watch producers. Commands are admitted once recovery succeeds. The host then drives `runtime.legacy.import_pending_transcripts()` and its `legacyThreadMigration` lifecycle events.
 
-Shutdown: PR watch and settlement producers; launch, title, stop and thread management
-services; the runtime layer (closes admission, prepares providers, stops the effect worker and
-provider sessions, reconciles); then run execution, the event ingestor and pending commits.
-Package 08's documented order joins the worker before title, stop and management. The runtime
-layer stops the worker and sessions together, so those three close first and in-flight effects
-retry after restart.
+Shutdown (packages 05 and 08's order): close admission; stop the PR watch, settlement and launch producers, the committed-event consumers and continuation delivery; stop the effect worker and join its daemon; stop the title, stop and thread-management services; then run execution, provider sessions and recovery reconciliation; then drain ingestion and pending commits. The session manager ingests session-scoped artifacts that arrive before a run subscribes; run events reach run execution only.
 
 ### Which handle serves each RPC
 
@@ -215,8 +229,8 @@ retry after restart.
 | --- | --- |
 | `orchestration.dispatchCommand` | `runtime.dispatch_command(command)` |
 | `orchestration.launchThread` | `runtime.launch_thread(input)` (needs `launch`) |
-| `orchestration.stopWorkflow` | `runtime.stop.stop_workflow(input, None)` |
-| `orchestration.forceStopThread` | `runtime.stop.force_stop_thread(input)` |
+| `orchestration.stopWorkflow` | `runtime.stop_workflow(input)`; typed failure `Error::StopWorkflow(OrchestrationV2StopWorkflowError)`, anything else is a defect |
+| `orchestration.forceStopThread` | `runtime.force_stop_thread(input)`; typed failure `Error::ForceStopThread(OrchestrationV2ForceStopThreadError)` |
 | `orchestration.subscribeThread`, thread snapshot, history, search-in-thread | `runtime.transport` (`subscribe_thread`, `bounded_thread_snapshot`, `history_page`, `search_thread`) |
 | `orchestration.getThreadTitles`, `getThreadLinkMetadata`, `getOlderSettledThreads` | `runtime.projections.{thread_titles, thread_link_metadata, older_settled_threads}` (inherent on `ProjectionStore`; trait methods await 02's forwarding) |
 | Shell and thread HTTP reads | `OrchestrationHttpRead { service: &runtime.transport }` |
@@ -227,7 +241,7 @@ retry after restart.
 | Project create, update and delete (`ProjectService`) | `runtime.project_command(ProjectCommand)` |
 | MCP `send_to_thread` | `runtime.intake.send_to_thread(input)` |
 | Transcript export (HTTP) | `OrchestrationHttpRead { service: &runtime.transport }` |
-| `getTurnDiff`, `getFullThreadDiff` | not available yet (no diff query service) |
+| `getTurnDiff`, `getFullThreadDiff` | not available yet: `CheckpointDiffQuery.ts` is being ported by 07 into `ports::checkpoints_forks::checkpoint_diff_query` |
 
 Admission: client commands pass the runtime layer's gate (closed before recovery and during
 shutdown); the host's `Lifecycle::admit_command` stays in front. `command_dispatcher()` and
@@ -246,14 +260,13 @@ under "Provider adapter requests" in the integrator's request file.
 
 ### Proof
 
-`tests/runtime.rs` creates a project and thread, sends a message through `dispatch_command`,
-watches the run reach `completed` through `transport.subscribe_thread`, then restarts on the same
-database and finds nothing to recover. With `git-backend` the same turn runs in an isolated Git
-repository on 07's `GitCheckpointBackend` and asserts the captured checkpoint ref resolves to a
-commit. Without `git-backend` the workspace is a plain folder and capture is skipped. The provider
-is a scripted adapter behind 05's registry. The Replay case (`acp-adapter`) is ignored until 12's
-ACP adapter accepts the not-loaded provider thread the first-message decision creates: it fails
-`ensure_thread` and the start effect then retries indefinitely.
+`tests/runtime.rs` (requires `acp-adapter`) runs on package 12's Replay provider (`devReplay`,
+model `multi-turn`) behind 05's registry. It creates a project and thread, sends a message
+through `dispatch_command`, watches the run reach `completed` through `transport.subscribe_thread`,
+then restarts on the same database and finds nothing to recover. With `git-backend` the same turn
+runs in an isolated Git repository on 07's `GitCheckpointBackend` and asserts the captured
+checkpoint ref resolves to a commit; without it the workspace is a plain folder and capture is
+skipped.
 
 ## Store API
 
@@ -476,6 +489,9 @@ These are additive contracts. Existing struct literals and required trait signat
 | `RecordFilter::{turn_item_run_id: Option<Option<RunId>>, turn_item_run_ids: Option<Vec<Option<RunId>>>, turn_item_node_ids: Option<Vec<NodeId>>, provider_turn_attempt_ids: Option<Vec<RunAttemptId>>}` | 02 | 02 read SQL. Empty list matches nothing; a `None` entry matches runless items. Every existing literal uses struct-update syntax |
 | `StoreDatabase::read` runs its closure in one deferred read transaction | Store owner (L8) | Done. Forced adaptations: 02's `ProjectionStore::read_snapshot` and 12's `ProjectionReplay::verify` no longer open their own (now nested) transaction |
 | `OrchestrationRuntime::{command_dispatcher() -> Arc<dyn CommandDispatcher>, effect_worker() -> Arc<dyn EffectWorker>}`; `RuntimePorts::pull_request_identities: Option<Arc<dyn PullRequestIdentityRegistry>>` | 10, 12 (scenario harnesses); 02 (registry) | Composition. The registry, when given, makes the sink use 02's `RegistryProjectionWriter` |
+| `Error::StopWorkflow(Box<OrchestrationV2StopWorkflowError>)`, `Error::ForceStopThread(Box<OrchestrationV2ForceStopThreadError>)`; `OrchestrationRuntime::{stop_workflow(OrchestrationV2StopWorkflowInput) -> Result<()>, force_stop_thread(OrchestrationV2ForceStopThreadInput) -> Result<OrchestrationV2ForceStopThreadResult>}` (sixth batch, 19:50) | Server (typed RPC failures) | Composition translates 08's operation codes until 08 returns the variants from `ThreadStopService` |
+| `RuntimePorts::credentials: Option<Arc<dyn SessionCredentials>>`; manager receives the ingestor; recovery `with_restart_settings`; layer `with_run_execution` and staged shutdown | 05 | Composition |
+| `tests/runtime.rs` requires `acp-adapter` (`[[test]] required-features`) and runs on Replay | Coordinator | Integrator |
 | `testing::Script<I,O>::push(Result<O>)`, `next_call().await -> Option<I>`; `Fake*` implementations for every new service, policy methods on existing fake adapter/runtime, `FakeEventCommitter::new(StoreDatabase)` | Integrator requirement | Implemented in `testing.rs`. Unscripted calls fail with typed Unsupported; prepared fake commits run callbacks on real migrated SQLite and roll back on callback/script errors |
 
 Transaction implementation contract for 03: perform receipt dedupe and guards before invoking preparation; run normalization, callback mutations, marker/position writes, events, projections, receipt and outbox on the **same** writer transaction. Preparation must not replace the receipt identity or weaken the supplied guard; validate any newly prepared guard before append. A guard rejection after callback mutation must roll those mutations back. Publish and signal only after durable commit, retaining the publication lane when the caller drops. The callback is synchronous and must not perform external I/O. The fake demonstrates rollback, not production dedupe, guard enforcement, event append or publication.
@@ -536,52 +552,64 @@ must resnapshot on lag rather than silently drop branch changes.
 
 Enable `claude-adapter` and call `adapters::claude::claude_registration(options, continuation_key, enabled, credential_access)`. Add the returned `AdapterRegistration` to `runtime::sessions::AdapterRegistry::new`, then inject that registry as `RuntimePorts.providers`, exactly as with Replay. A dynamic host can return the registration from `ProviderInstanceSource`. Use driver `claudeAgent` in the configured instance settings, and the same instance ID in `options.instance_id` and model selections. The continuation key identifies the configured provider/credential context; the host supplies its enabled state and shared credential-access gates. Construction and registration do not spawn a process; starting native work does. The registry remains authoritative for admission.
 
-Inject the configured instance id and `LaunchOptions` (resolved executable and complete environment), `ProcessConnector` for production or a pipe connector for replay, shared `Clock`/`IdGenerator`, a fresh native-session UUID generator, and the per-session T3 MCP servers. Supply `ClaudeAttachments` for saved attachment paths and document text sidecars (`DirectoryClaudeAttachments` handles the standard attachment directory). `transcript_root` is the explicitly configured Claude projects directory used for native transcript operations. The adapter never discovers account directories implicitly.
+Inject the configured instance id and `LaunchOptions` (resolved executable and complete environment), `ProcessConnector` for production or a pipe connector for replay, shared `Clock`/`IdGenerator`, and a fresh native-session UUID generator. `options.mcp_servers` accepts stateless SDK servers shared across sessions. For thread-bound T3 tools, inject `ClaudeHostOptions::mcp_server_factory`: its `ClaudeMcpServerFactory::create(&OpenSession, CancellationToken)` returns the named SDK servers for that app thread/provider session. The adapter calls it once per opened session, registers its servers before native initialization, and reuses them across native query replacements. Bind the host's thread context and permissions there and stop any owned host work when its token is cancelled; closing one session does not cancel another's bindings. Static and factory names must be distinct. Supply `ClaudeAttachments` for saved attachment paths and document text sidecars (`DirectoryClaudeAttachments` handles the standard attachment directory). `transcript_root` is the explicitly configured Claude projects directory used for native transcript operations. The adapter never discovers account directories implicitly.
 
 `ClaudeHostOptions` supplies the host home/settings directories, attachment directory for native access, current auto-compact override, and authoritative runtime/MCP/device instructions. Inject `compile_model` from the provider model catalog to preserve catalog defaults, aliases, effort maps, and model suffixes; the same compiler handles launch and live effort/fast-mode updates; the direct-model fallback only applies explicit native options. `managed_settings` must include the native OS/server effective policy snapshots for this instance, including restrictions resolved outside ordinary settings files. The adapter combines these restrictions monotonically with custom-home, project/local and launch-file restrictions; launch settings cannot re-enable a disabled mode. No JavaScript SDK sidecar is used.
 
 For native background wakes, inject `ClaudeHostOptions::continuation_requests` with the sender consumed by the shared `ProviderContinuationService`. The adapter buffers the native wake until the allocated provider-created run calls `start_turn`; that call consumes native frames without sending another prompt. Keep the same session alive while its pending-background predicate is true. Continuation callbacks retire cancelled, unstarted wakes and guard against stale delivery.
 
-## Package 09 transport continuation — server contract (2026-11-13)
+## Package 09 transport — server contract (2026-11-13)
 
-The shell RPC is ready to connect to the server handler:
-
-```rust
-let mut subscription = runtime.transport.subscribe_shell(input, LiveStreamLimits::default()).await?;
-while let Some(batch) = subscription.pull().await? {
-    // Send each SharedLiveItem.value through the existing RPC encoder.
-}
-subscription.close().await?;
-```
-
-`subscribe_shell(OrchestrationV2SubscribeShellInput, LiveStreamLimits) -> Result<ShellSubscription>` subscribes before any database await. Its authoritative snapshot precedes `synchronized`; resume deltas precede that marker and live deltas follow it. Invalid/ahead/pruned/over-budget resume cursors return a snapshot, or one terminal `snapshot-required` frame with `httpSnapshotFallback`. Broadcast loss also sends a terminal `snapshot-required`; buffer overflow fails the stream. Drop cancels both workers; `close` additionally joins them. Lightweight references group for 50 ms / 512 events, shell reads batch, queued full-state deltas replace by identity, and delivered states remain charged. Subscriber snapshots use the single-transaction indexed projection seam and preserve idle-subagent/older-settled exceptions and counts. HTTP snapshots use the same loader.
+The composed shell and thread services are implemented. Every subscription below owns its cancellation: drop cancels work; shell/command `close().await` also joins the worker. Pull shared live item values through the RPC encoder without cloning their whole payloads.
 
 | Endpoint | Single service call |
 | --- | --- |
-| `orchestration.subscribeShell` | `TransportService::subscribe_shell(input, limits).await?` |
-| `orchestration.subscribeCommandOutput` | `CommandOutputHub::subscribe(input).await?`; frames from async `pull`, cancel on drop, awaited `close` |
-| `orchestration.subscribePromptSuggestion` | Existing `SessionManager::subscribe_prompt_suggestion(input.thread_id).await?`; send the watch's current value, then changes, drop on cancellation |
-| `orchestration.searchThread` | `ThreadFind::search_thread(input).await?` |
-| `orchestration.searchThreadStream` | `ThreadFind::search_thread_stream(input).await?`; async `pull` yields the early match then the complete snapshot; drop releases the scan |
-| `orchestration.searchThreads` (client) | `ThreadSearch::search_with_older_settled_rows(input).await?` |
+| `orchestration.subscribeShell` | `runtime.transport.subscribe_shell(input, LiveStreamLimits::default()).await?` |
+| `orchestration.subscribeThread` | `runtime.transport.subscribe_thread(input, limits).await?` |
+| `orchestration.subscribeCommandOutput` | `runtime.command_output.as_ref().ok_or(/* unavailable backend */)?.subscribe(input).await?` |
+| `orchestration.subscribePromptSuggestion` | `runtime.sessions.subscribe_prompt_suggestion(input.thread_id).await?`; send the watch's current value, then changes |
+| `orchestration.searchThread` | `runtime.transport.search_thread(input).await?` |
+| `orchestration.searchThreadStream` | Requested store accessor: `runtime.projections.search_thread_stream(input).await?`; forwards its existing cached `ThreadFind::search_thread_stream`, never creates another cache |
+| `orchestration.searchThreads` (client) | `runtime.thread_search.as_ref().ok_or(/* unavailable backend */)?.search_with_older_settled_rows(input).await?` |
 | Agent title/message search | `ThreadSearch::search_threads(input, project_id).await?` |
-| HTTP thread transcript | `OrchestrationHttpRead::thread_transcript(scopes, management, thread_id, environment_id, max_bytes).await?` |
+| HTTP thread transcript | `OrchestrationHttpRead { service: &runtime.transport }.thread_transcript(scopes, &runtime.threads, thread_id, environment_id, max_bytes).await?` |
 
-Construct one `CommandOutputHub::new(projections, events, terminal_fold)` and route ephemeral provider output to its `append(target, chunk)` / `finish(target)`. It retains 64 live and 16 finished tails, accumulates at most 16 Ki UTF-16 units per subscriber, throttles appends at 100 ms and overflow replacements at 500 ms, reconciles persisted settlement/legacy Bash output, and errors on missing/non-command rows or event loss. The mandatory marked `TerminalOutputFold` host shim represents `packages/shared/src/terminalOutput.ts`; ANSI/cursor folding is **not implemented here**. The hub is not production-complete until the shared owner supplies that fold and ingestion connects it. Plain-text test doubles test the hub only; they do not establish ANSI parity.
+HTTP transcript export uses the existing management service, including scope enforcement before reads, full persisted history, the supplied environment identity, a 400 response for over-budget exports and 404 for missing threads. The export preserves tool output rather than applying wire previews. The server owner still needs to connect its HTTP route to this call.
 
-`ThreadFind::new(snapshot_reader, rendered_text)` requires the marked `ThreadFindSnapshotReader` and `ThreadFindText` host shims. Package 02 now implements the visible-index/candidate-payload read on ProjectionStore in one transaction, including fork sources/revisions and empty-reply tool exceptions. The text helper must supply canonical rendered Markdown/context/skill segments, occurrence counting and HTML/MCP result detection. Selection, relative wrapping, bounded navigation, question-answer folding and progressive frames are ported. `ProjectionReader::search` and `TransportService::search_thread` now work when the store is constructed with `ProjectionStore::with_thread_find_text(text)`; without that required backend they fail Unsupported. Supply the same text backend through composition (integrator-owned). Find now has 8192/32 parsed-text caches, eight completed scans and a one-minute idle expiry with active scan leases.
+`command_output_hub::NativeTerminalOutputFold` is the sole package-09 ANSI implementation, in its child `terminal_output.rs`. Construct it once with `Arc::new(NativeTerminalOutputFold)` and supply `RuntimePorts.terminal_output`; package 12's recorder consumes this same `TerminalOutputFold`. It handles split escapes/string controls, cursor/erase/save/restore, SGR, carriage-return progress, a 64-line mutable window, 2,048 style runs and UTF-16 tail budgets. The hub retains 64 live and 16 finished tails, bounds subscriber appends at 16 Ki units, throttles append/replacement frames, observes committed item snapshots, normalizes legacy Bash results, and fails on missing/non-command rows or event loss. Provider ingestion must deliver ephemeral chunks to this exact hub's `append(target, chunk)` and call `finish(target)` before settled item publication. Its current `CommandOutput` branch still discards chunks; that hookup belongs to 06/composition.
 
-`ThreadSearch::new(database, policy)` has the real SQLite bounded FTS/scan query, placeholder/notice/stream/subagent/side-chat/async-answer exclusions, message selection/hit counts, project scoping, older-settled selection and coherent ranked shell reads. `ThreadSearchPolicy` is a marked shim for the authoritative shared palette tokenizer/matcher/ranking/displayed-link helpers; no approximate policy is installed. `message_search_index.rs` ports the trigger predicates, readable-text hook, create/recreate and transactional rebuild, including old databases without `search_text`. Citation conversion is injected into `readable_search_text`; it is not duplicated. Full source search suites await these shared implementations.
+The concrete native search helpers are staged in owned leaves, **not yet declared in the production module tree**, because their requested dependencies have not landed in the frozen manifest:
 
-Remaining differences/integration work:
+- `find_text.rs`, `find_directives.rs`, `find_legacy.rs`: `NativeThreadFindText`, rendered Markdown/plan boundaries, citations and comments, Codex directives/templates, legacy and structured context, skill labels, file labels, occurrence counting, and the existing bounded HTML/MCP parser from `wire_projection.rs`.
+- `search_policy.rs`, `palette_search.rs`: `NativeThreadSearchPolicy::default()`, Unicode normalization/categories, CJK/short-token narrowing, accent and case matching with UTF-16 offsets, phrase/proximity grading, hex identifiers, palette title/PR matching, picks/use/recency ranking, and a bounded prepared-query cache.
 
-- No project-enrichment host seam exists. Shell reads expose stored project shells; asynchronous identity-resolution refreshes and `knownProjectIdentities` suppression are not connected. SHA-256 identity digests, absent-identity root selection and HTTP digests match TypeScript golden values.
-- New subscriptions return the crate's typed `Error`; the server handler owns mapping it to each canonical RPC error envelope. The hub preserves error messages; event-feed loss currently retains no original cause, so full TypeScript cause parity needs an error-envelope bridge.
-- Find still reads snapshot candidates before checking its completed-scan cache; TypeScript checks a cheaper revision query first. Keep a ThreadFind service alive across calls to retain caches; the current store forwarding constructs one per call.
-- Older title candidates currently read raw thread JSON rather than TypeScript's reduced SQL fields. Title/ranking validation belongs to the supplied policy. Candidate order is explicitly rowid order instead of relying on unspecified SQL ordering.
-- Numeric cursors carry no environment identity in the existing wire contract. Ahead, pruned and unsafe cursors reset correctly; an in-range cursor copied from another environment cannot be distinguished by either implementation without a contract change.
-- `ShellSnapshotAnswer` remains local pending the contracts owner's move. No manifest/module-root/seam edits were made.
+After the integrator adds `regex = "1"`, `unicode-normalization = "0.1"`, `unicode-general-category = "1"` and `pulldown-cmark = "0.13"`, declare each helper as the `native` child in its owned `thread_find.rs` / `thread_search.rs` and re-export its struct (exact lines in the seam brief). Configure `RuntimePorts.thread_find_text = Some(Arc::new(NativeThreadFindText))` and `RuntimePorts.search_policy = Some(Arc::new(NativeThreadSearchPolicy::default()))`. Composition already constructs one store with one Find cache and one search service. The progressive Find accessor is still requested from store owner 02. Missing backends remain explicitly Unsupported.
 
-TypeScript source mapping for this continuation: `ShellStream.ts` plus the shell portion of `ws.ts` -> `src/ports/transport/shell_stream.rs`; `CommandOutputHub.ts` -> `command_output_hub.rs`; `ThreadFind.ts` -> `thread_find.rs`; `ThreadSearch.ts` -> `thread_search.rs`; `messageSearchIndex.ts` -> `message_search_index.rs`; `http.ts` -> `http.rs`. `WireProjection.test.ts` -> `tests/ports/wire_projection_test.rs` now pins the independently executed TypeScript result: **314,913 UTF-16 units / 314,915 UTF-8 bytes** for 10,000 images, including eight retained image markers. The raw preview is 262,144 bytes before JSON escaping, so TypeScript's `<270,000` assertion is incorrect. Rust preserves the source behavior.
+`ThreadFind` retains the snapshot/revision-bound scan, progressive early/complete frames, relative selection/wrapping, folded question answers, bounded navigation, 8,192/32 parsed-text caches, eight completed scans and one-minute idle expiry. The store supplies its real visible-index/candidate payload snapshot in one transaction. `ThreadSearch` uses bounded real SQLite FTS/scan reads, excludes placeholders/notices/streams/hidden threads and async answers, counts the best-quality hits, scopes projects and returns older settled shell rows coherently. `message_search_index.rs` supplies create/recreate/rebuild and trigger predicates, including legacy databases without `search_text`.
 
-Verification: **81 transport tests pass** (76 in the isolated package-09 harness plus five transport lib tests), including real migrated SQLite and the real package-02 Find snapshot adapter. This continuation adds 22 tests. Shell has 14 tests (12 external + 2 lib), command output 6 (4 + 2), Find 5 (4 + 1), HTTP 4, and cross-thread search/index 3; existing wire/history/thread tests also pass. The integrator has declared the previously missing hub and Find test modules. Full crate verification remains red outside transport: the ports run had 746 passed, two stop-related failures and one ignored; Clippy reports five collapsible_if findings in decision/engine.rs; format-check reports unowned test files only. This remains partial TypeScript source-suite coverage: remaining rendering, ANSI, ranking and enrichment assertions require the named shared host bridges. Exact signatures, owners and failure names are recorded under the dated package-09 headings in the external seam-request brief.
+Source mapping and checks:
+
+| TypeScript | Rust | Focused test coverage |
+| --- | --- | --- |
+| `orchestration-v2/ShellStream.ts`, shell part of `ws.ts` | `shell_stream.rs`, `transport/service.rs` | 14 baseline shell tests |
+| `orchestration-v2/CommandOutputHub.ts`; `shared/terminalOutput.ts` | `command_output_hub.rs`, `terminal_output.rs` | 7 tests including one 1,204-case executed-TS oracle; all five current external hub tests pass |
+| `orchestration-v2/ThreadFind.ts`; shared find/count/context/directive helpers | `thread_find.rs`, `find_text.rs`, `find_directives.rs`, `find_legacy.rs` | 5 baseline service/cache tests; 2 new native tests covering 888 rendered cases, 480 embed cases and 80 occurrence cases |
+| `orchestration-v2/ThreadSearch.ts`; `shared/paletteSearch.ts`, PR helpers | `thread_search.rs`, `search_policy.rs`, `palette_search.rs` | 3 baseline SQL/snippet tests; 3 native tests covering 196 message, 14 title and 8 message-ranking cases |
+| `orchestration-v2/messageSearchIndex.ts` | `message_search_index.rs` | Real migrated SQLite FTS and scan coverage in the search tests |
+| `orchestration-v2/http.ts` | `http.rs` | 4 tests, including authorized full export, denied scope, missing thread and size bound |
+
+The latest isolated native-source run passes **6 tests / 2,870 TypeScript-computed cases**, and scoped Clippy with `-D warnings` passes. It imports the actual helper/fold source against actual contracts and copies only seam signatures/accessors into an external scaffold; it is not a production composition test. The current standard crate passes all **82 package-09 transport tests** (77 integration tests and five library tests), including the expanded hub/HTTP/Find assertions. The staged helper tests still require the manifest changes before they can join that production module tree. The latest normal hub test build succeeds; the earlier visit-event exhaustiveness, absent Grok replay fixture and ingestion borrow errors no longer block it. Current all-target Clippy stops outside package 09 at `pull_request_sync_reactor.rs:605` (`too_many_arguments`) and `thread_settlement_service.rs:843` (`unnecessary_fold`). Crate format-check reports only unowned files: `checkpoint_diff_query.rs`, `pull_request_sync_reactor.rs`, `thread_settlement_service.rs`, `runtime/threads.rs` and `thread_settlement_service_test.rs`. No other owner's source was changed.
+
+Known differences and remaining integration limits:
+
+- Project enrichment is not connected: snapshots use stored project shells and emit no asynchronous identity-resolution refresh. Digest/root-selection helpers match executed TypeScript values.
+- The handler maps crate errors into RPC envelopes; original event-feed causes are not retained by the hub. Full TypeScript error-cause parity needs that bridge.
+- Find checks its completed-scan cache after reading snapshot candidates; TypeScript checks a cheaper revision query first. Composition now retains the single cache across calls.
+- Native Markdown uses CommonMark events and a lightweight raw-HTML traversal rather than the TypeScript HTML5 tree-repair engine. The recorded visibility/directive/context cases match; arbitrary malformed-HTML repair, all editor-link schemes and all custom Markdown plugin syntax still need full source-suite conformance before claiming renderer-wide parity.
+- Rust public strings replace unpaired UTF-16 surrogates with U+FFFD; JavaScript can retain them when cursor edits split a surrogate pair. Internal terminal runs retain original units so later edits can repair the pair.
+- Older title candidates read full thread JSON rather than reduced SQL fields. Candidate ordering is explicitly rowid-based, replacing unspecified SQL order.
+- Numeric cursors contain no environment identity. Ahead/pruned/unsafe cursors reset; an in-range cursor from another environment is indistinguishable under the existing TypeScript contract too.
+- `ShellSnapshotAnswer` remains a local untagged type pending its requested move to `t3-contracts::orchestration_v2::OrchestrationV2ShellSnapshotAnswer`.
+- Contracts now expose `ThreadVisitRecorded`; package 09 only extracts its thread ID for the generic reference path. Read-state fan-out/awareness drift is not ported before the requested upstream merge.
+
+The investigated image-preview bound is a TypeScript test bug: executing the source with 10,000 image blocks yields **314,913 UTF-16 units / 314,915 UTF-8 bytes**, including eight retained image markers. Its 262,144-byte raw preview expands under JSON escaping, so `<270,000` is incorrect. `wire_projection_test.rs` pins the executed source result; Rust preserves that behavior.

@@ -426,6 +426,13 @@ pub struct AuthPairingLink {
     pub created_at: WireDateTime,
     #[serde(rename = "expiresAt")]
     pub expires_at: WireDateTime,
+    #[serde(
+        rename = "connectDeviceRequest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub connect_device_request: Option<AuthConnectDeviceRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +513,13 @@ pub struct AuthAccessSnapshot {
     pub pairing_links: Vec<AuthPairingLink>,
     #[serde(rename = "clientSessions")]
     pub client_sessions: Vec<AuthClientSession>,
+    #[serde(
+        rename = "connectDevices",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub connect_devices: Option<Vec<AuthConnectDevice>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1176,3 +1190,58 @@ crate::redacted_debug!(AuthMcpApprovalPairingCode { _tag, access } redact { code
 crate::redacted_debug!(AuthMcpApprovalBrowserSession { _tag, access } redact { csrf_token });
 crate::redacted_debug!(AuthMcpTokenRequest { grant_type, redirect_uri, resource } redact { code, code_verifier, client_id });
 crate::redacted_debug!(AuthMcpTokenResult { token_type, expires_in, scope } redact { access_token });
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConnectDeviceRequest {
+    pub verification_code: TrimmedNonEmptyString,
+    #[serde(
+        rename = "client",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub client: Option<AuthClientMetadata>,
+}
+crate::redacted_debug!(AuthConnectDeviceRequest { client } redact { verification_code });
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConnectDevice {
+    pub proof_key_thumbprint: TrimmedNonEmptyString,
+    pub verification_code: TrimmedNonEmptyString,
+    #[serde(
+        rename = "client",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub client: Option<AuthClientMetadata>,
+    #[serde(deserialize_with = "crate::wire::utc_datetime::deserialize")]
+    pub approved_at: WireDateTime,
+}
+crate::redacted_debug!(AuthConnectDevice { proof_key_thumbprint, client, approved_at } redact { verification_code });
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthApproveConnectDeviceInput {
+    pub pairing_link_id: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthApproveConnectDeviceResult {
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRevokeConnectDeviceInput {
+    pub proof_key_thumbprint: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRevokeConnectDeviceResult {
+    pub revoked: bool,
+}

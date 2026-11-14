@@ -63,6 +63,10 @@ pub enum EnvironmentInternalErrorReason {
     ClientSessionsLoadFailed,
     #[serde(rename = "client_session_revoke_failed")]
     ClientSessionRevokeFailed,
+    #[serde(rename = "connect_device_approve_failed")]
+    ConnectDeviceApproveFailed,
+    #[serde(rename = "connect_device_revoke_failed")]
+    ConnectDeviceRevokeFailed,
     #[serde(rename = "project_snapshot_failed")]
     ProjectSnapshotFailed,
     #[serde(rename = "project_mutation_failed")]
@@ -232,6 +236,7 @@ pub struct EnvironmentResourceNotFoundError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EnvironmentHttpCommonError {
+    EnvironmentConnectApprovalPendingError(EnvironmentConnectApprovalPendingError),
     EnvironmentRequestInvalidError(EnvironmentRequestInvalidError),
     EnvironmentAuthInvalidError(EnvironmentAuthInvalidError),
     EnvironmentScopeRequiredError(EnvironmentScopeRequiredError),
@@ -545,4 +550,22 @@ pub struct EnvironmentOrchestrationThreadHistoryQuery {
         with = "crate::wire::optional"
     )]
     pub compact_ids: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnvironmentConnectApprovalPendingErrorTag {
+    EnvironmentConnectApprovalPendingError,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnvironmentConnectApprovalPendingErrorCode {
+    #[serde(rename = "connect_approval_pending")]
+    ConnectApprovalPending,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentConnectApprovalPendingError {
+    #[serde(rename = "_tag")]
+    pub tag: EnvironmentConnectApprovalPendingErrorTag,
+    pub code: EnvironmentConnectApprovalPendingErrorCode,
+    pub trace_id: TrimmedNonEmptyString,
 }

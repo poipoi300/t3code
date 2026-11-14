@@ -2,6 +2,10 @@ use super::super::{Registry, register};
 use t3_contracts::environment_http::*;
 
 pub fn register_module(registry: &mut Registry) {
+    register::<EnvironmentConnectApprovalPendingError>(
+        registry,
+        "EnvironmentConnectApprovalPendingError",
+    );
     register::<AuthClientSessionRevokeResult>(registry, "AuthClientSessionRevokeResult");
     register::<AuthOtherClientSessionsRevokeResult>(
         registry,

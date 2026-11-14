@@ -127,3 +127,21 @@ fn mutations_normalize_legacy_selections_and_reject_invalid_sources()
     }
     Ok(())
 }
+
+#[test]
+fn ignored_file_query_trims_and_enforces_utf16_length() -> Result<(), serde_json::Error> {
+    use serde_json::json;
+    for query in [json!(null), json!("x".repeat(257)), json!("😀".repeat(129))] {
+        assert!(
+            serde_json::from_value::<ProjectListIgnoredFilesInput>(
+                json!({"cwd":"/repo", "query":query})
+            )
+            .is_err()
+        );
+    }
+    let input: ProjectListIgnoredFilesInput = serde_json::from_value(
+        json!({"cwd":"/repo", "query":format!("  {}  ", "😀".repeat(128))}),
+    )?;
+    assert_eq!(input.query.map(|query| query.0), Some("😀".repeat(128)));
+    Ok(())
+}

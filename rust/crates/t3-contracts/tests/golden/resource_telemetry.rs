@@ -2,6 +2,7 @@ use super::super::{Registry, register};
 use t3_contracts::resource_telemetry::*;
 
 pub fn register_module(registry: &mut Registry) {
+    register::<DesktopTelemetryServerReady>(registry, "DesktopTelemetryServerReady");
     register::<DesktopElectronProcessMetric>(registry, "DesktopElectronProcessMetric");
     register::<DesktopElectronProcessType>(registry, "DesktopElectronProcessType");
     register::<DesktopHostTelemetryHello>(registry, "DesktopHostTelemetryHello");

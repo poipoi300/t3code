@@ -2472,6 +2472,12 @@ pub struct ServerSettings {
         with = "crate::wire::lenient"
     )]
     pub usage_model_filter: Option<crate::usage::UsageModelFilter>,
+    #[serde(default, deserialize_with = "deserialize_default_false")]
+    pub require_connect_device_approval: bool,
+    #[serde(default, deserialize_with = "deserialize_default_appearance")]
+    pub default_appearance: DefaultAppearancePreference,
+    #[serde(default, deserialize_with = "deserialize_default_appearance_set_at")]
+    pub default_appearance_set_at: String,
 }
 impl Default for ServerSettings {
     fn default() -> Self {
@@ -2489,6 +2495,9 @@ impl Default for ServerSettings {
             continue_threads_after_server_update:
                 server_settings_continue_threads_after_server_update_default(),
             keep_awake_while_agents_work: server_settings_keep_awake_while_agents_work_default(),
+            require_connect_device_approval: false,
+            default_appearance: DefaultAppearancePreference::Unset,
+            default_appearance_set_at: String::new(),
             enable_agent_browser_access: server_settings_enable_agent_browser_access_default(),
             cloud_speech_credentials: server_settings_cloud_speech_credentials_default(),
             speech_model_id: server_settings_speech_model_id_default(),
@@ -3242,7 +3251,7 @@ pub struct ServerSettingsPatch {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::wire::optional"
+        with = "patch_speech_acceleration"
     )]
     pub speech_acceleration: Option<crate::speech::SpeechAcceleration>,
     #[serde(
@@ -3667,6 +3676,41 @@ pub struct ServerSettingsPatch {
             Option<crate::base_schemas::TrimmedNonEmptyString>,
         >,
     >,
+    #[serde(
+        rename = "requireConnectDeviceApproval",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub require_connect_device_approval: Option<bool>,
+    #[serde(
+        rename = "defaultTheme",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "patch_theme_string"
+    )]
+    pub default_theme: Option<DefaultThemePreference>,
+    #[serde(
+        rename = "defaultThemeSetAt",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "patch_theme_string"
+    )]
+    pub default_theme_set_at: Option<String>,
+    #[serde(
+        rename = "defaultAppearance",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub default_appearance: Option<DefaultAppearancePreference>,
+    #[serde(
+        rename = "defaultAppearanceSetAt",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "patch_theme_string"
+    )]
+    pub default_appearance_set_at: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StorageCleanupReportTrigger {
@@ -4605,3 +4649,124 @@ fn storage_cleanup_report_bytes_freed_default() -> WireNumber {
 pub type ClientSettings = ClientSettingsSchema;
 
 pub type WireDurationMillis = WireNumber;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DefaultAppearancePreference {
+    #[default]
+    #[serde(rename = "")]
+    Unset,
+    #[serde(rename = "light")]
+    Light,
+    #[serde(rename = "dark")]
+    Dark,
+    #[serde(rename = "system")]
+    System,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClientServerSettingsPatch(pub ServerSettingsPatch);
+impl From<ServerSettingsPatch> for ClientServerSettingsPatch {
+    fn from(mut patch: ServerSettingsPatch) -> Self {
+        patch.default_theme = None;
+        patch.default_theme_set_at = None;
+        patch.default_appearance = None;
+        patch.default_appearance_set_at = None;
+        Self(patch)
+    }
+}
+impl From<ClientServerSettingsPatch> for ServerSettingsPatch {
+    fn from(patch: ClientServerSettingsPatch) -> Self {
+        ClientServerSettingsPatch::from(patch.0).0
+    }
+}
+
+impl Serialize for ClientServerSettingsPatch {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ServerSettingsPatch::from(self.clone()).serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ClientServerSettingsPatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(fields) = value.as_object_mut() {
+            for key in [
+                "defaultTheme",
+                "defaultThemeSetAt",
+                "defaultAppearance",
+                "defaultAppearanceSetAt",
+            ] {
+                fields.remove(key);
+            }
+        }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn deserialize_default_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Option::<bool>::deserialize(d).map(Option::unwrap_or_default)
+}
+fn deserialize_default_appearance<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<DefaultAppearancePreference, D::Error> {
+    Option::<DefaultAppearancePreference>::deserialize(d).map(Option::unwrap_or_default)
+}
+fn deserialize_default_appearance_set_at<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<String, D::Error> {
+    let value = Option::<String>::deserialize(d)?.unwrap_or_default();
+    if value.encode_utf16().count() > 64 {
+        return Err(serde::de::Error::custom(
+            "appearance timestamp exceeds 64 UTF-16 units",
+        ));
+    }
+    Ok(value)
+}
+
+mod patch_speech_acceleration {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(try_from = "String")]
+    struct Acceleration(String);
+    impl TryFrom<String> for Acceleration {
+        type Error = &'static str;
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            if value == "auto"
+                || value == "cpu"
+                || (value.strip_prefix("gpu:").is_some_and(|v| {
+                    !v.is_empty() && !v.starts_with(['\n', '\r', '\u{2028}', '\u{2029}'])
+                }) && value.encode_utf16().count() <= 500)
+            {
+                Ok(Self(value))
+            } else {
+                Err("invalid speech acceleration")
+            }
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        crate::wire::optional::deserialize::<D, Acceleration>(d).map(|v| v.map(|v| v.0))
+    }
+    pub use crate::wire::optional::serialize;
+}
+
+mod patch_theme_string {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(try_from = "String")]
+    struct Preference(String);
+    impl TryFrom<String> for Preference {
+        type Error = &'static str;
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            if value.encode_utf16().count() <= 64 {
+                Ok(Self(value))
+            } else {
+                Err("theme preference exceeds 64 UTF-16 units")
+            }
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        crate::wire::optional::deserialize::<D, Preference>(d).map(|v| v.map(|v| v.0))
+    }
+    pub use crate::wire::optional::serialize;
+}

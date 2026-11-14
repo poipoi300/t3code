@@ -139,6 +139,13 @@ pub struct ServerProviderAuth {
         with = "crate::wire::double_option"
     )]
     pub workspace_id: Option<Option<TrimmedNonEmptyString>>,
+    #[serde(
+        rename = "endpoint",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub endpoint: Option<Option<TrimmedNonEmptyString>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1264,17 +1271,9 @@ pub struct EnvironmentThemeFile {
     pub version: Option<Option<WireLiteral<1>>>,
     pub name: TrimmedNonEmptyString,
     pub appearance: EnvironmentThemeAppearance,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::wire::double_option"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "theme_color")]
     pub canvas: Option<Option<EnvironmentThemeColor>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::wire::double_option"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "theme_color")]
     pub accent: Option<Option<EnvironmentThemeColor>>,
     #[serde(
         default,
@@ -1288,6 +1287,13 @@ pub struct EnvironmentThemeFile {
         with = "crate::wire::double_option"
     )]
     pub variants: Option<Option<EnvironmentThemeVariants>>,
+    #[serde(
+        rename = "css",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "self::theme_css"
+    )]
+    pub css: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1302,17 +1308,9 @@ pub struct EnvironmentTheme {
     pub version: Option<Option<WireLiteral<1>>>,
     pub name: TrimmedNonEmptyString,
     pub appearance: EnvironmentThemeAppearance,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::wire::double_option"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "theme_color")]
     pub canvas: Option<Option<EnvironmentThemeColor>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::wire::double_option"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "theme_color")]
     pub accent: Option<Option<EnvironmentThemeColor>>,
     #[serde(
         default,
@@ -1326,6 +1324,13 @@ pub struct EnvironmentTheme {
         with = "crate::wire::double_option"
     )]
     pub variants: Option<Option<EnvironmentThemeVariants>>,
+    #[serde(
+        rename = "css",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "self::theme_css"
+    )]
+    pub css: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1496,6 +1501,13 @@ pub struct ServerConfig {
         with = "crate::wire::double_option"
     )]
     pub usage_limit_sources: Option<Option<UsageLimitSourceSnapshots>>,
+    #[serde(
+        rename = "serverTime",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub server_time: Option<IsoDateTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2035,3 +2047,53 @@ pub struct ServerSelfUpdateError {
 }
 
 crate::redacted_debug!(ServerSelfUpdateResult { target_version, method, update_id } redact { desktop_update_token });
+
+pub const THEME_CSS_MAX_LENGTH: usize = 20_000;
+mod theme_css {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(try_from = "String")]
+    struct Css(String);
+    impl TryFrom<String> for Css {
+        type Error = &'static str;
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            if value.encode_utf16().count() > super::THEME_CSS_MAX_LENGTH {
+                Err("theme CSS exceeds 20000 UTF-16 units")
+            } else {
+                Ok(Self(value))
+            }
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<String>>, D::Error> {
+        crate::wire::double_option::deserialize::<D, Css>(d).map(|v| v.map(|v| v.map(|v| v.0)))
+    }
+    pub use crate::wire::double_option::serialize;
+}
+
+mod theme_color {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(try_from = "String")]
+    struct Color(String);
+    impl TryFrom<String> for Color {
+        type Error = &'static str;
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            if [4, 7].contains(&value.len())
+                && value.starts_with('#')
+                && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            {
+                Ok(Self(value))
+            } else {
+                Err("expected a three- or six-digit hex color")
+            }
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<String>>, D::Error> {
+        crate::wire::double_option::deserialize::<D, Color>(d).map(|v| v.map(|v| v.map(|v| v.0)))
+    }
+    pub use crate::wire::double_option::serialize;
+}

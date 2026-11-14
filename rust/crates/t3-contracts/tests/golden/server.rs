@@ -196,3 +196,17 @@ fn compatible_arrays_drop_unreadable_entries() -> Result<(), serde_json::Error> 
     assert_eq!(serde_json::to_value(issues)?, serde_json::json!([valid]));
     Ok(())
 }
+
+#[test]
+fn theme_css_enforces_javascript_length() -> Result<(), serde_json::Error> {
+    use serde_json::json;
+    for (css, accepted) in [("😀".repeat(10_000), true), ("😀".repeat(10_001), false)] {
+        let input = json!({"name":"Theme", "appearance":"light", "css":css});
+        let decoded = serde_json::from_value::<EnvironmentThemeFile>(input.clone());
+        assert_eq!(decoded.is_ok(), accepted);
+        if let Ok(theme) = decoded {
+            assert_eq!(serde_json::to_value(theme)?, input);
+        }
+    }
+    Ok(())
+}

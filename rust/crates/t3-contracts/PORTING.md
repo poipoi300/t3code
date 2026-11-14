@@ -18,7 +18,7 @@ Golden equality establishes wire preservation, not complete filter validation.
 Find names in fixtures/manifest.json's exports (`file.ts#Export -> schema name`).
 The manifest already carries source ownership. tests/schema_modules.json resolves
 re-exports to declarations and assigns synthetic union members to their parent
-and `rpc.*` names to rpc. It covers all 2,216 sample names; refresh it only when
+and `rpc.*` names to rpc. It covers all 2,230 sample names; refresh it only when
 fixtures change. BrowserRecordingFrameRate belongs to preview, not settings.
 Samples are JSONL at fixtures/<samples[].file>; count must equal samples[].count.
 

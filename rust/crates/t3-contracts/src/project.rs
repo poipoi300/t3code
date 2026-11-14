@@ -485,6 +485,13 @@ pub struct ProjectListEntriesResult {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectListIgnoredFilesInput {
     pub cwd: crate::base_schemas::TrimmedNonEmptyString,
+    #[serde(
+        rename = "query",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "self::ignored_file_query"
+    )]
+    pub query: Option<crate::base_schemas::TrimmedString>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1132,4 +1139,28 @@ pub(crate) mod optional_received_icon {
         Ok(Some(icon.filter(|icon| icon.0.is_some())))
     }
     pub use crate::wire::double_option::serialize;
+}
+
+mod ignored_file_query {
+    use crate::base_schemas::TrimmedString;
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(try_from = "TrimmedString")]
+    struct Query(TrimmedString);
+    impl TryFrom<TrimmedString> for Query {
+        type Error = &'static str;
+        fn try_from(value: TrimmedString) -> Result<Self, Self::Error> {
+            if value.0.encode_utf16().count() > 256 {
+                Err("ignored-file query exceeds 256 UTF-16 units")
+            } else {
+                Ok(Self(value))
+            }
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<TrimmedString>, D::Error> {
+        crate::wire::optional::deserialize::<D, Query>(d).map(|v| v.map(|v| v.0))
+    }
+    pub use crate::wire::optional::serialize;
 }

@@ -355,6 +355,20 @@ pub struct PreviewOpenInput {
         with = "crate::wire::double_option"
     )]
     pub reveal: Option<Option<bool>>,
+    #[serde(
+        rename = "colorScheme",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub color_scheme: Option<Option<PreviewAppearancePreference>>,
+    #[serde(
+        rename = "zoomFactor",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "open_zoom_factor"
+    )]
+    pub zoom_factor: Option<Option<PreviewZoomFactor>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -676,4 +690,21 @@ pub enum PreviewError {
     SessionLookup(PreviewSessionLookupError),
     InvalidUrl(PreviewInvalidUrlError),
     ControlRequired(PreviewControlRequiredError),
+}
+
+mod open_zoom_factor {
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Option<super::PreviewZoomFactor>>, D::Error> {
+        let value = crate::wire::double_option::deserialize::<D, super::PreviewZoomFactor>(d)?;
+        if value
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some_and(|v| !super::PREVIEW_ZOOM_LEVELS.contains(&v.value()))
+        {
+            return Err(serde::de::Error::custom("unsupported preview zoom factor"));
+        }
+        Ok(value)
+    }
+    pub use crate::wire::double_option::serialize;
 }

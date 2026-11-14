@@ -502,6 +502,7 @@ pub struct DesktopTelemetryRequestDesktopUpdate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DesktopTelemetryControlMessage {
+    DesktopTelemetryServerReady(Box<DesktopTelemetryServerReady>),
     DesktopTelemetrySetDiagnosticsDemand(Box<DesktopTelemetrySetDiagnosticsDemand>),
     DesktopTelemetrySetHostPowerIntervals(Box<DesktopTelemetrySetHostPowerIntervals>),
     DesktopTelemetryRequestDesktopUpdate(Box<DesktopTelemetryRequestDesktopUpdate>),
@@ -1204,4 +1205,15 @@ pub struct ResourceTelemetryRetryResult {
     pub accepted: bool,
     #[serde()]
     pub snapshot: ResourceTelemetrySnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DesktopTelemetryServerReadyType {
+    #[serde(rename = "serverReady")]
+    ServerReady,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopTelemetryServerReady {
+    pub version: WireLiteral<1>,
+    pub r#type: DesktopTelemetryServerReadyType,
 }

@@ -1,6 +1,56 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainEventThreadVisitRecorded {
+    #[serde(rename = "id")]
+    pub id: crate::base_schemas::EventId,
+    #[serde(rename = "threadId")]
+    pub thread_id: crate::base_schemas::ThreadId,
+    #[serde(
+        rename = "runId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub run_id: Option<Option<crate::base_schemas::RunId>>,
+    #[serde(
+        rename = "nodeId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub node_id: Option<Option<crate::base_schemas::NodeId>>,
+    #[serde(
+        rename = "driver",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub driver: Option<Option<crate::provider_instance::ProviderDriverKind>>,
+    #[serde(
+        rename = "providerInstanceId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub provider_instance_id: Option<Option<crate::provider_instance::ProviderInstanceId>>,
+    #[serde(
+        rename = "rawEventId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub raw_event_id: Option<Option<crate::base_schemas::RawEventId>>,
+    #[serde(
+        rename = "occurredAt",
+        deserialize_with = "crate::wire::utc_datetime::deserialize"
+    )]
+    pub occurred_at: crate::wire::WireDateTime,
+    #[serde(rename = "payload")]
+    pub payload: OrchestrationV2ThreadVisit,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DomainEventThreadCreated {
     #[serde(rename = "id")]
     pub id: crate::base_schemas::EventId,
@@ -973,6 +1023,8 @@ pub enum OrchestrationV2DomainEvent {
     ThreadTagsUpdated(Box<DomainEventThreadCreated>),
     #[serde(rename = "thread.visited")]
     ThreadVisited(Box<DomainEventThreadCreated>),
+    #[serde(rename = "thread.visit-recorded")]
+    ThreadVisitRecorded(Box<DomainEventThreadVisitRecorded>),
     #[serde(rename = "thread.marked-unread")]
     ThreadMarkedUnread(Box<DomainEventThreadCreated>),
     #[serde(rename = "thread.metadata-updated")]
@@ -1054,6 +1106,7 @@ impl crate::wire::TaggedUnion for OrchestrationV2DomainEvent {
         "thread.active-reordered",
         "thread.tags-updated",
         "thread.visited",
+        "thread.visit-recorded",
         "thread.marked-unread",
         "thread.metadata-updated",
         "thread.pull-request-synced",
@@ -1178,6 +1231,8 @@ pub enum OrchestrationV2DomainEventJson {
     ThreadTagsUpdated(Box<DomainEventThreadCreated>),
     #[serde(rename = "thread.visited")]
     ThreadVisited(Box<DomainEventThreadCreated>),
+    #[serde(rename = "thread.visit-recorded")]
+    ThreadVisitRecorded(Box<DomainEventThreadVisitRecorded>),
     #[serde(rename = "thread.marked-unread")]
     ThreadMarkedUnread(Box<DomainEventThreadCreated>),
     #[serde(rename = "thread.pull-request-synced")]
@@ -1259,6 +1314,7 @@ impl crate::wire::TaggedUnion for OrchestrationV2DomainEventJson {
         "thread.active-reordered",
         "thread.tags-updated",
         "thread.visited",
+        "thread.visit-recorded",
         "thread.marked-unread",
         "thread.pull-request-synced",
         "thread.metadata-updated",

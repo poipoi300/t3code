@@ -669,3 +669,90 @@ mod tests {
         Ok(())
     }
 }
+
+pub(crate) mod utc_datetime {
+    use super::*;
+
+    fn valid(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        let expanded = matches!(bytes.first(), Some(b'+' | b'-'));
+        let year_end = if expanded { 7 } else { 4 };
+        if bytes.len() != year_end + 20 {
+            return false;
+        }
+        let number = |start: usize, end: usize| -> Option<i32> {
+            bytes
+                .get(start..end)?
+                .iter()
+                .all(u8::is_ascii_digit)
+                .then_some(())?;
+            value.get(start..end)?.parse().ok()
+        };
+        let Some(mut year) = number(usize::from(expanded), year_end) else {
+            return false;
+        };
+        if bytes[0] == b'-' {
+            year = -year;
+        }
+        if !(-271_821..=275_760).contains(&year) {
+            return false;
+        }
+        let tail = &bytes[year_end..];
+        if tail[0] != b'-'
+            || tail[3] != b'-'
+            || tail[6] != b'T'
+            || tail[9] != b':'
+            || tail[12] != b':'
+            || tail[15] != b'.'
+            || tail[19] != b'Z'
+        {
+            return false;
+        }
+        let part = |start, end| number(year_end + start, year_end + end);
+        let (Some(month), Some(day), Some(hour), Some(minute), Some(second), Some(_millis)) = (
+            part(1, 3),
+            part(4, 6),
+            part(7, 9),
+            part(10, 12),
+            part(13, 15),
+            part(16, 19),
+        ) else {
+            return false;
+        };
+        let days = match month {
+            4 | 6 | 9 | 11 => 30,
+            2 => 28 + i32::from(year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)),
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            _ => return false,
+        };
+        (1..=days).contains(&day)
+            && hour < 24
+            && minute < 60
+            && second < 60
+            && (year != -271_821 || (month, day) >= (4, 20))
+            && (year != 275_760
+                || ((month, day) < (9, 13)
+                    || ((month, day) == (9, 13)
+                        && hour == 0
+                        && minute == 0
+                        && second == 0
+                        && part(16, 19) == Some(0))))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<WireDateTime, D::Error> {
+        let value = String::deserialize(d)?;
+        if valid(&value) {
+            Ok(WireDateTime(value))
+        } else {
+            Err(serde::de::Error::custom("expected an encoded UTC DateTime"))
+        }
+    }
+
+    pub fn deserialize_nullable<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<WireDateTime>, D::Error> {
+        #[derive(Deserialize)]
+        struct Utc(#[serde(deserialize_with = "deserialize")] WireDateTime);
+        Option::<Utc>::deserialize(d).map(|v| v.map(|v| v.0))
+    }
+}

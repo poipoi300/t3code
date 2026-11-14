@@ -151,6 +151,13 @@ pub struct ServerProviderUsageLimits {
         with = "crate::wire::double_option"
     )]
     pub unavailable: Option<Option<ServerProviderUsageUnavailable>>,
+    #[serde(
+        rename = "zeroSpendCap",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub zero_spend_cap: Option<Option<bool>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,6 +209,13 @@ pub struct UsageLimitSourceSnapshot {
         with = "crate::wire::double_option"
     )]
     pub error: Option<Option<TrimmedNonEmptyString>>,
+    #[serde(
+        rename = "origin",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub origin: Option<Option<TrimmedNonEmptyString>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -677,7 +677,7 @@ pub struct ThreadOpensPicksItem {
 pub struct OrchestrationV2ThreadOpens {
     #[serde(rename = "openedAt")]
     pub opened_at: crate::wire::JsNumber,
-    #[serde(rename = "score")]
+    #[serde(rename = "score", deserialize_with = "deserialize_open_score")]
     pub score: crate::wire::JsNumber,
     #[serde(rename = "picks")]
     pub picks: Vec<ThreadOpensPicksItem>,
@@ -2984,6 +2984,13 @@ pub struct OrchestrationV2ConversationMessage {
         with = "crate::wire::double_option"
     )]
     pub delegated_completion: Option<Option<ConversationMessageDelegatedCompletion>>,
+    #[serde(
+        rename = "followsThreadSelection",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub follows_thread_selection: Option<Option<LiteralTrue>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3508,5 +3515,35 @@ impl Serialize for OrchestrationV2NotificationSource {
             .serialize(serializer),
             _ => NotificationSourceFields::serialize(self, serializer),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationV2ThreadVisit {
+    #[serde(
+        default = "app_thread_last_visited_at_default",
+        deserialize_with = "crate::wire::utc_datetime::deserialize_nullable"
+    )]
+    pub last_visited_at: Option<crate::wire::WireDateTime>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_lenient_opens"
+    )]
+    pub opens: Option<Option<OrchestrationV2ThreadOpens>>,
+}
+pub type OrchestrationV2ThreadVisitJson = OrchestrationV2ThreadVisit;
+
+fn deserialize_open_score<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<crate::wire::JsNumber, D::Error> {
+    let score = crate::wire::JsNumber::deserialize(d)?;
+    if score.value() < 0.0 {
+        Err(serde::de::Error::custom(
+            "thread open score must be non-negative",
+        ))
+    } else {
+        Ok(score)
     }
 }

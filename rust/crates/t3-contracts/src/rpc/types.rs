@@ -166,7 +166,7 @@ pub enum WsPeerLinksAnswerRequestError {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WsServerUpdateSettingsPayload {
-    pub patch: crate::settings::ServerSettingsPatch,
+    pub patch: crate::settings::ClientServerSettingsPatch,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

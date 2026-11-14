@@ -2,6 +2,8 @@ use super::super::{Registry, register};
 use t3_contracts::settings::*;
 
 pub fn register_module(registry: &mut Registry) {
+    register::<DefaultAppearancePreference>(registry, "DefaultAppearancePreference");
+    register::<ClientServerSettingsPatch>(registry, "ClientServerSettingsPatch");
     register::<AntigravityAuthMethod>(registry, "AntigravityAuthMethod");
     register::<AntigravitySettings>(registry, "AntigravitySettings");
     register::<AppearanceContrast>(registry, "AppearanceContrast");
@@ -346,6 +348,7 @@ fn empty_object_matches_DEFAULT_SERVER_SETTINGS_DEFAULT_SNOOZE_PRESETS_and_DEFAU
   "enableProviderUpdateChecks": true,
   "continueThreadsAfterServerUpdate": true,
   "keepAwakeWhileAgentsWork": true,
+  "requireConnectDeviceApproval": false,
   "enableAgentBrowserAccess": true,
   "cloudSpeechCredentials": {
     "openai": "",
@@ -420,6 +423,8 @@ fn empty_object_matches_DEFAULT_SERVER_SETTINGS_DEFAULT_SNOOZE_PRESETS_and_DEFAU
   "backgroundActivityProfile": "balanced",
   "defaultTheme": "",
   "defaultThemeSetAt": "",
+  "defaultAppearance": "",
+  "defaultAppearanceSetAt": "",
   "environmentIcon": null,
   "newWorktreesStartFromOrigin": true,
   "worktreeSubmodules": null,
@@ -535,6 +540,7 @@ fn partial_object_matches_DEFAULT_SERVER_SETTINGS_and_DEFAULT_BACKGROUND_ACTIVIT
   "enableProviderUpdateChecks": true,
   "continueThreadsAfterServerUpdate": true,
   "keepAwakeWhileAgentsWork": true,
+  "requireConnectDeviceApproval": false,
   "enableAgentBrowserAccess": true,
   "cloudSpeechCredentials": {
     "openai": "",
@@ -625,6 +631,8 @@ fn partial_object_matches_DEFAULT_SERVER_SETTINGS_and_DEFAULT_BACKGROUND_ACTIVIT
   "backgroundActivityProfile": "balanced",
   "defaultTheme": "",
   "defaultThemeSetAt": "",
+  "defaultAppearance": "",
+  "defaultAppearanceSetAt": "",
   "environmentIcon": null,
   "newWorktreesStartFromOrigin": true,
   "worktreeSubmodules": null,
@@ -813,5 +821,34 @@ fn encoded_empty_binary_paths_remain_empty_and_missing_paths_use_defaults()
     let missing: CodexSettings = serde_json::from_value(json!({}))?;
     assert_eq!(serde_json::to_value(explicit)?["binaryPath"], "");
     assert_eq!(serde_json::to_value(missing)?["binaryPath"], "codex");
+    Ok(())
+}
+
+#[test]
+fn client_patches_drop_theme_defaults_before_validating_them() -> Result<(), serde_json::Error> {
+    use serde_json::json;
+    let patch: ClientServerSettingsPatch = serde_json::from_value(json!({
+        "defaultTheme": 12, "defaultThemeSetAt": null,
+        "defaultAppearance": "future", "defaultAppearanceSetAt": {},
+        "keepAwakeWhileAgentsWork": false, "requireConnectDeviceApproval": true
+    }))?;
+    assert_eq!(
+        serde_json::to_value(patch)?,
+        json!({"keepAwakeWhileAgentsWork": false, "requireConnectDeviceApproval": true})
+    );
+    let patch: ServerSettingsPatch = serde_json::from_value(
+        json!({"defaultTheme":"local", "defaultAppearance":"dark", "defaultAppearanceSetAt":"now"}),
+    )?;
+    assert_eq!(
+        serde_json::to_value(patch)?,
+        json!({"defaultTheme":"local", "defaultAppearance":"dark", "defaultAppearanceSetAt":"now"})
+    );
+    let settings: ServerSettings = serde_json::from_value(json!({}))?;
+    assert!(!settings.require_connect_device_approval);
+    assert_eq!(
+        settings.default_appearance,
+        DefaultAppearancePreference::Unset
+    );
+    assert_eq!(settings.default_appearance_set_at, "");
     Ok(())
 }

@@ -2,6 +2,12 @@ use super::super::{Registry, register};
 use t3_contracts::auth::*;
 
 pub fn register_module(registry: &mut Registry) {
+    register::<AuthRevokeConnectDeviceResult>(registry, "AuthRevokeConnectDeviceResult");
+    register::<AuthRevokeConnectDeviceInput>(registry, "AuthRevokeConnectDeviceInput");
+    register::<AuthConnectDeviceRequest>(registry, "AuthConnectDeviceRequest");
+    register::<AuthConnectDevice>(registry, "AuthConnectDevice");
+    register::<AuthApproveConnectDeviceResult>(registry, "AuthApproveConnectDeviceResult");
+    register::<AuthApproveConnectDeviceInput>(registry, "AuthApproveConnectDeviceInput");
     register::<AuthAccessSnapshot>(registry, "AuthAccessSnapshot");
     register::<AuthAccessStreamClientRemovedEvent>(registry, "AuthAccessStreamClientRemovedEvent");
     register::<AuthAccessStreamClientUpsertedEvent>(

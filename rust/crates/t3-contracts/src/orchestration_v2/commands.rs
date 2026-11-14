@@ -523,6 +523,13 @@ pub struct CommandThreadMetadataUpdate {
         with = "crate::wire::double_option"
     )]
     pub linked_pull_request: Option<Option<crate::thread_pull_request::ThreadLinkedPullRequest>>,
+    #[serde(
+        rename = "continuation",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::double_option"
+    )]
+    pub continuation: Option<Option<ThreadMetadataContinuation>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2034,4 +2041,11 @@ pub struct OrchestrationV2DispatchCommandError {
         with = "crate::wire::nullable_optional"
     )]
     pub cause: Option<Option<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMetadataContinuation {
+    pub message_id: crate::base_schemas::MessageId,
+    pub text: String,
 }

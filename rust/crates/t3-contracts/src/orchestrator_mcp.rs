@@ -244,16 +244,9 @@ pub struct OrchestratorMcpDelegateTaskInput {
     pub interaction_mode: Option<Option<OrchestratorMcpInteractionMode>>,
 }
 
-pub const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT: &str =
-    "Completion wakes this thread, so end your turn. Do not wait on it or poll it.";
+pub const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT: &str = "Completion wakes this thread. Do not wait on it or poll it. Continue other work, and end your turn when none is left.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OrchestratorMcpRunningTaskNext {
-    #[serde(
-        rename = "Completion wakes this thread, so end your turn. Do not wait on it or poll it."
-    )]
-    CompletionWakesParent,
-}
+pub type OrchestratorMcpRunningTaskNext = String;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

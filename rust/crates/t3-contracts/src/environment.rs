@@ -540,6 +540,13 @@ pub struct ExecutionEnvironmentCapabilities {
         with = "crate::wire::optional"
     )]
     pub linked_thread_refreshes: Option<bool>,
+    #[serde(
+        rename = "ignoredFileSearch",
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::optional"
+    )]
+    pub ignored_file_search: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

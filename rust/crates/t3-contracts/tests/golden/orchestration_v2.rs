@@ -1,6 +1,16 @@
 use super::super::{Registry, register};
 use t3_contracts::orchestration_v2::*;
 pub fn register_module(registry: &mut Registry) {
+    register::<OrchestrationV2ThreadVisitJson>(registry, "OrchestrationV2ThreadVisitJson");
+    register::<OrchestrationV2ThreadVisit>(registry, "OrchestrationV2ThreadVisit");
+    register::<OrchestrationV2DomainEventJson>(
+        registry,
+        "OrchestrationV2DomainEventJson.thread.visit-recorded",
+    );
+    register::<OrchestrationV2DomainEvent>(
+        registry,
+        "OrchestrationV2DomainEvent.thread.visit-recorded",
+    );
     register::<OrchestrationGetWorkflowScriptError>(
         registry,
         "OrchestrationGetWorkflowScriptError",
