@@ -40,6 +40,7 @@ use crate::screens::thread::markdown::{
         CodeBlockOptions, CodeBlockProps, CodeBlockState, extract_fence_title, markdown_code_block,
     },
 };
+use crate::screens::thread::timeline::TimelineServices;
 
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, tw};
@@ -724,6 +725,9 @@ impl AssistantRowsState {
     }
 }
 
+/// MessagesTimeline's row context for assistant rows, from the thread's [`TimelineServices`].
+/// Reply is hidden until the composer exposes `replyToResponse` (ui-mounts-notes.md); the
+/// changed-files card (`AssistantChangedFilesSection`) is not ported by the diff lane yet.
 #[derive(Clone)]
 pub struct AssistantRowContext {
     pub thread_ref: Option<ThreadKey>,
@@ -731,23 +735,21 @@ pub struct AssistantRowContext {
     pub agent_directories: Option<DirectoryLookup>,
     pub timestamp_format: Memo<TimestampFormat>,
     pub provider_capabilities: Option<CapabilityLookup>,
-    pub on_fork_from_run: Option<ForkHandler>,
-    pub on_reply_to_response: Option<ReplyHandler>,
-    pub changed_files: Option<RowSlot>,
+    on_fork_from_run: Option<ForkHandler>,
+    on_reply_to_response: Option<ReplyHandler>,
     pub state: AssistantRowsState,
 }
 
 impl AssistantRowContext {
-    pub fn new(state: AssistantRowsState) -> Self {
+    pub fn new(state: AssistantRowsState, services: &TimelineServices) -> Self {
         Self {
-            thread_ref: None,
+            thread_ref: Some(services.key.clone()),
             markdown_cwd: None,
             agent_directories: None,
-            timestamp_format: computed(|| TimestampFormat::Locale),
+            timestamp_format: services.timestamp_format,
             provider_capabilities: None,
-            on_fork_from_run: None,
+            on_fork_from_run: services.rewind.fork_action(),
             on_reply_to_response: None,
-            changed_files: None,
             state,
         }
     }
@@ -783,7 +785,6 @@ pub fn assistant_timeline_row(
         })
     });
     let meta_context = context.clone();
-    let changed_files = context.changed_files.clone();
     let show_meta =
         computed(move || row.with(|row| row.as_ref().is_some_and(|row| row.show_assistant_meta)));
     let show_interrupted = computed(move || {
@@ -801,7 +802,6 @@ pub fn assistant_timeline_row(
                 .get()
                 .map(|rendered| untracked(|| rendered.view(state)))
         })))
-        .child(changed_files.map(|render| assistant_changed_files_section(row, render)))
         .child(dynamic(move || {
             show_interrupted.get().then(|| {
                 view()
@@ -1298,7 +1298,19 @@ mod tests {
             .find(|row| AssistantRow::from_row(row).is_some())
             .expect("client assistant row");
         let row = assistant_row(computed(move || Some(Shared(source.clone()))));
-        let mut context = AssistantRowContext::new(AssistantRowsState::default());
+        provide_context(crate::runtime::Rt::new(
+            t3_client::ClientStore::default(),
+            Rc::new(crate::runtime::backend::Unavailable("fixture".into())),
+            crate::runtime::host::Choice::Demo,
+        ));
+        provide_context(crate::state::nav::Navigator::new(
+            crate::state::nav::Route::Home,
+        ));
+        let services = TimelineServices::new(ThreadKey {
+            environment: t3_client::types::EnvironmentId("environment".into()),
+            thread: ThreadId("thread".into()),
+        });
+        let mut context = AssistantRowContext::new(AssistantRowsState::default(), &services);
         context.timestamp_format = computed(|| TimestampFormat::V24Hour);
         view()
             .app_class(tw("group/assistant"))

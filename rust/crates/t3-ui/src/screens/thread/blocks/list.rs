@@ -20,17 +20,16 @@ use crate::screens::thread::rows::approval::{
     ApprovalContext, approval_timeline_row, unmatched_pending_approval_rows,
 };
 use crate::screens::thread::rows::assistant::{
-    AssistantRowContext, AssistantRowsState, assistant_changed_files_section,
-    assistant_message_meta, assistant_meta_timeline_row, assistant_row, assistant_status_badge,
-    assistant_timeline_row, sent_message_timeline_row, should_preserve_assistant_line_breaks,
+    AssistantRowContext, AssistantRowsState, assistant_message_meta, assistant_meta_timeline_row,
+    assistant_row, assistant_status_badge, assistant_timeline_row, sent_message_timeline_row,
+    should_preserve_assistant_line_breaks,
 };
 use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_row};
-use crate::screens::thread::rows::groups::{
-    WorkGroupsContext, WorkGroupsState, work_group_timeline_row,
-};
+use crate::screens::thread::rows::groups::{WorkGroupsContext, work_group_timeline_row};
 use crate::screens::thread::rows::plan::{PlanContext, proposed_plan_timeline_row};
 use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
 use crate::screens::thread::rows::work::working_row;
+use crate::screens::thread::timeline::TimelineServices;
 use crate::screens::thread::viewport::{TimelineViewport, timeline_row_keys};
 use crate::theme::{cn, tw};
 use crate::ui::surface::empty_state;
@@ -566,37 +565,33 @@ pub struct BlockListThreadContext {
     pub pending: Option<(PendingMessages, Rc<dyn ComposerSendClient>)>,
 }
 
-impl Default for BlockListOptions {
-    fn default() -> Self {
+impl BlockListOptions {
+    /// Rows outside a thread's timeline (no events, plans, approvals or pending messages).
+    pub fn new(services: &TimelineServices) -> Self {
         Self {
             state: BlockListState::default(),
-            assistant: AssistantRowContext::new(AssistantRowsState::default()),
-            user: UserRowContext::new(UserRowState::new()),
-            work: WorkGroupsContext::new(WorkGroupsState::default()),
+            assistant: AssistantRowContext::new(AssistantRowsState::default(), services),
+            user: UserRowContext::new(UserRowState::new(), services),
+            work: WorkGroupsContext::new(services.groups),
             wrapped: computed(|| true),
             themed: computed(crate::theme::has_theme_id),
             thread: None,
         }
     }
-}
 
-impl BlockListOptions {
     pub fn for_thread(
-        key: ThreadKey,
-        groups: WorkGroupsState,
+        services: &TimelineServices,
         approvals: ApprovalContext,
         plans: PlanContext,
-        working: Memo<bool>,
     ) -> Self {
-        let mut options = Self::default();
-        options.user.working = working;
-        options.work = WorkGroupsContext::new(groups);
+        let mut options = Self::new(services);
+        let key = services.key.clone();
         let pending = rt().backend().client().map(|client| {
             let client: Rc<dyn ComposerSendClient> = Rc::new(client);
             (PendingMessages::attach(client.clone(), key.clone()), client)
         });
         options.thread = Some(BlockListThreadContext {
-            events: EventRowContext::new(key.clone(), groups.entries),
+            events: services.events.clone(),
             key,
             approvals,
             plans,
@@ -906,11 +901,11 @@ fn assistant_footer(
 ) -> impl IntoElement {
     let assistant = assistant_row(row);
     let meta_context = context.clone();
-    let files = context.changed_files;
     view()
+        // MessageAuthorHeading is sr-only; each cell of the message carries it as its label.
+        .label(move || SharedString::from(t("T3 Code")))
         // The message's py-0.5 is split between its header and footer, never repeated per block.
         .app_class(tw("relative min-w-0 px-1 pb-0.5"))
-        .child(files.map(|render| assistant_changed_files_section(assistant, render)))
         .child(dynamic(move || {
             assistant.with(|row| row.as_ref().filter(|row| !row.show_assistant_meta)
                 .and_then(|row| row.projected_item.as_ref())

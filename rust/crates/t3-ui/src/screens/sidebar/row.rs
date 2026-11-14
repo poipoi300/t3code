@@ -453,8 +453,10 @@ pub fn sidebar_thread_row(
     let failed = |action: &str, error: t3_client::ClientError| {
         crate::ui::toast::toast_manager().add(crate::ui::toast::ToastOptions {
             variant: crate::ui::toast::Variant::Error,
-            title: t(t3_client::thread_views::thread_ops::header::action_failure_title(action)),
-            description: Some(error.to_string()),
+            title: crate::i18n::Text::client_key(
+                t3_client::thread_views::thread_ops::header::action_failure_title(action),
+            ),
+            description: Some(crate::i18n::Text::content(error.to_string())),
             ..Default::default()
         });
     };

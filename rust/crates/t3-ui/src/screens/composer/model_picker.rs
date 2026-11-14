@@ -149,7 +149,8 @@ impl CatalogState {
         match self {
             Self::Ready => None,
             Self::Loading => Some(t("Searching project models...")),
-            Self::Offline => Some(t("Not connected. Model selection is unavailable.")),
+            // The web's picker adds no line of its own; the composer's disconnected banner says it.
+            Self::Offline => None,
             // Catalogue failures carry server detail: content, never a catalogue key.
             Self::Error(reason) => Some(reason.clone()),
             Self::Denied(reason) | Self::Unsupported(reason) => Some(t(reason)), // client English key
@@ -758,7 +759,6 @@ fn provider_status(provider: &PickerProvider) -> String {
 /// Port of ModelPickerContent.tsx ModelPickerList; NSH owns virtual row recycling.
 fn model_picker_list(props: Rc<PickerProps>, state: PickerState) -> impl IntoElement {
     let query_props = props.clone();
-    let rows_props = props.clone();
     let search = nsh_base::input()
         .label(t("Search models..."))
         .placeholder(t("Search models..."))
@@ -774,7 +774,6 @@ fn model_picker_list(props: Rc<PickerProps>, state: PickerState) -> impl IntoEle
         ));
     view().app_class(tw("flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/40 border-l border-border/70"))
         .child(view().app_class(tw("shrink-0 px-3 pt-2.5")).child(search))
-        .child(dynamic(move || if rows_props.search.is_none() { Some(text(t("Model search is unavailable on this client.")).app_class(tw("px-3 py-1 text-xs text-muted-foreground"))) } else { None }))
         .child(dynamic({ let props = props.clone(); move || {
             let data = props.data.get();
             let (models, legacy) = visible_models(&data, state.tab.get().as_ref(), &state.query.get(), &state.expanded.get(), props.search.as_ref());
@@ -843,7 +842,11 @@ fn model_list_row(props: Rc<PickerProps>, state: PickerState, key: ModelKey) -> 
             content.child(text(t("Unavailable")).app_class(tw("text-xs text-muted-foreground")));
     }
     let mut row = view().app_class(tw("flex h-8 w-full items-center gap-1.5 pl-2 pr-px"))
-        .child(nsh_base::button().accessibility_label(label).disabled(disabled).on_press(move || pick_model(&pick_props, state, pick_key.clone(), false))
+        .child(nsh_base::button().accessibility_label(label).disabled(disabled).on_press(move || {
+            // ModelPickerContent's Combobox is `multiple` when it toggles models: a press adds or removes.
+            let additive = pick_props.on_toggle_model.is_some();
+            pick_model(&pick_props, state, pick_key.clone(), additive)
+        })
             .app_class(tw("group relative flex min-w-0 flex-1 cursor-pointer items-center rounded-sm px-2 py-1 text-sm outline-none hover:bg-accent focus-visible:bg-accent disabled:opacity-64")).child(content));
     if let Some(toggle) = props.on_toggle_favorite.clone() {
         let favorite_key = key.clone();
@@ -870,19 +873,6 @@ fn model_list_row(props: Rc<PickerProps>, state: PickerState, key: ModelKey) -> 
                     }))
                     .app_class(tw("text-xs")),
                 ),
-        );
-    }
-    if let Some(toggle) = props.on_toggle_model.clone() {
-        row = row.child(
-            nsh_base::button()
-                .accessibility_label(t("Toggle model selection"))
-                .disabled(disabled)
-                .on_press(move || {
-                    if can_pick(&props, &key) {
-                        toggle(key.clone());
-                    }
-                })
-                .child(icon(Icon::Plus, 14.0, move || palette().foreground)),
         );
     }
     row.into_element()

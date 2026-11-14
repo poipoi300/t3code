@@ -399,14 +399,15 @@ fn show_outcome(outcome: &SettingsUpdateOutcome) {
         } else {
             ToastVariant::Warning
         },
-        title: settings_text(&toast.title),
+        title: settings_text(&toast.title).into(),
         description: Some(
             toast
                 .description
                 .iter()
                 .map(settings_text)
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")
+                .into(),
         ),
         ..Default::default()
     });
@@ -1772,11 +1773,11 @@ fn scope_menu(
 }
 
 /// The settings pickers' `Select` (`SelectTrigger size="sm"`, `SelectPopup align="end"`): item
-/// titles are English keys except where a caller passes content such as language names.
+/// titles are keys, or content such as native language names.
 pub fn settings_select(
     label: &'static str,
     width: &'static str,
-    items: Vec<(&'static str, String)>,
+    items: Vec<(&'static str, Text)>,
     value: impl Fn() -> String + 'static,
     disabled: impl Fn() -> bool + 'static,
     on_change: impl Fn(String) + 'static,
@@ -1785,7 +1786,7 @@ pub fn settings_select(
     let mut props = SelectProps::new(label);
     props.items = items
         .into_iter()
-        .map(|(value, title)| SelectItem::new(value, title))
+        .map(|(value, title)| SelectItem::new(value, title.resolve()))
         .collect::<Vec<_>>()
         .into();
     props.value = Prop::bind(move || SelectValue::Controlled(Some(SharedString::from(value()))));

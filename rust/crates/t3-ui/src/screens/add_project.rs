@@ -229,7 +229,8 @@ pub struct AddProjectRuntime(pub Rc<dyn AddProjectClient>);
 
 pub fn screen() -> AnyElement {
     let Some(client) = use_context::<AddProjectRuntime>() else {
-        // Frozen Backend has no creation service; no unsupported message is invented here.
+        // The demo has no creation service; no unsupported message is invented here.
+        debug_assert!(use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()), "AddProjectRuntime is not provided: app::provide_client_services provides it with the client");
         return view().flex_1().into_element();
     };
     command_palette_add_project(client.0)

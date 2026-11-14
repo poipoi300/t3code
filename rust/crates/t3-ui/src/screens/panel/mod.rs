@@ -151,12 +151,26 @@ fn MountedThreadWorkspace(props: MountedThreadWorkspaceProps) -> impl IntoElemen
         )
     });
     let inline = computed(move || placement.with(Option::is_some));
-    let terminal = use_context::<TerminalRegistration>().map(stored);
+    // TERM's drawer of this thread over the root's terminal service; absent on the demo
+    // backend, where the header's toggle stays disabled.
+    let services = use_context::<crate::runtime::services::terminal::TerminalServices>();
+    debug_assert!(
+        services.is_some() || runtime.backend().client().is_none(),
+        "TerminalServices is not provided: app::provide_client_services provides it with the client"
+    );
+    let terminal = services.map(|services| {
+        crate::screens::terminal::drawer::terminal_registration(services, key.clone())
+    });
     provide_context(header::HeaderLayout {
         details_inline: Prop::bind(move || inline.get()),
-        terminal: terminal.map(|terminal| terminal.with(|t| t.control.clone())),
+        terminal: terminal.as_ref().map(|terminal| terminal.control.clone()),
     });
-    let registry = use_context::<PanelRegistry>().unwrap_or_else(|| PanelRegistry::new(vec![]));
+    let registry = use_context::<PanelRegistry>();
+    debug_assert!(
+        registry.is_some(),
+        "PanelRegistry is not provided: app::provide_client_services (or provide_without_client)          provides it above the routes"
+    );
+    let registry = registry.unwrap_or_else(|| PanelRegistry::new(vec![]));
     let thread_id = key.thread.clone();
     let shell = runtime.store.shell(key.environment.clone());
     let has_project = computed(move || {
@@ -242,12 +256,9 @@ fn MountedThreadWorkspace(props: MountedThreadWorkspaceProps) -> impl IntoElemen
                 .pr(move || px(lane.get().inset_end))
                 .child(timeline::timeline(key.clone()))
                 .child(composer::composer(key.clone()))
-                .child(terminal.map(|terminal| {
-                    panel_target()
-                        .open(move || terminal.with(|t| t.control.open.get()))
-                        .child(terminal.with(|t| (t.render)(selected.get())))
-                        .into_element()
-                })),
+                // The drawer shows itself while the thread's drawer is open; it stays mounted so
+                // its chords (`terminal.toggle`) work while it is closed.
+                .child(terminal.map(|terminal| (terminal.render)(key.clone()))),
         )
         .child(
             view()

@@ -39,21 +39,43 @@ use crate::state::nav::{Route, navigator};
 use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::toast::{Action, ThreadToastData, ToastOptions, Variant, toast_manager};
 
+/// The client settings the notifications follow, provided at the app root
+/// (`app::provide_client_services`).
+#[derive(Clone)]
+pub struct NotificationSettings {
+    current: Rc<dyn Fn() -> Rc<ClientSettingsSchema>>,
+    changes: Rc<dyn Fn() -> futures::stream::LocalBoxStream<'static, ()>>,
+}
+
+pub fn notification_settings<P: t3_client::platform::Platform + Clone + 'static>(
+    client: &t3_client::composition::ClientRuntime<P>,
+) -> NotificationSettings {
+    let current = client.settings();
+    let changes = current.clone();
+    NotificationSettings {
+        current: Rc::new(move || current.client_settings()),
+        changes: Rc::new(move || changes.changes()),
+    }
+}
+
 /// `startThreadNotifications` and `startBackgroundThreadAnnouncements` for the life of the app.
 pub fn thread_notifications() -> impl IntoElement {
     let runtime = rt();
     let nav = navigator();
-    let Some(client) = runtime.backend().client() else {
+    let Some(settings_service) = use_context::<NotificationSettings>() else {
         // The demo backend has no settings or live environments to watch.
+        debug_assert!(
+            runtime.backend().client().is_none(),
+            "NotificationSettings is not provided: app::provide_client_services provides it with the client"
+        );
         return view().app_class(crate::theme::tw("hidden"));
     };
-    let settings_service = client.settings();
-    let settings = signal_with(settings_service.client_settings(), SignalEquals::Never);
+    let settings = signal_with((settings_service.current)(), SignalEquals::Never);
     let watch = settings_service.clone();
     spawn(async move {
-        let mut changes = watch.changes();
+        let mut changes = (watch.changes)();
         while changes.next().await.is_some() {
-            let _ = settings.try_set(watch.client_settings());
+            let _ = settings.try_set((watch.current)());
         }
     });
 
@@ -275,12 +297,12 @@ fn present(
             let id = manager.add(ToastOptions {
                 variant,
                 // A client English key, translated where the toast shows it.
-                title: String::from(notification.title),
-                description: Some(body.clone()),
+                title: crate::i18n::Text::client_key(notification.title),
+                description: Some(crate::i18n::Text::content(body.clone())),
                 // The thread's title is content: shown as it is, never translated.
                 description_content: Some(Rc::new(move || text(body.clone()).into_element())),
                 action: Some(Action {
-                    label: String::from("Open thread"),
+                    label: "Open thread".into(),
                     disabled: false,
                     on_press: Rc::new(move || {
                         if let Some(id) = *close_id.borrow() {

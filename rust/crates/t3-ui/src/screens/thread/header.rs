@@ -250,7 +250,7 @@ fn report_header_error(error: HeaderError, title: Option<&str>) {
         let detail = detail.unwrap_or_else(|| "An error occurred.".into());
         toast::toast_manager().add(ToastOptions {
             variant: toast::Variant::Error,
-            title: title.unwrap_or(&failure_title).to_owned(),
+            title: crate::i18n::Text::client_key(title.unwrap_or(&failure_title).to_owned()),
             description_content: Some(
                 Rc::new(move || text(detail.resolve()).into_element()) as toast::Slot
             ),

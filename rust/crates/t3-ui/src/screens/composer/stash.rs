@@ -189,7 +189,7 @@ fn show_result(stash: PromptStash, result: StashResult) {
         let spoken = title.resolve().to_string();
         toast_manager().add(ToastOptions {
             variant: notice.variant,
-            title: spoken,
+            title: spoken.into(),
             title_content: Some(Rc::new(move || {
                 let title = title.clone();
                 text(move || title.resolve()).into_element()

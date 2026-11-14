@@ -161,7 +161,8 @@ pub fn new_thread_link_route(search: &str) -> AnyElement {
 
 pub fn index_draft_landing(target: Target) -> AnyElement {
     let Some(client) = use_context::<NewThreadRuntime>() else {
-        // The frozen Backend has no draft service; an unobserved shell cannot prove emptiness.
+        // The demo has no draft service; an unobserved shell cannot prove emptiness.
+        debug_assert!(use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()), "NewThreadRuntime is not provided: app::provide_client_services provides it with the client");
         return view().flex_1().into_element();
     };
     let current = signal(Rc::new(NewThreadView::Loading));

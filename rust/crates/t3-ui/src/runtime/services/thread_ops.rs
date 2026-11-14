@@ -373,3 +373,62 @@ pub fn retry_workspace_preparation_run<P: Platform + Clone + 'static>(
         .thread_metadata()
         .retry_workspace_preparation_run(key, run)
 }
+
+struct SecretRequestBinding<P: Platform + Clone + 'static>(
+    t3_client::thread_views::secret_request::SecretRequests<P>,
+);
+/// `secrets.answerRequest` for TL-EVENTS' SecretRequestCard.
+pub fn secret_requests<P: Platform + Clone + 'static>(
+    client: &ClientRuntime<P>,
+) -> crate::screens::thread::rows::secret_request::SecretRequestService {
+    crate::screens::thread::rows::secret_request::SecretRequestService(Rc::new(
+        SecretRequestBinding(t3_client::thread_views::secret_request::SecretRequests::new(
+            client.clone(),
+        )),
+    ))
+}
+impl<P: Platform + Clone + 'static> crate::screens::thread::rows::secret_request::SecretRequestClient
+    for SecretRequestBinding<P>
+{
+    fn answer(
+        &self,
+        environment: t3_client::types::EnvironmentId,
+        input: t3_contracts::secret_request::SecretRequestAnswerInput,
+    ) -> LocalBoxFuture<
+        'static,
+        Result<(), t3_client::thread_views::secret_request::SecretAnswerError>,
+    > {
+        self.0.answer(environment, input)
+    }
+}
+
+struct LinkRequestBinding<P: Platform + Clone + 'static>(
+    t3_client::thread_views::link_request::LinkRequests<P>,
+);
+/// `peerLinks.answerRequest` for TL-EVENTS' LinkRequestCard.
+pub fn link_requests<P: Platform + Clone + 'static>(
+    client: &ClientRuntime<P>,
+) -> crate::screens::thread::rows::link_request::LinkRequestService {
+    crate::screens::thread::rows::link_request::LinkRequestService(Rc::new(LinkRequestBinding(
+        t3_client::thread_views::link_request::LinkRequests::new(client.clone()),
+    )))
+}
+impl<P: Platform + Clone + 'static> crate::screens::thread::rows::link_request::LinkRequestClient
+    for LinkRequestBinding<P>
+{
+    fn can_answer(
+        &self,
+        environment: &t3_client::types::EnvironmentId,
+        input: &t3_contracts::peer_link::PeerLinkRequestAnswerInput,
+    ) -> bool {
+        self.0.can_answer(environment, input)
+    }
+    fn answer(
+        &self,
+        environment: t3_client::types::EnvironmentId,
+        input: t3_contracts::peer_link::PeerLinkRequestAnswerInput,
+    ) -> LocalBoxFuture<'static, Result<(), t3_client::thread_views::link_request::LinkAnswerError>>
+    {
+        self.0.answer(environment, input)
+    }
+}

@@ -8,12 +8,15 @@ use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTi
 use t3_client::types::ThreadKey;
 use t3_contracts::base_schemas::{MessageId, RunId};
 
-use super::rows::user::UserRowContext;
+use super::rows::assistant::{ForkHandler, ForkRequest};
+use super::rows::user::RevertAction;
 use crate::i18n::{Text, t};
 use crate::state::nav::{Navigator, Route, navigator};
 use crate::ui::confirm::{
     ConfirmDialogInitialFocus, ConfirmDialogOptions, ConfirmDialogVariant, request_confirm_dialog,
 };
+use futures::FutureExt;
+use t3_contracts::orchestration_v2_id_table::IdOrIndex;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RewindTarget {
@@ -146,30 +149,48 @@ impl TimelineRewind {
         }
     }
 
-    pub fn bind_user_row(self, context: &mut UserRowContext) {
-        context.reverting = self.reverting;
-        context.revert = self.client.with(|client| {
+    /// The user row's "Edit from here" (`onRevertToTurnCount`); none without a rewind service.
+    pub fn revert_action(self) -> Option<RevertAction> {
+        self.client.with(|client| {
             client.as_ref().map(|_| {
                 Rc::new(
                     move |row: &t3_client::thread_views::user_message::UserRow, count: usize| {
+                        let IdOrIndex::Id(message_id) = &row.message.id else {
+                            return;
+                        };
                         self.request_revert(
                             RewindTarget {
-                                message_id: match &row.message.id {
-                                    t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
-                                        id.clone()
-                                    }
-                                    t3_contracts::orchestration_v2_id_table::IdOrIndex::Index(
-                                        _,
-                                    ) => return,
-                                },
+                                message_id: message_id.clone(),
                                 turn_count: count as u64,
                             },
                             false,
                         );
                     },
-                ) as super::rows::user::RevertAction
+                ) as RevertAction
             })
-        });
+        })
+    }
+
+    /// The assistant row's `onForkFromRun`: forks the item's source thread at `run_id`, opens the
+    /// fork, and leaves a failure in [`TimelineRewind::error`] as the web's thread error.
+    pub fn fork_action(self) -> Option<ForkHandler> {
+        self.client.with(|client| {
+            client.as_ref().map(|_| {
+                Rc::new(move |request: ForkRequest| {
+                    let (IdOrIndex::Id(source), IdOrIndex::Id(run_id)) =
+                        (request.source_thread_id, request.run_id)
+                    else {
+                        return futures::future::ready(Ok(())).boxed_local();
+                    };
+                    let key = self.key.get();
+                    let source = ThreadKey {
+                        environment: key.environment,
+                        thread: source,
+                    };
+                    self.fork_thread(source, run_id).boxed_local()
+                }) as ForkHandler
+            })
+        })
     }
 
     pub fn availability(self, target: &RewindTarget) -> RewindAvailability {
@@ -237,24 +258,44 @@ impl TimelineRewind {
     }
 
     pub fn on_fork_from_run(self, run_id: RunId) {
-        if self.reverting.get_untracked() || !self.state.get_untracked().can_fork {
-            return;
-        }
-        let Some(client) = self.client.get() else {
-            return;
-        };
         let key = self.key.get();
-        self.pending.set(true);
+        let fork = self.fork_thread(key, run_id);
         self.owner.run(|| {
             spawn(async move {
-                let _pending = Pending(self.pending);
-                self.error.set(None);
-                match client.fork(key, run_id).await {
-                    Ok(target) => self.nav.open(Route::Thread(target)),
-                    Err(error) => self.error.set(Some(error)),
-                }
-            });
+                let _ = fork.await;
+            })
         });
+    }
+
+    fn fork_thread(
+        self,
+        source: ThreadKey,
+        run_id: RunId,
+    ) -> impl std::future::Future<Output = Result<(), String>> + 'static {
+        let client = (!self.reverting.get_untracked() && self.state.get_untracked().can_fork)
+            .then(|| self.client.get())
+            .flatten();
+        if client.is_some() {
+            self.pending.set(true);
+        }
+        async move {
+            let Some(client) = client else {
+                return Ok(());
+            };
+            let _pending = Pending(self.pending);
+            let _ = self.error.try_set(None);
+            match client.fork(source, run_id).await {
+                Ok(target) => {
+                    self.nav.open(Route::Thread(target));
+                    Ok(())
+                }
+                Err(error) => {
+                    let message = error.message.clone();
+                    let _ = self.error.try_set(Some(error));
+                    Err(message)
+                }
+            }
+        }
     }
 }
 

@@ -664,7 +664,7 @@ fn save_plan_to_workspace_form(
         .child(dialog::dialog_header(
             dialog,
             view()
-                .child(dialog::dialog_title(dialog, || t("Save plan to workspace")))
+                .child(dialog::dialog_title(dialog, || "Save plan to workspace".into()))
                 .child(
                     view()
                         .app_class(tw("hidden"))
@@ -678,6 +678,7 @@ fn save_plan_to_workspace_form(
                                     ),
                                 )],
                             )
+                            .into()
                         })),
                 )
                 .child(workspace_description(workspace)),

@@ -324,7 +324,7 @@ pub fn threads_settings_panel() -> impl IntoElement {
                                     settings_select(
                                         "Response streaming",
                                         "w-full sm:w-56",
-                                        RESPONSE_STREAMING_MODE_LABELS.iter().map(|(v, l)| (*v, (*l).to_owned())).collect(),
+                                        RESPONSE_STREAMING_MODE_LABELS.iter().map(|(v, l)| (*v, Text::from(*l))).collect(),
                                         move || {
                                             if context.mixed(&["responseStreamingMode"]) {
                                                 String::new()

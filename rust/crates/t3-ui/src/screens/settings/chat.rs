@@ -55,20 +55,20 @@ fn modifier_label() -> &'static str {
     if crate::host::is_mac() { "⌘" } else { "Ctrl" }
 }
 
-fn send_shortcut_options() -> Vec<(&'static str, String)> {
+fn send_shortcut_options() -> Vec<(&'static str, Text)> {
     let modifier = t3_i18n::Value::Text(modifier_label().into());
     vec![
-        ("enter", t("Enter")),
+        ("enter", Text::from("Enter")),
         (
             "mod-enter-multiline",
-            tr(
+            Text::content(tr(
                 "{modifier} + Enter for multiline prompts",
                 &[("modifier", modifier.clone())],
-            ),
+            )),
         ),
         (
             "mod-enter",
-            tr("{modifier} + Enter always", &[("modifier", modifier)]),
+            Text::content(tr("{modifier} + Enter always", &[("modifier", modifier)])),
         ),
     ]
 }
@@ -109,8 +109,8 @@ const SCREEN_READER_ANNOUNCEMENTS_LABELS: [(&str, &str); 3] = [
     ("everything", "Everything"),
 ];
 
-fn labels(table: &[(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
-    table.iter().map(|(v, l)| (*v, (*l).to_owned())).collect()
+fn labels(table: &[(&'static str, &'static str)]) -> Vec<(&'static str, Text)> {
+    table.iter().map(|(v, l)| (*v, Text::from(*l))).collect()
 }
 
 /// `ChatSettingsPanel`.
@@ -172,7 +172,7 @@ pub fn chat_settings_panel() -> impl IntoElement {
                             settings_select(
                                 "Follow-up behavior",
                                 "w-auto min-w-0",
-                                vec![("queue", "Queue".to_owned()), ("steer", "Steer".to_owned())],
+                                vec![("queue", Text::from("Queue")), ("steer", Text::from("Steer"))],
                                 move || text_value(context, "followUpBehavior"),
                                 || false,
                                 move |behavior| context.update(json!({ "followUpBehavior": behavior })),

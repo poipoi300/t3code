@@ -160,21 +160,21 @@ fn show_branch_error(error: ClientError, failure_title: &'static str) {
         ClientError::Cancelled => return,
         ClientError::PermissionDenied { .. } => ToastOptions {
             variant: toast::Variant::Error,
-            title: t("Action unavailable"),
-            description: Some(t("This connection cannot change the thread's branch.")),
+            title: "Action unavailable".into(),
+            description: Some("This connection cannot change the thread's branch.".into()),
             ..Default::default()
         },
         ClientError::Rejected { message, .. } if message == WORKTREE_CHANGE_BLOCKED_MESSAGE => {
             ToastOptions {
                 variant: toast::Variant::Warning,
-                title: t(WORKTREE_CHANGE_BLOCKED_MESSAGE),
+                title: crate::i18n::Text::client_key(WORKTREE_CHANGE_BLOCKED_MESSAGE),
                 ..Default::default()
             }
         }
         error => ToastOptions {
             variant: toast::Variant::Error,
-            title: t(failure_title),
-            description: Some(error.to_string()),
+            title: failure_title.into(),
+            description: Some(crate::i18n::Text::content(error.to_string())),
             ..Default::default()
         },
     };

@@ -322,8 +322,8 @@ impl Control {
         }
         toast::toast_manager().add(toast::stacked_thread_toast(ToastOptions {
             variant: toast::Variant::Error,
-            title: t(title),
-            description: Some(error.to_string()),
+            title: title.into(),
+            description: Some(Text::content(error.to_string())),
             timeout: None,
             data: toast::ThreadToastData {
                 thread_ref: Some(self.scope.get().thread),
@@ -554,7 +554,12 @@ impl Control {
 }
 
 pub fn git_actions_control(props: GitActionsControlProps) -> impl IntoElement {
-    let backend = stored(use_context::<GitActionsRuntime>());
+    let backend = use_context::<GitActionsRuntime>();
+    debug_assert!(
+        backend.is_some() || use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
+        "GitActionsRuntime is not provided: app::provide_client_services provides it with the client"
+    );
+    let backend = stored(backend);
     let props = stored(props);
     let scope = computed(move || props.with(|p| p.scope.get()));
     view().child(dynamic(move || {
@@ -1263,7 +1268,7 @@ fn default_branch_dialog(control: Control) -> impl IntoElement {
                 })
             });
             view().child(dialog::dialog_header(state, view()
-                .child(dialog::dialog_title(state, move || copy.get().0))
+                .child(dialog::dialog_title(state, move || Text::client_key(copy.get().0)))
                 .child(text(move || copy.get().1).app_class(tw("text-muted-foreground text-sm")))
                 .child(when(unavailable, move || text(move || {
                     let branch = control.pending.get().map_or_else(String::new, |pending| pending.branch);

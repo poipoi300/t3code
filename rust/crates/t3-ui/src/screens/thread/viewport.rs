@@ -133,6 +133,39 @@ pub fn timeline_row_keys(
     })
 }
 
+/// Where keyboard focus is when a scroll key arrives, for [`scroll_key_direction`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyFocus {
+    /// An editable field, terminal or other text input has focus (TYPE_TO_FOCUS_EDITABLE_SELECTOR).
+    pub editable: bool,
+    /// A dialog or other floating layer is open (TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR).
+    pub floating_layer: bool,
+}
+
+/// Port of timelineViewport.ts handleKeyDown's guards: the direction a scroll key moves the
+/// timeline, or none when the key belongs to something else. NSH reports no IME composition on
+/// key events, and delivers only keys whose focus is inside the list, so `isComposing` and the
+/// body-target case have no equivalent here.
+pub fn scroll_key_direction(event: &KeyEvent, focus: &KeyFocus) -> Option<bool> {
+    let up = match event.key.as_str() {
+        "PageUp" | "Home" | "ArrowUp" => true,
+        "PageDown" | "End" | "ArrowDown" | " " => false,
+        _ => return None,
+    };
+    let modifiers = event.modifiers;
+    if event.default_prevented
+        || modifiers.alt
+        || modifiers.ctrl
+        || modifiers.cmd
+        || modifiers.shift
+        || focus.editable
+        || focus.floating_layer
+    {
+        return None;
+    }
+    Some(up)
+}
+
 type RowIndexLookup = Rc<dyn Fn(&str) -> Option<usize>>;
 
 #[derive(Clone)]
@@ -255,6 +288,15 @@ impl TimelineViewport {
 
     /// Attach to the real list, without a second scroll container or any per-row measurement.
     pub fn attach(self, list: VirtualList) -> VirtualList {
+        let keys = use_context::<crate::keys::bindings::Keybindings>();
+        let key_focus = move || {
+            let context = keys.map(|keys| keys.context.read());
+            let flag = |name| context.as_ref().is_some_and(|context| context.get(name));
+            KeyFocus {
+                editable: flag("editableFocus") || flag("terminalFocus"),
+                floating_layer: crate::ui::confirm::is_confirm_dialog_active(),
+            }
+        };
         let saved = self.visit.with(|v| v.saved.clone());
         // NSH follows index/end commands through measurement; no RAF settling loop is needed.
         let list = if let Some(saved) = saved.filter(|p| !p.at_end) {
@@ -281,19 +323,19 @@ impl TimelineViewport {
                     self.visit.with(|v| v.frame = frame);
                 });
             })
+            // timelineViewport.ts handleWheel. NSH's wheel event names no target, so a nested
+            // scroller's own wheel still counts here (isTimelineScrollTarget has no equivalent).
             .on_wheel(move |event: &WheelEvent| {
                 let delta = event.delta.points(px(16.0)).y.0;
-                if delta != 0.0 {
-                    self.navigate(TimelineNavigation::Wheel { up: delta < 0.0 });
+                if event.modifiers.ctrl || delta == 0.0 {
+                    return;
                 }
+                self.navigate(TimelineNavigation::Wheel { up: delta < 0.0 });
             })
             .on_key_down(move |event: &KeyEvent| {
-                let up = match event.key.as_str() {
-                    "PageUp" | "Home" | "ArrowUp" => true,
-                    "PageDown" | "End" | "ArrowDown" | " " => false,
-                    _ => return,
-                };
-                self.navigate(TimelineNavigation::Key { up });
+                if let Some(up) = scroll_key_direction(event, &key_focus()) {
+                    self.navigate(TimelineNavigation::Key { up });
+                }
             })
             .on_touch(move |event: &TouchEvent| {
                 if event.phase != TouchPhase::Start {
@@ -532,6 +574,59 @@ fn is_at_end(metrics: ScrollEvent) -> bool {
 mod tests {
     use super::*;
     use t3_client::types::{EnvironmentId, ThreadId};
+
+    fn key_event(name: &'static str, change: impl FnOnce(&mut KeyEvent)) -> KeyEvent {
+        let mut event = KeyEvent::default();
+        event.key = SharedString::new_static(name);
+        change(&mut event);
+        event
+    }
+
+    #[test]
+    fn scroll_keys_move_the_timeline_only_without_modifiers_editables_or_layers() {
+        let plain = KeyFocus::default();
+        assert_eq!(
+            scroll_key_direction(&key_event("PageUp", |_| ()), &plain),
+            Some(true)
+        );
+        assert_eq!(
+            scroll_key_direction(&key_event("ArrowDown", |_| ()), &plain),
+            Some(false)
+        );
+        assert_eq!(
+            scroll_key_direction(&key_event(" ", |_| ()), &plain),
+            Some(false)
+        );
+        assert_eq!(scroll_key_direction(&key_event("a", |_| ()), &plain), None);
+        // Shift+Arrow extends a text selection; it must not release follow.
+        for modify in [
+            |e: &mut KeyEvent| e.modifiers.shift = true,
+            |e: &mut KeyEvent| e.modifiers.alt = true,
+            |e: &mut KeyEvent| e.modifiers.ctrl = true,
+            |e: &mut KeyEvent| e.modifiers.cmd = true,
+            |e: &mut KeyEvent| e.default_prevented = true,
+        ] {
+            assert_eq!(
+                scroll_key_direction(&key_event("ArrowUp", modify), &plain),
+                None
+            );
+        }
+        for focus in [
+            KeyFocus {
+                editable: true,
+                floating_layer: false,
+            },
+            KeyFocus {
+                editable: false,
+                floating_layer: true,
+            },
+        ] {
+            assert_eq!(
+                scroll_key_direction(&key_event("Home", |_| ()), &focus),
+                None
+            );
+        }
+    }
 
     #[test]
     fn follow_releases_and_rearms_only_after_leaving_and_returning() {

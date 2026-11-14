@@ -189,6 +189,10 @@ pub fn thread_details_panel(
 ) -> impl IntoElement {
     let runtime = rt();
     let details = use_context::<ThreadDetailsRuntime>();
+    debug_assert!(
+        details.is_some() || runtime.backend().client().is_none(),
+        "ThreadDetailsRuntime is not provided: app::provide_client_services provides it with the client"
+    );
     let config = runtime.store.environment_config(key.environment.clone());
     let environment = key.environment.clone();
     let label = computed(move || {

@@ -6,12 +6,14 @@ use std::rc::Rc;
 
 use nsh_core::prelude::*;
 use t3_client::ClientStore;
+use t3_client::composition::ClientRuntime;
+use t3_client::platform::Platform;
 
 use crate::runtime::Rt;
 use crate::runtime::host::{self, Started};
 use crate::screens::{router, shell};
 use crate::state::clock;
-use crate::state::nav::{Navigator, initial_route};
+use crate::state::nav::{Navigator, Route, initial_route};
 use crate::state::panels::Panels;
 use crate::theme::{self, ThemeChoice, palette};
 
@@ -42,27 +44,34 @@ pub fn App() -> impl IntoElement {
 }
 
 fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyElement {
+    let paired = started.paired;
+    let has_environments = !started.backend.environments().is_empty();
+    booted_tree(initial_route(address, paired || has_environments), store, started)
+}
+
+/// The app once its backend has started, opened at `route`: what `App` shows after the launch
+/// address is read. Tests boot the host's client (`runtime::client::start`) and mount this.
+pub fn booted_tree(route: Route, store: ClientStore, started: Started) -> AnyElement {
+    let runtime = Rt::new(store, started.backend, started.choice);
+    let client = runtime.backend().client();
+    app_tree(runtime, route, move || match client {
+        Some(client) => provide_client_services(&client),
+        None => provide_without_client(),
+    })
+}
+
+/// Everything below the boot: contexts, client services (`provide_services`), the routes and
+/// the root hosts. Tests mount it with a fake-platform client, as `root` does with the host's.
+pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> AnyElement {
     theme::install(&ThemeChoice::default());
     provide_context(theme::text_view_parts());
-    // NSH's built-in highlighter answers with a `dynamic` region inside the code's text node,
-    // which the native platforms do not paint (ui-plan.md, NSH finding 10): plain code there.
-    #[cfg(not(target_arch = "wasm32"))]
-    provide_context(nsh_base::text_view::CodeHighlighter::new(|_| Vec::new()));
-    crate::i18n::set_language("system", &[locale().to_string()]);
-    let paired = started.paired;
-    let runtime = Rt::boot(store, started);
-    // Client services bound once above the routes (runtime/services). Approvals, plans, the
-    // thread header, Markdown links and rewind reach the client themselves.
-    if let Some(client) = runtime.backend().client() {
-        use crate::runtime::services::{git_panel, thread_ops};
-        thread_ops::bind_confirmation(&client);
-        provide_context(git_panel::git_actions(client.git_panel()));
-        provide_context(git_panel::git_actions_registration(client.git_panel()));
+    if let Some(highlighter) = crate::host::code_highlighter() {
+        provide_context(highlighter);
     }
-    let nav = Navigator::new(initial_route(
-        address,
-        paired || !runtime.environments().is_empty(),
-    ));
+    crate::i18n::set_language("system", &[locale().to_string()]);
+    provide_context(runtime);
+    provide_services();
+    let nav = Navigator::new(route);
     provide_context(nav);
     let panels = Panels::new();
     provide_context(panels);
@@ -90,15 +99,26 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
         .app_class(theme::tw("relative"))
         // Absolute drag background behind the routes; desktop windows only.
         .child(crate::screens::titlebar::desktop_titlebar())
+        // Untracked: only standalone-or-shell (then the route) switches the tree; a signal read
+        // while building it (theme tokens, layout) must not rebuild the whole shell.
         .child(dynamic(move || {
-            if standalone.get() {
-                router::screen(&top.get())
-            } else {
-                crate::screens::palette::command_palette(shell::app_shell()).into_element()
-            }
+            let standalone = standalone.get();
+            untracked(|| {
+                if standalone {
+                    dynamic(move || {
+                        let route = top.get();
+                        untracked(|| router::screen(&route))
+                    })
+                    .into_element()
+                } else {
+                    crate::screens::palette::command_palette(shell::app_shell()).into_element()
+                }
+            })
         }))
         // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
         .child(crate::ui::confirm::confirm_dialog_host())
+        // ThreadNotificationCoordinator, started once from the app root (hidden, effects only).
+        .child(crate::screens::notifications::thread_notifications())
         .into_element();
     crate::ui::toast::toast_provider(
         crate::ui::toast::anchored_toast_provider(crate::keys::bindings::keyboard_events(
@@ -107,4 +127,45 @@ fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyEleme
         crate::ui::toast::Position::TopRight,
     )
     .into_element()
+}
+
+/// The client services every screen reads from context, bound once above the routes
+/// (`runtime/services`). Plans, the thread header, Markdown links and rewind reach the client
+/// themselves. Tests pass a fake-platform runtime here, as `root` passes the host's.
+pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) {
+    use crate::runtime::services::{
+        diff, files, git_panel, navigation, shell, terminal, thread_ops,
+    };
+    use crate::screens::panel::{self, PanelRegistry};
+    thread_ops::bind_confirmation(client);
+    provide_context(git_panel::git_actions(client.git_panel()));
+    provide_context(git_panel::git_actions_registration(client.git_panel()));
+    provide_context(git_panel::branch_registration(client.git_panel()));
+    provide_context(git_panel::thread_details_runtime(client.git_panel()));
+    provide_context(thread_ops::approval_services(client));
+    provide_context(navigation::new_thread_runtime(client));
+    provide_context(navigation::add_project_runtime(client.add_project()));
+    provide_context(files::files(client));
+    provide_context(files::file_viewer(client));
+    provide_context(shell::sidebar_width_store(client));
+    provide_context(shell::sidebar_shelves_store(client));
+    provide_context(crate::screens::notifications::notification_settings(client));
+    let host = panel::workspace_panel_host();
+    provide_context(host);
+    // RightPanelSurfaceContent.tsx's surfaces. Browser, Terminal tabs, pull requests, devices and
+    // side chats register here when their lanes land (briefs/ui-mounts-notes.md).
+    provide_context(PanelRegistry::new(vec![
+        panel::file_viewer::files_panel_registration(host),
+        panel::diff::diff_panel_registration(diff::diff_panel_runtime(client), host),
+    ]));
+    // TERM's drawer and header toggle: the workspace builds `terminal_registration` per thread.
+    provide_context(terminal::TerminalServices::new(client.terminals()));
+}
+
+/// The demo and an unavailable host: the workspace host with no surface to offer, as the web
+/// offers none it cannot load.
+pub fn provide_without_client() {
+    let host = crate::screens::panel::workspace_panel_host();
+    provide_context(host);
+    provide_context(crate::screens::panel::PanelRegistry::new(vec![]));
 }

@@ -2,6 +2,7 @@
 //! (briefs/client-services-package.md). Each builds its handles from `Backend::client()` and only
 //! delegates; rules belong in the client.
 
+pub mod assets;
 pub mod composer;
 pub mod connection;
 pub mod diff;

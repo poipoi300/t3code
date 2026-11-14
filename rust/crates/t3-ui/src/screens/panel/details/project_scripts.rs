@@ -258,8 +258,8 @@ fn show_error(title: String, error: ClientError) {
     }
     toast::toast_manager().add(toast::stacked_thread_toast(ToastOptions {
         variant: toast::Variant::Error,
-        title,
-        description: Some(error.to_string()),
+        title: title.into(),
+        description: Some(crate::i18n::Text::content(error.to_string())),
         ..Default::default()
     }));
 }
@@ -752,6 +752,7 @@ fn delete_confirmation(
                                 "Delete action \"{name}\"?",
                                 &[("name", Value::Text(form.with(|f| f.name.clone())))],
                             )
+                            .into()
                         }))
                         .child(dialog::dialog_description(state, || {
                             "This action cannot be undone.".into()

@@ -51,3 +51,31 @@ pub fn is_windows() -> bool {
 pub fn trackpad_history_swipe() -> bool {
     os() == Os::MacOs
 }
+
+/// Where the code tokenizer's syntaxes come from, matching NSH's loader boundary: native binaries
+/// carry two-face's dump (built on a blocking thread); the web page supplies `nsh-syntaxes.bin`
+/// (nsh-base/src/syntax.rs::load_async). `None` when they cannot be read.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn load_syntax_set() -> Option<syntect::parsing::SyntaxSet> {
+    blocking(two_face::syntax::extra_newlines).await.ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn load_syntax_set() -> Option<syntect::parsing::SyntaxSet> {
+    next_frame().await;
+    let bytes = nsh_core::runtime_data::load("syntaxes").await?;
+    syntect::dumps::from_uncompressed_data(&bytes)
+        .inspect_err(|error| log::warn!("Code syntaxes could not be loaded: {error}"))
+        .ok()
+}
+
+/// The code highlighter the root provides to NSH's TextView, if it replaces NSH's own. NSH's
+/// built-in highlighter answers with a `dynamic` region inside the code's text node, which the
+/// native platforms do not paint (ui-plan.md, NSH finding 10; reports/ui-mounts-app-root.md):
+/// native code is plain until NSH paints it. The web keeps NSH's highlighter.
+pub fn code_highlighter() -> Option<nsh_base::text_view::CodeHighlighter> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return Some(nsh_base::text_view::CodeHighlighter::new(|_| Vec::new()));
+    #[cfg(target_arch = "wasm32")]
+    None
+}

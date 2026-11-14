@@ -151,7 +151,8 @@ fn refused_scope(failure: &Value) -> Option<String> {
         value["_tag"] == "EnvironmentAuthorizationError"
     })
     .first()
-    .map(|error| error["requiredScope"].as_str().unwrap().to_owned())
+    // `requiredScope` carries the legacy name; `requiredPermission` the scope itself.
+    .map(|error| error["requiredPermission"].as_str().unwrap().to_owned())
 }
 
 mod harness {
@@ -405,6 +406,34 @@ mod harness {
                 });
                 if let Some(value) = statuses.into_iter().rev().find_map(&found) {
                     return value;
+                }
+                self.pump().await;
+            }
+        }
+
+        fn statuses(&self) -> Vec<&Value> {
+            objects(&self.config, &|value| {
+                value["instanceId"] == INSTANCE && value["driver"] == "acpRegistry"
+            })
+        }
+
+        pub fn status_count(&self) -> usize {
+            self.statuses().len()
+        }
+
+        /// A configuration change re-probes the agent (as TypeScript's `refreshInstance` after
+        /// `invalidateEnrichmentCache`): the readiness status, then the probed one. Capability
+        /// checks read the probed status, so a client waits for it as this does.
+        pub async fn reprobed(&mut self, since: usize) {
+            loop {
+                let statuses = self.statuses();
+                let later = statuses.get(since..).unwrap_or_default();
+                if let Some(base) = later.iter().position(|s| !s["nativeSessions"].is_object())
+                    && later[base..]
+                        .iter()
+                        .any(|s| s["configurableProviders"] == true)
+                {
+                    return;
                 }
                 self.pump().await;
             }

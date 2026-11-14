@@ -2,6 +2,7 @@
 //! target, its futures on NSH's executor, saved environments restored at start-up.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
@@ -16,6 +17,15 @@ use t3_client::rpc::SessionEndpoint;
 use super::backend::Unavailable;
 use super::host::{Choice, Started};
 
+/// Set once the client's storage opened with a key store that outlives the process.
+static SAVED_SERVERS_LAST: AtomicBool = AtomicBool::new(false);
+
+/// Whether servers paired now are still saved, with their credentials, at the next start on this
+/// host. False for the demo, an unavailable host, and a mobile host without its OS key store.
+pub fn saved_servers_last() -> bool {
+    SAVED_SERVERS_LAST.load(Ordering::Relaxed)
+}
+
 pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
     // The client's tasks live as long as the owner that started it (`App`).
     let owner = Owner::current();
@@ -26,7 +36,10 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
     });
     async move {
         let platform = match host::open().await {
-            Ok(platform) => platform,
+            Ok((platform, lasting)) => {
+                SAVED_SERVERS_LAST.store(lasting, Ordering::Relaxed);
+                platform
+            }
             Err(reason) => {
                 log::warn!("t3-ui: the client did not start: {reason}");
                 return Started {
@@ -113,18 +126,20 @@ mod host {
         }
     }
 
-    pub async fn open() -> Result<NativePlatform, String> {
+    /// The platform, and whether what it saves outlives this run.
+    pub async fn open() -> Result<(NativePlatform, bool), String> {
         let dir = nsh_core::prelude::data_dir()
             .ok_or("This host keeps no app data, so the client cannot save servers.")?
             .join("client");
         let runtime = runtime()?;
-        let mut config = config(dir);
+        let (mut config, lasting) = config(dir);
         config.presentation = Some(presentation_for_host());
         Entered {
             handle: runtime.handle().clone(),
             future: Box::pin(NativePlatform::open(config)),
         }
         .await
+        .map(|platform| (platform, lasting))
         .map_err(|error| format!("The client's storage did not open: {error}"))
     }
 
@@ -132,8 +147,8 @@ mod host {
     const APP_VERSION: Option<&str> = option_env!("T3_APP_VERSION");
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    fn config(dir: std::path::PathBuf) -> NativeConfig {
-        NativeConfig::desktop(dir)
+    fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
+        (NativeConfig::desktop(dir), true)
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
@@ -141,18 +156,28 @@ mod host {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
     }
 
-    /// The iOS Keychain. Android keeps saved credentials for one run until t3-platform can reach
-    /// the process's Java VM for its Keystore store (request U13 in client-seam-requests.md).
+    /// The Android Keystore (t3-platform finds the Java VM itself, U13) or the iOS Keychain.
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    fn config(dir: std::path::PathBuf) -> NativeConfig {
-        let ephemeral = |dir| NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default()));
-        if cfg!(target_os = "android") {
-            return ephemeral(dir);
+    fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
+        mobile_config(
+            || NativeConfig::mobile(dir.clone()).map_err(|error| error.to_string()),
+            || NativeConfig::new(dir.clone(), Box::new(t3_platform::EphemeralSecretStore::default())),
+        )
+    }
+
+    /// The OS key store when it opens; otherwise keys in memory, and saved servers last this run.
+    #[cfg(any(target_os = "android", target_os = "ios", test))]
+    fn mobile_config<C>(
+        key_store: impl FnOnce() -> Result<C, String>,
+        in_memory: impl FnOnce() -> C,
+    ) -> (C, bool) {
+        match key_store() {
+            Ok(config) => (config, true),
+            Err(error) => {
+                log::warn!("t3-ui: no OS key store ({error}); saved servers last this run only");
+                (in_memory(), false)
+            }
         }
-        NativeConfig::mobile(dir.clone()).unwrap_or_else(|error| {
-            log::warn!("t3-ui: no OS key store ({error}); saved servers last this run only");
-            ephemeral(dir)
-        })
     }
 
     /// NSH reports the Android API level, not the release `apps/mobile` sends, so Android sends
@@ -183,8 +208,11 @@ mod host {
         target_os = "android",
         target_os = "ios"
     )))]
-    fn config(dir: std::path::PathBuf) -> NativeConfig {
-        NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default()))
+    fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
+        (
+            NativeConfig::new(dir, Box::new(t3_platform::EphemeralSecretStore::default())),
+            false,
+        )
     }
 
     #[cfg(not(any(
@@ -197,6 +225,22 @@ mod host {
     fn presentation_for_host() -> t3_contracts::auth::AuthClientPresentationMetadata {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
     }
+    #[cfg(test)]
+    mod tests {
+        use super::mobile_config;
+
+        // Integration 3 (U13): Android was given in-memory keys even with a working Keystore, so
+        // nothing paired survived a restart.
+        #[test]
+        fn a_mobile_host_keeps_its_servers_when_its_key_store_opens() {
+            assert_eq!(mobile_config(|| Ok("key store"), || "memory"), ("key store", true));
+            assert_eq!(
+                mobile_config(|| Err("no Java VM".to_owned()), || "memory"),
+                ("memory", false),
+                "without a key store the host says its servers last this run only"
+            );
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -206,9 +250,11 @@ mod host {
 
     pub const SOURCE: OrchestrationV2CreationSource = OrchestrationV2CreationSource::Web;
 
-    pub async fn open() -> Result<WebPlatform, String> {
+    /// The platform, and whether what it saves outlives this run (the browser's storage does).
+    pub async fn open() -> Result<(WebPlatform, bool), String> {
         WebPlatform::open(WebConfig::default())
             .await
+            .map(|platform| (platform, true))
             .map_err(|error| format!("The client's storage did not open: {error}"))
     }
 }

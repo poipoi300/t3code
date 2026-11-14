@@ -25,39 +25,17 @@ pub const MAX_HIGHLIGHT_CHUNKS_PER_FRAME: usize = 1;
 
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 
-// Match NSH's loader boundary: only native binaries contain two-face's syntax dump.
-#[cfg(not(target_arch = "wasm32"))]
+/// The tokenizer's syntaxes, loaded once from where the host keeps them (`host::load_syntax_set`).
 pub async fn load_code_syntaxes() -> bool {
     if SYNTAXES.get().is_some() {
         return true;
     }
-    blocking(|| {
-        SYNTAXES.get_or_init(two_face::syntax::extra_newlines);
-    })
-    .await
-    .is_ok()
-}
-
-// Match nsh-base/src/syntax.rs::load_async; the web page supplies nsh-syntaxes.bin.
-#[cfg(target_arch = "wasm32")]
-pub async fn load_code_syntaxes() -> bool {
-    next_frame().await;
-    if SYNTAXES.get().is_some() {
-        return true;
-    }
-    let Some(bytes) = nsh_core::runtime_data::load("syntaxes").await else {
+    let Some(set) = crate::host::load_syntax_set().await else {
         return false;
     };
-    match syntect::dumps::from_uncompressed_data::<SyntaxSet>(&bytes) {
-        Ok(set) => {
-            let _ = SYNTAXES.set(set);
-            SYNTAXES.get().is_some()
-        }
-        Err(error) => {
-            log::warn!("Code syntaxes could not be loaded: {error}");
-            false
-        }
-    }
+    // A concurrent load may have filled it first; either set is the same dump.
+    let _ = SYNTAXES.set(set);
+    true
 }
 
 /// ChatMarkdown.tsx / resolveDiffThemeName: custom themes keep the appearance's syntax palette.

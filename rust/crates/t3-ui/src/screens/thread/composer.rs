@@ -304,22 +304,35 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         });
     }
 
-    // CMP-SUGGEST over the client's suggestion session.
-    let cwd = client
-        .git_panel()
-        .workspace_context(&key, None)
-        .map(|context| {
-            context
-                .worktree_path
-                .clone()
-                .unwrap_or(context.project.workspace_root.0.clone())
-        });
-    let suggestion_session = client.composer_suggestions(&key, cwd);
+    // CMP-SUGGEST over the client's suggestion session. Its file search reads the thread's
+    // workspace, which the shell may deliver after the composer mounts: follow it.
+    let shell = rt().store.shell(key.environment.clone());
+    let cwd = {
+        let client = client.clone();
+        let key = key.clone();
+        computed(move || {
+            shell.get();
+            client
+                .git_panel()
+                .workspace_context(&key, None)
+                .map(|context| {
+                    context
+                        .worktree_path
+                        .clone()
+                        .unwrap_or(context.project.workspace_root.0.clone())
+                })
+        })
+    };
+    let suggestion_session = {
+        let client = client.clone();
+        let key = key.clone();
+        computed(move || Shared(Rc::new(client.composer_suggestions(&key, cwd.get()))))
+    };
     let suggestions_cell: Stored<Option<ComposerSuggestions>> = stored(None);
     let picker_handle = model_picker_create_handle();
     let query = {
-        let session = suggestion_session.clone();
         move |request: Option<crate::screens::composer::suggestions::ComposerSuggestionRequest>| {
+            let session = suggestion_session.get_untracked();
             let operation = session.query(request.as_ref().map(bindings::suggestion_request));
             spawn(async move {
                 let _ = operation.await;
@@ -327,7 +340,6 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
         }
     };
     let select = {
-        let session = suggestion_session.clone();
         let editor = editor.clone();
         move |id: &str,
               _trigger: &t3_client::thread_views::composer::policy::Trigger,
@@ -340,7 +352,7 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
             };
             // The client compares the draft with the editor's source; write the latest keystroke.
             drafts.on_change(snapshot.clone());
-            match session.select(
+            match suggestion_session.get_untracked().select(
                 &bindings::suggestion_request(&request),
                 id,
                 &snapshot.value,
@@ -369,17 +381,22 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
     };
     let suggestions = ComposerSuggestions::new(editor.clone(), query, select);
     let _ = suggestions_cell.replace(Some(suggestions));
-    {
-        let session = suggestion_session.clone();
-        let mut changes = session.changes();
-        spawn(async move {
-            while changes.next().await.is_some() {
-                if let Some(view) = session.snapshot() {
-                    suggestions.publish(bindings::suggestion_results(&view));
+    // A new workspace is a new suggestion scope: results of the old session are refused.
+    effect(move || {
+        let session = suggestion_session.get();
+        let scope = cwd.get_untracked().unwrap_or_default();
+        untracked(|| {
+            suggestions.set_scope(scope);
+            let mut changes = session.changes();
+            spawn(async move {
+                while changes.next().await.is_some() {
+                    if let Some(view) = session.snapshot() {
+                        suggestions.publish(bindings::suggestion_results(&view));
+                    }
                 }
-            }
+            });
         });
-    }
+    });
     effect(move || {
         let disabled = choice_only.get();
         suggestions.enabled.set(!disabled);

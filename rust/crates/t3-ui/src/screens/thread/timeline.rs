@@ -1,16 +1,11 @@
 //! Port of apps/web/src/components/chat/MessagesTimeline.tsx MessagesTimeline (the list and its
 //! row frame). Rows are the client's port of `MessagesTimeline.logic.ts`
 //! (`t3_client::thread_views::messages_timeline`), derived from the timeline entries and the
-//! thread's run; each virtual-list cell reads its row through its own memo, so a streamed token
-//! re-renders only the streaming row. User rows are TL-ROWS-USER's; assistant, assistant-meta and
-//! sent-message rows TL-ROWS-ASSISTANT's; work-log, thinking, toggle and fold rows TL-ROWS-WORK-2's
-//! over TL-ROWS-WORK-1's entries, whose expansions feed back into the client's row input; event
-//! rows TL-EVENTS'; pending approvals TL-APPROVAL's and proposed plans TL-PLAN's. TL-VIEWPORT
-//! owns following and position memory; requests whose turn item has not arrived and CMP-SEND's
-//! queued and failed messages follow the rows inside the same scroller.
-//!
-//! The block-flattened timeline (TL-BLOCKS-*) replaces the cell body with blocks so long code
-//! cannot dominate a frame; see ui-plan.md, NSH problem 2.
+//! thread's run, then split into block cells by TL-BLOCKS-3's list (`blocks::list`), so a long
+//! reply is many cells and a streamed token re-renders only the streaming block. Rows read what
+//! ChatView hands every row from [`TimelineServices`], built once per thread above the list.
+//! TL-VIEWPORT owns following and position memory; requests whose turn item has not arrived and
+//! CMP-SEND's queued and failed messages follow the rows inside the same scroller.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,71 +14,38 @@ use futures::StreamExt;
 use nsh_core::prelude::*;
 use t3_client::services::models::{present_thread_shell, thread_runtime_is_active};
 use t3_client::state::selectors::thread_shell;
+use t3_client::thread_views::composer::target::ComposerTarget;
 use t3_client::thread_views::messages_timeline::{
-    MessagesTimelineRow, MessagesTimelineRowContent, MessagesTimelineRowsInput,
-    MessagesTimelineRowsProjection, TimelineLatestRun, derive_messages_timeline_rows_with_state,
+    MessagesTimelineRowsInput, MessagesTimelineRowsProjection, TimelineLatestRun,
+    derive_messages_timeline_rows_with_state,
 };
 use t3_client::types::{EnvironmentId, ThreadKey};
-use t3_contracts::orchestration_v2::{OrchestrationV2ThreadShell, OrchestrationV2TurnItem};
+use t3_contracts::base_schemas::RunId;
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadShell;
+use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+use t3_contracts::settings::{
+    ClientSettingsSchema, ScreenReaderAnnouncements, TimestampFormat, ToolCallVisibility,
+};
 
-use crate::i18n::t;
+use crate::i18n::Text;
+use crate::runtime::services::assets::{AssetUrlBinding, host_asset_urls};
 use crate::runtime::{Shared, rt};
-use crate::screens::thread::rows::approval::{
-    ApprovalContext, ApprovalRowsState, approval_timeline_row, unmatched_pending_approval_rows,
-};
-use crate::screens::thread::rows::assistant::{
-    AssistantRowContext, AssistantRowsState, assistant_meta_timeline_row, assistant_row,
-    assistant_timeline_row, sent_message_timeline_row,
-};
-use crate::screens::composer::send::{ComposerSendClient, PendingMessages, pending_messages};
-use crate::screens::thread::rows::events::{EventRowContext, v2_event_timeline_row};
-use crate::screens::thread::rows::plan::{PlanContext, PlanRowsState, proposed_plan_timeline_row};
-use crate::screens::thread::rows::groups::{
-    WorkGroupsContext, WorkGroupsState, work_group_timeline_row,
-};
-use crate::screens::thread::rows::user::{UserRowContext, UserRowState, user_message_row};
-use crate::screens::thread::rows::work::working_row;
-use crate::screens::thread::viewport::{TimelineViewport, timeline_row_keys};
-use crate::theme::tw;
-use crate::ui::surface::empty_state;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowKind {
-    User,
-    Assistant,
-    AssistantMeta,
-    SentMessage,
-    Event,
-    Plan,
-    Working,
-    Work,
-    Other,
-}
-
-fn kind_of(row: &MessagesTimelineRow) -> RowKind {
-    use MessagesTimelineRowContent as C;
-    match &row.content {
-        C::Message { message, .. } if message.role == "user" => RowKind::User,
-        C::Message { .. } => RowKind::Assistant,
-        C::AssistantMeta { .. } => RowKind::AssistantMeta,
-        C::SentMessage { .. } => RowKind::SentMessage,
-        C::Event { .. } => RowKind::Event,
-        C::ProposedPlan { .. } => RowKind::Plan,
-        C::Working { .. } => RowKind::Working,
-        C::Work { .. }
-        | C::WorkLive { .. }
-        | C::Thinking { .. }
-        | C::WorkToggle { .. }
-        | C::TurnFold { .. }
-        | C::AttemptFold { .. } => RowKind::Work,
-        _ => RowKind::Other,
-    }
-}
+use crate::screens::composer::chips::{ChipContext, ChipData, user_message_chip_renderer};
+use crate::screens::settings::shell::SettingsRuntime;
+use crate::screens::thread::blocks::list::{BlockListOptions, messages_timeline};
+use crate::screens::thread::markdown::base::ChatMarkdownSettings;
+use crate::screens::thread::rewind::{TimelineRewind, use_timeline_rewind};
+use crate::screens::thread::rows::approval::{ApprovalContext, ApprovalRowsState};
+use crate::screens::thread::rows::events::EventRowContext;
+use crate::screens::thread::rows::groups::WorkGroupsState;
+use crate::screens::thread::rows::plan::{PlanContext, PlanRowsState};
+use crate::screens::thread::rows::user::ContextChipRenderer;
+use t3_client::thread_views::thread_ops::approvals::ApprovalMap;
 
 /// What ChatView passes MessagesTimeline about the run (`latestRun`, `runningRunId`, `isWorking`,
 /// `activeTurnStartedAt`), read from the client's presentation of the thread shell.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct RunState {
+pub struct RunState {
     latest_run: Option<TimelineLatestRun>,
     running_run_id: Option<String>,
     is_working: bool,
@@ -113,25 +75,141 @@ fn run_state(environment: &EnvironmentId, thread: &OrchestrationV2ThreadShell) -
     }
 }
 
-pub fn timeline(key: ThreadKey) -> impl IntoElement {
-    let runtime = rt();
-    let thread_id = key.thread.clone();
-    let environment = key.environment.clone();
-    let run = runtime
-        .store
-        .shell_state(key.environment.clone(), move |shell| {
-            shell
-                .and_then(|shell| thread_shell(shell, &thread_id))
-                .map(|thread| run_state(&environment, thread))
+/// MessagesTimeline's `TimelineRowSharedState` and the client settings it reads, for one thread.
+/// Construct once above the list; every row constructor takes it, so no row is built without
+/// its actions.
+#[derive(Clone)]
+pub struct TimelineServices {
+    pub key: ThreadKey,
+    pub run: Memo<RunState>,
+    pub working: Memo<bool>,
+    pub rewind: TimelineRewind,
+    /// ThreadFind has no production mount yet (TL-FIND); closed is the web's state without find.
+    pub find_active: Memo<bool>,
+    pub timestamp_format: Memo<TimestampFormat>,
+    /// `toolCallVisibility`, with zen shown as hideAll while find is open.
+    pub tool_call_visibility: Memo<String>,
+    pub screen_reader_announcements: Memo<ScreenReaderAnnouncements>,
+    pub math_rendering_enabled: Memo<bool>,
+    pub chips: ContextChipRenderer,
+    pub assets: Option<AssetUrlBinding>,
+    pub groups: WorkGroupsState,
+    pub events: EventRowContext,
+}
+
+impl TimelineServices {
+    pub fn new(key: ThreadKey) -> Self {
+        let runtime = rt();
+        let thread_id = key.thread.clone();
+        let environment = key.environment.clone();
+        let run = runtime
+            .store
+            .shell_state(key.environment.clone(), move |shell| {
+                shell
+                    .and_then(|shell| thread_shell(shell, &thread_id))
+                    .map(|thread| run_state(&environment, thread))
+                    .unwrap_or_default()
+            });
+        let working = computed(move || run.with(|run| run.is_working));
+        let settings = client_settings();
+        let find_active = computed(|| false);
+        let timestamp_format = computed(move || settings.with(|s| s.timestamp_format.clone()));
+        let preferred = computed(move || settings.with(|s| s.tool_call_visibility.clone()));
+        let tool_call_visibility = computed(move || {
+            let preferred = preferred.get();
+            let shown = if find_active.get() && preferred == ToolCallVisibility::Zen {
+                ToolCallVisibility::HideAll
+            } else {
+                preferred
+            };
+            serde_json::to_value(shown)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
                 .unwrap_or_default()
         });
+        let screen_reader_announcements =
+            computed(move || settings.with(|s| s.screen_reader_announcements.clone()));
+        let math_rendering_enabled = computed(move || settings.with(|s| s.math_rendering_enabled));
+        let groups = WorkGroupsState::default();
+        let mut events = EventRowContext::new(key.clone(), groups.entries);
+        events.timestamp_format = timestamp_format;
+        Self {
+            rewind: use_timeline_rewind(key.clone()),
+            chips: user_message_chip_renderer(ChipContext::for_thread(
+                chip_data(&key),
+                key.clone(),
+            )),
+            assets: use_context::<AssetUrlBinding>().or_else(host_asset_urls),
+            key,
+            run,
+            working,
+            find_active,
+            timestamp_format,
+            tool_call_visibility,
+            screen_reader_announcements,
+            math_rendering_enabled,
+            groups,
+            events,
+        }
+    }
+}
+
+/// `useClientSettings`: the client's settings, followed while the timeline is mounted. The
+/// demo backend has none, so it shows the defaults.
+fn client_settings() -> Signal<Rc<ClientSettingsSchema>> {
+    let service = use_context::<SettingsRuntime>().or_else(|| {
+        rt().backend()
+            .client()
+            .map(|client| crate::runtime::services::settings::settings(&client))
+    });
+    let settings = signal_with(
+        service
+            .as_ref()
+            .map_or_else(Rc::default, |service| service.0.client_settings()),
+        SignalEquals::Never,
+    );
+    if let Some(service) = service {
+        spawn(async move {
+            let mut changes = service.0.changes();
+            while changes.next().await.is_some() {
+                let _ = settings.try_set(service.0.client_settings());
+            }
+        });
+    }
+    settings
+}
+
+/// Skill and provider catalogues for sent context chips, read once per mount: a sent chip needs
+/// them only to describe a skill, and following the composer would re-read on every token.
+fn chip_data(key: &ThreadKey) -> Memo<ChipData> {
+    let session = rt()
+        .backend()
+        .client()
+        .map(|client| client.composer_chips(ComposerTarget::Thread(key.clone())));
+    let data = untracked(|| {
+        session
+            .and_then(|session| session.snapshot().ok())
+            .map(|view| ChipData {
+                skills: view.skills.clone(),
+                providers: view.providers.clone(),
+                ..Default::default()
+            })
+            .unwrap_or_default()
+    });
+    computed(move || data.clone())
+}
+
+pub fn timeline(key: ThreadKey) -> impl IntoElement {
+    let runtime = rt();
+    let services = TimelineServices::new(key.clone());
     let entries = runtime.store.timeline(key.clone());
     // The previous projection: the client reuses unchanged rows and patches a streaming one.
     let previous: Rc<RefCell<Option<MessagesTimelineRowsProjection>>> = Rc::default();
-    let groups = WorkGroupsState::default();
+    let groups = services.groups;
     let approvals = ApprovalContext::new(key.clone(), ApprovalRowsState::default());
     let pending_approvals = approvals.pending;
-    let working = computed(move || run.with(|run| run.is_working));
+    let run = services.run;
+    let visibility = services.tool_call_visibility;
     let rows = computed(move || {
         let run = run.get();
         let mut input = MessagesTimelineRowsInput {
@@ -140,7 +218,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
             running_run_id: run.running_run_id,
             is_working: run.is_working,
             active_turn_started_at: run.active_turn_started_at,
-            tool_call_visibility: "showAll".into(),
+            tool_call_visibility: visibility.get(),
             ..Default::default()
         };
         groups.apply_to_input(&mut input);
@@ -150,9 +228,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
                 .0
                 .values()
                 .filter_map(|pending| match &pending.request.id {
-                    t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
-                        Some(id.0.clone())
-                    }
+                    IdOrIndex::Id(id) => Some(id.0.clone()),
                     _ => None,
                 })
                 .collect()
@@ -162,184 +238,65 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         *previous.borrow_mut() = Some(next);
         Shared(rows)
     });
-    let count = computed(move || rows.with(|r| r.0.len()));
-    let keys = timeline_row_keys(rows);
-    let viewport = TimelineViewport::new(key.clone(), keys);
-    let shared = Rows {
-        state: AssistantRowsState::default(),
-        users: UserRowState::new(),
-        events: EventRowContext::new(key.clone(), groups.entries),
-        approvals: approvals.clone(),
-        plans: plan_context(&key),
-        groups,
-        working,
+    thread_activity_announcer(&services, approvals.pending);
+    provide_context(ChatMarkdownSettings {
+        math_enabled: services.math_rendering_enabled,
+    });
+    let options = BlockListOptions::for_thread(&services, approvals, plan_context(&key));
+    messages_timeline(rows, options)
+}
+
+/// Port of ThreadActivityAnnouncer.tsx at its "status" level: working, needs approval and the
+/// run's outcome, through the platform's announcer (the web's polite live region). The
+/// "messages" and "everything" levels also read replies and steps (`turnDetailAnnouncement.ts`,
+/// not ported), so at those levels only the status is announced.
+fn thread_activity_announcer(services: &TimelineServices, approvals: Memo<Shared<ApprovalMap>>) {
+    use t3_client::thread_views::threads::activity_announcement::{
+        ThreadActivitySnapshot, ThreadActivityStatus, ThreadAnnouncementMemory,
+        next_thread_announcement,
     };
-    let pending = runtime
-        .backend()
-        .client()
-        .map(|client| -> (PendingMessages, Rc<dyn ComposerSendClient>) {
-            let client = Rc::new(client);
-            (PendingMessages::attach(client.clone(), key.clone()), client)
+    let run = services.run;
+    let working = services.working;
+    let snapshot = computed(move || {
+        let request_id = approvals.with(|pending| {
+            pending
+                .0
+                .values()
+                .find_map(|pending| match &pending.request.id {
+                    IdOrIndex::Id(id) => Some(id.0.clone()),
+                    IdOrIndex::Index(_) => None,
+                })
         });
-    let none_pending = {
-        let pending = pending.as_ref().map(|(messages, _)| *messages);
-        move || pending.is_none_or(|p| p.messages.with(|m| m.is_empty()))
-    };
-    let list = virtual_list(count, move |at| {
-        let row: Memo<Option<Shared<MessagesTimelineRow>>> =
-            computed(move || rows.with(|r| r.0.get(at.index()).cloned().map(Shared)));
-        let kind = computed(move || row.with(|r| r.as_ref().map(|r| kind_of(&r.0))));
-        cell(row, kind, shared.clone())
-    })
-    .empty(dynamic(move || {
-        none_pending().then(|| {
-            empty_state(
-                t("No messages yet"),
-                t("Send a message to start this thread."),
-            )
-        })
-    }))
-    .footer(
-        view().app_class(tw("w-full px-3 sm:px-12")).child(
-            view()
-                .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
-                .child(unmatched_pending_approval_rows(rows, approvals))
-                .child(pending.map(|(messages, client)| pending_messages(client, key, messages))),
-        ),
-    )
-    .estimated_item_size(px(120.0))
-    .content_padding_y(px(16.0))
-    .flex_1()
-    .test_id("timeline");
-    let list = viewport.attach(list);
-    view()
-        .flex_1()
-        .min_h(px(0.0))
-        .selectable(true)
-        .child(list)
-}
-
-/// The per-thread row state the cells share, created once above the virtual list.
-#[derive(Clone)]
-struct Rows {
-    state: AssistantRowsState,
-    users: UserRowState,
-    events: EventRowContext,
-    approvals: ApprovalContext,
-    plans: PlanContext,
-    groups: WorkGroupsState,
-    working: Memo<bool>,
-}
-
-fn cell(
-    row: Memo<Option<Shared<MessagesTimelineRow>>>,
-    kind: Memo<Option<RowKind>>,
-    Rows {
-        state,
-        users,
-        events,
-        approvals,
-        plans,
-        groups,
-        working,
-    }: Rows,
-) -> impl IntoElement {
-    dynamic(move || {
-        let body = match kind.get()? {
-            // WorkingTimelineRow carries its own lane, column and padding.
-            RowKind::Working => return Some(working_row().into_element()),
-            RowKind::User => {
-                let projection = computed(move || row.with(|r| r.as_ref().map(|r| r.0.clone())));
-                let mut context = UserRowContext::new(users);
-                context.working = working;
-                user_message_row(projection, context).into_element()
-            }
-            RowKind::Assistant => {
-                assistant_timeline_row(assistant_row(row), AssistantRowContext::new(state))
-                    .into_element()
-            }
-            RowKind::AssistantMeta => {
-                assistant_meta_timeline_row(assistant_row(row), AssistantRowContext::new(state))
-                    .into_element()
-            }
-            RowKind::SentMessage => {
-                sent_message_timeline_row(sent_text(row), AssistantRowContext::new(state))
-                    .into_element()
-            }
-            RowKind::Event => v2_event_timeline_row(row, events.clone()).into_element(),
-            RowKind::Plan => proposed_plan_timeline_row(row, plans.clone()).into_element(),
-            // A pending approval entry leaves WORK-1's slot empty; TL-APPROVAL draws the row's requests.
-            RowKind::Work => view()
-                .child(work_group_timeline_row(row, WorkGroupsContext::new(groups)))
-                .child(approval_timeline_row(row, approvals.clone()))
-                .into_element(),
-            RowKind::Other => return None,
-        };
-        let frame = move || Some(tw(row.with(|r| r.as_ref().map_or("pb-4", |r| frame_of(&r.0)))));
-        Some(
-            view()
-                .app_class(tw("w-full px-3 sm:px-12"))
-                .child(
-                    view()
-                        .app_class(tw("mx-auto w-full min-w-0 max-w-(--chat-content-max-width)"))
-                        .child(view().app_class(frame).child(body)),
-                )
-                .into_element(),
-        )
-    })
-}
-
-/// The row's outer `div` classes in MessagesTimeline.tsx `TimelineRowContent`: the bottom padding
-/// per row kind, and `group/assistant` on assistant messages and their meta row.
-fn frame_of(row: &MessagesTimelineRow) -> &'static str {
-    use MessagesTimelineRowContent as C;
-    let assistant = match &row.content {
-        C::Message { message, .. } => message.role == "assistant",
-        C::AssistantMeta { .. } => true,
-        _ => false,
-    };
-    match (padding_of(row), assistant) {
-        ("pb-1", true) => "pb-1 group/assistant",
-        ("pb-2", true) => "pb-2 group/assistant",
-        ("pb-4", true) => "pb-4 group/assistant",
-        (padding, _) => padding,
-    }
-}
-
-fn padding_of(row: &MessagesTimelineRow) -> &'static str {
-    use MessagesTimelineRowContent as C;
-    match &row.content {
-        C::Work { .. } | C::WorkLive { .. } | C::Thinking { .. } | C::WorkToggle { .. } => "",
-        C::Event { projected_item, .. }
-            if matches!(projected_item.item, OrchestrationV2TurnItem::Subagent(_)) =>
-        {
-            ""
+        let latest = run.with(|run| run.latest_run.clone());
+        ThreadActivitySnapshot {
+            status: if request_id.is_some() {
+                ThreadActivityStatus::Approval
+            } else if working.get() {
+                ThreadActivityStatus::Working
+            } else {
+                ThreadActivityStatus::Idle
+            },
+            request_id,
+            run_id: latest
+                .as_ref()
+                .map(|run| IdOrIndex::Id(RunId(run.run_id.clone()))),
+            run_status: latest
+                .and_then(|run| serde_json::from_value(serde_json::Value::String(run.status)).ok()),
         }
-        C::TurnFold { .. } | C::Working { .. } => "pb-1.5",
-        C::Message {
-            grouped_with_next: Some(true),
-            ..
-        } => "pb-1",
-        C::Message {
-            message,
-            show_assistant_meta: false,
-            ..
-        } if message.role == "assistant" => "pb-2",
-        C::Event { .. } | C::AttemptFold { .. } | C::HtmlRender { .. } | C::McpApp { .. } => {
-            "pb-2"
+    });
+    let memory: Stored<Option<ThreadAnnouncementMemory>> = stored(None);
+    // Writes to the platform's screen-reader announcer; the first snapshot is the baseline.
+    effect(move || {
+        let next = snapshot.get();
+        let announcement = memory.with(|memory| {
+            let (next, announcement) = next_thread_announcement(memory.as_ref(), next);
+            *memory = Some(next);
+            announcement
+        });
+        if let Some(announcement) = announcement {
+            announce_for_accessibility(Text::client_key(announcement).resolve().to_string());
         }
-        C::ViewedImages { .. } | C::WorktreeSetup { .. } | C::SentMessage { .. } => "pb-2",
-        _ => "pb-4",
-    }
-}
-
-fn sent_text(row: Memo<Option<Shared<MessagesTimelineRow>>>) -> Memo<String> {
-    computed(move || {
-        row.with(|r| match r.as_ref().map(|r| &r.0.content) {
-            Some(MessagesTimelineRowContent::SentMessage { text }) => text.clone(),
-            _ => String::new(),
-        })
-    })
+    });
 }
 
 /// TL-PLAN's context, with the plan's workspace root followed from the client (thread_ops).

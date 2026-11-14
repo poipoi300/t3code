@@ -52,14 +52,19 @@ pub fn pointer() -> Pointer {
     }
 }
 
-/// Sidebar width on Medium and Wide layouts: the web app's 16rem default, clamped while resizing.
+/// Sidebar width on Medium and Wide layouts: the web app's 16rem default. The bounds are the
+/// client's (`view_logic::shell::sidebar_width`, threadSidebarWidth.ts): at least 13rem, and at
+/// most what leaves the main content 40rem.
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 256.0;
-pub const SIDEBAR_MIN_WIDTH: f32 = 208.0;
-pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
+pub const SIDEBAR_MIN_WIDTH: f32 =
+    t3_client::view_logic::shell::sidebar_width::THREAD_SIDEBAR_MIN_WIDTH as f32;
 
 pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
-    let max = SIDEBAR_MAX_WIDTH.min((window_width * 0.5).max(SIDEBAR_MIN_WIDTH));
-    width.clamp(SIDEBAR_MIN_WIDTH, max)
+    use t3_client::view_logic::shell::sidebar_width::{
+        THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
+    };
+    let max = resolve_thread_sidebar_maximum_width(f64::from(window_width), THREAD_SIDEBAR_MIN_WIDTH);
+    clamp_thread_sidebar_width(f64::from(width), THREAD_SIDEBAR_MIN_WIDTH, max) as f32
 }
 
 #[cfg(test)]
@@ -76,10 +81,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_width_never_takes_more_than_half_a_narrow_window() {
-        assert_eq!(clamp_sidebar_width(400.0, 700.0), 350.0);
+    fn sidebar_width_leaves_the_main_content_its_minimum() {
+        assert_eq!(clamp_sidebar_width(400.0, 700.0), SIDEBAR_MIN_WIDTH);
         assert_eq!(clamp_sidebar_width(100.0, 1400.0), SIDEBAR_MIN_WIDTH);
-        assert_eq!(clamp_sidebar_width(900.0, 1400.0), SIDEBAR_MAX_WIDTH);
+        assert_eq!(clamp_sidebar_width(900.0, 1400.0), 760.0);
+        assert_eq!(clamp_sidebar_width(300.0, 1024.0), 300.0);
         assert_eq!(clamp_sidebar_width(300.0, 300.0), SIDEBAR_MIN_WIDTH);
     }
 }

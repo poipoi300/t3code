@@ -96,6 +96,8 @@ pub struct EventRowContext {
     pub now_ms: Memo<Option<i64>>,
     pub timestamp_format: Memo<TimestampFormat>,
     pub on_toggle_entry: Option<Rc<dyn Fn(String, bool)>>,
+    secret_requests: Option<super::secret_request::SecretRequestService>,
+    link_requests: Option<super::link_request::LinkRequestService>,
 }
 
 impl EventRowContext {
@@ -130,6 +132,19 @@ impl EventRowContext {
             now_ms: computed(|| None),
             timestamp_format: computed(|| TimestampFormat::Locale),
             on_toggle_entry: None,
+            secret_requests: use_context::<super::secret_request::SecretRequestService>().or_else(
+                || {
+                    runtime.backend().client().map(|client| {
+                        crate::runtime::services::thread_ops::secret_requests(&client)
+                    })
+                },
+            ),
+            link_requests: use_context::<super::link_request::LinkRequestService>().or_else(|| {
+                runtime
+                    .backend()
+                    .client()
+                    .map(|client| crate::runtime::services::thread_ops::link_requests(&client))
+            }),
         }
     }
 
@@ -193,8 +208,21 @@ pub fn v2_event_timeline_row(row: TimelineRow, context: EventRowContext) -> impl
                 && row.subagents.as_ref().map_or(1, Vec::len) > 1
             {
                 v2_subagent_group(&row, &context)
+            } else if let Item::SecretRequest(item) = &row.projected_item.item {
+                super::secret_request::secret_request_card(
+                    context.key.environment.clone(),
+                    Rc::new(item.as_ref().clone()),
+                    &row.projected_item.visibility,
+                    context.secret_requests.clone(),
+                )
+            } else if let Item::LinkRequest(item) = &row.projected_item.item {
+                super::link_request::link_request_card(
+                    context.key.environment.clone(),
+                    Rc::new(item.as_ref().clone()),
+                    &row.projected_item.visibility,
+                    context.link_requests.clone(),
+                )
             } else {
-                // Secret/link request cards require the request service (TL-APPROVAL/C1); no fabricated copy.
                 v2_lifecycle_row(&row.projected_item.item, row.resource_summary, &context)
             },
         )

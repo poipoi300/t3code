@@ -95,7 +95,7 @@ impl Results {
             .iter()
             .flat_map(|group| &group.items)
             .filter(|item| !item.disabled)
-            .map(|item| command::Item::new(item.value.clone(), item.title.clone()))
+            .map(|item| command::Item::new(item.value.clone(), title(item)))
             .collect()
     }
 }
@@ -395,7 +395,7 @@ fn command_palette_result_row(
     let option = computed(move || {
         item.with(|item| {
             item.as_ref().map(|item| {
-                let mut option = command::Item::new(item.value.clone(), item.title.clone());
+                let mut option = command::Item::new(item.value.clone(), title(item));
                 option.disabled = item.disabled;
                 option
             })

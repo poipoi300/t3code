@@ -92,7 +92,7 @@ fn notification_settings(context: SettingsContext) -> impl IntoElement {
                     "w-full sm:w-56",
                     NOTIFICATION_MODE_LABELS
                         .iter()
-                        .map(|(value, label)| (*value, (*label).to_owned()))
+                        .map(|(value, label)| (*value, Text::from(*label)))
                         .collect(),
                     move || value(context, "notificationMode").as_str().unwrap_or("off").to_owned(),
                     move || requesting.get(),
@@ -146,10 +146,10 @@ const TIMESTAMP_FORMAT_LABELS: [(&str, &str); 3] = [
     ("24-hour", "24-hour"),
 ];
 
-fn labels(table: &[(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
+fn labels(table: &[(&'static str, &'static str)]) -> Vec<(&'static str, Text)> {
     table
         .iter()
-        .map(|(value, label)| (*value, (*label).to_owned()))
+        .map(|(value, label)| (*value, Text::from(*label)))
         .collect()
 }
 
@@ -314,12 +314,12 @@ pub fn general_settings_panel() -> impl IntoElement {
                             .description(|| Text::from("System default follows your browser or OS language."))
                             .reset(reset(context, "language", "language"))
                             .control(move || {
-                                let mut items = vec![(t3_i18n::SYSTEM_LANGUAGE, "System default".to_owned())];
+                                let mut items = vec![(t3_i18n::SYSTEM_LANGUAGE, Text::from("System default"))];
                                 // Language names are shown in their own language (content).
                                 items.extend(
                                     t3_i18n::SUPPORTED_LOCALES
                                         .iter()
-                                        .map(|locale| (*locale, t3_i18n::native_language_name(locale).to_owned())),
+                                        .map(|locale| (*locale, Text::content(t3_i18n::native_language_name(locale)))),
                                 );
                                 settings_select(
                                     "Language",

@@ -9,8 +9,8 @@
 //! between blocks is the same as inside one TextView.
 
 use nsh_base::text_view::{
-    Block, CodeBlock, CustomNode, Document, MarkdownOptions, MarkdownPlugin, MarkdownPlugins,
-    Parser, TextViewClasses,
+    Block, CodeBlock, CustomNode, Document, Image, ImageLength, MarkdownOptions, MarkdownPlugin,
+    MarkdownPlugins, Parser, TextViewClasses, TextViewMath,
 };
 use nsh_core::prelude::*;
 
@@ -46,10 +46,13 @@ pub fn chat_markdown_with_root_classes(
     let plugins = use_context::<MarkdownPlugins>().unwrap_or_default();
     let streaming = std::rc::Rc::new(streaming);
     let parse_streaming = streaming.clone();
+    let math = use_context::<ChatMarkdownSettings>().map(|settings| settings.math_enabled);
+    let math_enabled = move || math.is_some_and(|math| math.get());
     let parsed = computed(move || {
         Parser::new()
             .options(MarkdownOptions {
                 streaming: parse_streaming(),
+                math: math_enabled(),
                 ..Default::default()
             })
             .plugins(&plugins)
@@ -67,6 +70,7 @@ pub fn chat_markdown_with_root_classes(
         .document(move || Some(document.get()))
         .options(move || MarkdownOptions {
             streaming: streaming(),
+            math: math_enabled(),
             ..Default::default()
         })
         .classes(classes)
@@ -78,8 +82,60 @@ pub fn chat_markdown_with_root_classes(
             .unwrap_or_else(|| markdown_custom_fallback(node))
         })
         .render_code_block(|code: &CodeBlock| fenced_code_block(code))
+        .render_math(|formula: &TextViewMath| {
+            let formula = formula.clone();
+            super::rich::markdown_math(computed(move || formula.clone()), true).into_element()
+        })
+        .render_image(markdown_image)
         .selectable(true)
         .into_element()
+}
+
+/// ChatMarkdown's `mathEnabled` (`mathRenderingEnabled`); the timeline provides it from the
+/// client settings. Without a provider, math stays text, the setting's default.
+#[derive(Clone, Copy)]
+pub struct ChatMarkdownSettings {
+    pub math_enabled: Memo<bool>,
+}
+
+/// ChatMarkdown.tsx `img` for a direct (http, https or data) source: ChatMarkdownImage at the
+/// authored size. Workspace-file, context-reference and media sources need
+/// `classifyMarkdownImageSource` and the asset binding, not ported; they show the unavailable
+/// fallback.
+fn markdown_image(image: &Image) -> AnyElement {
+    use super::rich::{
+        MarkdownImageState, MarkdownMediaProps, MediaKind, authored_image_size_style,
+        chat_markdown_image, chat_markdown_image_fallback, markdown_image_copy,
+    };
+    let length = |length: Option<&ImageLength>| match length {
+        Some(ImageLength::Points(points)) => Some(points.0.to_string()),
+        _ => None,
+    };
+    let (width, height) = (length(image.width.as_ref()), length(image.height.as_ref()));
+    let direct = ["http://", "https://", "data:image/"].iter().any(|scheme| {
+        image
+            .src
+            .get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    });
+    let props = MarkdownMediaProps {
+        src: direct.then(|| image.src.clone()),
+        alt: image.alt.clone(),
+        copy_markdown: Some(markdown_image_copy(
+            &image.alt,
+            &image.src,
+            image.title.as_deref(),
+        )),
+        size: authored_image_size_style(width.as_deref(), height.as_deref(), 30.0),
+        source_failed: !direct,
+        ..Default::default()
+    };
+    let props = computed(move || props.clone());
+    if direct {
+        chat_markdown_image(props, MarkdownImageState::default(), false).into_element()
+    } else {
+        chat_markdown_image_fallback(props, MediaKind::Image).into_element()
+    }
 }
 
 fn markdown_custom_fallback(node: &CustomNode) -> AnyElement {
@@ -181,6 +237,13 @@ fn fenced_code_block(code: &CodeBlock) -> AnyElement {
         fence_title: extract_fence_title(code.meta.as_deref()),
         ..CodeBlockProps::default()
     };
+    if props.language == "mermaid" {
+        return super::rich::markdown_mermaid_code_block(
+            computed(move || props.clone()),
+            CodeBlockState::new(),
+        )
+        .into_element();
+    }
     let body = code.code.clone();
     markdown_code_block(
         computed(move || props.clone()),

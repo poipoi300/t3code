@@ -9,11 +9,19 @@ use t3_contracts::chat_attachment::{ChatAttachment, ChatFileAttachment};
 use t3_contracts::composer_context::{ComposerContextRecord, PreviewAnnotationContextRecord};
 
 use crate::i18n::{Value, t, tr};
+use crate::runtime::services::assets::AssetUrlBinding;
+use crate::screens::thread::timeline::TimelineServices;
 use crate::state::layout::{Pointer, pointer};
 use crate::theme::{cn, palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::tooltip::{tooltip, tooltip_create_handle};
+use futures::StreamExt;
+use t3_client::services::assets::AssetUrlState;
+use t3_client::thread_views::messages_timeline::MessagesTimelineRowContent;
+use t3_client::view_logic::session::select_message_image_resources;
+use t3_contracts::assets::AssetResource;
+use t3_contracts::orchestration_v2::OrchestrationV2TurnItem;
 
 use nsh_base::text_view::{
     CustomNode, Inline, MarkdownOptions, MarkdownPlugin, ParseContext, Parser, TextViewClasses,
@@ -107,7 +115,6 @@ impl UserRowState {
     }
 }
 
-pub type RowSlot = Rc<dyn Fn(&UserRow) -> AnyElement>;
 pub type RowAction = Rc<dyn Fn(&UserRow)>;
 pub type RevertAction = Rc<dyn Fn(&UserRow, usize)>;
 pub type FileAction = Rc<dyn Fn(&ChatFileAttachment)>;
@@ -126,7 +133,7 @@ pub type ContextChipRenderer = Rc<
 #[derive(Clone)]
 struct UserMarkdownPlugin {
     row: Rc<UserRow>,
-    chip: Option<ContextChipRenderer>,
+    chip: ContextChipRenderer,
 }
 
 impl MarkdownPlugin for UserMarkdownPlugin {
@@ -190,11 +197,7 @@ impl MarkdownPlugin for UserMarkdownPlugin {
         {
             return Some(view().into_element());
         }
-        // CMP-CHIPS owns UserMessageContextReferenceChip and its detail popovers; no invented fallback copy.
-        Some(self.chip.as_ref().map_or_else(
-            || view().into_element(),
-            |render| render(reference, record, &self.row),
-        ))
+        Some((self.chip)(reference, record, &self.row))
     }
 }
 
@@ -281,7 +284,9 @@ impl TimestampHost for LocalTimestampHost {
     }
 }
 
-/// Later attachment/chip/lifecycle packages supply their components here.
+/// MessagesTimeline's row context for user rows (`TimelineRowSharedState`), from the thread's
+/// [`TimelineServices`]. Not built: InlineAudioPreview (CMP-ATTACH), WorkflowOpeningBlock, and
+/// file download (the platform has no URL download), so those parts render nothing.
 #[derive(Clone)]
 pub struct UserRowContext {
     pub state: UserRowState,
@@ -289,63 +294,61 @@ pub struct UserRowContext {
     pub working: Memo<bool>,
     pub reverting: Memo<bool>,
     pub timestamp_format: Memo<TimestampFormat>,
-    pub context_chip: Option<ContextChipRenderer>,
-    pub audio: Option<RowSlot>,
-    pub workflow: Option<RowSlot>,
-    pub fresh_session: Option<RowSlot>,
-    pub model_switch: Option<RowSlot>,
-    pub open_sender: Option<RowAction>,
-    pub open_automation: Option<RowAction>,
-    pub revert: Option<RevertAction>,
-    pub file_open: Option<FileAction>,
-    pub file_download: Option<FileAction>,
+    environment: t3_client::types::EnvironmentId,
+    context_chip: ContextChipRenderer,
+    events: crate::screens::thread::rows::events::EventRowContext,
+    assets: Option<AssetUrlBinding>,
+    open_sender: Option<RowAction>,
+    open_automation: Option<RowAction>,
+    revert: Option<RevertAction>,
+    file_open: Option<FileAction>,
+    file_download: Option<FileAction>,
 }
 
 impl UserRowContext {
-    pub fn new(state: UserRowState) -> Self {
+    pub fn new(state: UserRowState, services: &TimelineServices) -> Self {
+        let key = services.key.clone();
         let mut context = Self {
             state,
-            find_active: computed(|| false),
-            working: computed(|| false),
-            reverting: computed(|| false),
-            timestamp_format: computed(|| TimestampFormat::Locale),
-            context_chip: None,
-            audio: None,
-            workflow: None,
-            fresh_session: None,
-            model_switch: None,
+            find_active: services.find_active,
+            working: services.working,
+            reverting: services.rewind.reverting,
+            timestamp_format: services.timestamp_format,
+            environment: key.environment.clone(),
+            context_chip: services.chips.clone(),
+            events: services.events.clone(),
+            assets: services.assets.clone(),
             open_sender: None,
             open_automation: None,
             revert: None,
             file_open: None,
             file_download: None,
         };
+        context.revert = services.rewind.revert_action();
+        if let Some(panel) = use_context::<crate::screens::panel::PanelHost>() {
+            let key = key.clone();
+            context.file_open = Some(Rc::new(move |file| {
+                panel.apply(
+                    &key,
+                    t3_client::view_logic::shell::panels::Action::OpenAttachment(file.clone()),
+                );
+            }));
+        }
         if let Some(nav) = use_context::<crate::state::nav::Navigator>()
-            && let Some(key) = nav.top().thread().cloned()
+            && let Some(runtime) = use_context::<crate::runtime::Rt>()
         {
-            if let Some(panel) = use_context::<crate::screens::panel::PanelHost>() {
-                let key = key.clone();
-                context.file_open = Some(Rc::new(move |file| {
-                    panel.apply(
-                        &key,
-                        t3_client::view_logic::shell::panels::Action::OpenAttachment(file.clone()),
-                    );
-                }));
-            }
-            if let Some(runtime) = use_context::<crate::runtime::Rt>() {
-                context.open_sender = Some(Rc::new(move |row| {
-                    if let Some(sender) = t3_client::thread_views::user_message::sender_thread_key(
-                        &row.message,
-                        &key.environment,
-                    ) && runtime
-                        .environments()
-                        .iter()
-                        .any(|entry| entry.id == sender.environment)
-                    {
-                        nav.open(crate::state::nav::Route::Thread(sender));
-                    }
-                }));
-            }
+            context.open_sender = Some(Rc::new(move |row| {
+                if let Some(sender) = t3_client::thread_views::user_message::sender_thread_key(
+                    &row.message,
+                    &key.environment,
+                ) && runtime
+                    .environments()
+                    .iter()
+                    .any(|entry| entry.id == sender.environment)
+                {
+                    nav.open(crate::state::nav::Route::Thread(sender));
+                }
+            }));
         }
         context
     }
@@ -356,7 +359,7 @@ pub fn user_message_row(
     context: UserRowContext,
 ) -> impl IntoElement {
     let timestamp_format = context.timestamp_format;
-    let row = computed(move || {
+    let presented = computed(move || {
         projection.with(|projection| {
             projection.as_ref().and_then(|row| {
                 present_user_message_row(
@@ -368,17 +371,40 @@ pub fn user_message_row(
             })
         })
     });
+    let urls = committed_image_urls(presented, &context);
+    let row = computed(move || {
+        presented.with(|row| {
+            row.as_ref()
+                .map(|row| urls.with(|urls| with_asset_previews(row, urls)))
+        })
+    });
+    let model_switch = computed(move || {
+        projection.with(|projection| {
+            let MessagesTimelineRowContent::Message {
+                projected_item: Some(item),
+                ..
+            } = &projection.as_ref()?.content
+            else {
+                return None;
+            };
+            match &item.item {
+                OrchestrationV2TurnItem::UserMessage(item) => item.model_switch.clone().flatten(),
+                _ => None,
+            }
+        })
+    });
     dynamic(move || {
         row.get().map(|row| {
             untracked(|| {
                 let mut root = view();
-                for (enabled, slot) in [
-                    (row.fresh_context, &context.fresh_session),
-                    (row.model_switch, &context.model_switch),
-                ] {
-                    if enabled {
-                        root = root.child(slot.as_ref().map(|slot| slot(&row)));
-                    }
+                if row.fresh_context {
+                    root = root.child(crate::screens::thread::rows::events::fresh_session_row());
+                }
+                if let Some(change) = model_switch.get() {
+                    root = root.child(crate::screens::thread::rows::events::model_switch_row(
+                        &change,
+                        &context.events,
+                    ));
                 }
                 root.child(user_message_content(Rc::new(row), context.clone()))
             })
@@ -386,13 +412,64 @@ pub fn user_message_row(
     })
 }
 
-fn user_message_content(row: Rc<UserRow>, context: UserRowContext) -> AnyElement {
-    if row.workflow_opening {
-        return context
-            .workflow
-            .as_ref()
-            .map_or_else(|| view().into_element(), |render| render(&row));
+/// UserTimelineRow's `useAssetUrls` over `selectMessageImageResources`: a committed image's signed
+/// URL, by attachment id, while it resolves; a failed or loading one keeps its own preview.
+fn committed_image_urls(
+    row: Memo<Option<UserRow>>,
+    context: &UserRowContext,
+) -> Memo<BTreeMap<String, String>> {
+    let urls = signal(BTreeMap::<String, String>::new());
+    if let Some(assets) = context.assets.clone() {
+        let environment = context.environment.clone();
+        let resources = computed(move || {
+            row.with(|row| {
+                row.as_ref()
+                    .map(|row| select_message_image_resources(&row.images))
+                    .unwrap_or_default()
+            })
+        });
+        // Re-run only when the image set changes; the effect owns its watchers.
+        effect(move || {
+            for resource in resources.get() {
+                let AssetResource::Attachment { attachment_id, .. } = &resource else {
+                    continue;
+                };
+                let id = attachment_id.0.clone();
+                let mut states = assets.0.watch(environment.clone(), resource);
+                spawn(async move {
+                    while let Some(state) = states.next().await {
+                        let url = match state {
+                            AssetUrlState::Success { url, .. } => Some(url),
+                            _ => None,
+                        };
+                        urls.update(|urls| {
+                            match url {
+                                Some(url) => urls.insert(id.clone(), url),
+                                None => urls.remove(&id),
+                            };
+                        });
+                    }
+                });
+            }
+        });
     }
+    computed(move || urls.get())
+}
+
+/// `createMessageAttachmentPreviewProjector`: the signed URL replaces an attachment's preview.
+fn with_asset_previews(row: &UserRow, urls: &BTreeMap<String, String>) -> UserRow {
+    let mut row = row.clone();
+    for image in row.images.iter_mut().chain(row.preview_images.iter_mut()) {
+        if let ChatAttachment::Image(file) = &image.attachment
+            && let Some(url) = urls.get(&file.id).filter(|url| !url.is_empty())
+        {
+            image.preview_url = Some(url.clone());
+        }
+    }
+    row
+}
+
+fn user_message_content(row: Rc<UserRow>, context: UserRowContext) -> AnyElement {
     if row.attribution == Attribution::Automation {
         automation_message_row(row, context).into_element()
     } else {
@@ -649,10 +726,7 @@ fn user_row_body(row: Rc<UserRow>, context: UserRowContext, collapsible: bool) -
     if row.has_media && !row.media_above_text {
         body = body.child(default_media_block(&row, &context));
     }
-    // CMP-ATTACH owns InlineAudioPreview; mount its real renderer when that package lands.
-    if row.has_audio {
-        body = body.child(context.audio.as_ref().map(|render| render(&row)));
-    }
+    // InlineAudioPreview is not ported yet (CMP-ATTACH); an audio attachment renders nothing.
     if row.has_files {
         let mut files = view().app_class(tw(if row.file_cards_only {
             "flex flex-col items-end gap-1"
@@ -780,22 +854,20 @@ fn message_actions(
                 }
         });
         let row = row.clone();
-        let disabled = action.is_none();
-        actions = actions.child(dynamic(move || {
-            available.get().then(|| {
-                let action = action.clone();
-                let row = row.clone();
-                button(
-                    ButtonContent::Label(label.clone()),
-                    ButtonVariant::Link,
-                    ButtonSize::Xs,
-                    move || disabled,
-                    move || {
-                        if let Some(action) = &action {
-                            action(&row);
-                        }
-                    },
-                )
+        // No handler (Open automation has no route yet): hidden, as the web hides it.
+        actions = actions.child(action.map(|action| {
+            dynamic(move || {
+                available.get().then(|| {
+                    let action = action.clone();
+                    let row = row.clone();
+                    button(
+                        ButtonContent::Label(label.clone()),
+                        ButtonVariant::Link,
+                        ButtonSize::Xs,
+                        || false,
+                        move || action(&row),
+                    )
+                })
             })
         }));
     }
@@ -815,8 +887,13 @@ fn message_actions(
         Some("flex items-center gap-0.5"),
         float_actions.then_some("flex-wrap justify-end"),
     ])));
-    if let Some(count) = row.revert_turn_count {
-        controls = controls.child(revert_user_message_button(row.clone(), count, context));
+    if let (Some(count), Some(revert)) = (row.revert_turn_count, &context.revert) {
+        controls = controls.child(revert_user_message_button(
+            row.clone(),
+            count,
+            revert.clone(),
+            context,
+        ));
     }
     if !row.copy_text.is_empty() {
         controls = controls.child(message_copy_button(
@@ -911,10 +988,9 @@ fn actions_frame(actions: impl IntoElement) -> impl IntoElement {
 fn revert_user_message_button(
     row: UserRow,
     count: usize,
+    action: RevertAction,
     context: &UserRowContext,
 ) -> impl IntoElement + use<> {
-    let action = context.revert.clone();
-    let missing = action.is_none();
     let working = context.working;
     let reverting = context.reverting;
     view()
@@ -930,12 +1006,9 @@ fn revert_user_message_button(
             },
             ButtonVariant::Ghost,
             ButtonSize::Xs,
-            move || missing || working.get() || reverting.get(),
+            move || working.get() || reverting.get(),
             move || {
-                if !working.get_untracked()
-                    && !reverting.get_untracked()
-                    && let Some(action) = &action
-                {
+                if !working.get_untracked() && !reverting.get_untracked() {
                     action(&row, count);
                 }
             },
@@ -1133,27 +1206,44 @@ pub fn user_file_card(file: FilePresentation) -> impl IntoElement {
     } else {
         t("Sending attachment")
     };
-    let downloadable = file.downloadable;
-    let download = file.download.clone().filter(|_| downloadable);
-    let disabled = download.is_none();
+    let card = view().app_class(tw("flex w-64 max-w-full items-center gap-1 rounded-2xl bg-message py-2 ps-2 pe-1 text-message-foreground"))
+        .child(identity);
+    if !file.downloadable {
+        return card.child(button(
+            ButtonContent::Icon {
+                icon: Icon::Download,
+                label: download_label,
+            },
+            ButtonVariant::GhostMuted,
+            ButtonSize::IconXs,
+            || true,
+            || {},
+        ));
+    }
+    // Without a download handler the button is not drawn, as the web does without onFileDownload.
+    let Some(download) = file.download.clone() else {
+        return card;
+    };
+    let hint = download_label.clone();
     let download_button = button(
         ButtonContent::Icon {
             icon: Icon::Download,
-            label: download_label.clone(),
+            label: download_label,
         },
         ButtonVariant::GhostMuted,
         ButtonSize::IconXs,
-        move || disabled,
-        move || {
-            if let Some(download) = &download {
-                download(&file.file);
-            }
-        },
+        || false,
+        move || download(&file.file),
     );
-    let hint = download_label;
-    view().app_class(tw("flex w-64 max-w-full items-center gap-1 rounded-2xl bg-message py-2 ps-2 pe-1 text-message-foreground"))
-        .child(identity)
-        .child(view().tooltip(tooltip(tooltip_create_handle(), Default::default(), text(hint))).child(download_button))
+    card.child(
+        view()
+            .tooltip(tooltip(
+                tooltip_create_handle(),
+                Default::default(),
+                text(hint),
+            ))
+            .child(download_button),
+    )
 }
 
 pub fn user_video_attachment(
@@ -1213,14 +1303,12 @@ pub fn user_file_attachment(file: FilePresentation) -> impl IntoElement {
         .app_class(tw("focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"))
         .child(glyph).child(identity)
         .child(icon(Icon::Eye, 16.0, || palette().muted_foreground));
-    let download = file.download.clone();
-    let disabled = download.is_none();
     let download_label = tr("Download {label}", &[("label", Value::Text(label))]);
     let hint = download_label.clone();
     view()
         .app_class(tw("flex min-w-0 items-center gap-1"))
         .child(preview)
-        .child(
+        .child(file.download.clone().map(|download| {
             view()
                 .tooltip(tooltip(
                     tooltip_create_handle(),
@@ -1234,14 +1322,10 @@ pub fn user_file_attachment(file: FilePresentation) -> impl IntoElement {
                     },
                     ButtonVariant::GhostMuted,
                     ButtonSize::IconXs,
-                    move || disabled,
-                    move || {
-                        if let Some(download) = &download {
-                            download(&file.file);
-                        }
-                    },
-                )),
-        )
+                    || false,
+                    move || download(&file.file),
+                ))
+        }))
         .into_element()
 }
 

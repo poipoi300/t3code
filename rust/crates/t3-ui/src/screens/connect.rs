@@ -18,6 +18,7 @@
 
 use std::rc::Rc;
 
+use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -174,18 +175,21 @@ async fn pair_from_link(
     pairing_url: String,
     backend: Rc<dyn crate::runtime::backend::Backend>,
     nav: crate::state::nav::Navigator,
-) {
+) -> bool {
     let report = |detail: &str| {
         toast_manager().add(stacked_thread_toast(ToastOptions {
             variant: ToastVariant::Error,
-            title: t("Could not add backend"),
-            description: Some(t(detail)), // client English key
+            title: "Could not add backend".into(),
+            description: Some(Text::client_key(detail.to_owned())),
             ..ToastOptions::default()
         }));
     };
     let origin = match pairing_link_origin(&pairing_url) {
         Ok(origin) => origin,
-        Err(failure) => return report(&failure.detail),
+        Err(failure) => {
+            report(&failure.detail);
+            return false;
+        }
     };
     let message = tr(
         "Add the backend at {origin}?",
@@ -197,7 +201,7 @@ async fn pair_from_link(
         None => false,
     };
     if !confirmed {
-        return;
+        return false;
     }
     let input = PairingInput {
         pairing_url: Some(pairing_url),
@@ -207,15 +211,89 @@ async fn pair_from_link(
         Ok(_) => {
             toast_manager().add(ToastOptions {
                 variant: ToastVariant::Success,
-                title: t("Backend added"),
-                description: Some(t(
-                    "The environment is saved and will reconnect on app startup.",
-                )),
+                title: "Backend added".into(),
+                description: reconnect_promise(),
                 ..ToastOptions::default()
             });
             nav.open(Route::Home);
+            true
         }
-        Err(failure) => report(&failure.detail),
+        Err(failure) => {
+            report(&failure.detail);
+            false
+        }
+    }
+}
+
+/// The web's "will reconnect on app startup", only where saved servers outlive this run: a host
+/// whose key store did not open (or the demo) keeps them for this run only.
+fn reconnect_promise() -> Option<Text> {
+    crate::runtime::client::saved_servers_last()
+        .then(|| Text::from("The environment is saved and will reconnect on app startup."))
+}
+
+/// Mounted once at the app root (`app.rs`), beside the toast providers:
+/// - pairing links the OS hands the running app (`ClientRuntime::pairing_links`, mobile deep links
+///   and desktop app links), each confirmed by its origin as a launch link is, one at a time, and
+///   a link that already paired is not offered again (`DesktopWebLinkCoordinator`);
+/// - once after the first restore, what saved data the client could not keep
+///   (`ClientRuntime::take_storage_notice`), so a lost environment list or credential is never a
+///   silently empty app. The web has no such notice (it discards silently); the copy is ours.
+pub fn connection_notices() -> impl IntoElement {
+    let runtime = rt();
+    let nav = navigator();
+    if let Some(client) = runtime.backend().client() {
+        let mut links = client.pairing_links();
+        let backend = runtime.backend();
+        spawn(async move {
+            let mut paired = std::collections::BTreeSet::new();
+            while let Some(input) = links.next().await {
+                let Some(pairing_url) = input.pairing_url else {
+                    continue;
+                };
+                if paired.contains(&pairing_url) {
+                    continue;
+                }
+                if pair_from_link(pairing_url.clone(), backend.clone(), nav).await {
+                    paired.insert(pairing_url);
+                }
+            }
+        });
+        let environments = runtime.environments_signal();
+        // The notice is ready when the first restore has finished, which lists the environments.
+        effect(move || {
+            environments.with(|_| ());
+            if let Some(notice) = client.take_storage_notice() {
+                toast_manager().add(storage_notice_toast(&notice));
+            }
+        });
+    }
+    view()
+}
+
+fn storage_notice_toast(notice: &t3_client::composition::StorageNotice) -> ToastOptions {
+    let mut parts = Vec::new();
+    if notice.reset_catalog {
+        parts.push(t("The list of saved environments could not be read and was reset."));
+    }
+    if notice.storage.recreated_database {
+        parts.push(t("Saved data was damaged and was set aside."));
+    }
+    if notice.storage.discarded_secure_records > 0 || notice.storage.replaced_unreadable_key {
+        parts.push(t("Saved credentials could not be read and were removed."));
+    }
+    if !notice.damaged.is_empty() {
+        parts.push(tr(
+            "{count} saved environments need to be paired again.",
+            &[("count", Value::Int(notice.damaged.len() as i64))],
+        ));
+    }
+    ToastOptions {
+        variant: ToastVariant::Warning,
+        title: "Some saved data could not be read".into(),
+        description: Some(Text::content(parts.join(" "))),
+        timeout: None,
+        ..ToastOptions::default()
     }
 }
 
@@ -445,19 +523,20 @@ fn pairing_route_surface() -> impl IntoElement {
                     toast_manager().add(match &target {
                         Some(target) => ToastOptions {
                             variant: ToastVariant::Success,
-                            title: t("Route added"),
-                            description: Some(tr(
-                                "{label} now has another way to connect.",
-                                &[("label", Value::Text(target.label.clone().into()))],
-                            )),
+                            title: "Route added".into(),
+                            description: Some(
+                                tr(
+                                    "{label} now has another way to connect.",
+                                    &[("label", Value::Text(target.label.clone().into()))],
+                                )
+                                .into(),
+                            ),
                             ..ToastOptions::default()
                         },
                         None => ToastOptions {
                             variant: ToastVariant::Success,
-                            title: t("Backend added"),
-                            description: Some(t(
-                                "The environment is saved and will reconnect on app startup.",
-                            )),
+                            title: "Backend added".into(),
+                            description: reconnect_promise(),
                             ..ToastOptions::default()
                         },
                     });
@@ -716,8 +795,8 @@ fn saved_backend_list_row(
             if let Err(message) = result {
                 toast_manager().add(stacked_thread_toast(ToastOptions {
                     variant: ToastVariant::Error,
-                    title: t("Could not remove backend"),
-                    description: Some(message.resolve().to_string()),
+                    title: "Could not remove backend".into(),
+                    description: Some(message),
                     ..ToastOptions::default()
                 }));
             }
@@ -739,8 +818,8 @@ fn saved_backend_list_row(
             if let Err(message) = actions.reconnect(&e.id).await {
                 toast_manager().add(stacked_thread_toast(ToastOptions {
                     variant: ToastVariant::Error,
-                    title: t("Could not reconnect"),
-                    description: Some(message.resolve().to_string()),
+                    title: "Could not reconnect".into(),
+                    description: Some(message),
                     ..ToastOptions::default()
                 }));
             }
