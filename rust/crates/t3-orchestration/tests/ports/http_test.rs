@@ -29,6 +29,7 @@ async fn transcript_authorizes_and_maps_missing_and_oversized_history() {
         hydrator: Arc::new(NoLegacyTranscript),
         signals: OutboxSignals::default(),
         clock: Arc::new(ManualClock::new(TEST_TIME)),
+        worktree_restore: Arc::new(t3_orchestration::composition::NoWorktreeRestore),
     });
     let http = OrchestrationHttpRead { service: &service };
     let environment = t3_contracts::base_schemas::EnvironmentId("env".into());

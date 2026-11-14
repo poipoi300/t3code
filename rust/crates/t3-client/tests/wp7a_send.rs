@@ -763,6 +763,9 @@ fn lost_launch_reply_replays_the_same_workspace_and_holds_for_operation_access()
                     }
                     let launch = request(requests.next().await.expect("launch"));
                     assert_eq!(launch.tag, "orchestration.launchThread");
+                    if edited {
+                        service.update_pending(&id, "Edited idea".into(), SendOptions::default()).now_or_never().expect("creation edits persist while the launch is in flight").expect("edit");
+                    }
                     peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {
                         request_id: launch.id,
                         exit: Exit::fail(
@@ -821,10 +824,6 @@ fn lost_launch_reply_replays_the_same_workspace_and_holds_for_operation_access()
                             .expect("reconnect");
                         fresh
                     } else {
-                        service
-                            .update_pending(&id, "Edited idea".into(), SendOptions::default())
-                            .await
-                            .expect("edit");
                         service.clone()
                     };
                     active_service.wake();
