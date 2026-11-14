@@ -5658,6 +5658,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde_json",
  "sha2 0.10.9",
+ "system-configuration",
  "t3-client",
  "t3-contracts",
  "t3-rpc",
@@ -5672,6 +5673,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "webpki-roots 1.0.12",
+ "windows-registry",
  "zeroize",
 ]
 
