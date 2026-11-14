@@ -4,7 +4,7 @@ use t3_orchestration::{
     provider::{ProviderEvent, ProviderEventKind},
 };
 fn snapshot(id: &str, text: &str, streaming: bool) -> ProviderEvent {
-    ProviderEvent {driver:serde_json::from_value(json!("codex")).unwrap(),kind:ProviderEventKind::Message(Box::new(serde_json::from_value(json!({"id":id,"threadId":"thread","runId":null,"nodeId":null,"role":"assistant","text":text,"attachments":[],"streaming":streaming,"createdBy":"agent","creationSource":"provider","createdAt":"2026-09-08T00:00:00.000Z","updatedAt":"2026-09-08T00:00:00.000Z"})).unwrap()))}
+    ProviderEvent {driver:serde_json::from_value(json!("codex")).expect("test value"),kind:ProviderEventKind::Message(Box::new(serde_json::from_value(json!({"id":id,"threadId":"thread","runId":null,"nodeId":null,"role":"assistant","text":text,"attachments":[],"streaming":streaming,"createdBy":"agent","creationSource":"provider","createdAt":"2026-09-08T00:00:00.000Z","updatedAt":"2026-09-08T00:00:00.000Z"})).expect("test value")))}
 }
 fn shown(event: Option<ProviderEvent>) -> Value {
     match event.map(|e| e.kind) {

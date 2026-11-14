@@ -132,6 +132,16 @@ pub fn threads_starting_work(events: &[OrchestrationV2DomainEvent]) -> HashSet<T
 }
 
 impl RuntimeModeCeiling {
+    /// The document's `limits.maxRuntimeMode`, the one source for dispatch and turn checks.
+    pub fn from_managed(
+        policy: &t3_contracts::managed_policy::ManagedPolicyDocument,
+    ) -> Option<Self> {
+        Some(Self {
+            organization: policy.organization.0.clone(),
+            max_runtime_mode: policy.limits.as_ref()?.max_runtime_mode?,
+        })
+    }
+
     pub fn message(&self, refused: CeilingRefused) -> String {
         let label = match self.max_runtime_mode {
             RuntimeMode::ApprovalRequired => "Supervised",

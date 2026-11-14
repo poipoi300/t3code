@@ -12,6 +12,7 @@ use super::{
         RootRunState, RootTurnPreparation, RunExecutionHandle, RunExecutionService, StartRootRun,
     },
 };
+use crate::ports::decisions::runtime_policy::is_above_ceiling;
 use crate::{
     api::*,
     error::{Error, Result},
@@ -219,6 +220,13 @@ struct ResumeOutcome {
     recovered: bool,
 }
 
+/// A policy resolved by the caller, or one turn start resolves itself (TS order: after the
+/// recovery read, so a refusal can settle the run).
+enum PolicySource<'a> {
+    Configured(ConfiguredRuntimePolicy),
+    Resolve(&'a dyn RuntimePolicyResolver),
+}
+
 struct PreviewHandoffWriter;
 #[async_trait]
 impl HandoffPersistence for PreviewHandoffWriter {
@@ -277,10 +285,47 @@ impl ProviderTurnStartService {
         cancellation: CancellationToken,
         projector: Option<Arc<dyn ComposerContextProjector>>,
     ) -> Result<Option<RunExecutionHandle>> {
-        let ConfiguredRuntimePolicy {
-            policy: runtime_policy,
-            options: policy_options,
-        } = configured;
+        self.start_from(
+            thread_id,
+            run_id,
+            PolicySource::Configured(configured),
+            will_retry,
+            cancellation,
+            projector,
+        )
+        .await
+    }
+
+    /// TS `ProviderTurnStartService.start`: resolves the run's policy itself. A turn above the
+    /// managed ceiling settles the run as failed instead of returning an error to retry.
+    pub async fn start_resolving(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        policy: &dyn RuntimePolicyResolver,
+        will_retry: bool,
+        cancellation: CancellationToken,
+    ) -> Result<Option<RunExecutionHandle>> {
+        self.start_from(
+            thread_id,
+            run_id,
+            PolicySource::Resolve(policy),
+            will_retry,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    async fn start_from(
+        &self,
+        thread_id: ThreadId,
+        run_id: RunId,
+        source: PolicySource<'_>,
+        will_retry: bool,
+        cancellation: CancellationToken,
+        projector: Option<Arc<dyn ComposerContextProjector>>,
+    ) -> Result<Option<RunExecutionHandle>> {
         let context = self
             .projections
             .turn_start_context(thread_id.clone(), run_id.clone())
@@ -371,6 +416,31 @@ impl ProviderTurnStartService {
                     .await;
             }
         };
+        let configured = match source {
+            PolicySource::Configured(configured) => configured,
+            PolicySource::Resolve(policy) => match policy
+                .resolve(projection.thread.clone(), state.run.model_selection.clone())
+                .await
+            {
+                Ok(configured) => configured,
+                Err(error) if is_above_ceiling(&error) => {
+                    return self
+                        .failed(
+                            &state,
+                            "runtime-mode-above-ceiling",
+                            "Thread mode is above the policy limit",
+                            error,
+                            false,
+                        )
+                        .await;
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        let ConfiguredRuntimePolicy {
+            policy: runtime_policy,
+            options: policy_options,
+        } = configured;
         let runs = &projection.runs;
         let turns = &projection.provider_turns;
         let mut related_threads = Vec::new();
@@ -1975,6 +2045,7 @@ fn pending_handoffs(
 
 pub fn provider_failure_message(error: &Error) -> String {
     match error {
+        Error::Service { detail, .. } if is_above_ceiling(error) => detail.clone(),
         Error::Provider(
             ProviderError::Protocol { detail, .. } | ProviderError::Operation { detail, .. },
         ) => detail.clone(),

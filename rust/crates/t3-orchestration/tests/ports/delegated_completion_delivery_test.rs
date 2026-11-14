@@ -113,11 +113,11 @@ impl CommandDispatcher for QuestionDispatch {
     ) -> t3_orchestration::error::Result<t3_orchestration::stores::receipts::CommandReceipt> {
         use t3_orchestration::stores::receipts::{AggregateId, CommandReceipt, ReceiptStatus};
         let command = t3_contracts::stored::to_value(&command)?;
-        self.0.lock().unwrap().push(command.clone());
+        self.0.lock().expect("test value").push(command.clone());
         Ok(CommandReceipt {
             command_id: serde_json::from_value(command["commandId"].clone())?,
             aggregate: AggregateId::Thread(ThreadId("thread:test".into())),
-            command_type: command["type"].as_str().unwrap().into(),
+            command_type: command["type"].as_str().expect("test value").into(),
             accepted_at: t3_orchestration::testing::TEST_TIME.into(),
             result_sequence: 0,
             status: ReceiptStatus::Accepted,
@@ -150,7 +150,9 @@ async fn child_question(
     task["childThreadId"] = "child".into();
     task["status"] = "running".into();
     task["completionWake"] = "settled_only".into();
-    task.as_object_mut().unwrap().remove("completionDelivery");
+    task.as_object_mut()
+        .expect("test value")
+        .remove("completionDelivery");
     h.write("subagent.updated", task).await?;
     let mut run = parent.clone();
     run["threadId"] = "child".into();

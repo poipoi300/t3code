@@ -16,7 +16,9 @@ fn outcome_event(id: &str, status: &str) -> OrchestrationV2StoredEvent {
     run["requestedAt"] = "2026-10-19T12:00:00.000Z".into();
     run["startedAt"] = "2026-10-19T12:00:30.000Z".into();
     run["completedAt"] = "2026-10-19T12:10:30.000Z".into();
-    run.as_object_mut().unwrap().shift_remove("delegatedTaskId");
+    run.as_object_mut()
+        .expect("test value")
+        .shift_remove("delegatedTaskId");
     decode(
         json!({"sequence":1,"commandId":null,"event":{"id":format!("event:{id}"),"threadId":"thread:test","type":"run.updated","occurredAt":"2026-10-19T12:10:30.000Z","payload":run}}),
     )

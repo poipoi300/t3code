@@ -203,7 +203,9 @@ fn scheduled_inputs(
     input.providers = std::sync::Arc::new(AdapterRegistry::from_adapters(adapters));
     std::sync::Arc::new(t3_orchestration::runtime::dispatch::RuntimeCommandInputs {
         base: input,
-        sessions: super::provider_turn_start_service_test::sessions(active_adapter.unwrap()),
+        sessions: super::provider_turn_start_service_test::sessions(
+            active_adapter.expect("test value"),
+        ),
         policy: std::sync::Arc::new(t3_orchestration::composition::BaseRuntimePolicy),
     })
 }
@@ -216,7 +218,7 @@ async fn check_promoted_scheduled_delivery(pinned: bool) -> Result<()> {
         .reader
         .thread(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     thread.worktree_path = Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
         workspace.path().to_string_lossy().into_owned(),
     ));
@@ -228,7 +230,10 @@ async fn check_promoted_scheduled_delivery(pinned: bool) -> Result<()> {
     let mut command = message("scheduled", "scheduled");
     command["scheduledTaskId"] = "task:scheduled".into();
     if !pinned {
-        command.as_object_mut().unwrap().remove("modelSelection");
+        command
+            .as_object_mut()
+            .expect("test value")
+            .remove("modelSelection");
     }
     dispatcher
         .dispatch(serde_json::from_value(command)?)
@@ -237,17 +242,17 @@ async fn check_promoted_scheduled_delivery(pinned: bool) -> Result<()> {
         .reader
         .projection(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     let queued = before
         .runs
         .iter()
         .find(|run| run.status == OrchestrationV2RunStatus::Queued)
-        .unwrap();
+        .expect("test value");
     let queued_message = before
         .messages
         .iter()
         .find(|message| message.id == queued.user_message_id)
-        .unwrap();
+        .expect("test value");
     assert_eq!(
         t3_contracts::stored::to_value(queued_message)?.get("followsThreadSelection"),
         (!pinned).then_some(&json!(true))
@@ -289,7 +294,7 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
         .reader
         .thread(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     thread.worktree_path = Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
         workspace.path().to_string_lossy().into_owned(),
     ));
@@ -300,7 +305,10 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
     .await?;
     let mut command = message("scheduled", if edit { "scheduled" } else { "/goal pause" });
     command["scheduledTaskId"] = "task:scheduled".into();
-    command.as_object_mut().unwrap().remove("modelSelection");
+    command
+        .as_object_mut()
+        .expect("test value")
+        .remove("modelSelection");
     dispatcher
         .dispatch(serde_json::from_value(command)?)
         .await?;
@@ -308,12 +316,12 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
         .reader
         .projection(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     let queued = before
         .runs
         .iter()
         .find(|run| run.status == OrchestrationV2RunStatus::Queued)
-        .unwrap();
+        .expect("test value");
     for run in before
         .runs
         .iter()
@@ -330,7 +338,7 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
     }
     dispatcher.dispatch(serde_json::from_value(json!({"type":"thread.model-selection.set","commandId":"switch-claude","threadId":"thread:test","modelSelection":{"instanceId":"claudeAgent","model":"claude-test"}}))?).await?;
     if edit {
-        let error=dispatcher.dispatch(serde_json::from_value(json!({"type":"queued-run.edit","commandId":"edit-goal","threadId":"thread:test","runId":queued.id,"text":"/goal pause"}))?).await.unwrap_err();
+        let error=dispatcher.dispatch(serde_json::from_value(json!({"type":"queued-run.edit","commandId":"edit-goal","threadId":"thread:test","runId":queued.id,"text":"/goal pause"}))?).await.expect_err("test value");
         assert!(
             error
                 .to_string()
@@ -351,13 +359,13 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
         .reader
         .projection(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     assert_eq!(
         after
             .messages
             .iter()
             .find(|message| message.id == queued.user_message_id)
-            .unwrap()
+            .expect("test value")
             .text,
         if edit { "scheduled" } else { "/goal pause" }
     );
@@ -366,7 +374,7 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
             .runs
             .iter()
             .find(|run| run.id == queued.id)
-            .unwrap()
+            .expect("test value")
             .status,
         if edit {
             OrchestrationV2RunStatus::Queued
@@ -402,7 +410,7 @@ async fn check_scheduled_goal_case(edit: bool) -> Result<()> {
         );
         let id = t3_contracts::stored::to_value(&queued.id)?
             .as_str()
-            .unwrap()
+            .expect("test value")
             .to_owned();
         let starts=h.database.stores.read(move |db|Ok(db.query_row("SELECT COUNT(*) FROM orchestration_v2_effect_outbox WHERE json_extract(payload_json,'$.type')='provider-turn.start' AND json_extract(payload_json,'$.runId')=?1",[id],|row|row.get::<_,i64>(0))?)).await?;
         assert_eq!(starts, 0);

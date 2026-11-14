@@ -9,7 +9,7 @@ use t3_orchestration::{
 use tokio_util::sync::CancellationToken;
 
 fn transcript(entries: Value) -> ReplayTranscript {
-    serde_json::from_value(json!({"provider":"opencode","protocol":OPENCODE_PROTOCOL,"version":"1","scenario":"sdk","entries":entries})).unwrap()
+    serde_json::from_value(json!({"provider":"opencode","protocol":OPENCODE_PROTOCOL,"version":"1","scenario":"sdk","entries":entries})).expect("test value")
 }
 
 #[tokio::test]

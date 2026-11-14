@@ -253,7 +253,7 @@ impl CommandInputs for RuntimeCommandInputs {
     }
     async fn prepare(&self, command: &OrchestrationV2ServerCommand) -> Result<PreparedCommand> {
         let mut prepared = self.base.prepare(command).await?;
-        let (_, kind, _) = command_identity(command)?;
+        let (command_id, kind, _) = command_identity(command)?;
         let continuation =
             crate::ports::decisions::orchestrator::metadata_update_continuation(command)?;
         if let Some(projection) = &prepared.context.context.projection {
@@ -274,8 +274,18 @@ impl CommandInputs for RuntimeCommandInputs {
                         thread.worktree_path = serde_json::from_value(path.clone())?;
                     }
                 }
-                prepared.context.inputs.runtime_policy =
-                    Some(self.policy.resolve(thread, selection).await?);
+                // TS `runtimePolicyCeilingCause`: refused like the dispatch ceiling, unrecorded.
+                let resolved = self.policy.resolve(thread, selection).await.map_err(|error| {
+                    if !crate::ports::decisions::runtime_policy::is_above_ceiling(&error) {
+                        return error;
+                    }
+                    let reason = match error {
+                        Error::Service { detail, .. } => detail,
+                        other => other.to_string(),
+                    };
+                    Error::Rejected { command_id, reason }
+                })?;
+                prepared.context.inputs.runtime_policy = Some(resolved);
             }
             let mut sessions = std::collections::BTreeMap::new();
             for provider in &projection.provider_threads {

@@ -43,7 +43,7 @@ impl SessionDirectory for Sessions {
         input: OpenSession,
     ) -> Result<Arc<dyn SessionRuntime>> {
         if let Some(opening) = &self.opening {
-            opening.send(()).unwrap();
+            opening.send(()).expect("test value");
         }
         if let Some(resume) = &self.resume_open {
             resume.notified().await;
@@ -118,7 +118,10 @@ pub async fn seed(h: &Harness) -> Result<RootRunState> {
     message["role"] = "user".into();
     message["text"] = "Hello provider".into();
     message["attachments"] = json!([]);
-    message.as_object_mut().unwrap().shift_remove("context");
+    message
+        .as_object_mut()
+        .expect("test value")
+        .shift_remove("context");
     message["createdBy"] = "user".into();
     message["creationSource"] = "web".into();
     for (kind, value) in [
@@ -584,7 +587,10 @@ async fn ready_handoff(
     handoff["status"] = "ready".into();
     handoff["strategy"] = "full_thread_summary".into();
     handoff["transferId"] = serde_json::Value::Null;
-    handoff.as_object_mut().unwrap().remove("delivery");
+    handoff
+        .as_object_mut()
+        .expect("test value")
+        .remove("delivery");
     handoff["history"] = json!({"coverage":"Previous accepted work", "messages":[{"itemId":"item:previous","threadId":"thread:test","runId":"run:previous","providerThreadId":"pt:previous","role":"user","text":"Keep the 日本語 result 🧪", "status":"completed","kind":"user_message"}],"omittedItems":0});
     h.write("context-handoff.updated", handoff).await?;
     let (base, _base_calls) = h.fake();

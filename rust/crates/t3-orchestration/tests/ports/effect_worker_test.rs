@@ -32,7 +32,7 @@ impl ProjectionWriter for Projection {
         let event = serde_json::to_value(&event.event)?;
         projects::apply(
             tx,
-            &project_event(event["id"].as_str().unwrap(), "projection")?,
+            &project_event(event["id"].as_str().expect("test value"), "projection")?,
         )?;
         tx.execute(
             "UPDATE projection_projects SET title=?1 WHERE project_id='projection'",
@@ -54,7 +54,7 @@ fn request(id: &str, thread: &str) -> CommitRequest {
             error: None,
         }),
         decision: Decision {
-            events: vec![detached_event(&format!("event:{id}"), thread).unwrap()],
+            events: vec![detached_event(&format!("event:{id}"), thread).expect("test value")],
             effects: vec![pending(
                 &format!("effect:{id}"),
                 thread,
@@ -216,10 +216,14 @@ struct BlockProjection {
 
 impl ProjectionWriter for BlockProjection {
     fn apply(&self, tx: &Transaction<'_>, event: &OrchestrationV2StoredEvent) -> Result<()> {
-        if let Some(started) = self.started.lock().unwrap().take() {
+        if let Some(started) = self.started.lock().expect("test value").take() {
             let _ = started.send(());
         }
-        self.release.lock().unwrap().recv().unwrap();
+        self.release
+            .lock()
+            .expect("test value")
+            .recv()
+            .expect("test value");
         Projection.apply(tx, event)
     }
 }
@@ -311,20 +315,22 @@ impl EffectExecutor for ControlledExecutor {
                 row: effect.clone(),
                 finish,
             })
-            .unwrap();
+            .expect("test value");
         tokio::select! {
             biased;
             _ = token.cancelled() => {
                 let (release, cleanup) = oneshot::channel();
-                self.cancelled.send((effect.id, release)).unwrap();
-                cleanup.await.unwrap();
+                self.cancelled.send((effect.id, release)).expect("test value");
+                cleanup.await.expect("test value");
                 Err(Error::Cancelled)
             },
-            result = result => result.unwrap(),
+            result = result => result.expect("test value"),
         }
     }
     async fn failed(&self, effect: EffectRow, _: &Error, will_retry: bool) -> Result<()> {
-        self.failed.send((effect.id, will_retry)).unwrap();
+        self.failed
+            .send((effect.id, will_retry))
+            .expect("test value");
         Ok(())
     }
 }
@@ -669,7 +675,7 @@ impl EffectExecutor for AlwaysFails {
         })
     }
     async fn failed(&self, _: EffectRow, _: &Error, retry: bool) -> Result<()> {
-        self.failures.lock().unwrap().push(retry);
+        self.failures.lock().expect("test value").push(retry);
         Ok(())
     }
 }
@@ -1175,9 +1181,9 @@ fn item_value() -> serde_json::Value {
         include_str!("../../../../fixtures/samples/OrchestrationV2TurnItem.jsonl")
             .lines()
             .next()
-            .unwrap(),
+            .expect("test value"),
     )
-    .unwrap();
+    .expect("test value");
     item["id"] = "item".into();
     item["threadId"] = "thread".into();
     item["runId"] = "run".into();
@@ -1816,7 +1822,10 @@ mod executor_routes {
     impl CommandDispatcher for Dispatch {
         async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<CommandReceipt> {
             let command = serde_json::to_value(command)?;
-            self.commands.lock().unwrap().push(command.clone());
+            self.commands
+                .lock()
+                .expect("test value")
+                .push(command.clone());
             if self.fail.load(Ordering::SeqCst) {
                 return Err(Error::Unsupported("failure recorder unavailable"));
             }
@@ -1825,7 +1834,7 @@ mod executor_routes {
                 aggregate: AggregateId::Thread(serde_json::from_value(
                     command["threadId"].clone(),
                 )?),
-                command_type: command["type"].as_str().unwrap().into(),
+                command_type: command["type"].as_str().expect("test value").into(),
                 accepted_at: TEST_TIME.into(),
                 result_sequence: 1,
                 status: ReceiptStatus::Accepted,
@@ -1899,12 +1908,12 @@ mod executor_routes {
                         },
                         TEST_TIME,
                     )?
-                    .unwrap())
+                    .expect("test value"))
                 })
                 .await
         }
         fn commands(&self) -> Vec<Value> {
-            self.dispatch.commands.lock().unwrap().clone()
+            self.dispatch.commands.lock().expect("test value").clone()
         }
     }
     fn failure(detail: &str) -> Error {
@@ -1939,7 +1948,7 @@ mod executor_routes {
             include_str!("../../../../fixtures/samples/OrchestrationV2AppThread.jsonl")
                 .lines()
                 .next()
-                .unwrap(),
+                .expect("test value"),
         )?;
         thread["id"] = "thread".into();
         thread["projectId"] = "project".into();
@@ -2480,7 +2489,7 @@ mod executor_routes {
     impl ResourceCleanup for DropCleanup {
         async fn cleanup(&self, _: ThreadId, _: ResourceKind) -> Result<()> {
             let _marker = DropMarker(self.dropped.clone());
-            self.entered.send(()).unwrap();
+            self.entered.send(()).expect("test value");
             std::future::pending().await
         }
     }

@@ -646,6 +646,166 @@ async fn request(subscription: &mut EventSubscription) -> RuntimeRequestId {
 fn control(id: &str, tool: &str, input: Value) -> Value {
     json!({"type":"control_request","request_id":id,"request":{"subtype":"can_use_tool","tool_name":tool,"input":input,"tool_use_id":format!("tool-{id}")}})
 }
+async fn callback_reply_or_pending(
+    runtime: &Arc<dyn SessionRuntime>,
+    subscription: &mut EventSubscription,
+    peer: &mut Peer,
+) -> (bool, Value) {
+    let observed = tokio::select! {
+        reply = peer.read() => Ok(reply),
+        id = request(subscription) => Err(id),
+    };
+    match observed {
+        Ok(reply) => (false, reply["response"]["response"].clone()),
+        Err(id) => {
+            runtime
+                .respond(RuntimeResponse {
+                    request_id: id,
+                    decision: Some(ProviderApprovalDecision::Decline),
+                    feedback: None,
+                    answers: None,
+                })
+                .await
+                .expect("decline unexpected pending request");
+            (true, peer.read().await["response"]["response"].clone())
+        }
+    }
+}
+
+#[tokio::test]
+async fn permission_callback_denies_native_removal_safety_without_a_user_approval() {
+    for reason in [
+        "Dangerous rm operation not ruled out — the shell may read this command differently than it was parsed",
+        "Dangerous rm operation on possibly-empty variable path: $TARGET\nUse a literal absolute path instead.",
+        "This shell -c script runs rm and could not be checked",
+        "A permission rule denies a command in this shell -c script",
+        "dAnGeRoUs rmdir operation on a possibly-empty path",
+    ] {
+        let (runtime, mut subscription, mut peer) = running().await;
+        let mut frame = control("removal", "Bash", json!({"command":"rm -rf \"$TARGET\""}));
+        frame["request"]["decision_reason"] = json!(format!("\u{1b}[33m{reason}\u{1b}[39m"));
+        peer.send(frame).await;
+        let (asked, reply) =
+            callback_reply_or_pending(&runtime, &mut subscription, &mut peer).await;
+        runtime.close().await.unwrap();
+        assert!(
+            !asked,
+            "native safety veto became a user-overridable approval: {reason}"
+        );
+        assert_eq!(reply["behavior"], "deny");
+        assert_eq!(
+            reply["message"],
+            format!(
+                "Claude Code's removal safety check denied this command; the user did not reject it. The command did not run. Do not bypass the check by splitting the removal, putting it in a script, or using another tool or shell. If the warning below supplies a safe rewrite, use it and let the same check evaluate it. Otherwise continue the rest of the task without the removal and tell the user what you needed to delete and why. Warning: {reason}"
+            )
+        );
+        assert_eq!(reply["toolUseID"], "tool-removal");
+        assert!(reply.get("decisionClassification").is_none());
+    }
+}
+
+#[tokio::test]
+async fn permission_callback_plan_without_approvals_denies_before_asking() {
+    let mut input = fixture_turn_input().unwrap();
+    input.runtime_policy.interaction_mode =
+        t3_contracts::provider_policy::ProviderInteractionMode::Plan;
+    input.runtime_policy.approval_policy = Some(json!("never"));
+    let (runtime, mut subscription, mut peer) = running_with_input(
+        ClaudeHostOptions::default(),
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        input,
+    )
+    .await;
+    peer.send(control(
+        "plan-approval",
+        "Write",
+        json!({"file_path":"a","content":"x"}),
+    ))
+    .await;
+    let (asked, reply) = callback_reply_or_pending(&runtime, &mut subscription, &mut peer).await;
+    runtime.close().await.unwrap();
+    assert!(!asked, "approvals-disabled Plan mode requested an approval");
+    assert_eq!(reply["behavior"], "deny");
+    assert_eq!(
+        reply["message"],
+        "This tool requires approval in Plan mode, but approvals are disabled for this thread."
+    );
+}
+
+#[tokio::test]
+async fn permission_callback_auto_without_callback_allows_without_asking() {
+    let mut input = fixture_turn_input().unwrap();
+    input.runtime_policy.runtime_mode = t3_contracts::provider_policy::RuntimeMode::Auto;
+    let (runtime, mut subscription, mut peer) = running_with_input(
+        ClaudeHostOptions::default(),
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        input,
+    )
+    .await;
+    peer.send(control(
+        "auto",
+        "Write",
+        json!({"file_path":"a","content":"x"}),
+    ))
+    .await;
+    let (asked, reply) = callback_reply_or_pending(&runtime, &mut subscription, &mut peer).await;
+    runtime.close().await.unwrap();
+    assert!(!asked, "Auto mode without a callback requested approval");
+    assert_eq!(reply["behavior"], "allow");
+    assert_eq!(
+        reply["updatedInput"],
+        json!({"file_path":"a","content":"x"})
+    );
+    assert!(reply.get("decisionClassification").is_none());
+}
+
+#[tokio::test]
+async fn permission_callback_max_runtime_mode_filters_native_set_mode_suggestions() {
+    use t3_contracts::provider_policy::RuntimeMode;
+    let mut input = fixture_turn_input().unwrap();
+    input.runtime_policy.runtime_mode = RuntimeMode::ApprovalRequired;
+    input.runtime_policy.max_runtime_mode = Some(RuntimeMode::ApprovalRequired);
+    let (runtime, mut subscription, mut peer) = running_with_input(
+        ClaudeHostOptions::default(),
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        input,
+    )
+    .await;
+    let mut frame = control("managed", "Bash", json!({"command":"pwd"}));
+    frame["request"]["permission_suggestions"] = json!([
+        {"type":"setMode","mode":"bypassPermissions","destination":"userSettings"},
+        {"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"pwd"}],"behavior":"allow","destination":"projectSettings"}
+    ]);
+    peer.send(frame).await;
+    let id = request(&mut subscription).await;
+    runtime
+        .respond(RuntimeResponse {
+            request_id: id,
+            decision: Some(ProviderApprovalDecision::AcceptForSession),
+            feedback: None,
+            answers: None,
+        })
+        .await
+        .unwrap();
+    let reply = peer.read().await;
+    runtime.close().await.unwrap();
+    assert_eq!(
+        reply["response"]["response"]["updatedPermissions"],
+        json!([
+            {"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"pwd"}],"behavior":"allow","destination":"session"}
+        ])
+    );
+}
+
 #[tokio::test]
 async fn full_access_callback_requires_explicit_decision_and_preserves_tool_id() {
     let (runtime, mut subscription, mut peer) = running().await;

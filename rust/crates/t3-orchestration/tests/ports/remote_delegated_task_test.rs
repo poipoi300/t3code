@@ -110,7 +110,7 @@ async fn get_task(h: &Harness) -> Result<Value> {
         .reader
         .projection(ThreadId("thread:test".into()))
         .await?
-        .unwrap();
+        .expect("test value");
     assert_eq!(projection.subagents.len(), 1);
     Ok(t3_contracts::stored::to_value(&projection.subagents[0])?)
 }

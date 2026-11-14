@@ -45,7 +45,7 @@ fn native_terminal_matches_executed_typescript_fixtures() {
     }
 }
 fn target() -> OrchestrationV2SubscribeCommandOutputInput {
-    serde_json::from_value(json!({"threadId":"thread","itemId":"command"})).unwrap()
+    serde_json::from_value(json!({"threadId":"thread","itemId":"command"})).expect("test value")
 }
 async fn write(
     sink: &t3_orchestration::runtime::commit::EventSink,
@@ -58,9 +58,9 @@ async fn write(
     if let Some(output) = output {
         item["output"] = output.into();
     } else {
-        item.as_object_mut().unwrap().remove("output");
+        item.as_object_mut().expect("test value").remove("output");
     }
-    commit(sink,vec![serde_json::from_value(json!({"id":id,"threadId":"thread","type":"turn-item.updated","occurredAt":TEST_TIME,"payload":item})).unwrap()]).await.unwrap();
+    commit(sink,vec![serde_json::from_value(json!({"id":id,"threadId":"thread","type":"turn-item.updated","occurredAt":TEST_TIME,"payload":item})).expect("test value")]).await.expect("test value");
 }
 #[tokio::test(start_paused = true)]
 async fn expanded_output_gets_initial_replace_coalesced_append_overflow_replace_and_final() {

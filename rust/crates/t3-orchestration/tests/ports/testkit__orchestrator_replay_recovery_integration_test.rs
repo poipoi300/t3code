@@ -32,7 +32,8 @@ fn policy() -> RuntimePolicy {
     }
 }
 fn selection(model: &str) -> ModelSelection {
-    serde_json::from_value(json!({"instanceId":DEV_REPLAY_INSTANCE_ID,"model":model})).unwrap()
+    serde_json::from_value(json!({"instanceId":DEV_REPLAY_INSTANCE_ID,"model":model}))
+        .expect("test value")
 }
 fn make_registry(
     prefix: &str,
@@ -43,7 +44,7 @@ fn make_registry(
         Arc::new(SequenceIds::new(prefix)),
         false,
     );
-    registration.adapter = t3_orchestration::ports::acp_replay::testkit::provider_replay_harness::event_tap::observe_adapter(registration.adapter, Arc::new(move |event| observed.lock().unwrap().push(event.clone())));
+    registration.adapter = t3_orchestration::ports::acp_replay::testkit::provider_replay_harness::event_tap::observe_adapter(registration.adapter, Arc::new(move |event| observed.lock().expect("test value").push(event.clone())));
     Arc::new(AdapterRegistry::new(vec![registration]))
 }
 async fn open(
@@ -62,7 +63,7 @@ async fn open(
     let adapter = registry
         .adapter(ProviderInstanceId(DEV_REPLAY_INSTANCE_ID.into()))
         .await
-        .unwrap();
+        .expect("test value");
     let runtime = adapter
         .open_session(
             OpenSession {
@@ -85,8 +86,8 @@ async fn open(
             CancellationToken::new(),
         )
         .await
-        .unwrap();
-    let events = runtime.subscribe().await.unwrap();
+        .expect("test value");
+    let events = runtime.subscribe().await.expect("test value");
     let thread = match previous {
         Some((_, thread)) => runtime
             .resume_thread(ResumeThread {
@@ -96,7 +97,7 @@ async fn open(
                 runtime_policy: Some(policy()),
             })
             .await
-            .unwrap(),
+            .expect("test value"),
         None => runtime
             .ensure_thread(EnsureThread {
                 thread_id: ThreadId("thread:registry-replay".into()),
@@ -108,7 +109,7 @@ async fn open(
                 force_new_native_thread: false,
             })
             .await
-            .unwrap(),
+            .expect("test value"),
     };
     (runtime, events, thread)
 }
@@ -131,10 +132,10 @@ async fn turn(
                 ordinal,
                 "Replay registry lifecycle",
             )
-            .unwrap(),
+            .expect("test value"),
         )
         .await
-        .unwrap();
+        .expect("test value");
     let mut current_thread = thread.clone();
     let mut running_turn = None;
     let mut interrupt_task = None;
@@ -146,7 +147,7 @@ async fn turn(
             .recv()
             .await
             .expect("event stream ended")
-            .unwrap()
+            .expect("test value")
             .kind
         {
             ProviderEventKind::Turn { provider_turn, .. }
@@ -154,9 +155,9 @@ async fn turn(
             {
                 running_turn = Some(
                     serde_json::from_value::<ProviderTurnId>(
-                        serde_json::to_value(provider_turn.id).unwrap(),
+                        serde_json::to_value(provider_turn.id).expect("test value"),
                     )
-                    .unwrap(),
+                    .expect("test value"),
                 );
             }
             ProviderEventKind::Message(message) => {
@@ -192,7 +193,7 @@ async fn turn(
         }
     }
     if let Some(task) = interrupt_task {
-        task.await.unwrap().unwrap();
+        task.await.expect("test value").expect("test value");
     }
     assert!(streamed);
     assert!(completed);

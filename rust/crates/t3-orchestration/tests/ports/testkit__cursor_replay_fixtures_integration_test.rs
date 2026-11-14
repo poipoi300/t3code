@@ -9,7 +9,7 @@ use t3_orchestration::{
 };
 
 fn transcript(entries: Value) -> ReplayTranscript {
-    serde_json::from_value(json!({"provider":"cursor","protocol":CURSOR_PROTOCOL,"version":"1","scenario":"runner","entries":entries})).unwrap()
+    serde_json::from_value(json!({"provider":"cursor","protocol":CURSOR_PROTOCOL,"version":"1","scenario":"runner","entries":entries})).expect("test value")
 }
 fn outbound(frame: Value) -> Value {
     json!({"type":"expect_outbound","frame":frame})

@@ -29,7 +29,7 @@ fn policy() -> RuntimePolicy {
     }
 }
 fn selection(model: &str) -> ModelSelection {
-    serde_json::from_value(json!({"instanceId":"replay","model":model})).unwrap()
+    serde_json::from_value(json!({"instanceId":"replay","model":model})).expect("test value")
 }
 async fn runtime(
     model: &str,
@@ -81,8 +81,8 @@ async fn open_with_identity(
             CancellationToken::new(),
         )
         .await
-        .unwrap();
-    let events = runtime.subscribe().await.unwrap();
+        .expect("test value");
+    let events = runtime.subscribe().await.expect("test value");
     let thread = runtime
         .ensure_thread(EnsureThread {
             thread_id: ThreadId("thread:test".into()),
@@ -94,7 +94,7 @@ async fn open_with_identity(
             force_new_native_thread: false,
         })
         .await
-        .unwrap();
+        .expect("test value");
     (runtime, events, thread)
 }
 

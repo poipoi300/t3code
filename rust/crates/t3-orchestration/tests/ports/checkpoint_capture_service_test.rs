@@ -57,6 +57,10 @@ async fn capture_finishes_runs_without_decoding_unrelated_history_and_is_idempot
         let mut committed = h.sink.subscribe();
         let gate = Arc::new(Gate::default());
         *backend.gate.lock().expect("gate") = Some(gate.clone());
+        let (probes, lookups) = (
+            backend.probes.load(Ordering::SeqCst),
+            backend.lookups.load(Ordering::SeqCst),
+        );
         let capture = {
             let service = service.clone();
             let scope_id = expanded_id(&scope.id)?;
@@ -79,6 +83,11 @@ async fn capture_finishes_runs_without_decoding_unrelated_history_and_is_idempot
         h.seed("run.updated", &run).await?;
         gate.release.add_permits(1);
         capture.await.expect("capture task")?;
+        // Finalization probes the repository once and reuses the baseline lookup for the diff.
+        assert_eq!(backend.probes.load(Ordering::SeqCst) - probes, 1);
+        if !lookup_failure {
+            assert_eq!(backend.lookups.load(Ordering::SeqCst) - lookups, 1);
+        }
         let observed = committed.recv().await.expect("committed event");
         assert!(matches!(
             observed,

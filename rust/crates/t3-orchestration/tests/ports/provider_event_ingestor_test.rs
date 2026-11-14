@@ -40,7 +40,7 @@ impl ProviderTelemetry for Telemetry {
         input: CompletedProviderTurn,
         _cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        self.completed.lock().unwrap().push(input);
+        self.completed.lock().expect("test value").push(input);
         Ok(())
     }
     async fn refresh_usage(
@@ -49,7 +49,7 @@ impl ProviderTelemetry for Telemetry {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         assert_eq!(instance_id.0, "codex");
-        *self.cancellation.lock().unwrap() = Some(cancellation.clone());
+        *self.cancellation.lock().expect("test value") = Some(cancellation.clone());
         self.refresh.notify_one();
         cancellation.cancelled().await;
         Ok(())
@@ -64,7 +64,7 @@ struct HubResets {
 #[async_trait]
 impl UsageLimitResets for HubResets {
     async fn endpoint(&self, instance: ProviderInstanceId) -> Result<Option<String>> {
-        self.endpoints.lock().unwrap().push(instance);
+        self.endpoints.lock().expect("test value").push(instance);
         Ok(Some("http://hub.test:8317".into()))
     }
     async fn reset_at(
@@ -73,7 +73,10 @@ impl UsageLimitResets for HubResets {
         endpoint: String,
         model: Option<String>,
     ) -> Result<Option<IsoDateTime>> {
-        self.calls.lock().unwrap().push((driver.0, endpoint, model));
+        self.calls
+            .lock()
+            .expect("test value")
+            .push((driver.0, endpoint, model));
         Ok(Some(t3_contracts::wire::WireDateTime(
             "2026-11-13T18:00:00.000Z".into(),
         )))
@@ -430,15 +433,15 @@ pub fn fixture(name: &str) -> Value {
         .join(format!("{name}.jsonl"));
     serde_json::from_str(
         std::fs::read_to_string(path)
-            .unwrap()
+            .expect("test value")
             .lines()
             .next()
-            .unwrap(),
+            .expect("test value"),
     )
-    .unwrap()
+    .expect("test value")
 }
 pub fn decode<T: serde::de::DeserializeOwned>(value: Value) -> T {
-    serde_json::from_value(value).unwrap()
+    serde_json::from_value(value).expect("test value")
 }
 pub fn item(kind: &str, id: &str) -> Value {
     json!({"type":kind,"id":id,"threadId":"thread:test","runId":"run:test","nodeId":"node:test","providerThreadId":"pt:test","providerTurnId":"turn:test","nativeItemRef":null,"parentItemId":null,"ordinal":1,"status":"running","title":null,"startedAt":TEST_TIME,"completedAt":null,"updatedAt":TEST_TIME})
@@ -1229,16 +1232,16 @@ impl InterceptCommitter {
         })
     }
     pub(crate) fn fail_next(&self, error: Error) {
-        self.errors.lock().unwrap().push_back(error);
+        self.errors.lock().expect("test value").push_back(error);
     }
     async fn before_commit(&self) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let gate = self.gate.lock().unwrap().take();
+        let gate = self.gate.lock().expect("test value").take();
         if let Some((entered, release)) = gate {
             let _ = entered.send(());
             release.await.map_err(|_| Error::Cancelled)?;
         }
-        let error = self.errors.lock().unwrap().pop_front();
+        let error = self.errors.lock().expect("test value").pop_front();
         if let Some(error) = error {
             return Err(error);
         }

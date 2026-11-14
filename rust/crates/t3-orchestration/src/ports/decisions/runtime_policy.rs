@@ -13,6 +13,21 @@ pub struct RuntimePolicyOverride {
     pub sandbox_policy: Option<serde_json::Value>,
 }
 
+/// The `Error::Service` operation of a turn refused by the managed ceiling (TS
+/// `RuntimePolicyAboveCeilingError`).
+pub const ABOVE_CEILING: &str = "runtime-policy.above-ceiling";
+
+fn above_ceiling(ceiling: &RuntimeModeCeiling) -> Error {
+    Error::Service {
+        operation: ABOVE_CEILING,
+        detail: ceiling.message(CeilingRefused::Turn),
+    }
+}
+
+pub fn is_above_ceiling(error: &Error) -> bool {
+    matches!(error, Error::Service { operation, .. } if *operation == ABOVE_CEILING)
+}
+
 pub fn provider_runtime_mode(mode: RuntimeMode, supported: Option<&[RuntimeMode]>) -> RuntimeMode {
     if supported.is_none_or(|modes| modes.is_empty() || modes.contains(&mode)) {
         mode
@@ -31,10 +46,7 @@ pub fn resolve(
     if let Some(ceiling) = ceiling
         .filter(|ceiling| is_runtime_mode_above(thread.runtime_mode, ceiling.max_runtime_mode))
     {
-        return Err(Error::Service {
-            operation: "runtime-policy.above-ceiling",
-            detail: ceiling.message(CeilingRefused::Turn),
-        });
+        return Err(above_ceiling(ceiling));
     }
     let cwd = thread
         .worktree_path
@@ -127,12 +139,7 @@ impl ProjectRuntimePolicy {
         overrides: RuntimePolicyOverride,
         reasoning_effort: Option<String>,
     ) -> std::sync::Arc<dyn crate::api::RuntimePolicyResolver> {
-        let ceiling = managed.and_then(|policy| {
-            Some(RuntimeModeCeiling {
-                organization: policy.organization.0.clone(),
-                max_runtime_mode: policy.limits.as_ref()?.max_runtime_mode?,
-            })
-        });
+        let ceiling = managed.and_then(RuntimeModeCeiling::from_managed);
         std::sync::Arc::new(OverriddenRuntimePolicy {
             base: std::sync::Arc::new(Self {
                 database,
@@ -157,10 +164,7 @@ impl crate::api::RuntimePolicyResolver for ProjectRuntimePolicy {
             .as_ref()
             .filter(|ceiling| is_runtime_mode_above(thread.runtime_mode, ceiling.max_runtime_mode))
         {
-            return Err(Error::Service {
-                operation: "runtime-policy.above-ceiling",
-                detail: ceiling.message(CeilingRefused::Turn),
-            });
+            return Err(above_ceiling(ceiling));
         }
         let supported = self
             .providers
@@ -232,11 +236,33 @@ impl crate::api::RuntimePolicyResolver for CeilingRuntimePolicy {
         selection: t3_contracts::model_selection::ModelSelection,
     ) -> Result<crate::provider::ConfiguredRuntimePolicy> {
         if is_runtime_mode_above(thread.runtime_mode, self.ceiling.max_runtime_mode) {
-            return Err(Error::Service {
-                operation: "runtime-policy.above-ceiling",
-                detail: self.ceiling.message(CeilingRefused::Turn),
-            });
+            return Err(above_ceiling(&self.ceiling));
         }
-        self.base.resolve(thread, selection).await
+        let mut configured = self.base.resolve(thread, selection).await?;
+        configured.policy.max_runtime_mode = Some(self.ceiling.max_runtime_mode);
+        Ok(configured)
+    }
+}
+
+/// Lays a provider's offered runtime modes over another policy: a mode the provider does not
+/// offer runs as approval-required (TS `providerRuntimeMode`).
+pub struct SupportedModesRuntimePolicy {
+    pub base: std::sync::Arc<dyn crate::api::RuntimePolicyResolver>,
+    pub modes: std::sync::Arc<dyn ProviderRuntimeModeSource>,
+}
+
+#[async_trait::async_trait]
+impl crate::api::RuntimePolicyResolver for SupportedModesRuntimePolicy {
+    async fn resolve(
+        &self,
+        thread: OrchestrationV2AppThread,
+        selection: t3_contracts::model_selection::ModelSelection,
+    ) -> Result<crate::provider::ConfiguredRuntimePolicy> {
+        let instance = selection.instance_id.clone();
+        let mut configured = self.base.resolve(thread, selection).await?;
+        let supported = self.modes.supported_modes(instance).await?;
+        configured.policy.runtime_mode =
+            provider_runtime_mode(configured.policy.runtime_mode, supported.as_deref());
+        Ok(configured)
     }
 }

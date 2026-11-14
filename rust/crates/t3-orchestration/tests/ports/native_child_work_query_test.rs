@@ -9,7 +9,7 @@ struct Backend(Mutex<Vec<ChildWorkInput>>);
 #[async_trait]
 impl NativeChildWorkBackend for Backend {
     async fn read(&self, input: ChildWorkInput) -> Result<Vec<OrchestrationV2NativeChildWork>> {
-        self.0.lock().unwrap().push(input);
+        self.0.lock().expect("test value").push(input);
         Ok(vec![])
     }
 }

@@ -29,8 +29,12 @@ fn pending(
             .map(|extension| format!("-{extension}"))
             .unwrap_or_default()
     );
-    let attachment:ChatAttachment=serde_json::from_value(json!({"type":if mime=="image/png" {"image"}else{"file"},"id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()})).unwrap();
-    std::fs::write(attachment_path(directory, &attachment).unwrap(), bytes).unwrap();
+    let attachment:ChatAttachment=serde_json::from_value(json!({"type":if mime=="image/png" {"image"}else{"file"},"id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()})).expect("test value");
+    std::fs::write(
+        attachment_path(directory, &attachment).expect("test value"),
+        bytes,
+    )
+    .expect("test value");
     attachment
 }
 struct Documents(AtomicUsize);
@@ -190,7 +194,9 @@ struct GatedCopy {
 #[async_trait]
 impl CopyFile for GatedCopy {
     async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<()> {
-        self.started.send((from.clone(), to.clone())).unwrap();
+        self.started
+            .send((from.clone(), to.clone()))
+            .expect("test value");
         self.release.notified().await;
         std::fs::copy(from, to)?;
         Ok(())
@@ -203,7 +209,7 @@ struct GatedDocuments {
 #[async_trait]
 impl DocumentText for GatedDocuments {
     async fn ensure(&self, path: PathBuf) -> Result<Option<PathBuf>> {
-        self.started.send(path.clone()).unwrap();
+        self.started.send(path.clone()).expect("test value");
         self.release.notified().await;
         let sidecar = PathBuf::from(format!("{}.txt", path.display()));
         std::fs::write(&sidecar, "extracted")?;

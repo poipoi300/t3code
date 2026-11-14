@@ -52,7 +52,7 @@ fn input(after: u64) -> OrchestrationV2SubscribeThreadInput {
     serde_json::from_value(
         json!({"threadId":"thread","afterSequence":after,"requestCompletionMarker":true}),
     )
-    .unwrap()
+    .expect("test value")
 }
 #[tokio::test]
 async fn replay_obeys_global_sequence_gaps_and_completion_precedes_committed_live_events()

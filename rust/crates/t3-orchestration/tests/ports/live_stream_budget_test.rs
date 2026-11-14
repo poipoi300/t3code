@@ -2,7 +2,7 @@ use serde_json::json;
 use std::sync::Arc;
 use t3_orchestration::ports::transport::live_stream_budget::*;
 fn item(sequence: u64, text: &str) -> Arc<SharedLiveItem<serde_json::Value>> {
-    SharedLiveItem::new(json!({"sequence":sequence,"text":text}), sequence).unwrap()
+    SharedLiveItem::new(json!({"sequence":sequence,"text":text}), sequence).expect("test value")
 }
 #[tokio::test]
 async fn overflow_releases_queued_items_but_keeps_unacknowledged_delivery_charged() {

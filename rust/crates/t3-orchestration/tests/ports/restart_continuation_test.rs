@@ -57,7 +57,7 @@ fn eligible(p: Value) -> bool {
         &decode(p),
         &t3_contracts::wire::WireDateTime(TEST_TIME.into()),
     )
-    .unwrap()
+    .expect("test value")
     .is_some()
 }
 #[test]

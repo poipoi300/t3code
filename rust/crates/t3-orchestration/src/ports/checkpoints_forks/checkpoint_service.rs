@@ -259,6 +259,127 @@ impl CheckpointService {
         Ok(checkpoint)
     }
 
+    /// Run finalization: materializes `baselines`, then captures `end`, as
+    /// `materialize_baseline` and `capture` do in turn, but under one workspace lease, with one
+    /// repository probe, and reusing a baseline's lookup as the diff's starting ref.
+    pub async fn finalize_run(
+        &self,
+        baselines: Vec<Capture>,
+        end: Capture,
+        cancellation: CancellationToken,
+    ) -> Result<(Vec<OrchestrationV2Checkpoint>, OrchestrationV2Checkpoint)> {
+        if baselines
+            .iter()
+            .any(|baseline| baseline.scope.id != end.scope.id)
+        {
+            return Err(Error::Service {
+                operation: "checkpoint.finalize",
+                detail: "Baselines must belong to the captured scope".into(),
+            });
+        }
+        let _lock = self.locks.acquire(Path::new(&end.scope.cwd.0)).await?;
+        let probed = if end.force_missing && baselines.iter().all(|baseline| baseline.force_missing)
+        {
+            None
+        } else {
+            Some(
+                self.metadata
+                    .is_repository(PathBuf::from(&end.scope.cwd.0))
+                    .await
+                    .ok(),
+            )
+        };
+        // Err(()) is a failed probe; a forced-missing input is never probed.
+        let repository = |force_missing: bool| -> std::result::Result<bool, ()> {
+            if force_missing {
+                return Ok(false);
+            }
+            match probed {
+                Some(Some(value)) => Ok(value),
+                _ => Err(()),
+            }
+        };
+        let mut lookups: HashMap<u64, Option<CheckpointRef>> = HashMap::new();
+        let mut materialized = Vec::with_capacity(baselines.len());
+        for mut input in baselines {
+            input.run_id = None;
+            input.app_run_ordinal = None;
+            let status = match repository(input.force_missing) {
+                Ok(false) => CheckpointStatus::Missing,
+                Err(()) => CheckpointStatus::Error,
+                Ok(true) => match self
+                    .backend
+                    .lookup(input.scope.clone(), input.ordinal)
+                    .await
+                {
+                    Ok(found) => {
+                        let status = if found.is_some() {
+                            CheckpointStatus::Ready
+                        } else {
+                            CheckpointStatus::Missing
+                        };
+                        lookups.insert(input.ordinal, found);
+                        status
+                    }
+                    Err(_) => CheckpointStatus::Error,
+                },
+            };
+            let mut checkpoint = self.record(&input, status, vec![])?;
+            checkpoint.parent_checkpoint_id = None;
+            materialized.push(checkpoint);
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let status = match repository(end.force_missing) {
+            Ok(false) => CheckpointStatus::Missing,
+            Err(()) => CheckpointStatus::Error,
+            Ok(true) => match self
+                .backend
+                .capture(
+                    CaptureCheckpoint {
+                        scope: end.scope.clone(),
+                        ordinal: end.ordinal,
+                        message: String::new(),
+                    },
+                    cancellation.clone(),
+                )
+                .await
+            {
+                Ok(_) => CheckpointStatus::Ready,
+                Err(Error::Unsupported(_)) => CheckpointStatus::Missing,
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(_) => CheckpointStatus::Error,
+            },
+        };
+        let mut files = Vec::new();
+        if status == CheckpointStatus::Ready {
+            let previous = end.ordinal.saturating_sub(1);
+            let from = match lookups.remove(&previous) {
+                Some(found) => found,
+                None => self
+                    .backend
+                    .lookup(end.scope.clone(), previous)
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            if let Some(from) = from {
+                let to = self
+                    .metadata
+                    .reference(&expanded_id(&end.scope.id)?, end.ordinal);
+                if let Ok(diff) = self
+                    .backend
+                    .diff(PathBuf::from(&end.scope.cwd.0), from, to)
+                    .await
+                {
+                    files = diff.files;
+                }
+            }
+        }
+        Ok((materialized, self.record(&end, status, files)?))
+    }
+
     pub async fn capture(
         &self,
         input: Capture,

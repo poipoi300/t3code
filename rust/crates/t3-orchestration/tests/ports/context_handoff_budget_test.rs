@@ -370,7 +370,7 @@ struct Persist(Mutex<Vec<OrchestrationV2ContextHandoff>>);
 #[async_trait]
 impl HandoffPersistence for Persist {
     async fn persist(&self, handoff: OrchestrationV2ContextHandoff) -> Result<()> {
-        self.0.lock().unwrap().push(handoff);
+        self.0.lock().expect("test value").push(handoff);
         Ok(())
     }
 }
@@ -393,7 +393,7 @@ impl HistoryInjection for CaptureInjection {
     ) -> Result<bool> {
         self.requests
             .lock()
-            .unwrap()
+            .expect("test value")
             .push((messages.to_vec(), context.into()));
         Ok(true)
     }
@@ -401,20 +401,20 @@ impl HistoryInjection for CaptureInjection {
 #[async_trait]
 impl HistoryInjection for Inject {
     async fn inject(&self, messages: &[OrchestrationV2HistoricalMessage], _: &str) -> Result<bool> {
-        *self.calls.lock().unwrap() += 1;
+        *self.calls.lock().expect("test value") += 1;
         assert_eq!(messages.len(), 1);
         assert_eq!(
             self.persist
                 .0
                 .lock()
-                .unwrap()
+                .expect("test value")
                 .last()
-                .unwrap()
+                .expect("test value")
                 .delivery
                 .as_ref()
-                .unwrap()
+                .expect("test value")
                 .as_ref()
-                .unwrap()
+                .expect("test value")
                 .status,
             ContextHandoffDeliveryStatus::Pending
         );
@@ -428,13 +428,16 @@ impl HistoryInjection for Inject {
 fn records() -> (OrchestrationV2ContextHandoff, OrchestrationV2ProviderThread) {
     let mut handoff = fixture("OrchestrationV2ContextHandoff");
     handoff["history"] = json!({"coverage":"source coverage", "messages":[{"itemId":"item:one","threadId":"thread:source","runId":"run:source","providerThreadId":null,"role":"user","text":"Partial work 日本語 🧪","status":"completed","kind":"user_message"}],"omittedItems":0});
-    handoff.as_object_mut().unwrap().remove("delivery");
+    handoff
+        .as_object_mut()
+        .expect("test value")
+        .remove("delivery");
     let mut provider = fixture("OrchestrationV2ProviderThread");
     provider["nativeThreadRef"] =
         json!({"driver":"codex","strength":"strong","nativeId":"native:target"});
     (
-        serde_json::from_value(handoff).unwrap(),
-        serde_json::from_value(provider).unwrap(),
+        serde_json::from_value(handoff).expect("test value"),
+        serde_json::from_value(provider).expect("test value"),
     )
 }
 #[tokio::test]

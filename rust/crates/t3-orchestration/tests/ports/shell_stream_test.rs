@@ -28,7 +28,7 @@ pub fn shell(id: &str, parent: Option<&str>) -> OrchestrationV2ThreadShell {
     ] {
         value[key] = value2;
     }
-    serde_json::from_value(value).unwrap()
+    serde_json::from_value(value).expect("test value")
 }
 fn snapshot() -> OrchestrationV2ShellSnapshot {
     OrchestrationV2ShellSnapshot {

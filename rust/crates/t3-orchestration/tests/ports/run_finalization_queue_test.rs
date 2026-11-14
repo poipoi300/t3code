@@ -31,7 +31,7 @@ impl EffectExecutor for Executor {
                     detail: error.to_string(),
                 }),
             EffectRequest::Start { .. } => {
-                self.calls.lock().unwrap().push("start");
+                self.calls.lock().expect("test value").push("start");
                 Ok(())
             }
             _ => Err(Error::Unsupported("unused test effect")),

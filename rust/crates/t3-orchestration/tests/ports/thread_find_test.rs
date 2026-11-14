@@ -30,9 +30,9 @@ impl ThreadFindText for PlainText {
     }
 }
 async fn fixture(texts: &[&str]) -> (TestDatabase, ThreadFind) {
-    let fixture = TestDatabase::memory().unwrap();
+    let fixture = TestDatabase::memory().expect("test value");
     let (_, sink) = service(&fixture);
-    seed(&fixture, &sink).await.unwrap();
+    seed(&fixture, &sink).await.expect("test value");
     for (i, text) in texts.iter().enumerate() {
         let mut item = command(&format!("item-{i}"), i as u64 + 1);
         item["type"] = "assistant_message".into();
@@ -40,7 +40,7 @@ async fn fixture(texts: &[&str]) -> (TestDatabase, ThreadFind) {
         item["text"] = (*text).into();
         item["streaming"] = false.into();
         item["attachments"] = json!([]);
-        commit(&sink,vec![serde_json::from_value(json!({"id":format!("event-{i}"),"threadId":"thread","type":"turn-item.updated","occurredAt":t3_orchestration::testing::TEST_TIME,"payload":item})).unwrap()]).await.unwrap();
+        commit(&sink,vec![serde_json::from_value(json!({"id":format!("event-{i}"),"threadId":"thread","type":"turn-item.updated","occurredAt":t3_orchestration::testing::TEST_TIME,"payload":item})).expect("test value")]).await.expect("test value");
     }
     let find = ThreadFind::new(
         Arc::new(ProjectionStore::new(fixture.stores.clone())),
@@ -52,9 +52,9 @@ fn input(extra: serde_json::Value) -> OrchestrationV2SearchThreadInput {
     let mut value = json!({"threadId":"thread","query":"rust"});
     value
         .as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().unwrap().clone());
-    serde_json::from_value(value).unwrap()
+        .expect("test value")
+        .extend(extra.as_object().expect("test value").clone());
+    serde_json::from_value(value).expect("test value")
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ fn user_row(index: usize, human: bool) -> OrchestrationV2ProjectedTurnItem {
     item["messageId"] = format!("message-{index}").into();
     item["text"] = "Continue".into();
     item["attachments"] = json!([]);
-    serde_json::from_value(json!({"position":index,"visibility":"local","sourceThreadId":"thread","sourceItemId":format!("item-{index}"),"item":item})).unwrap()
+    serde_json::from_value(json!({"position":index,"visibility":"local","sourceThreadId":"thread","sourceItemId":format!("item-{index}"),"item":item})).expect("test value")
 }
 fn ids(rows: &[OrchestrationV2ProjectedTurnItem]) -> Vec<String> {
     rows.iter()

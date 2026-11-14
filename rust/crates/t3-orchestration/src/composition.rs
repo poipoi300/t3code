@@ -20,7 +20,14 @@ use crate::{
             },
         },
         commit_worker::effect_worker::ServiceExecutor,
-        decisions::{runtime_policy::resolve_base, thread_command_executor::KeyedLanes},
+        decisions::{
+            dispatch_mode_limit::RuntimeModeCeiling,
+            runtime_policy::{
+                CeilingRuntimePolicy, ProviderRuntimeModeSource, SnapshotRuntimeModes,
+                SupportedModesRuntimePolicy, resolve_base,
+            },
+            thread_command_executor::KeyedLanes,
+        },
         runs_ingestion::{
             provider_event_ingestor::ProviderEventIngestor,
             provider_turn_control_service::ProviderTurnControlService,
@@ -138,10 +145,19 @@ pub struct RuntimePorts {
     /// Without it provider-thread rollback effects are unsupported.
     pub rollback_workspaces: Option<Arc<dyn RollbackWorkspaceRecovery>>,
     pub finalization_observer: Arc<dyn FinalizationObserver>,
-    /// The managed policy's runtime-mode ceiling for thread creation and mode changes; load it
-    /// from the same `ManagedPolicyDocument` given to 04's `ProjectRuntimePolicy::configured`.
+    /// The organisation's managed policy (TS `serverSettings.managedPolicy`). Its
+    /// `limits.maxRuntimeMode` caps thread creation and mode changes at dispatch and every turn
+    /// start, whatever `policy` is supplied, and is passed to adapters as `max_runtime_mode`.
+    pub managed_policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
+    /// Transitional: the ceiling as a separate value, from before `managed_policy`. It applies
+    /// exactly as the document's ceiling; giving both with different values fails `start`.
     pub runtime_mode_ceiling:
         Option<crate::ports::decisions::dispatch_mode_limit::RuntimeModeCeiling>,
+    /// The host's provider status snapshots (TS `instance.snapshot`), for each instance's
+    /// `supportedRuntimeModes`. Without it an adapter's own `supported_runtime_modes` applies.
+    pub provider_snapshots: Option<
+        tokio::sync::watch::Receiver<Arc<Vec<t3_contracts::server::ServerProvider>>>,
+    >,
     pub sessions: SessionManagerOptions,
     pub worker: WorkerOptions,
 }
@@ -182,7 +198,9 @@ impl RuntimePorts {
             pull_request_identities: None,
             rollback_workspaces: None,
             finalization_observer: Arc::new(Unbound),
+            managed_policy: None,
             runtime_mode_ceiling: None,
+            provider_snapshots: None,
             sessions: SessionManagerOptions::default(),
             worker: WorkerOptions::default(),
         }
@@ -265,10 +283,21 @@ impl OrchestrationRuntime {
             pull_request_identities,
             rollback_workspaces,
             finalization_observer,
+            managed_policy,
             runtime_mode_ceiling,
+            provider_snapshots,
             sessions: session_options,
             worker: worker_options,
         } = ports;
+        let runtime_mode_ceiling = single_ceiling(managed_policy.as_ref(), runtime_mode_ceiling)?;
+        let policy = enforced_policy(
+            policy,
+            runtime_mode_ceiling.clone(),
+            Arc::new(RegistryRuntimeModes {
+                snapshots: provider_snapshots.map(SnapshotRuntimeModes::new),
+                providers: providers.clone(),
+            }),
+        );
         let projections = Arc::new(match thread_find_text {
             Some(text) => ProjectionStore::new(database.clone()).with_thread_find_text(text),
             None => ProjectionStore::new(database.clone()),
@@ -832,26 +861,12 @@ impl ThreadOperations for ComposedThreads {
         run_id: RunId,
         options: EffectExecutionOptions,
     ) -> Result<()> {
-        let thread = self
-            .projections
-            .thread(thread_id.clone())
-            .await?
-            .ok_or_else(|| Error::ThreadNotFound(thread_id.clone()))?;
-        let model_selection = match self
-            .projections
-            .run(thread_id.clone(), run_id.clone())
-            .await?
-        {
-            Some(run) => run.model_selection,
-            None => thread.model_selection.clone(),
-        };
-        let policy = self.policy.resolve(thread, model_selection).await?;
         // The returned handle only reports settlement; the execution scope owns the run.
         self.turn_start
-            .start(
+            .start_resolving(
                 thread_id,
                 run_id,
-                policy.policy,
+                self.policy.as_ref(),
                 options.will_retry,
                 self.cancellation.child_token(),
             )
@@ -1094,6 +1109,65 @@ impl RuntimeRequestResponder for Responder {
             .respond(thread_id, session_id, response)
             .await
             .map_err(|error| Error::RuntimeResponse(Box::new(error)))
+    }
+}
+
+fn single_ceiling(
+    managed: Option<&t3_contracts::managed_policy::ManagedPolicyDocument>,
+    legacy: Option<RuntimeModeCeiling>,
+) -> Result<Option<RuntimeModeCeiling>> {
+    let managed = managed.and_then(RuntimeModeCeiling::from_managed);
+    match (managed, legacy) {
+        (Some(managed), Some(legacy)) if managed != legacy => Err(Error::Service {
+            operation: "OrchestrationRuntime.start",
+            detail: "runtime_mode_ceiling differs from the managed policy's maxRuntimeMode.".into(),
+        }),
+        (managed, legacy) => Ok(managed.or(legacy)),
+    }
+}
+
+/// Whatever policy the host supplies runs within the provider's offered modes and under the
+/// managed ceiling, which also refuses turns on threads whose mode predates the policy.
+fn enforced_policy(
+    policy: Arc<dyn RuntimePolicyResolver>,
+    ceiling: Option<RuntimeModeCeiling>,
+    modes: Arc<dyn ProviderRuntimeModeSource>,
+) -> Arc<dyn RuntimePolicyResolver> {
+    let policy: Arc<dyn RuntimePolicyResolver> = Arc::new(SupportedModesRuntimePolicy {
+        base: policy,
+        modes,
+    });
+    match ceiling {
+        Some(ceiling) => Arc::new(CeilingRuntimePolicy {
+            base: policy,
+            ceiling,
+        }),
+        None => policy,
+    }
+}
+
+/// The host's snapshot list for an instance when it has one, else the adapter's own list.
+struct RegistryRuntimeModes {
+    snapshots: Option<SnapshotRuntimeModes>,
+    providers: Arc<dyn ProviderRegistry>,
+}
+
+#[async_trait]
+impl ProviderRuntimeModeSource for RegistryRuntimeModes {
+    async fn supported_modes(
+        &self,
+        instance: t3_contracts::provider_instance::ProviderInstanceId,
+    ) -> Result<Option<Vec<t3_contracts::provider_policy::RuntimeMode>>> {
+        if let Some(snapshots) = &self.snapshots
+            && let Some(modes) = snapshots.supported_modes(instance.clone()).await?
+        {
+            return Ok(Some(modes));
+        }
+        // An instance the registry does not know has no list; turn start reports it.
+        Ok(match self.providers.adapter(instance).await {
+            Ok(adapter) => adapter.supported_runtime_modes(),
+            Err(_) => None,
+        })
     }
 }
 

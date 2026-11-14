@@ -4,22 +4,24 @@ use std::collections::HashSet;
 use t3_orchestration::{api::*, ports::runs_ingestion::restart_background_note::*};
 fn run(ordinal: u64, provider: &str, extra: Value) -> OrchestrationV2Run {
     let mut run = fixture("OrchestrationV2Run");
-    for (key,value) in json!({"id":format!("run:{ordinal}"),"ordinal":ordinal,"providerThreadId":provider,"userMessageId":format!("message:{ordinal}"),"activeAttemptId":format!("attempt:{ordinal}"),"status":"completed","completedAt":null}).as_object().unwrap(){run[key]=value.clone();}
-    for (key, value) in extra.as_object().unwrap() {
+    for (key,value) in json!({"id":format!("run:{ordinal}"),"ordinal":ordinal,"providerThreadId":provider,"userMessageId":format!("message:{ordinal}"),"activeAttemptId":format!("attempt:{ordinal}"),"status":"completed","completedAt":null}).as_object().expect("test value"){run[key]=value.clone();}
+    for (key, value) in extra.as_object().expect("test value") {
         run[key] = value.clone();
     }
     decode(run)
 }
 fn turn(run: &OrchestrationV2Run, status: &str) -> OrchestrationV2ProviderTurn {
     let mut turn = fixture("OrchestrationV2ProviderTurn");
-    turn["runAttemptId"] = t3_contracts::stored::to_value(&run.active_attempt_id).unwrap();
-    turn["providerThreadId"] = t3_contracts::stored::to_value(&run.provider_thread_id).unwrap();
+    turn["runAttemptId"] =
+        t3_contracts::stored::to_value(&run.active_attempt_id).expect("test value");
+    turn["providerThreadId"] =
+        t3_contracts::stored::to_value(&run.provider_thread_id).expect("test value");
     turn["status"] = status.into();
     decode(turn)
 }
 fn attempt(run: &OrchestrationV2Run, id: &str) -> OrchestrationV2RunAttempt {
     let mut attempt = fixture("OrchestrationV2RunAttempt");
-    attempt["runId"] = t3_contracts::stored::to_value(&run.id).unwrap();
+    attempt["runId"] = t3_contracts::stored::to_value(&run.id).expect("test value");
     attempt["id"] = id.into();
     decode(attempt)
 }

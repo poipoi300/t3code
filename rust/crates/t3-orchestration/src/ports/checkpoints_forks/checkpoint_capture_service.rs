@@ -91,24 +91,17 @@ impl CheckpointCaptureService {
                 force_missing: context.side_chat,
             })
         };
-        let mut captured = Vec::new();
+        let mut baselines = Vec::new();
         if baseline_ordinal != 0 && !context.preserved_ordinals.contains(&0) {
-            captured.push(
-                self.checkpoints
-                    .materialize_baseline(make_input(0)?)
-                    .await?,
-            );
+            baselines.push(make_input(0)?);
         }
         if !context.preserved_ordinals.contains(&baseline_ordinal) {
-            captured.push(
-                self.checkpoints
-                    .materialize_baseline(make_input(baseline_ordinal)?)
-                    .await?,
-            );
+            baselines.push(make_input(baseline_ordinal)?);
         }
-        let checkpoint = self
+        let (captured, checkpoint) = self
             .checkpoints
-            .capture(
+            .finalize_run(
+                baselines,
                 Capture {
                     scope: scope.clone(),
                     run_id: Some(run_id.clone()),

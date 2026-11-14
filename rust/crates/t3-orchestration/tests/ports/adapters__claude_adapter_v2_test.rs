@@ -638,6 +638,65 @@ fn permission_policy_matrix_preserves_runtime_sandbox_and_explicit_approval() {
     );
 }
 #[test]
+fn permission_callback_session_grants_preserve_unknown_native_suggestions() {
+    let request: ToolPermission = serde_json::from_value(json!({
+        "tool_name":"Bash", "input":{"command":"pwd"}, "tool_use_id":"tool",
+        "permission_suggestions":[
+            {"type":"futureScopedRule", "scope":{"command":"pwd"}, "opaque":17, "destination":"userSettings"},
+            {"type":"setMode", "mode":"futureRestrictedMode", "destination":"projectSettings"}
+        ]
+    })).unwrap();
+    let answer = serde_json::to_value(permission_result_from_decision(
+        &request,
+        ProviderApprovalDecision::AcceptForSession,
+        None,
+        false,
+    ))
+    .unwrap();
+    assert_eq!(
+        answer["updatedPermissions"],
+        json!([
+            {"type":"futureScopedRule", "scope":{"command":"pwd"}, "opaque":17, "destination":"session"},
+            {"type":"setMode", "mode":"futureRestrictedMode", "destination":"session"}
+        ])
+    );
+    assert_eq!(answer["updatedInput"], json!({"command":"pwd"}));
+}
+
+#[test]
+fn permission_callback_empty_session_suggestions_grant_only_the_current_call() {
+    for (suggestions, managed) in [
+        (None, false),
+        (Some(vec![]), false),
+        (
+            Some(vec![
+                json!({"type":"setMode","mode":"bypassPermissions","destination":"userSettings"}),
+            ]),
+            true,
+        ),
+    ] {
+        let mut request: ToolPermission = serde_json::from_value(json!({
+            "tool_name":"Bash", "input":{"command":"pwd"}, "tool_use_id":"tool",
+        }))
+        .unwrap();
+        request.permission_suggestions = suggestions;
+        let answer = serde_json::to_value(permission_result_from_decision(
+            &request,
+            ProviderApprovalDecision::AcceptForSession,
+            None,
+            managed,
+        ))
+        .unwrap();
+        assert_eq!(answer["behavior"], "allow");
+        assert!(
+            answer.get("updatedPermissions").is_none(),
+            "must not invent a standing tool rule: {answer}"
+        );
+        assert_eq!(answer["decisionClassification"], "user_temporary");
+    }
+}
+
+#[test]
 fn decisions_never_upgrade_refusals_and_session_grants_are_session_scoped() {
     let request:ToolPermission=serde_json::from_value(json!({"tool_name":"Bash","input":{"command":"pwd"},"tool_use_id":"tool",
         "permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"pwd"}],"behavior":"allow","destination":"userSettings"}]})).unwrap();

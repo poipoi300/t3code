@@ -19,7 +19,7 @@ impl FinalizationCapture for Capture {
         _target: FinalizationTarget,
         _cancellation: CancellationToken,
     ) -> Result<()> {
-        self.calls.lock().unwrap().push("capture");
+        self.calls.lock().expect("test value").push("capture");
         if self.fail {
             Err(Error::Service {
                 operation: "capture",
@@ -35,7 +35,7 @@ pub struct Refresh(pub Arc<Mutex<Vec<&'static str>>>);
 impl FinalizationObserver for Refresh {
     async fn refresh(&self, cwd: String, _thread_id: ThreadId, _run_id: RunId) -> Result<()> {
         assert_eq!(cwd, "/repo");
-        self.0.lock().unwrap().push("refresh");
+        self.0.lock().expect("test value").push("refresh");
         Err(Error::Service {
             operation: "refresh",
             detail: "Git command timed out".into(),

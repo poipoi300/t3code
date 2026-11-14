@@ -98,6 +98,7 @@ pub mod support {
         pub mode: AtomicU8,
         pub captures: AtomicUsize,
         pub lookups: AtomicUsize,
+        pub probes: AtomicUsize,
         pub restores: AtomicUsize,
         pub refs: Mutex<HashSet<String>>,
         pub deleted: Mutex<Vec<String>>,
@@ -214,6 +215,7 @@ pub mod support {
             ))
         }
         async fn is_repository(&self, _cwd: PathBuf) -> Result<bool> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
             match self.mode.load(Ordering::SeqCst) {
                 3 => Err(Error::Service {
                     operation: "probe",

@@ -57,11 +57,12 @@ fn fixture_process_options(mode: &str) -> t3_process::ProcessOptions {
     let prefix = module_path!()
         .split_once("::")
         .map_or(String::new(), |(_, path)| format!("{path}::"));
-    let mut options = t3_process::ProcessOptions::new(std::env::current_exe().unwrap()).args([
-        "--exact".to_owned(),
-        format!("{prefix}codex_process_fixture"),
-        "--nocapture".to_owned(),
-    ]);
+    let mut options = t3_process::ProcessOptions::new(std::env::current_exe().expect("test value"))
+        .args([
+            "--exact".to_owned(),
+            format!("{prefix}codex_process_fixture"),
+            "--nocapture".to_owned(),
+        ]);
     options
         .env
         .insert("T3_CODEX_PROCESS_FIXTURE".into(), Some(mode.into()));
@@ -149,7 +150,9 @@ async fn process_failures_include_exit_status_and_bounded_clean_stderr() {
 
 fn value(event: &ProviderEvent) -> Option<Value> {
     match &event.kind {
-        ProviderEventKind::TurnItem { item, .. } => Some(serde_json::to_value(item).unwrap()),
+        ProviderEventKind::TurnItem { item, .. } => {
+            Some(serde_json::to_value(item).expect("test value"))
+        }
         _ => None,
     }
 }
@@ -661,7 +664,7 @@ fn latest_entities(
                 }
                 _ => return None,
             }
-            .unwrap();
+            .expect("test value");
             Some((value["id"].to_string(), value))
         })
         .collect()
@@ -681,7 +684,9 @@ fn assert_recorded_details(name: &str, result: &kit::ReplayResult) {
             .values()
             .filter(|node| node["kind"] == "approval_request")
         {
-            let parent = nodes.get(&node["parentNodeId"].to_string()).unwrap();
+            let parent = nodes
+                .get(&node["parentNodeId"].to_string())
+                .expect("test value");
             assert_eq!(parent["threadId"], node["threadId"]);
             assert_eq!(parent["kind"], "subagent");
         }
@@ -700,7 +705,7 @@ fn assert_recorded_details(name: &str, result: &kit::ReplayResult) {
             plan["kind"] == "todo_list"
                 && plan["steps"]
                     .as_array()
-                    .unwrap()
+                    .expect("test value")
                     .iter()
                     .all(|step| step["status"] == "completed")
         }));
@@ -712,12 +717,12 @@ fn assert_recorded_details(name: &str, result: &kit::ReplayResult) {
                 && plan["status"] == "active"
                 && plan["markdown"]
                     .as_str()
-                    .unwrap()
+                    .expect("test value")
                     .to_lowercase()
                     .contains("replay")
                 && plan["markdown"]
                     .as_str()
-                    .unwrap()
+                    .expect("test value")
                     .to_lowercase()
                     .contains("fixture")
         }));
@@ -728,20 +733,20 @@ fn approval(id: Value) -> Value {
 }
 async fn pending(h: &mut kit::Harness) -> RuntimeRequestId {
     let events = h
-        .collect_until(|e| matches!(&e.kind, ProviderEventKind::RuntimeRequest {request,..} if serde_json::to_value(request).unwrap()["status"]=="pending"))
+        .collect_until(|e| matches!(&e.kind, ProviderEventKind::RuntimeRequest {request,..} if serde_json::to_value(request).expect("test value")["status"]=="pending"))
         .await
-        .unwrap();
+        .expect("test value");
     events
         .into_iter()
         .find_map(|e| match e.kind {
             ProviderEventKind::RuntimeRequest { request, .. }
-                if serde_json::to_value(&request).unwrap()["status"] == "pending" =>
+                if serde_json::to_value(&request).expect("test value")["status"] == "pending" =>
             {
-                Some(mapping::expanded_id(&request.id).unwrap())
+                Some(mapping::expanded_id(&request.id).expect("test value"))
             }
             _ => None,
         })
-        .unwrap()
+        .expect("test value")
 }
 fn response(id: RuntimeRequestId, decision: Option<ProviderApprovalDecision>) -> RuntimeResponse {
     RuntimeResponse {
@@ -1359,7 +1364,7 @@ impl t3_orchestration::adapters::codex::CodexUsagePolicy for CodexUsageFixture {
         }
     }
     fn updated(&self, _: Option<&Value>, update: &Value, _: &IsoDateTime) {
-        self.0.send(update.clone()).unwrap();
+        self.0.send(update.clone()).expect("test value");
     }
 }
 
@@ -2840,8 +2845,8 @@ impl t3_orchestration::adapters::codex::CodexAttachmentResolver for SavedCodexAt
         &self,
         attachment: &t3_contracts::chat_attachment::ChatAttachment,
     ) -> ProviderResult<Option<t3_orchestration::adapters::codex::ResolvedCodexAttachment>> {
-        let attachment = serde_json::to_value(attachment).unwrap();
-        let id = attachment["id"].as_str().unwrap();
+        let attachment = serde_json::to_value(attachment).expect("test value");
+        let id = attachment["id"].as_str().expect("test value");
         Ok(Some(
             t3_orchestration::adapters::codex::ResolvedCodexAttachment {
                 path: std::path::PathBuf::from(format!("/saved/{id}")),
@@ -3301,7 +3306,7 @@ impl t3_orchestration::adapters::codex::CodexBackgroundHost for CodexBackgroundF
         &self,
         request: t3_orchestration::adapters::codex::CodexContinuationRequest,
     ) -> ProviderResult<()> {
-        self.wakes.send(request).unwrap();
+        self.wakes.send(request).expect("test value");
         Ok(())
     }
     async fn has_pending_wake(
@@ -3315,7 +3320,7 @@ impl t3_orchestration::adapters::codex::CodexBackgroundHost for CodexBackgroundF
         _thread: &str,
         process: &str,
     ) -> ProviderResult<bool> {
-        self.terminated.send(process.into()).unwrap();
+        self.terminated.send(process.into()).expect("test value");
         Ok(true)
     }
 }
@@ -4579,16 +4584,16 @@ impl t3_orchestration::adapters::codex::CodexMcpAppHost for McpAppFixture {
         assert_eq!(input.tool, "show");
         assert_eq!(input.resource_uri, "ui://fixture/app");
         assert_eq!(input.contents[0]["text"], "<html>fixture app</html>");
-        self.entered.send(input).unwrap();
+        self.entered.send(input).expect("test value");
         self.release.notified().await;
         let path = self.directory.join("fixture.html");
-        std::fs::write(&path, "fixture snapshot").unwrap();
+        std::fs::write(&path, "fixture snapshot").expect("test value");
         let removed = self.removed.clone();
         Ok(Some(
             t3_orchestration::adapters::codex::CodexCapturedMcpApp::new(
                 json!({"attachmentId":"fixture-html","server":"fixture-app","tool":"show","resourceUri":"ui://fixture/app"}),
                 move || {
-                    std::fs::remove_file(&path).unwrap();
+                    std::fs::remove_file(&path).expect("test value");
                     removed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 },
             ),
@@ -5144,9 +5149,9 @@ impl CodexFixtureCheckpoints {
     }
     fn scope(scope: &OrchestrationV2CheckpointScope) -> String {
         serde_json::to_value(&scope.id)
-            .unwrap()
+            .expect("test value")
             .as_str()
-            .unwrap()
+            .expect("test value")
             .to_owned()
     }
 }
@@ -5160,7 +5165,7 @@ impl t3_orchestration::api::CheckpointBackend for CodexFixtureCheckpoints {
         let scope = Self::scope(&input.scope);
         self.0
             .lock()
-            .unwrap()
+            .expect("test value")
             .insert((scope.clone(), input.ordinal));
         Ok(Self::reference(&scope, input.ordinal))
     }
@@ -5173,7 +5178,7 @@ impl t3_orchestration::api::CheckpointBackend for CodexFixtureCheckpoints {
         Ok(self
             .0
             .lock()
-            .unwrap()
+            .expect("test value")
             .contains(&(scope.clone(), ordinal))
             .then(|| Self::reference(&scope, ordinal)))
     }
@@ -5197,7 +5202,7 @@ impl t3_orchestration::api::CheckpointBackend for CodexFixtureCheckpoints {
         assert!(
             self.0
                 .lock()
-                .unwrap()
+                .expect("test value")
                 .contains(&(Self::scope(&scope), ordinal))
         );
         Ok(())
@@ -5210,7 +5215,7 @@ impl t3_orchestration::api::CheckpointBackend for CodexFixtureCheckpoints {
         let scope = Self::scope(&scope);
         self.0
             .lock()
-            .unwrap()
+            .expect("test value")
             .retain(|(candidate, ordinal)| *candidate != scope || preserve.contains(ordinal));
         Ok(())
     }

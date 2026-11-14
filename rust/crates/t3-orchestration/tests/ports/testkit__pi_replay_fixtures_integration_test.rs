@@ -61,7 +61,7 @@ fn all_recorded_pi_and_muse_sessions_are_consumed_by_the_jsonl_controllers()
 }
 
 fn transcript(entries: Value) -> ReplayTranscript {
-    serde_json::from_value(json!({"provider":"pi","protocol":PI_RPC_REPLAY_PROTOCOL,"version":"1","scenario":"ordering","entries":entries})).unwrap()
+    serde_json::from_value(json!({"provider":"pi","protocol":PI_RPC_REPLAY_PROTOCOL,"version":"1","scenario":"ordering","entries":entries})).expect("test value")
 }
 
 #[tokio::test]

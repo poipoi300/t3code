@@ -11,13 +11,13 @@ struct LifecycleHost {
 struct PreviewLog(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
 impl PreviewActivity for PreviewLog {
     fn end(self: Box<Self>) {
-        self.0.lock().unwrap().push("preview-end");
+        self.0.lock().expect("test value").push("preview-end");
     }
 }
 #[async_trait::async_trait]
 impl RunExecutionHost for LifecycleHost {
     async fn app_context(&self, _thread: ThreadId) -> Result<Vec<AppModelContext>> {
-        self.events.lock().unwrap().push("app-context");
+        self.events.lock().expect("test value").push("app-context");
         if self.fail_context {
             return Err(t3_orchestration::error::Error::Unsupported(
                 "fixture MCP context failure",
@@ -29,7 +29,7 @@ impl RunExecutionHost for LifecycleHost {
         }])
     }
     async fn touch_mcp_credential(&self, _thread: ThreadId) -> Result<()> {
-        self.events.lock().unwrap().push("touch");
+        self.events.lock().expect("test value").push("touch");
         if self.fail_context {
             return Err(t3_orchestration::error::Error::Unsupported(
                 "fixture credential refresh failure",
@@ -38,7 +38,10 @@ impl RunExecutionHost for LifecycleHost {
         Ok(())
     }
     fn begin_preview(&self, _thread: ThreadId) -> Box<dyn PreviewActivity> {
-        self.events.lock().unwrap().push("preview-begin");
+        self.events
+            .lock()
+            .expect("test value")
+            .push("preview-begin");
         Box::new(PreviewLog(self.events.clone()))
     }
     async fn run_started(&self, context: ProviderTurnAnalyticsContext) -> Result<()> {
@@ -47,11 +50,14 @@ impl RunExecutionHost for LifecycleHost {
             context.segment,
             Some(ProviderTurnSegment::Attempt(RunAttemptReason::Initial))
         ));
-        self.events.lock().unwrap().push("run-started");
+        self.events.lock().expect("test value").push("run-started");
         Ok(())
     }
     async fn refresh_after_turn(&self, _project: ProjectId) -> Result<()> {
-        self.events.lock().unwrap().push("refresh-after-turn");
+        self.events
+            .lock()
+            .expect("test value")
+            .push("refresh-after-turn");
         Err(t3_orchestration::error::Error::Unsupported(
             "fixture refresh failure",
         ))
@@ -727,7 +733,10 @@ fn agent(child: &str, run: &str) -> Value {
     agent["providerThreadId"] = format!("pt:{child}").into();
     agent["origin"] = "provider_native".into();
     agent["status"] = "running".into();
-    agent.as_object_mut().unwrap().shift_remove("workflow");
+    agent
+        .as_object_mut()
+        .expect("test value")
+        .shift_remove("workflow");
     agent
 }
 fn message(thread: &str, run: Option<&str>) -> ProviderEventKind {
@@ -1804,7 +1813,7 @@ impl CheckpointBackend for BaselineGate {
         assert_eq!(input.ordinal, 0);
         self.captures
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.started.send(()).unwrap();
+        self.started.send(()).expect("test value");
         if let Some(failure) = self.failure {
             return Err(if failure == "cancelled" {
                 t3_orchestration::error::Error::Cancelled
@@ -1946,7 +1955,12 @@ impl SessionRuntime for StreamSession {
     }
     async fn subscribe(&self) -> ProviderResult<EventSubscription> {
         Ok(EventSubscription {
-            events: self.events.lock().unwrap().take().unwrap(),
+            events: self
+                .events
+                .lock()
+                .expect("test value")
+                .take()
+                .expect("test value"),
             cancellation: tokio_util::sync::CancellationToken::new(),
         })
     }

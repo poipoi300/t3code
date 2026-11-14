@@ -22,9 +22,9 @@ struct Writer {
 }
 impl ProjectionWriter for Writer {
     fn apply(&self, tx: &Transaction<'_>, event: &OrchestrationV2StoredEvent) -> Result<()> {
-        if let Some((started, release)) = self.blocked.lock().unwrap().take() {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+        if let Some((started, release)) = self.blocked.lock().expect("test value").take() {
+            started.send(()).expect("test value");
+            release.recv().expect("test value");
         }
         let value = serde_json::to_value(&event.event)?;
         if value["id"] == "fail" {
@@ -46,7 +46,7 @@ fn request(id: &str) -> CommitRequest {
     CommitRequest {
         receipt: None,
         decision: Decision {
-            events: vec![detached_event(id, "thread").unwrap()],
+            events: vec![detached_event(id, "thread").expect("test value")],
             ..Default::default()
         },
         guard: CommitGuard::None,
@@ -376,7 +376,7 @@ async fn outer_transaction_failure_fails_every_source_and_publishes_nothing_from
 fn event(index: usize) -> ProviderEvent {
     let message: OrchestrationV2ConversationMessage = serde_json::from_value(serde_json::json!({
         "id":"single-message","threadId":"thread","runId":null,"nodeId":null,"createdBy":"agent","creationSource":"provider","role":"assistant","text":format!("delta:{index}"),"attachments":[],"streaming":true,"createdAt":TEST_TIME,"updatedAt":TEST_TIME,
-    })).unwrap();
+    })).expect("test value");
     ProviderEvent {
         driver: ProviderDriverKind("codex".into()),
         kind: ProviderEventKind::Message(Box::new(message)),

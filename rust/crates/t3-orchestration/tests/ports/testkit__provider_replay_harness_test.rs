@@ -256,7 +256,7 @@ fn replay_created_event(
     thread: &str,
 ) -> t3_contracts::orchestration_v2::OrchestrationV2DomainEvent {
     use t3_orchestration::testing::TEST_TIME;
-    serde_json::from_value(json!({"id":id,"threadId":thread,"type":"thread.created","occurredAt":TEST_TIME,"payload":{"id":thread,"projectId":"project:replay","title":"Replay","providerInstanceId":"replay","modelSelection":{"instanceId":"replay","model":"showcase"},"runtimeMode":"approval-required","interactionMode":"default","createdBy":"user","creationSource":"web","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"rootThreadId":thread,"parentThreadId":null,"relationshipToParent":null},"forkedFrom":null,"createdAt":TEST_TIME,"updatedAt":TEST_TIME,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null}})).unwrap()
+    serde_json::from_value(json!({"id":id,"threadId":thread,"type":"thread.created","occurredAt":TEST_TIME,"payload":{"id":thread,"projectId":"project:replay","title":"Replay","providerInstanceId":"replay","modelSelection":{"instanceId":"replay","model":"showcase"},"runtimeMode":"approval-required","interactionMode":"default","createdBy":"user","creationSource":"web","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"rootThreadId":thread,"parentThreadId":null,"relationshipToParent":null},"forkedFrom":null,"createdAt":TEST_TIME,"updatedAt":TEST_TIME,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null}})).expect("test value")
 }
 
 #[tokio::test]
