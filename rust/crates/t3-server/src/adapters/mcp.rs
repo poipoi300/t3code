@@ -314,6 +314,7 @@ impl McpAdapter {
         let access: Arc<dyn AccessStore> = Arc::new(ProjectionAccess(projections.clone()));
 
         let mut adapters = ServiceAdapters::default();
+        let orchestration_adapter;
         {
             // Thread writes go through `commands_for(caller)`: the caller's modes, a requested
             // escalation and the link fence are checked under the command lock.
@@ -324,8 +325,9 @@ impl McpAdapter {
             });
             adapters.orchestration = Some(orchestration.clone());
             adapters.worktree = Some(Arc::new(t3_mcp::adapters::worktree::WorktreeAdapter {
-                orchestration,
+                orchestration: orchestration.clone(),
             }));
+            orchestration_adapter = orchestration;
         }
         #[cfg(feature = "scheduler")]
         if let Some(scheduler) = domains.get::<crate::adapters::scheduler::SchedulerAdapter>() {
@@ -349,6 +351,12 @@ impl McpAdapter {
                     threads: runtime.threads.clone(),
                     database: t3_orchestration::stores::StoreDatabase(context.database.clone()),
                 }),
+                delegation: delegation(
+                    orchestration_adapter.clone(),
+                    domains,
+                    context,
+                    services.orchestrator.clone(),
+                ),
                 rest: services.orchestrator.clone(),
             });
         }
@@ -689,7 +697,95 @@ impl t3_mcp::apps::AppSession for LiveAppSession {
 /// concrete sibling bindings (scheduler) or their typed `available: false`.
 struct Orchestrator {
     reads: Arc<t3_mcp::adapters::threads::ThreadReadAdapter>,
+    /// `delegate_task` and `task_status`.
+    delegation: Arc<dyn t3_mcp::services::OrchestratorService>,
     rest: Arc<dyn t3_mcp::services::OrchestratorService>,
+}
+
+/// Delegated tasks over the caller's commands, with provider snapshots from the provider domain;
+/// without the provider domain they answer their missing piece.
+#[cfg(feature = "mcp-delegation")]
+fn delegation(
+    orchestration: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
+    domains: &Domains,
+    context: &DomainContext<'_>,
+    fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
+) -> Arc<dyn t3_mcp::services::OrchestratorService> {
+    let (Some(providers), Some(source)) = (
+        domains.get::<t3_provider::domain::ProviderDomain>(),
+        domains
+            .get::<crate::adapters::orchestration::OrchestrationAdapter>()
+            .and_then(|o| o.provider_source().cloned()),
+    ) else {
+        return fallback;
+    };
+    Arc::new(t3_mcp::adapters::delegation::DelegationAdapter {
+        orchestration,
+        host: Arc::new(DelegationHost {
+            providers,
+            source,
+            settings: context.local.settings.clone(),
+        }),
+    })
+}
+#[cfg(not(feature = "mcp-delegation"))]
+fn delegation(
+    _: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
+    _: &Domains,
+    _: &DomainContext<'_>,
+    fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
+) -> Arc<dyn t3_mcp::services::OrchestratorService> {
+    fallback
+}
+
+#[cfg(feature = "mcp-delegation")]
+struct DelegationHost {
+    providers: Arc<t3_provider::domain::ProviderDomain>,
+    source: Arc<crate::adapters::native_providers::ProviderSource>,
+    settings: Arc<t3_config::settings::SettingsService>,
+}
+
+#[cfg(feature = "mcp-delegation")]
+#[async_trait::async_trait]
+impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
+    async fn providers(&self) -> t3_mcp::Result<Vec<serde_json::Value>> {
+        self.providers
+            .providers
+            .get_providers()
+            .await
+            .0
+            .iter()
+            .map(|provider| serde_json::to_value(provider).map_err(|_| McpError::Internal))
+            .collect()
+    }
+    async fn orchestration_instances(&self) -> t3_mcp::Result<BTreeSet<String>> {
+        use t3_orchestration::ports::sessions_recovery::provider_adapter_registry::ProviderInstanceSource;
+        Ok(self
+            .source
+            .instances()
+            .await
+            .map_err(|_| McpError::unavailable())?
+            .iter()
+            .map(|registration| registration.adapter.instance_id().0.clone())
+            .collect())
+    }
+    async fn enabled_for_project(
+        &self,
+        project: &t3_contracts::base_schemas::ProjectId,
+        instance: &str,
+    ) -> t3_mcp::Result<bool> {
+        let settings = self
+            .settings
+            .snapshot()
+            .await
+            .map_err(|_| McpError::unavailable())?;
+        t3_orchestration::ports::thread_project::thread_management_service::provider_instance_enabled(
+            &settings,
+            project,
+            &ProviderInstanceId(instance.into()),
+        )
+        .map_err(|_| McpError::unavailable())
+    }
 }
 
 #[async_trait::async_trait]
@@ -711,7 +807,7 @@ impl t3_mcp::services::OrchestratorService for Orchestrator {
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
-        t3_mcp::services::OrchestratorService::delegate_task(self.rest.as_ref(), context, input)
+        t3_mcp::services::OrchestratorService::delegate_task(self.delegation.as_ref(), context, input)
             .await
     }
     async fn task_status(
@@ -719,7 +815,7 @@ impl t3_mcp::services::OrchestratorService for Orchestrator {
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpTaskStatusInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpDelegateTaskResult> {
-        t3_mcp::services::OrchestratorService::task_status(self.rest.as_ref(), context, input).await
+        t3_mcp::services::OrchestratorService::task_status(self.delegation.as_ref(), context, input).await
     }
     async fn task_cancel(
         &self,

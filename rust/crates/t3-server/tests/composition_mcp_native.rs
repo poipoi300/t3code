@@ -734,6 +734,19 @@ async fn token_hand_over(provider: Provider) {
     // The token reached the provider process and nothing else: no client frame, no file the
     // server writes (database, logs).
     let secret = token.trim_start_matches("Bearer ").to_owned();
+    // It reached the provider over stdin only (Codex: `thread/start` config; Claude:
+    // `mcp_set_servers` after initialize): neither its argv nor its environment holds the
+    // token or the `/mcp` endpoint.
+    let launches = harness::launches(&home);
+    assert!(!launches.is_empty());
+    for launch in &launches {
+        let argv = launch["args"].to_string();
+        let env = launch["env"].to_string();
+        for value in [&secret, &endpoint] {
+            assert!(!argv.contains(value.as_str()), "argv: {argv}");
+            assert!(!env.contains(value.as_str()), "the environment holds the T3 MCP server");
+        }
+    }
     let snapshot = server.snapshot().await;
     assert!(!snapshot.to_string().contains(&secret));
     let (home, received) = server.stop().await;
@@ -808,6 +821,8 @@ mod fake {
                 "secret": std::env::var("T3_FAKE_SECRET").ok().as_deref() == Some(super::SECRET),
                 "home": home,
                 "pid": std::process::id(),
+                "args": std::env::args().skip(1).collect::<Vec<_>>(),
+                "env": std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
             })
             .to_string(),
         )

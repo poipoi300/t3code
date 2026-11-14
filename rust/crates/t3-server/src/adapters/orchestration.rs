@@ -171,6 +171,8 @@ impl OrchestrationAdapter {
     /// Git checkpoints, the system clock and live settings. Every other port keeps its typed
     /// `Unsupported` default (launch environment, titles, pull requests, workspaces, cleanup).
     #[cfg(feature = "local-services")]
+    // One parameter per host port group the composition root hands over, in its start order.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         context: &crate::services::DomainContext<'_>,
         providers: Vec<Arc<dyn ProviderAdapter>>,
