@@ -18,9 +18,7 @@ mod live {
             let mut value = fields.clone();
             value["_tag"] = "McpAppRequestError".into();
             if let Ok(typed) = serde_json::from_value(value) {
-                return Failure::Typed(WsMcpAppsCallToolError::McpAppRequestError(Box::new(
-                    typed,
-                )));
+                return Failure::Typed(WsMcpAppsCallToolError::McpAppRequestError(Box::new(typed)));
             }
         }
         Failure::Defect(ServerDefect::Internal {

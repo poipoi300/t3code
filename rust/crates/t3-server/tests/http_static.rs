@@ -258,8 +258,6 @@ async fn reserved_paths_are_not_the_spa_and_other_methods_are_refused() {
         "/api/orchestration/nope",
         "/oauth/nope",
         "/.well-known/nope",
-        "/mcp",
-        "/mcp/x",
         "/ws/voice",
     ] {
         assert_eq!(f.get(path).send().await.unwrap().status(), 404, "{path}");

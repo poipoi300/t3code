@@ -36,7 +36,10 @@ impl ProviderSource {
     /// Drops the provider domain's instances (and the domain handle they hold): afterwards no
     /// native session can open.
     pub fn unbind(&self) {
-        self.native.write().unwrap_or_else(|e| e.into_inner()).take();
+        self.native
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     fn native(&self) -> Option<Arc<dyn ProviderInstanceSource>> {
@@ -96,11 +99,11 @@ pub use native::NativeProviders;
 mod native {
     use super::*;
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+    use t3_claude_cli::launch::LaunchOptions;
     use t3_contracts::{
         provider_instance::{ProviderDriverKind, ProviderInstanceId},
         provider_setup::{ProviderSetupError, ProviderSetupErrorTag},
     };
-    use t3_claude_cli::launch::LaunchOptions;
     use t3_orchestration::{
         adapters::{
             claude::{
@@ -303,7 +306,9 @@ mod native {
         environment: Environment,
         host: &Host,
     ) -> t3_process::ProcessOptions {
-        use t3_codex_app_server::launch::{LaunchInput, Platform as LaunchPlatform, app_server_launch};
+        use t3_codex_app_server::launch::{
+            LaunchInput, Platform as LaunchPlatform, app_server_launch,
+        };
         // The program is resolved by `t3_process::spawn` (PATH, PATHEXT and batch quoting), so
         // the description is built for a plain `codex` and only its arguments and environment
         // are used.
@@ -391,7 +396,11 @@ mod native {
     /// `resolveClaudeSdkExecutablePath`: on Windows the SDK spawns without a shell, so a bare
     /// name is resolved through PATH and a launcher shim is replaced by the package entry
     /// beside it (`bin/claude.exe`, else `cli.js`).
-    fn claude_sdk_executable(binary: String, environment: &Environment, platform: Platform) -> String {
+    fn claude_sdk_executable(
+        binary: String,
+        environment: &Environment,
+        platform: Platform,
+    ) -> String {
         if platform != Platform::Windows {
             return binary;
         }
@@ -406,7 +415,10 @@ mod native {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat" | "ps1")
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "cmd" | "bat" | "ps1"
+                )
             });
         if !shim {
             return resolved.to_string_lossy().into_owned();

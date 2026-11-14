@@ -227,6 +227,8 @@ impl Server {
                     .extend(values.into_iter().map(|value| (id.clone(), value)));
             }
             CallEvent::Exit { id, exit } => self.exits.push((id, exit)),
+            // A stream this client interrupted.
+            CallEvent::Failed { .. } => {}
             other => panic!("unexpected {other:?}"),
         }
     }

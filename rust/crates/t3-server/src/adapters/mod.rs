@@ -48,6 +48,8 @@ pub mod telemetry;
 pub mod terminal;
 #[cfg(feature = "textgen")]
 pub mod textgen;
+#[cfg(all(feature = "textgen", feature = "providers"))]
+pub mod textgen_native;
 #[cfg(feature = "usage")]
 pub mod usage;
 #[cfg(feature = "workspace")]

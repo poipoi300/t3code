@@ -7,7 +7,12 @@
 //! transcripts (`apps/server/src/orchestration-v2/testkit/fixtures`). The provider launch
 //! arguments (`app-server -c ...`, `--output-format stream-json ...`) are not libtest's, so the
 //! file has its own `main` (`harness = false`).
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout, clippy::print_stderr)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 
 use serde_json::{Value, json};
 use std::{
@@ -26,25 +31,29 @@ fn main() -> ExitCode {
     }
     type Case = fn() -> Pin<Box<dyn Future<Output = ()>>>;
     let cases: &[(&str, Case)] = &[
-        ("codex_turn_streams_asks_approval_and_settles_with_a_checkpoint", || {
-            Box::pin(provider_turn(Provider::Codex))
-        }),
-        ("claude_turn_streams_asks_approval_and_settles_with_a_checkpoint", || {
-            Box::pin(provider_turn(Provider::Claude))
-        }),
+        (
+            "codex_turn_streams_asks_approval_and_settles_with_a_checkpoint",
+            || Box::pin(provider_turn(Provider::Codex)),
+        ),
+        (
+            "claude_turn_streams_asks_approval_and_settles_with_a_checkpoint",
+            || Box::pin(provider_turn(Provider::Claude)),
+        ),
         ("codex_process_ending_mid_turn_fails_the_run", || {
             Box::pin(process_ends_mid_turn(Provider::Codex))
         }),
         ("claude_process_ending_mid_turn_fails_the_run", || {
             Box::pin(process_ends_mid_turn(Provider::Claude))
         }),
-        ("a_turn_above_the_managed_ceiling_never_reaches_the_provider", || {
-            Box::pin(turn_above_the_ceiling())
-        }),
-        ("shutdown_with_a_live_session_stops_the_provider_and_fails_its_approval_closed", || {
-            Box::pin(pending_approval_after_restart())
-        }),
-        ("a_disabled_instance_refuses_turns", || {
+        (
+            "a_turn_above_the_managed_ceiling_never_reaches_the_provider",
+            || Box::pin(turn_above_the_ceiling()),
+        ),
+        (
+            "shutdown_with_a_live_session_stops_the_provider_and_fails_its_approval_closed",
+            || Box::pin(pending_approval_after_restart()),
+        ),
+        ("a_disabled_instance_refuses_turns_until_enabled", || {
             Box::pin(disabled_instance())
         }),
         ("a_driver_the_policy_disallows_has_no_turn_adapter", || {
@@ -163,8 +172,7 @@ fn instance(provider: Provider, home: &Path, exit_after: Option<&str>, enabled: 
         json!({"name":"T3_FAKE_SECRET","value":SECRET,"sensitive":true}),
     ];
     if let Some(label) = exit_after {
-        environment
-            .push(json!({"name":"T3_FAKE_EXIT_AFTER","value":label,"sensitive":false}));
+        environment.push(json!({"name":"T3_FAKE_EXIT_AFTER","value":label,"sensitive":false}));
     }
     json!({
         "driver": provider.instance(),
@@ -238,8 +246,7 @@ mod harness {
                 eprintln!("home: {}", home.display());
             }
             if !home.join("userdata/settings.json").exists() {
-                std::fs::write(home.join("userdata/settings.json"), settings.to_string())
-                    .unwrap();
+                std::fs::write(home.join("userdata/settings.json"), settings.to_string()).unwrap();
             }
             let workspace = home.join("workspace");
             if !workspace.exists() {
@@ -418,7 +425,11 @@ mod harness {
             self.call("orchestration.dispatchCommand", command).await
         }
 
-        pub async fn create_thread(&mut self, provider: Provider, mode: &str) -> Result<Value, Value> {
+        pub async fn create_thread(
+            &mut self,
+            provider: Provider,
+            mode: &str,
+        ) -> Result<Value, Value> {
             self.dispatch(json!({"type":"thread.create","commandId":"command:thread","threadId":THREAD,"projectId":"project:native","title":"Native thread","modelSelection":{"instanceId":provider.instance(),"model":provider.model()},"runtimeMode":mode,"interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await
         }
 
@@ -455,7 +466,10 @@ mod harness {
 
         pub async fn snapshot(&self) -> Value {
             reqwest::Client::new()
-                .get(format!("{}/api/orchestration/threads/{THREAD}", self.origin))
+                .get(format!(
+                    "{}/api/orchestration/threads/{THREAD}",
+                    self.origin
+                ))
                 .header("cookie", &self.cookie)
                 .header("x-t3-orchestration-protocol", "2")
                 .send()
@@ -488,14 +502,18 @@ mod harness {
             }
         }
         let mut out = Vec::new();
-        values.iter().for_each(|value| walk(value, matches, &mut out));
+        values
+            .iter()
+            .for_each(|value| walk(value, matches, &mut out));
         out
     }
 
     /// The latest record of the thread's run, by its status.
     pub fn run_status(values: &[Value]) -> Option<String> {
         objects(values, &|value| {
-            value["rootNodeId"].is_string() && value["status"].is_string() && value["providerInstanceId"].is_string()
+            value["userMessageId"].is_string()
+                && value["rootNodeId"].is_string()
+                && value["status"].is_string()
         })
         .last()
         .map(|run| run["status"].as_str().unwrap().to_owned())
@@ -623,11 +641,21 @@ fn settings_with(instances: Value) -> Value {
 async fn provider_turn(provider: Provider) {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
-    let settings = settings_with(json!({ provider.instance(): instance(provider, &home, None, true) }));
+    if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+        std::mem::forget(temp);
+    }
+    let settings =
+        settings_with(json!({ provider.instance(): instance(provider, &home, None, true) }));
     let mut server = Server::start(&home, &settings, None).await;
-    server.create_thread(provider, "approval-required").await.unwrap();
+    server
+        .create_thread(provider, "approval-required")
+        .await
+        .unwrap();
     server.subscribe();
-    server.send("first", "Write the fixture file.").await.unwrap();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
 
     // The approval request, after streamed text (Codex streams before asking; Claude asks first).
     let request = server
@@ -640,7 +668,11 @@ async fn provider_turn(provider: Provider) {
         })
         .await;
     let snapshot = server.snapshot().await;
-    assert_eq!(run_status(std::slice::from_ref(&snapshot)).as_deref(), Some("running"), "{snapshot}");
+    assert_eq!(
+        run_status(std::slice::from_ref(&snapshot)).as_deref(),
+        Some("running"),
+        "{snapshot}"
+    );
     server
         .dispatch(json!({"type":"runtime-request.respond","commandId":"command:approve","threadId":THREAD,"requestId":request,"decision":"accept"}))
         .await
@@ -689,10 +721,14 @@ async fn provider_turn(provider: Provider) {
     assert!(!snapshot.to_string().contains(SECRET));
     for entry in std::fs::read_dir(home.join("userdata")).unwrap() {
         let path = entry.unwrap().path();
-        if path.to_string_lossy().contains("statev2") || path.extension().is_some_and(|e| e == "sqlite") {
+        if path.to_string_lossy().contains("statev2")
+            || path.extension().is_some_and(|e| e == "sqlite")
+        {
             let bytes = std::fs::read(&path).unwrap();
             assert!(
-                !bytes.windows(SECRET.len()).any(|window| window == SECRET.as_bytes()),
+                !bytes
+                    .windows(SECRET.len())
+                    .any(|window| window == SECRET.as_bytes()),
                 "{path:?}"
             );
         }
@@ -704,20 +740,32 @@ async fn provider_turn(provider: Provider) {
 async fn process_ends_mid_turn(provider: Provider) {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
+    if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+        std::mem::forget(temp);
+    }
     let settings = settings_with(json!({
         provider.instance(): instance(provider, &home, Some(provider.first_reply_label()), true)
     }));
     let mut server = Server::start(&home, &settings, None).await;
-    server.create_thread(provider, "approval-required").await.unwrap();
+    server
+        .create_thread(provider, "approval-required")
+        .await
+        .unwrap();
     server.subscribe();
-    server.send("first", "Write the fixture file.").await.unwrap();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
     let status = server
         .until(|values| {
-            run_status(values).filter(|status| !matches!(status.as_str(), "queued" | "starting" | "running"))
+            run_status(values)
+                .filter(|status| !matches!(status.as_str(), "queued" | "starting" | "running"))
         })
         .await;
     assert_eq!(status, "failed", "{:?}", server.thread);
-    let errors = objects(&server.thread, &|value| value["type"] == "error" && value["runId"].is_string());
+    let errors = objects(&server.thread, &|value| {
+        value["type"] == "error" && value["runId"].is_string()
+    });
     assert!(!errors.is_empty(), "{:?}", server.thread);
     assert_eq!(launches(&home).len(), 1);
     server.stop().await;
@@ -746,11 +794,20 @@ fn alive(pid: u64) -> bool {
 async fn pending_approval_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
+    if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+        std::mem::forget(temp);
+    }
     let settings = settings_with(json!({ "codex": instance(Provider::Codex, &home, None, true) }));
     let mut server = Server::start(&home, &settings, None).await;
-    server.create_thread(Provider::Codex, "approval-required").await.unwrap();
+    server
+        .create_thread(Provider::Codex, "approval-required")
+        .await
+        .unwrap();
     server.subscribe();
-    server.send("first", "Write the fixture file.").await.unwrap();
+    server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap();
     let request = server
         .until(|values| {
             objects(values, &|value| {
@@ -774,7 +831,10 @@ async fn pending_approval_after_restart() {
         value["responseCapability"].is_object() && value["id"] == request.as_str()
     });
     assert!(!requests.is_empty(), "{snapshot}");
-    assert!(requests.iter().all(|item| item["status"] != "pending"), "{requests:?}");
+    assert!(
+        requests.iter().all(|item| item["status"] != "pending"),
+        "{requests:?}"
+    );
     let refused = server
         .dispatch(json!({"type":"runtime-request.respond","commandId":"command:late","threadId":THREAD,"requestId":request,"decision":"accept"}))
         .await;
@@ -788,9 +848,15 @@ async fn pending_approval_after_restart() {
 async fn turn_above_the_ceiling() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
+    if std::env::var_os("NATIVE_PROVIDERS_TRACE").is_some() {
+        std::mem::forget(temp);
+    }
     let settings = settings_with(json!({ "codex": instance(Provider::Codex, &home, None, true) }));
     let mut server = Server::start(&home, &settings, None).await;
-    server.create_thread(Provider::Codex, "full-access").await.unwrap();
+    server
+        .create_thread(Provider::Codex, "full-access")
+        .await
+        .unwrap();
     server.stop().await;
 
     let mut server = Server::start(
@@ -799,56 +865,71 @@ async fn turn_above_the_ceiling() {
         Some(r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#),
     )
     .await;
-    let refused = server.send("first", "Write the fixture file.").await.unwrap_err();
+    let refused = server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap_err();
     assert!(
-        refused.to_string().contains("Acme limits threads to Auto-accept edits."),
+        refused
+            .to_string()
+            .contains("Acme limits threads to Auto-accept edits."),
         "{refused}"
     );
     assert!(launches(&home).is_empty());
     server.stop().await;
 }
 
-/// A disabled instance: a new thread on it is refused with TypeScript's error, and a thread
-/// whose instance is disabled later holds its message instead of starting the provider.
+/// A disabled instance: a message to its thread is refused with TypeScript's error
+/// (`ThreadManagementService.assertProviderInstanceEnabled` on `message.dispatch`) and the
+/// provider never starts; after the instance is enabled, the same thread runs a turn.
 async fn disabled_instance() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let settings = settings_with(json!({ "codex": instance(Provider::Codex, &home, None, false) }));
     let mut server = Server::start(&home, &settings, None).await;
-    let refused = server.create_thread(Provider::Codex, "approval-required").await.unwrap_err();
+    server
+        .create_thread(Provider::Codex, "approval-required")
+        .await
+        .unwrap();
+    let refused = server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap_err();
     assert!(
         refused
             .to_string()
             .contains(r#"Provider instance \"codex\" is disabled for project project:native."#),
         "{refused}"
     );
+    assert!(launches(&home).is_empty());
 
-    let mut enabled = instance(Provider::Codex, &home, None, true);
     server
-        .call("server.updateSettings", json!({"patch":{"providerInstances":{"codex":enabled.clone()}}}))
-        .await
-        .unwrap();
-    server.create_thread(Provider::Codex, "approval-required").await.unwrap();
-    enabled["enabled"] = json!(false);
-    server
-        .call("server.updateSettings", json!({"patch":{"providerInstances":{"codex":enabled}}}))
+        .call(
+            "server.updateSettings",
+            json!({"patch":{"providerInstances":{"codex":instance(Provider::Codex, &home, None, true)}}}),
+        )
         .await
         .unwrap();
     server.subscribe();
-    server.send("first", "Write the fixture file.").await.unwrap();
+    server
+        .send("second", "Write the fixture file.")
+        .await
+        .unwrap();
     server
         .until(|values| {
-            objects(values, &|value| value["queueHeld"] == true && value["status"] == "queued")
-                .first()
-                .map(|_| ())
+            objects(values, &|value| {
+                value["responseCapability"].is_object() && value["status"] == "pending"
+            })
+            .first()
+            .map(|_| ())
         })
         .await;
-    assert!(launches(&home).is_empty());
+    assert_eq!(launches(&home).len(), 1);
     server.stop().await;
 }
 
-/// The policy's `allowedDrivers` leaves Codex out: its instance is unavailable, so a turn on it
-/// finds no adapter and no Codex process starts.
+/// The policy's `allowedDrivers` leaves Codex out: its instance is unavailable, so a message on
+/// a Codex thread is refused with TypeScript's registry lookup error and no Codex process starts.
 async fn disallowed_driver() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
@@ -859,23 +940,21 @@ async fn disallowed_driver() {
         Some(r#"{"schemaVersion":1,"organization":"Acme","limits":{"providers":{"allowedDrivers":["claudeAgent"]}}}"#),
     )
     .await;
-    let outcome = match server.create_thread(Provider::Codex, "approval-required").await {
-        Err(refused) => refused.to_string(),
-        Ok(_) => {
-            server.subscribe();
-            server.send("first", "Write the fixture file.").await.unwrap();
-            let status = server
-                .until(|values| {
-                    run_status(values).filter(|status| {
-                        !matches!(status.as_str(), "queued" | "starting" | "running")
-                    })
-                })
-                .await;
-            assert_eq!(status, "failed", "{:?}", server.thread);
-            Value::Array(server.thread.clone()).to_string()
-        }
-    };
-    assert!(launches(&home).is_empty(), "{outcome}");
+    server
+        .create_thread(Provider::Codex, "approval-required")
+        .await
+        .unwrap();
+    let refused = server
+        .send("first", "Write the fixture file.")
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("No orchestration provider adapter is registered for codex."),
+        "{refused}"
+    );
+    assert!(launches(&home).is_empty());
     server.stop().await;
 }
 
@@ -957,7 +1036,10 @@ mod fake {
         let mut responses: BTreeMap<String, VecDeque<Value>> = BTreeMap::new();
         for step in steps {
             let frame = &step["frame"];
-            if step["type"] == "emit_inbound" && frame.get("method").is_none() && frame.get("id").is_some() {
+            if step["type"] == "emit_inbound"
+                && frame.get("method").is_none()
+                && frame.get("id").is_some()
+            {
                 responses
                     .entry(step["label"].as_str().unwrap().to_owned())
                     .or_default()
@@ -1054,7 +1136,8 @@ mod fake {
                 (Some("expect_outbound"), Some("permission.response")) => loop {
                     let Some(message) = wire.read() else { return };
                     if message["type"] == "control_response"
-                        && message["response"]["request_id"].as_str() == pending_permission.as_deref()
+                        && message["response"]["request_id"].as_str()
+                            == pending_permission.as_deref()
                     {
                         break;
                     }
@@ -1079,7 +1162,9 @@ mod fake {
                     }
                     if let Some(id) = frame["message"]["content"]
                         .as_array()
-                        .and_then(|content| content.iter().find(|block| block["type"] == "tool_use"))
+                        .and_then(|content| {
+                            content.iter().find(|block| block["type"] == "tool_use")
+                        })
                         .and_then(|block| block["id"].as_str())
                     {
                         tool_use = id.to_owned();
@@ -1123,7 +1208,9 @@ mod fake {
                     }
                 }
             }
-            Value::Array(items) => items.iter_mut().for_each(|child| replace_session(child, session)),
+            Value::Array(items) => items
+                .iter_mut()
+                .for_each(|child| replace_session(child, session)),
             _ => {}
         }
     }

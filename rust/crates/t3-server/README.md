@@ -85,9 +85,11 @@ server's own origin; `t3 pair` prints TypeScript's link on the dev URL and a
 
 ## Differences from TypeScript
 
-- Managed policy: only the policy file (and `T3CODE_DEV_MANAGED_POLICY_PATH` in debug builds) is
-  read. TypeScript also reads the Windows Group Policy registry key and macOS managed
-  preferences (`readPlatformPolicy`, owner `t3-config`). Policy-locked settings are not applied.
+- Managed policy: read as TypeScript reads it, from the Group Policy registry key on Windows, the
+  configuration profile on macOS and the policy file (`t3_config::policy_sources`; its README
+  lists the sources and the stricter refusals). The `T3CODE_DEV_MANAGED_*` overrides need the
+  non-default `dev-policy-overrides` feature in a debug build. Policy-locked settings are not
+  applied.
 - Not ported or refused at start: LAN fencing (`--lan`), Tailscale Serve, the desktop bootstrap
   descriptor, project auto-bootstrap from the working directory.
 - Request bodies time out per read (300 s idle) rather than over the whole request.

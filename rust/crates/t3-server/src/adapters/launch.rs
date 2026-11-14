@@ -904,7 +904,12 @@ impl WorkspaceBackend for Inner {
             .unwrap_or_else(|e| e.into_inner())
             .get(&created.thread.0)
             .map(|active| active.preparation.is_cancelled());
-        let git = self.git.at(&created.project_root);
+        // Cleanup completes during shutdown too (TS removes in an uninterruptible finalizer);
+        // the root's own token is the server's shutdown.
+        let git = self
+            .git
+            .at(&created.project_root)
+            .with_cancellation(CancellationToken::new());
         let removed = git
             .remove_worktree(&path, true)
             .await

@@ -473,9 +473,9 @@ async fn scheduled_tasks_and_their_webhook_route_are_served() {
         .send()
         .await
         .unwrap();
-    // Without command intake the webhook adapter fails closed for every hook (package G).
-    assert_eq!(post.status(), 500);
-    assert_eq!(post.headers()["x-t3-hook-outcome"], "error");
+    // With the runtime's intake the hook is looked up: an unknown hook is 404 `not_found`.
+    assert_eq!(post.status(), 404);
+    assert_eq!(post.headers()["x-t3-hook-outcome"], "not_found");
     s.runtime.shutdown().await.unwrap();
 }
 

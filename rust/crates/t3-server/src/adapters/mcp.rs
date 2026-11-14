@@ -22,7 +22,7 @@ use std::{
 use t3_contracts::{base_schemas::ThreadId, provider_instance::ProviderInstanceId};
 use t3_mcp::{
     AccessStore, Capability, CredentialRequest, McpError, McpServer, ProviderSessionConfig,
-    SessionRegistry, Services,
+    Services, SessionRegistry,
     access::ThreadShell,
     adapters::{
         ServiceAdapters, attachments::AttachmentAdapter, orchestration::ProjectionAccess,
@@ -78,8 +78,9 @@ impl McpSessions {
             .as_deref()
             .and_then(|host| host.parse::<IpAddr>().ok())
             .unwrap_or(IpAddr::from([127, 0, 0, 1]));
-        let environment =
-            t3_contracts::base_schemas::EnvironmentId(context.local.environment.environment_id.0.clone());
+        let environment = t3_contracts::base_schemas::EnvironmentId(
+            context.local.environment.environment_id.0.clone(),
+        );
         let address = Some(SocketAddr::new(host, config.port));
         let registry = Arc::new(match &self.clock {
             Some((window, clock)) => {
@@ -342,9 +343,11 @@ impl McpAdapter {
             .unwrap_or(false);
         let http = Arc::new(HttpState {
             registry,
-            clients: Some(Arc::new(t3_mcp::oauth::OAuthAuthenticator::for_request_origin(
-                context.local.auth.inner().clone(),
-            ))),
+            clients: Some(Arc::new(
+                t3_mcp::oauth::OAuthAuthenticator::for_request_origin(
+                    context.local.auth.inner().clone(),
+                ),
+            )),
             linked_environments_enabled: AtomicBool::new(linked),
             runtime_ceiling: context
                 .local

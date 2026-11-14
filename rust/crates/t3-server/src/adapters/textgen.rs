@@ -4,9 +4,9 @@
 //! runtime's title port. Requests go only to the base URL and key saved in settings; nothing a
 //! client sends reaches either.
 //!
-//! Provider-native generators (Codex, Claude, Cursor, Grok, OpenCode, Antigravity: TypeScript's
-//! `ProviderInstance.textGeneration`) are not ported; a selection that routes to one fails with
-//! a content-free `Unavailable`.
+//! A selection that names a provider instance runs through that instance's own CLI
+//! (`textgen_native.rs`: Codex and Claude). Other drivers' generators (Cursor, Grok, OpenCode,
+//! Antigravity) are not ported and answer a content-free `Unavailable`.
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
@@ -33,18 +33,18 @@ struct Host {
     settings: Arc<SettingsService>,
     #[cfg(feature = "providers")]
     providers: OnceLock<Arc<t3_provider::domain::ProviderDomain>>,
+    #[cfg(feature = "providers")]
+    native: crate::adapters::textgen_native::NativeHost,
 }
 
 impl TextGenAdapter {
     pub fn start(context: &crate::services::DomainContext<'_>) -> Arc<Self> {
-        Self::new(context.local.settings.clone())
-    }
-
-    pub fn new(settings: Arc<SettingsService>) -> Arc<Self> {
         let host = Arc::new(Host {
-            settings,
+            settings: context.local.settings.clone(),
             #[cfg(feature = "providers")]
             providers: OnceLock::new(),
+            #[cfg(feature = "providers")]
+            native: crate::adapters::textgen_native::NativeHost::new(context),
         });
         let generation = Arc::new(TextGeneration::new(host.clone()));
         Arc::new(Self { host, generation })
@@ -132,6 +132,11 @@ impl TextRunner for Host {
             .get(&request.model_selection.instance_id)
             .cloned()
         else {
+            #[cfg(feature = "providers")]
+            if let Some(domain) = self.providers.get() {
+                return crate::adapters::textgen_native::run(domain, &self.native, request, cancellation)
+                    .await;
+            }
             return Err(GenerationError::Unavailable);
         };
         let secrets: Arc<dyn GeneratorSecrets> = Arc::new(Secrets {

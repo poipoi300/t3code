@@ -377,7 +377,7 @@ async fn a_secret_source_check_reads_fresh_and_never_returns_the_value() {
         json!({"_tag": "Failed", "detail": "Could not read this secret from \"Team vault\". Check the provider's settings and that its store is unlocked."})
     );
 
-    let reader = server.cookie(&["orchestration:read", "settings:read"]).await;
+    let reader = server.cookie(&["orchestration:read", "providers:manage"]).await;
     let (mut socket, mut client) = server.socket(&reader).await;
     let exit = unary(
         &mut socket,
@@ -433,6 +433,9 @@ impl ProviderAdapter for Held {
     }
     fn driver(&self) -> ProviderDriverKind {
         ProviderDriverKind("replay".into())
+    }
+    fn supported_runtime_modes(&self) -> Option<Vec<t3_contracts::provider_policy::RuntimeMode>> {
+        None
     }
     async fn capabilities(&self) -> ProviderResult<OrchestrationV2ProviderCapabilities> {
         Ok(self.capabilities.clone())

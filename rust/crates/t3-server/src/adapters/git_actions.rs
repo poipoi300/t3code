@@ -467,35 +467,7 @@ impl WorkflowText {
             .map_err(|_| GenerationError::Provider)?
             .settings;
         let providers = self.textgen.providers().await;
-        let selection = match &settings.source_control_writer_model_selection {
-            None => settings.text_generation_model_selection.clone(),
-            Some(selection) => {
-                let json =
-                    serde_json::to_value(&settings).map_err(|_| GenerationError::Provider)?;
-                let id = selection.instance_id.0.as_str();
-                let usable = settings
-                    .text_generators
-                    .contains_key(&selection.instance_id)
-                    || providers.iter().any(|provider| {
-                        let snapshot = serde_json::to_value(provider).unwrap_or_default();
-                        snapshot["instanceId"] == id
-                            && snapshot["enabled"] == true
-                            && snapshot["availability"] != "unavailable"
-                            && snapshot["supportsTextGeneration"] != false
-                    });
-                if usable
-                    && t3_shared::project_settings::text_generation_selection_enabled(
-                        &json,
-                        project.as_ref().map(|id| id.0.as_str()),
-                        id,
-                    )
-                {
-                    selection.clone()
-                } else {
-                    settings.text_generation_model_selection.clone()
-                }
-            }
-        };
+        let selection = writer_selection(&settings, &providers, project.as_ref());
         Ok(Writer {
             selection,
             project,
@@ -735,6 +707,69 @@ impl WorkflowTextGenerator for WorkflowText {
         };
         Ok(PullRequestContent { title, body })
     }
+}
+
+/// Whether a provider snapshot can take a generation (`isTextGenerationTargetUsable`); a text
+/// generator of that id always can.
+fn usable(
+    settings: &t3_contracts::settings::ServerSettings,
+    providers: &[t3_contracts::server::ServerProvider],
+    instance: &t3_contracts::provider_instance::ProviderInstanceId,
+) -> bool {
+    settings.text_generators.contains_key(instance)
+        || providers.iter().any(|provider| {
+            let snapshot = serde_json::to_value(provider).unwrap_or_default();
+            snapshot["instanceId"] == instance.0.as_str()
+                && snapshot["enabled"] == true
+                && snapshot["availability"] != "unavailable"
+                && snapshot["supportsTextGeneration"] != false
+        })
+}
+
+/// `resolveSourceControlWriterModelSelection` over already project-resolved settings.
+pub(crate) fn writer_selection(
+    settings: &t3_contracts::settings::ServerSettings,
+    providers: &[t3_contracts::server::ServerProvider],
+    project: Option<&ProjectId>,
+) -> ModelSelection {
+    let Some(selection) = &settings.source_control_writer_model_selection else {
+        return settings.text_generation_model_selection.clone();
+    };
+    let json = serde_json::to_value(settings).unwrap_or_default();
+    if usable(settings, providers, &selection.instance_id)
+        && t3_shared::project_settings::text_generation_selection_enabled(
+            &json,
+            project.map(|id| id.0.as_str()),
+            selection.instance_id.0.as_str(),
+        )
+    {
+        selection.clone()
+    } else {
+        settings.text_generation_model_selection.clone()
+    }
+}
+
+/// `resolveReviewGuideModelSelection`: text generators cannot investigate a checkout, so they
+/// never write review guides.
+pub(crate) fn review_guide_selection(
+    settings: &t3_contracts::settings::ServerSettings,
+    providers: &[t3_contracts::server::ServerProvider],
+    project: Option<&ProjectId>,
+) -> ModelSelection {
+    if let Some(selection) = &settings.review_guide_model_selection {
+        let json = serde_json::to_value(settings).unwrap_or_default();
+        if !settings.text_generators.contains_key(&selection.instance_id)
+            && t3_shared::project_settings::project_provider_instance_enabled(
+                &json,
+                project.map(|id| id.0.as_str()),
+                selection.instance_id.0.as_str(),
+            )
+            && usable(settings, providers, &selection.instance_id)
+        {
+            return selection.clone();
+        }
+    }
+    writer_selection(settings, providers, project)
 }
 
 /// `resolveBaseRangeRef`: the remote-tracking commit of the base when there is one.
