@@ -826,6 +826,37 @@ async fn future_suggestions_are_presented_without_granting_permission() {
 }
 
 #[tokio::test]
+async fn raw_permission_responses_preserve_unknown_suggestions_and_native_identity() {
+    let (mut session, mut peer) = harness(SessionOptions::default());
+    let updates = json!([
+        {"type":"futureScopedRule","scope":{"command":"pwd"},"opaque":null,"destination":"session"},
+        {"type":"setMode","mode":"futureRestrictedMode","destination":"session"}
+    ]);
+    assert!(serde_json::from_value::<PermissionUpdate>(updates[0].clone()).is_err());
+    for (id, supplied_tool_id) in [("raw", "raw-tool"), ("raw-again", "unrelated-tool")] {
+        peer.callback(id, json!({"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"raw-tool","input":{"command":"pwd"}})).await;
+        let PendingRequest::ToolPermission { responder, .. } = pending(&mut session).await else {
+            panic!("expected tool permission")
+        };
+        let payload = json!({
+            "behavior":"allow", "updatedInput":{"command":"pwd"},
+            "updatedPermissions":updates, "toolUseID":supplied_tool_id,
+            "decisionClassification":"user_permanent", "futureResult":{"nullable":null,"enabled":false}
+        });
+        responder.respond_raw(payload.clone()).await.unwrap();
+        let mut expected = payload;
+        expected["toolUseID"] = json!("raw-tool");
+        assert_eq!(
+            peer.recv().await,
+            json!({"type":"control_response","response":{
+                "subtype":"success","request_id":id,"response":expected
+            }})
+        );
+    }
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn mcp_responses_and_null_ids_are_one_way_deliveries() {
     let (mut session, mut peer) = harness(SessionOptions::default());
     let server = Arc::new(EchoServer::new("s"));

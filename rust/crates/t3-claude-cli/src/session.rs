@@ -224,6 +224,10 @@ impl<T> Responder<T> {
     pub fn is_cancelled(&self) -> bool {
         self.context.cancellation.is_cancelled()
     }
+    /// Preserves response extension fields while retaining callback identity and cancellation.
+    pub async fn respond_raw(mut self, value: Value) -> Result<(), Error> {
+        self.answer(Ok(value)).await
+    }
     pub async fn reject(mut self, error: Error) -> Result<(), Error> {
         self.answer(Err(error)).await
     }
