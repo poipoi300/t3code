@@ -1,3 +1,9 @@
+CREATE TABLE auth_connect_devices (
+      proof_key_thumbprint TEXT PRIMARY KEY,
+      client_json TEXT,
+      approved_at TEXT NOT NULL
+    );
+
 CREATE TABLE auth_pairing_links (
       id TEXT PRIMARY KEY,
       credential TEXT NOT NULL UNIQUE,
@@ -9,7 +15,7 @@ CREATE TABLE auth_pairing_links (
       expires_at TEXT NOT NULL,
       consumed_at TEXT,
       revoked_at TEXT
-    , proof_key_thumbprint TEXT);
+    , proof_key_thumbprint TEXT, requires_connect_approval INTEGER NOT NULL DEFAULT 0, requested_client_json TEXT, connect_denied INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE auth_sessions (
       session_id TEXT PRIMARY KEY,
@@ -26,7 +32,7 @@ CREATE TABLE auth_sessions (
       expires_at TEXT NOT NULL,
       last_connected_at TEXT,
       revoked_at TEXT
-    , client_surface TEXT, client_app_version TEXT);
+    , client_surface TEXT, client_app_version TEXT, proof_key_thumbprint TEXT);
 
 CREATE TABLE "effect_sql_migrations" (
   migration_id integer PRIMARY KEY NOT NULL,

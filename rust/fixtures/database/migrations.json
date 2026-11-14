@@ -354,5 +354,13 @@
   {
     "id": 89,
     "name": "ShellThreadReadIndexes"
+  },
+  {
+    "id": 90,
+    "name": "AuthConnectDevices"
+  },
+  {
+    "id": 91,
+    "name": "AuthConnectDeniedRequests"
   }
 ]
