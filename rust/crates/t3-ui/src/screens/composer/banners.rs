@@ -12,7 +12,7 @@ use crate::theme::{cn, tw};
 use crate::ui::alert::composer_banner as banner;
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
-use crate::ui::popover::{PopoverOptions, popover, popover_create_handle};
+use crate::ui::popover::{PopoverOptions, popover, popover_create_handle, popover_title};
 
 pub type Node = Rc<dyn Fn() -> AnyElement>;
 
@@ -263,7 +263,8 @@ pub fn notice_text(
         let content = resolved.get();
         let container = banner_width.get();
         let hidden = style == NoticeTextStyle::Description && container > 0.0 && container < 400.0;
-        let recovered = if details_width.get() > 0.0 {
+        let recovering = overflow.with(|state| state.shown_at.is_some());
+        let recovered = if recovering && details_width.get() > 0.0 {
             details_width.get() + 4.0
         } else {
             0.0
@@ -298,6 +299,8 @@ pub fn notice_text(
     };
     // A native flex view replaces the source contents fragment so the details button shares layout.
     view()
+        // Native flex defaults to shrink=0; the source spans inherit CSS shrink=1.
+        .flex_shrink(1.0)
         .app_class(move || {
             Some(tw(
                 if style == NoticeTextStyle::Title
@@ -311,6 +314,7 @@ pub fn notice_text(
         })
         .child(
             view()
+                .flex_shrink(1.0)
                 .app_class(move || {
                     Some(tw(&cn([
                         Some(if style == NoticeTextStyle::Title {
@@ -331,6 +335,7 @@ pub fn notice_text(
             show_details.get().then(|| {
                 untracked(|| {
                     let handle = popover_create_handle();
+                    effect(move || println!("DETAIL OPEN {}", handle.is_open()));
                     let pending = stored(None::<Spawned<()>>);
                     let stay = move || {
                         if let Some(task) = pending.replace(None) {
@@ -344,51 +349,54 @@ pub fn notice_text(
                         })));
                     };
                     let popup_content = content.clone();
-                    let trigger = view()
+                    let trigger = button(
+                        ButtonContent::Icon {
+                            icon: Icon::Info,
+                            label: details_label.resolve().to_string(),
+                        },
+                        ButtonVariant::GhostMuted,
+                        ButtonSize::IconXs,
+                        || false,
+                        move || { println!("DETAIL PRESS before {}",handle.is_open()); handle.set_open(!handle.is_open()); println!("DETAIL PRESS after {}",handle.is_open()); },
+                    );
+                    // The details region owns and cancels its timers when removed.
+                    view()
                         .app_class(tw("flex-none"))
                         .on_layout(move |bounds: &Bounds<Points>| {
                             details_width.set(bounds.size.width.0)
                         })
                         .on_mouse_enter(move |_: &MouseEvent| {
-                            stay();
+                            println!("DETAIL ENTER"); stay();
                             handle.set_open(true);
                         })
                         .on_mouse_leave(move |_: &MouseEvent| leave())
-                        .child(button(
-                            ButtonContent::Icon {
-                                icon: Icon::Info,
-                                label: details_label.resolve().to_string(),
+                        .child(popover(
+                            handle,
+                            PopoverOptions {
+                                tooltip_style: true,
+                                side: Placement::Top,
+                                ..Default::default()
                             },
-                            ButtonVariant::GhostMuted,
-                            ButtonSize::IconXs,
-                            || false,
-                            || {},
-                        ));
-                    cleanup(move || {
-                        stay();
-                        details_width.set(0.0);
-                    });
-                    popover(
-                        handle,
-                        PopoverOptions {
-                            tooltip_style: true,
-                            side: Placement::Top,
-                            ..Default::default()
-                        },
-                        trigger,
-                        move || {
-                            view()
-                                .label(crate::i18n::ts("Notice details"))
-                                .max_w(
-                                    move || px(480.0_f32.min((window().width.0 - 32.0).max(0.0))),
-                                )
-                                .on_mouse_enter(move |_: &MouseEvent| stay())
-                                .on_mouse_leave(move |_: &MouseEvent| leave())
-                                .child(banner::scroll(popup_content.element()))
-                                .into_element()
-                        },
-                    )
-                    .into_element()
+                            trigger,
+                            move || {
+                                view()
+                                    .test_id("notice-details-content")
+                                    // The primitive registers its popup name through the title slot.
+                                    .child(
+                                        view()
+                                            .app_class(tw("hidden"))
+                                            .child(popover_title("Notice details")),
+                                    )
+                                    .max_w(move || {
+                                        px(480.0_f32.min((window().width.0 - 32.0).max(0.0)))
+                                    })
+                                    .on_mouse_enter(move |_: &MouseEvent| stay())
+                                    .on_mouse_leave(move |_: &MouseEvent| leave())
+                                    .child(banner::scroll(popup_content.element()))
+                                    .into_element()
+                            },
+                        ))
+                        .into_element()
                 })
             })
         }))

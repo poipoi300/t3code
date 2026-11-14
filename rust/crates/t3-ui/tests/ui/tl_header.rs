@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use nsh_core::element::{SignalEquals, signal_with};
 use nsh_core::prelude::*;
+use nsh_core::Checked;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::types::EnvironmentId;
@@ -20,7 +21,7 @@ const TERMINAL: &str = "role:button[Toggle terminal drawer]";
 const WORKSPACE: &str = "role:button[Toggle right panel]";
 
 #[component]
-fn Workspace() -> impl IntoElement {
+fn HeaderWorkspace() -> impl IntoElement {
     let host = PanelHost::new(PanelStore::default(), |_| {});
     provide_context(host);
     let key = stored(demo_thread(&EnvironmentId("demo-demo.t3.codes".into())));
@@ -81,7 +82,7 @@ fn workspace(window: (f32, f32)) -> Headless {
     let config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<Workspace>().url_schemes(["t3code"]))
+        ..EngineConfig::new(Root::of::<HeaderWorkspace>().url_schemes(["t3code"]))
     };
     let mut app = Headless::start_with_link(config, DEMO_LINK).expect("workspace starts");
     pair(&mut app);

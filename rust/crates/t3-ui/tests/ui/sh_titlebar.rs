@@ -135,4 +135,19 @@ fn native_geometry_clears_traffic_lights_and_fullscreen_releases_the_inset() {
         false,
     );
     assert_eq!(bounds(&app, "header-action").origin.x, px(130.0));
+    for platform in [Os::Windows, Os::Linux] {
+        let mut app = start(platform, DESKTOP);
+        let caption = Edges {
+            top: px(40.0),
+            right: px(138.0),
+            left: px(0.0),
+            bottom: px(0.0),
+        };
+        report(&mut app, caption, false);
+        assert_eq!(bounds(&app, "workspace-page-header").size.height, px(40.0));
+        report(&mut app, Edges::default(), true);
+        assert_eq!(bounds(&app, "workspace-page-header").size.height, px(52.0));
+        report(&mut app, caption, false);
+        assert_eq!(bounds(&app, "workspace-page-header").size.height, px(40.0));
+    }
 }

@@ -163,13 +163,23 @@ fn start(window: (f32, f32)) -> Headless {
     let mut reg = Registry::new();
     reg.register::<StashFixture>();
     sets.push(reg);
-    let mut app = Headless::start(EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: sets,
         clock: nsh_engine::Clock::manual(std::time::UNIX_EPOCH),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<StashFixture>())
-    })
-    .expect("start");
+    };
+    config.environment.os = if window == PHONE {
+        nsh_core::platform::Os::Android
+    } else {
+        nsh_core::platform::Os::Linux
+    };
+    config.environment.idiom = if window == PHONE {
+        nsh_core::platform::Idiom::Phone
+    } else {
+        nsh_core::platform::Idiom::Desktop
+    };
+    let mut app = Headless::start(config).expect("start");
     app.wait_for("role:button[Stashed prompts: 2. Open stash.]")
         .expect("badge mounted");
     app
@@ -221,11 +231,24 @@ fn delete_targets_its_own_row_and_keyboard_delete_tracks_the_remaining_selection
             .expect("delete first without restoring it");
         app.wait_for("role:button[Stashed prompts: 1. Open stash.]")
             .expect("deleted");
-        assert!(!app.screen().shows("Restore stashed prompt: First prompt"));
+        assert_eq!(
+            app.screen()
+                .count("role:button[Restore stashed prompt: First prompt]"),
+            Ok(0)
+        );
         app.press_key("mod+backspace")
             .expect("delete remaining selection");
         app.wait_for("Composer").expect("composer remains");
-        assert!(!app.screen().shows("Close stash"));
+        assert_eq!(
+            app.screen()
+                .count("role:button[Stashed prompts: 1. Open stash.]"),
+            Ok(0)
+        );
+        assert!(
+            !app.screen()
+                .matches("role:button[Close stash]")
+                .expect("drawer state")
+        );
         assert_eq!(
             app.screen().count("role:button[Delete stashed prompt]"),
             Ok(0)
@@ -244,13 +267,30 @@ fn denied_actions_are_inert_and_escape_and_prompt_edits_close_the_menu() {
         Ok(false)
     );
     app.press_key("enter").expect("inert restore");
+    assert!(
+        app.screen()
+            .matches("role:button[Close stash]")
+            .expect("still open after Enter")
+    );
     app.press_key("mod+backspace").expect("inert deletion");
-    assert!(app.screen().shows("Close stash"));
+    assert!(
+        app.screen()
+            .matches("role:button[Close stash]")
+            .expect("drawer state")
+    );
     assert!(app.screen().shows("First prompt"));
     assert!(app.screen().shows("Second prompt"));
     app.press_key("escape").expect("close");
-    assert!(!app.screen().shows("Close stash"));
+    assert!(
+        !app.screen()
+            .matches("role:button[Close stash]")
+            .expect("drawer state")
+    );
     open(&mut app, 2);
     app.press_key("mod+e").expect("external editor edit");
-    assert!(!app.screen().shows("Close stash"));
+    assert!(
+        !app.screen()
+            .matches("role:button[Close stash]")
+            .expect("drawer state")
+    );
 }

@@ -23,7 +23,7 @@ fn appended_deltas_do_not_scan_the_settled_prefix() {
         let before = flattener.work();
         for _ in 0..128 {
             let previous_len = source.len();
-            source.push_str("x");
+            source.push('x');
             source.push_str(newline);
             if legacy {
                 flattener.update(&source);
@@ -48,28 +48,25 @@ fn appended_deltas_do_not_scan_the_settled_prefix() {
     eprintln!(
         "128 deltas: legacy 4/512 settled fences = {legacy_small:?}/{legacy_large:?}; append 4/512 = {small:?}/{large:?}"
     );
-    assert!(
-        large.0 <= small.0 + 4096,
-        "128 deltas scanned/copied {small:?} with 4 settled fences versus {large:?} with 512"
-    );
-    assert!(
-        large.1 <= small.1 + 16,
-        "settled row visits grew: {small:?} versus {large:?}"
+    assert_eq!(
+        large, small,
+        "settled fence prefix must contribute zero work"
     );
     let definitions_small = measure(4, false, true, "\n");
     let definitions_large = measure(512, false, true, "\n");
     eprintln!("128 deltas after 4/512 definitions = {definitions_small:?}/{definitions_large:?}");
-    assert!(definitions_large.0 <= definitions_small.0 + 4096);
-    assert!(definitions_large.1 <= definitions_small.1 + 16);
+    assert_eq!(
+        definitions_large, definitions_small,
+        "settled definitions must contribute zero work"
+    );
     for newline in ["\r\n", "\r"] {
         let small = measure(4, false, false, newline);
         let large = measure(512, false, false, newline);
         eprintln!("128 deltas with {newline:?} after 4/512 fences = {small:?}/{large:?}");
-        assert!(
-            large.0 <= small.0 + 4096,
-            "{newline:?}: {small:?}/{large:?}"
+        assert_eq!(
+            large, small,
+            "{newline:?}: settled prefix must contribute zero work"
         );
-        assert!(large.1 <= small.1 + 16, "{newline:?}: {small:?}/{large:?}");
     }
 }
 
@@ -130,7 +127,7 @@ fn document_context_is_gathered_incrementally_and_resolved_once() {
     let version = initial.context_version;
     let before = flattener.work();
     for _ in 0..128 {
-        source.push_str("x");
+        source.push('x');
         flattener.ingest("context", &source);
     }
     let after = flattener.work();
@@ -157,12 +154,18 @@ fn document_context_is_gathered_incrementally_and_resolved_once() {
 fn late_definition_and_list_continuation_keep_completed_block_identity() {
     use std::rc::Rc;
     let mut flattener = MessageFlattener::new("late");
-    let mut source = "```rs\nlet settled = \"😀\";\n```\n\nBefore\n\n- first".to_owned();
+    let mut source = "```rs\nlet settled = \"😀\";\n```\n\nBefore\n\nList\n\n- first".to_owned();
     let first = flattener.ingest("late", &source);
     let code = first.document.block(1).expect("completed fence");
     let before = first.document.block(2).expect("completed paragraph");
+    assert_eq!(before.text.as_deref(), Some("Before\n\n"));
+    let open_list = first.document.block(3).expect("open list group");
     source.push_str("\n\n  continued\n\n- second");
     let continued = flattener.ingest("late", &source);
+    assert!(!Rc::ptr_eq(
+        &open_list,
+        &continued.document.block(3).expect("changed list")
+    ));
     assert!(Rc::ptr_eq(
         &code,
         &continued.document.block(1).expect("same fence")
@@ -249,8 +252,10 @@ fn late_definitions_name_cached_reference_candidates_without_visiting_the_prefix
     let small = measure(4);
     let large = measure(512);
     eprintln!("128 URL appends after 4/512 reference blocks = {small:?}/{large:?}");
-    assert!(large.0 <= small.0 + 4096);
-    assert!(large.1 <= small.1 + 16);
+    assert_eq!(
+        large, small,
+        "cached reference candidates must contribute zero work"
+    );
 
     let mut flattener = MessageFlattener::new("named");
     let first = flattener.append("[ref]\n\nPlain prose.\n\n```rs\nlet x = [1];\n```\n\nlive");
@@ -272,7 +277,7 @@ fn late_definitions_name_cached_reference_candidates_without_visiting_the_prefix
     assert!(!invalidation.affects(&code.id));
     let mut ids = Vec::new();
     invalidation.for_each_block(|id| ids.push(id.clone()));
-    assert_eq!(ids, [reference.id.clone()]);
+    assert_eq!(ids.as_slice(), std::slice::from_ref(&reference.id));
     assert!(std::rc::Rc::ptr_eq(
         &reference,
         &late.document.block(1).expect("shared earlier block")

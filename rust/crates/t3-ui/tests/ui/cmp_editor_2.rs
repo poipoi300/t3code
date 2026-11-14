@@ -164,17 +164,21 @@ fn source(app: &mut Headless, expected: &str) {
 #[test]
 fn enter_submits_the_current_snapshot_and_shift_enter_inserts_a_newline() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, "draft", EditorMode::Rich);
-        app.press_key("enter").expect("send key");
-        app.wait_for("Sent 1 \"draft\"")
-            .expect("Enter invokes submit");
-        source(&mut app, "draft");
-        app.press_key("shift+enter").expect("newline");
-        source(&mut app, "draft\n");
-        app.press_key("x").expect("type");
-        app.press_key("enter").expect("send latest");
-        app.wait_for("Sent 2 \"draft\\nx\"")
-            .expect("latest editor snapshot");
+        for value in ["draft", "**word**", "`word`"] {
+            let mut app = start(window, value, EditorMode::Rich);
+            app.press_key("enter").expect("send key");
+            app.wait_for(&format!("Sent 1 {value:?}"))
+                .expect("Enter invokes submit");
+            source(&mut app, value);
+            app.press_key("shift+enter").expect("newline");
+            source(&mut app, &format!("{value}\n"));
+            app.press_key("x").expect("type after a closed mark");
+            let latest = format!("{value}\nx");
+            source(&mut app, &latest);
+            app.press_key("enter").expect("send latest");
+            app.wait_for(&format!("Sent 2 {latest:?}"))
+                .expect("latest editor snapshot");
+        }
     }
 }
 

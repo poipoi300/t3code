@@ -263,6 +263,11 @@ pub fn composer_stash_menu(stash: PromptStash, props: StashMenuProps) -> impl In
             let selected = highlighted.get();
             state.entries.iter().find(|entry| Some(&entry.id) == selected.as_ref()).or_else(|| state.entries.first()).map(|entry| entry.id.clone())
         }));
+        // Parent refs outlive recycled rows; pruning here avoids reading disposed state in cleanup.
+        effect(move || {
+            let ids = stash.state.with(|state| state.entries.iter().map(|entry| entry.id.clone()).collect::<std::collections::BTreeSet<_>>());
+            buttons.with(|buttons| buttons.retain(|id, _| ids.contains(id)));
+        });
         let menu = element_ref();
         menu.on_focus_in(move || focused.set(true));
         menu.on_focus_out(move || focused.set(false));
@@ -381,11 +386,7 @@ fn stash_entry_row(
     buttons.with(|buttons| {
         buttons.insert(id.clone(), restore);
     });
-    cleanup(move || {
-        buttons.with(|buttons| {
-            buttons.remove(&id);
-        });
-    });
+
     let row_ref = element_ref();
     row_ref.on_focus_in(move || highlighted.set(Some(entry.with(|entry| entry.id.clone()))));
     view().element_ref(&row_ref).test_id(&entry.with(|entry| format!("stash-entry-{}", entry.id))).role(AccessibilityRole::Group)
@@ -413,7 +414,7 @@ fn stash_entry_row(
                     }))
                     .child(view().app_class(tw("flex shrink-0 items-center")).child(each(move || entry.with(|entry| entry.attachments.iter().take(3).cloned().collect::<Vec<_>>()), |image| image.id.clone(), |attachment, index| {
                         image(move || attachment.with(|image| SharedString::from(image.data_url.clone())))
-                            .accessible(false).app_class(move || Some(tw(&cn([Some("size-4 rounded border border-border/70 object-cover"), (index.get() > 0).then_some("-ml-1.5")]))))
+                            .accessible(false).app_class(move || Some(tw(&cn([Some("size-4 rounded border border-border/70 object-cover"), (index.get() > 0).then_some("-ms-1.5")]))))
                     })))
                     .child(dynamic(move || {
                         let count = entry.with(|entry| entry.files.as_ref().map_or(0, Vec::len));

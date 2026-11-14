@@ -66,7 +66,7 @@ fn control(label: &str, on_press: impl Fn() + 'static) -> impl IntoElement {
 }
 
 #[component]
-fn DetailsFixture() -> impl IntoElement {
+fn DetailsPanelFixture() -> impl IntoElement {
     details_fixture(false)
 }
 
@@ -154,7 +154,7 @@ fn fixture(window: (f32, f32)) -> Headless {
     Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<DetailsFixture>())
+        ..EngineConfig::new(Root::of::<DetailsPanelFixture>())
     })
     .expect("details fixture starts")
 }

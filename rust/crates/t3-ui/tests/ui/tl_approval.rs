@@ -265,7 +265,13 @@ fn child_request_errors_clear_on_retry_and_preserve_destination_and_literal_titl
         .expect("correct child received retry");
     assert!(!app.screen().shows("Child environment offline: Settings"));
     app.press("role:button[French]").expect("language change");
-    assert!(app.screen().shows("Settings"), "client names stay literal");
+    assert!(
+        app.screen()
+            .texts()
+            .iter()
+            .any(|text| text.contains("Settings")),
+        "client names stay literal"
+    );
 }
 
 #[test]

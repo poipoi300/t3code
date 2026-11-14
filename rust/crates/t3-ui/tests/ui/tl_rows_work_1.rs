@@ -10,7 +10,7 @@ use t3_client::thread_views::messages_timeline::{
     MessagesTimelineRowContent, MessagesTimelineRowsInput, derive_messages_timeline_rows,
 };
 use t3_client::view_logic::session::TimelineEntry;
-use t3_ui::i18n::{Value, t, tr};
+use t3_ui::i18n::{Value, tr};
 use t3_ui::runtime::Shared;
 use t3_ui::screens::thread::rows::work::{self, WorkEntryRow, WorkRowContext, WorkRowState};
 

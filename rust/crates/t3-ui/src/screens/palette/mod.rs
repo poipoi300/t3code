@@ -81,24 +81,29 @@ impl Palette {
     /// Port of shortcuts/commandPaletteCommands.ts's overlay and theme-picker handlers.
     /// SH-KEYS supplies effective bindings; the integrator installs these in its mounted Scope.
     pub fn command_handlers(self) -> BTreeMap<String, PaletteCommandHandler> {
-        ["commandPalette.toggle", "filePicker.toggle", "projectSearch.toggle", "theme.select"]
-            .into_iter()
-            .map(|command| {
-                let handler: PaletteCommandHandler = Rc::new(move |event| {
-                    if !self.is_mounted() {
-                        return false;
-                    }
-                    event.claim();
-                    if let Some(mode) = client::overlay_mode(Some(command)) {
-                        self.dispatch(UiAction::ToggleMode(mode));
-                    } else if !event.key.repeat {
-                        self.dispatch(UiAction::OpenIntent(Intent::ChangeTheme));
-                    }
-                    true
-                });
-                (command.into(), handler)
-            })
-            .collect()
+        [
+            "commandPalette.toggle",
+            "filePicker.toggle",
+            "projectSearch.toggle",
+            "theme.select",
+        ]
+        .into_iter()
+        .map(|command| {
+            let handler: PaletteCommandHandler = Rc::new(move |event| {
+                if !self.is_mounted() {
+                    return false;
+                }
+                event.claim();
+                if let Some(mode) = client::overlay_mode(Some(command)) {
+                    self.dispatch(UiAction::ToggleMode(mode));
+                } else if !event.key.repeat {
+                    self.dispatch(UiAction::OpenIntent(Intent::ChangeTheme));
+                }
+                true
+            });
+            (command.into(), handler)
+        })
+        .collect()
     }
 }
 
@@ -347,11 +352,16 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                 input.start_addon = Some(
                     nsh_base::button()
                         .accessibility_label(move || Some(SharedString::from(t("Back"))))
+                        .disabled(move || !palette.state().open)
                         .on_press(move || session.apply(SearchAction::Back))
                         .app_class(tw("flex cursor-pointer items-center"))
-                        .child(icon(Icon::ArrowLeft, 16.0, || {
-                            crate::theme::palette().icon_muted
-                        }))
+                        // autocomplete.tsx's addon svg selectors must reach the icon directly.
+                        .child(
+                            image(Icon::ArrowLeft.asset())
+                                .app_class(tw("-mx-0.5 size-4.5 sm:size-4"))
+                                .tint_color(|| crate::theme::palette().foreground)
+                                .accessible(false),
+                        )
                         .into_element(),
                 );
             }

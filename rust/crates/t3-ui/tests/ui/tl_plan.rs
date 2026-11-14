@@ -73,7 +73,7 @@ fn PlanFixture() -> impl IntoElement {
         assert_eq!(request.thread, key());
         assert_eq!(request.cwd, "C:/remote/workspace");
         assert_eq!(request.contents, source());
-        assert!(!request.relative_path.trim().is_empty());
+        assert_eq!(request.relative_path, "plans/settings.md");
         requests.update(|requests| requests.push(request));
         let gate = waiting.with(Option::take);
         async move {
@@ -83,7 +83,7 @@ fn PlanFixture() -> impl IntoElement {
             if failed.get_untracked() {
                 Err("Remote write failed: Settings".into())
             } else {
-                Ok("plans/settings.md".into())
+                Ok(Some("plans/settings.md".into()))
             }
         }
         .boxed_local()
@@ -94,6 +94,8 @@ fn PlanFixture() -> impl IntoElement {
         }
     });
     on_key("ctrl+s", move |_| failed.set(false));
+    on_key("ctrl+p", move |_| allowed.update(|value| *value = !*value));
+    on_key("ctrl+d", move |_| visible.update(|value| *value = !*value));
     view()
         .w_full()
         .h_full()
@@ -129,6 +131,13 @@ fn start(window: (f32, f32)) -> Headless {
 fn the_client_plan_expands_collapses_and_retains_expansion_when_recycled() {
     for size in [DESKTOP, PHONE] {
         let mut app = start(size);
+        assert!(
+            !app.screen().layout_nodes().iter().any(|node| node
+                .text
+                .as_ref()
+                .is_some_and(|text| text.text.text.contains("Closing body"))),
+            "the collapsed preview is bounded"
+        );
         app.press("role:button[Expand plan]").expect("expand");
         app.wait_for("Closing body").expect("complete body");
         app.press("role:button[Recycle]").expect("unmount");
@@ -140,6 +149,13 @@ fn the_client_plan_expands_collapses_and_retains_expansion_when_recycled() {
         assert!(
             !app.screen().shows("Closing body"),
             "find mounts content without expanding the clipped plan"
+        );
+        assert!(
+            app.screen().layout_nodes().iter().any(|node| node
+                .text
+                .as_ref()
+                .is_some_and(|text| text.text.text.contains("Closing body"))),
+            "find must mount the clipped source to count hidden matches"
         );
     }
 }
@@ -161,8 +177,32 @@ fn saving_guards_concurrency_rechecks_permission_and_preserves_a_failed_form_for
     app.press("role:button[Plan actions]").expect("menu");
     app.press("role:menuitem[Save to workspace]")
         .expect("save form");
+    app.clear("label:Workspace path")
+        .expect("replace default filename");
     app.type_text("label:Workspace path", "plans/settings.md")
         .expect("path");
+    app.press_key("ctrl+d").expect("recycle the plan cell");
+    app.press_key("ctrl+d").expect("remount the plan cell");
+    assert_eq!(
+        app.screen()
+            .input_text("label:Workspace path")
+            .expect("path draft"),
+        Some("plans/settings.md"),
+        "the draft belongs to the plan above recycled cells"
+    );
+    let input = app.screen().id("label:Workspace path").expect("path input");
+    app.press_key("ctrl+p")
+        .expect("permission revoked while open");
+    assert_eq!(
+        app.screen()
+            .id("label:Workspace path")
+            .expect("same path input"),
+        input,
+        "permission changes must not rebuild the form or lose its draft"
+    );
+    assert!(app.press("role:button[Save]").is_err());
+    assert!(app.screen().shows("writes:0"));
+    app.press_key("ctrl+p").expect("permission restored");
     app.press("role:button[Save]").expect("submit");
     app.wait_for("text:writes:1").expect("one service call");
     assert!(app.press("role:button[Save]").is_err());
@@ -175,4 +215,38 @@ fn saving_guards_concurrency_rechecks_permission_and_preserves_a_failed_form_for
     app.press("role:button[Save]").expect("retry");
     app.wait_for("text:writes:2")
         .expect("retry reached the service");
+}
+
+fn code_value() -> String {
+    (0..85)
+        .map(|line| format!("let line_{line} = {line};"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+#[component]
+fn CodePlanFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    provide_context(t3_ui::theme::text_view_parts());
+    let row = computed(|| {
+        Some(projected(&format!(
+            "# Code plan\n\n```rust title=example.rs\n{}\n```",
+            code_value()
+        )))
+    });
+    proposed_plan_timeline_row(row, PlanContext::new(key(), PlanRowsState::default()))
+}
+#[test]
+fn code_copy_collects_every_chunk_in_the_fence() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<CodePlanFixture>())
+    })
+    .expect("start code plan");
+    app.first_render().expect("render");
+    app.press("role:button[Expand plan]")
+        .expect("expand full fence");
+    app.press("role:button[Copy code]")
+        .expect("copy complete fence");
+    assert_eq!(app.screen().clipboard(), Some(code_value().as_str()));
 }

@@ -79,9 +79,10 @@ impl GitActionsBackend for FakeGit {
         _: &GitActionsScope,
         _: GitActionsWatch,
     ) -> LocalBoxStream<'static, GitActionsSnapshot> {
+        let resource = self.resource.clone();
         self.resource
             .observe(0)
-            .filter_map(|snapshot| async move { snapshot.value.as_deref().cloned() })
+            .filter_map(move |_| futures::future::ready(resource.snapshot().value.as_deref().cloned()))
             .boxed_local()
     }
     fn refresh(&self, _: &GitActionsScope) -> LocalBoxFuture<'static, Result<(), ClientError>> {

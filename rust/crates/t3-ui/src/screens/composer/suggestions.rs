@@ -5,7 +5,6 @@ use std::rc::Rc;
 use nsh_base::rich_editor::state::KeyEvent;
 use nsh_core::{AccessibilityState, element::text_measurer, prelude::*};
 use t3_client::thread_views::composer::policy::{self, SubmissionIntent, Trigger, TriggerKind};
-use t3_client::view_logic::JsTrim;
 
 use super::editor::{ComposerEditor, ComposerSnapshot, EditorMode};
 use crate::i18n::{Text, t, tr};
@@ -70,12 +69,20 @@ pub struct ComposerSuggestionRequest {
 type TriggerHandler = Rc<dyn Fn(Option<ComposerSuggestionRequest>)>;
 type SelectHandler = Rc<dyn Fn(&str, &Trigger, &ComposerSnapshot) -> bool>;
 
+/// Port of chat/ChatComposer.tsx composerMenuSearchKey (highlight identity only).
 fn same_menu_search(left: &Trigger, right: &Trigger) -> bool {
-    left.kind == right.kind
-        && left.query.js_trim().to_lowercase() == right.query.js_trim().to_lowercase()
+    // ChatComposer's visual highlight key uses JS trim; the client's JsTrim trait is private.
+    let query_key = |query: &str| {
+        query.trim_matches(|ch| matches!(ch,
+        '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
+        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+    )).to_lowercase()
+    };
+    left.kind == right.kind && query_key(&left.query) == query_key(&right.query)
 }
 
-/// UI interaction state. Querying, result ordering and selection operations are client calls.
+/// Port of chat/useComposerTriggerState.ts and ChatComposer.tsx's controlled menu state.
+/// Querying, result ordering and selection operations are client calls.
 #[derive(Clone, Copy)]
 pub struct ComposerSuggestions {
     editor: Stored<ComposerEditor>,
@@ -364,6 +371,7 @@ pub fn composer_command_menu(state: ComposerSuggestions, list_id: String) -> imp
                     Default::default(),
                     view()
                         .test_id("composer-command-menu")
+                        // Slot selectors move to rows; native scrollbars expose no CSS my-4 margin.
                         .app_class(tw("flex min-h-0 w-full flex-col overflow-hidden pb-[17px]"))
                         .child(dynamic(move || {
                             let items = state.items();
@@ -384,7 +392,8 @@ pub fn composer_command_menu(state: ComposerSuggestions, list_id: String) -> imp
                                 .label(move || {
                                     listbox_label(state.trigger.get().as_ref().map(|t| t.kind))
                                 })
-                                .app_class(tw("relative max-h-72 min-h-0 p-2 outline-none"))
+                                // Native intrinsic scrolling replaces size-full inside this capped drawer.
+                                .app_class(tw("relative max-h-72 min-h-0 p-2 outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"))
                                 .child(
                                     view().role(AccessibilityRole::Group).children(
                                         items
@@ -654,6 +663,8 @@ mod tests {
         assert!(!same_menu_search(&first, &next));
         next.kind = first.kind;
         next.query = "source".into();
+        assert!(!same_menu_search(&first, &next));
+        next.query = "\u{0085}src".into();
         assert!(!same_menu_search(&first, &next));
     }
 

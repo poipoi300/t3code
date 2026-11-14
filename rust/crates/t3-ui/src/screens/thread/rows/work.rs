@@ -21,7 +21,7 @@ use t3_client::view_logic::session::{
 };
 use t3_client::work_log::{
     has_question_answer, live_thought_line, question_answer_preview, question_answer_text,
-    question_text_preview, resolve_work_entry_tool_presentation, turn_item_has_detail,
+    question_text_preview, resolve_work_entry_tool_presentation,
     turn_item_needs_detail_fetch, work_entry_viewed_image_path,
 };
 use t3_client::workspace::project_ops::paths::format_workspace_relative_path;

@@ -38,7 +38,9 @@ use crate::ui::collapsible::{
     CollapsibleHandle, collapsible, collapsible_panel, collapsible_trigger,
 };
 use crate::ui::icon::{Icon, icon_with_class, provider_icon};
-use crate::ui::middle_truncate::{Options as TruncateOptions, middle_truncate};
+use crate::ui::middle_truncate::{
+    Font as TruncateFont, Options as TruncateOptions, middle_truncate_with_font,
+};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
 pub type TimelineRow = Memo<Option<Shared<MessagesTimelineRow>>>;
@@ -281,14 +283,11 @@ pub fn timeline_system_divider(
         label,
         detail.map(|detail| {
             text(move || detail.resolve())
-                .app_class(tw(&cn([
-                    Some("min-w-0 opacity-70"),
-                    Some(if wrap_detail {
-                        "ml-1.5"
-                    } else {
-                        "inline-flex items-center max-w-80 truncate"
-                    }),
-                ])))
+                .app_class(tw(if wrap_detail {
+                    "min-w-0"
+                } else {
+                    "max-w-80 truncate"
+                }))
                 .into_element()
         }),
         glyph,
@@ -308,10 +307,10 @@ fn timeline_system_divider_content(
     detail_separator: bool,
     action: Option<DividerAction>,
 ) -> AnyElement {
-    // NSH wraps at words and preserves newlines; whitespace/pre-wrap/wrap-anywhere need no classes.
+    // NSH's fragment host uses flex wrapping for inline detail; text preserves newlines without whitespace classes.
     let content = view()
         .app_class(tw(if wrap_detail {
-            "min-w-0"
+            "min-w-0 flex flex-wrap items-baseline justify-center"
         } else {
             "flex flex-wrap items-center justify-center gap-1.5"
         }))
@@ -326,7 +325,14 @@ fn timeline_system_divider_content(
         )
         .child(detail.map(|detail| {
             view()
-                .app_class(tw("min-w-0 inline-flex items-center"))
+                .app_class(tw(&cn([
+                    Some("min-w-0 opacity-70"),
+                    Some(if wrap_detail {
+                        "ml-1.5 inline-flex items-baseline"
+                    } else {
+                        "inline-flex items-center"
+                    }),
+                ])))
                 .child(detail_separator.then(|| text(SharedString::from("·\u{a0}"))))
                 .child(detail)
         }));
@@ -882,14 +888,21 @@ fn subagent_link_content(
                 move || label.resolve()
             })
             .into_element(),
-            Some(detail) if detail.contains('/') && !detail.contains(' ') => middle_truncate(
-                move || SharedString::from(detail.clone()),
-                TruncateOptions {
-                    show_title: false,
-                    ..Default::default()
-                },
-            )
-            .into_element(),
+            Some(detail) if detail.contains('/') && !detail.contains(' ') => {
+                middle_truncate_with_font(
+                    move || SharedString::from(detail.clone()),
+                    TruncateOptions {
+                        show_title: false,
+                        ..Default::default()
+                    },
+                    // NSH has no inherited computed font; theme::tw resolves the source's text-2xs to 11px.
+                    || TruncateFont {
+                        size: 11.0,
+                        ..Default::default()
+                    },
+                )
+                .into_element()
+            }
             Some(detail) => text(SharedString::from(detail))
                 .app_class(tw("block truncate"))
                 .into_element(),

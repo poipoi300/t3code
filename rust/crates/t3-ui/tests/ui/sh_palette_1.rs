@@ -19,6 +19,7 @@ fn PaletteFixture() -> impl IntoElement {
     let palette = palette_controller();
     let mounted = signal(true);
     let workspace_value = signal(String::new());
+    let command_claimed = signal(false);
     for (stroke, mode) in [("f3", OverlayMode::Files), ("f4", OverlayMode::Content)] {
         on_key_with(
             stroke,
@@ -61,7 +62,10 @@ fn PaletteFixture() -> impl IntoElement {
         },
         move |_| mounted.update(|mounted| *mounted = !*mounted),
     );
-    let file_toggle = palette.command_handlers().remove("filePicker.toggle").expect("file toggle handler");
+    let file_toggle = palette
+        .command_handlers()
+        .remove("filePicker.toggle")
+        .expect("file toggle handler");
     on_key_with(
         "f7",
         KeyOptions {
@@ -69,8 +73,36 @@ fn PaletteFixture() -> impl IntoElement {
             ..Default::default()
         },
         move |_| {
-            let mut event = DispatchEvent { key: Default::default(), default_prevented: false, propagation_stopped: false, inside_confirmation: false };
-            file_toggle(&mut event);
+            let mut event = DispatchEvent {
+                key: Default::default(),
+                default_prevented: false,
+                propagation_stopped: false,
+                inside_confirmation: false,
+            };
+            let consumed = file_toggle(&mut event);
+            command_claimed.set(consumed && event.default_prevented && event.propagation_stopped);
+        },
+    );
+    let theme_select = palette
+        .command_handlers()
+        .remove("theme.select")
+        .expect("theme picker handler");
+    on_key_with(
+        "f9",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            let mut event = DispatchEvent {
+                key: Default::default(),
+                default_prevented: false,
+                propagation_stopped: false,
+                inside_confirmation: false,
+            };
+            event.key.repeat = true;
+            let consumed = theme_select(&mut event);
+            command_claimed.set(consumed && event.default_prevented && event.propagation_stopped);
         },
     );
     on_key_with(
@@ -87,6 +119,7 @@ fn PaletteFixture() -> impl IntoElement {
         .child(text(move || format!("mounted: {}", palette.is_mounted())))
         .child(text(move || format!("presented: {}", palette.is_open())))
         .child(text(move || format!("mode: {:?}", palette.state().mode)))
+        .child(text(move || format!("claimed: {}", command_claimed.get())))
         .child(when(mounted, move || {
             untracked(move || {
                 command_palette(
@@ -160,7 +193,10 @@ fn a_new_thread_intent_focuses_the_search_input_and_back_restores_root() {
         assert_eq!(input_value(&app), "remote project");
         app.press_key("backspace").expect("delete within submenu");
         assert_eq!(input_value(&app), "remote projec");
-        assert!(app.screen().shows("Search..."));
+        assert!(
+            app.screen().shows("Backspace"),
+            "typing does not pop the submenu"
+        );
         app.clear("role:combobox[Command palette]")
             .expect("clear query");
         app.press_key("backspace").expect("empty submenu goes back");
@@ -215,8 +251,15 @@ fn outside_closes_a_child_and_discards_the_return_context() {
         let mut app = fixture(size_);
         app.press("role:button[Search]").expect("open");
         app.press_key("f3").expect("child");
-        app.press("id:command-dialog-backdrop")
-            .expect("outside dismissal");
+        let backdrop = app
+            .screen()
+            .id("id:command-dialog-backdrop")
+            .expect("backdrop");
+        app.engine()
+            .control()
+            .dispatch_event(backdrop, EventKind::PressDown, EventPayload::None);
+        app.wait_for("text:presented: false")
+            .expect("outside dismissal completes");
         assert_eq!(app.screen().count("role:dialog"), Ok(0));
         app.press("role:button[Open]").expect("fresh root");
         assert_eq!(input_value(&app), "");
@@ -235,7 +278,12 @@ fn requests_without_a_mounted_palette_are_dropped_and_unmount_clears_open_state(
         .expect("ignored intent while no palette mounted");
     app.press_key("f8")
         .expect("ignored plain open while absent");
-    app.press_key("f7").expect("registered overlay handler also stays inert");
+    app.press_key("f7")
+        .expect("registered overlay handler also stays inert");
+    assert!(
+        app.screen().shows("claimed: false"),
+        "an absent palette does not claim the shortcut"
+    );
     app.press_key("f6").expect("remount shell");
     app.wait_for("text:mounted: true").expect("mounted again");
     assert_eq!(
@@ -252,6 +300,7 @@ fn requests_without_a_mounted_palette_are_dropped_and_unmount_clears_open_state(
 fn toggling_an_open_child_mode_closes_it_and_the_next_toggle_opens_cleanly() {
     let mut app = fixture(PHONE);
     app.press_key("f7").expect("open files directly");
+    assert!(app.screen().shows("claimed: true"));
     app.wait_for("text:mode: Files").expect("files mode");
     app.press_key("f7").expect("same mode closes");
     assert_eq!(app.screen().count("role:dialog"), Ok(0));
@@ -259,6 +308,12 @@ fn toggling_an_open_child_mode_closes_it_and_the_next_toggle_opens_cleanly() {
     app.press_key("escape")
         .expect("direct child escapes to root");
     assert_eq!(input_value(&app), "");
+    app.type_text("role:combobox[Command palette]", "retained")
+        .expect("query before repeat");
+    app.press_key("f9")
+        .expect("repeat of theme shortcut is consumed without replacing root");
+    assert_eq!(input_value(&app), "retained");
+    assert!(app.screen().shows("claimed: true"));
 }
 
 #[test]

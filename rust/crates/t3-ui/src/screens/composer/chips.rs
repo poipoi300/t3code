@@ -13,7 +13,13 @@ use nsh_base::rich_editor::{
 use nsh_core::prelude::*;
 use t3_client::{
     services::{assets::format_attachment_size, providers::provider_instance_display_name},
-    thread_views::{composer::citations, user_message::Reference},
+    thread_views::{
+        composer::{
+            chip_presentation::{PullRequestDisplayState, review_comment_presentation},
+            citations,
+        },
+        user_message::Reference,
+    },
     types::ThreadKey,
     view_logic::session::MessageAttachment,
 };
@@ -21,7 +27,7 @@ use t3_contracts::{
     assistant_citations::AssistantCitation,
     composer_context::{
         ComposerContextRecord, ElementContextRecord, ElementContextSource,
-        PreviewAnnotationContextRecord, TerminalContextRecord,
+        PreviewAnnotationContextRecord, PullRequestContextMetadata, TerminalContextRecord,
     },
     server::{ServerProvider, ServerProviderSkill},
 };
@@ -39,10 +45,23 @@ use crate::{
         tooltip::{self, TooltipOptions},
     },
 };
+use t3_client::thread_views::composer::{
+    attachment_intake::{AttachmentItem, UploadState},
+    web_drafts::kind_context_id,
+};
 
 pub type MentionAction = Rc<dyn Fn(&str)>;
 pub type AttachmentAction = Rc<dyn Fn(&str)>;
 pub type CitationAction = Rc<dyn Fn(&AssistantCitation)>;
+
+/// Override for containing blocks whose font differs from the user message's `text-sm`.
+#[derive(Clone, Copy)]
+pub struct ChipFontSize(pub Prop<f32>);
+
+fn chip_font_size() -> impl Fn() -> f32 + Copy {
+    let size = use_context::<ChipFontSize>().map(|size| size.0);
+    move || size.map_or(14.0, |size| size.get())
+}
 
 /// Client-owned records and catalogues; this renderer never tokenizes prompt or message text.
 #[derive(Clone, Default, PartialEq)]
@@ -53,6 +72,7 @@ pub struct ChipData {
     pub previews: BTreeMap<String, String>,
     pub video_attachments: BTreeSet<String>,
     pub message_attachments: BTreeMap<String, MessageAttachment>,
+    pub draft_attachments: Vec<AttachmentItem>,
 }
 
 #[derive(Clone)]
@@ -61,6 +81,7 @@ pub struct ChipContext {
     pub open_mention: Option<MentionAction>,
     pub open_attachment: Option<AttachmentAction>,
     pub open_citation: Option<CitationAction>,
+    pub open_pull_request: Option<MentionAction>,
 }
 
 impl ChipContext {
@@ -70,6 +91,7 @@ impl ChipContext {
             open_mention: None,
             open_attachment: None,
             open_citation: None,
+            open_pull_request: None,
         }
     }
 
@@ -100,8 +122,23 @@ pub fn composer_prompt_editor_with_chips(
     on_paste_files: impl Fn(&RichEditorPastedFiles) + 'static,
 ) -> impl IntoElement {
     install_composer_chip_views(&editor.session());
+    let font = use_context::<ChipFontSize>().unwrap_or_else(|| {
+        ChipFontSize(Prop::bind(|| {
+            let size = theme::current_tokens()
+                .number("font-size-prompt")
+                .unwrap_or(14.0);
+            if crate::state::layout::layout_class().is_compact()
+                && crate::state::layout::pointer() == crate::state::layout::Pointer::Coarse
+            {
+                size.max(16.0)
+            } else {
+                size
+            }
+        }))
+    });
     // NodeViews read their context when mounted, under this component's owner.
     crate::ui::popover::with_popup_context(context, move || {
+        provide_context(font);
         composer_prompt_editor_tiptap(editor, props, on_change, on_paste_files).into_element()
     })
 }
@@ -207,7 +244,7 @@ fn context_chip_class(kind: &str) -> SharedString {
     // Element/hover selectors are resolved on the real control and its label below.
     tw(&theme::cn([
         Some(
-            "inline-flex max-w-full items-center gap-[0.2em] font-medium leading-[normal] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default",
+            "inline-flex max-w-full items-center font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current rounded-sm disabled:cursor-default",
         ),
         Some(color),
     ]))
@@ -216,18 +253,54 @@ fn context_chip_class(kind: &str) -> SharedString {
 fn interactive_chip_class(kind: &str) -> SharedString {
     let base = context_chip_class(kind);
     // ContextChipLabel's :is(button:enabled,a):hover selector becomes a named native group.
-    tw(&theme::cn([Some(&base), Some("group/chip cursor-pointer")]))
+    tw(&theme::cn([
+        Some(base.as_str()),
+        Some("group/chip cursor-pointer"),
+    ]))
 }
 
 /// Port of ContextChip.tsx ContextChipLabel; NSH text owns single-line truncation.
 pub fn context_chip_label(label: Text) -> impl IntoElement {
+    let size = chip_font_size();
     text(move || label.resolve())
-        .app_class(tw("block min-w-0 self-baseline overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
+        // NSH's box lengths have no em unit; the containing font supplies the 0.2em offset.
+        .app_class(tw("block min-w-0 self-baseline overflow-hidden text-ellipsis underline decoration-transparent decoration-1 transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
+        .underline_offset(move || px(size() * 0.2))
         .number_of_lines(1_u32)
 }
 
 fn glyph(which: Icon) -> AnyElement {
-    icon_with_class(which, "block size-[1em] shrink-0 self-center").into_element()
+    let size = chip_font_size();
+    svg(which.asset())
+        .app_class(tw("block shrink-0 self-center"))
+        .w(move || px(size()))
+        .h(move || px(size()))
+        .accessible(false)
+        .into_element()
+}
+
+fn image_chip_thumbnail(url: String) -> AnyElement {
+    let size = chip_font_size();
+    image(url)
+        .app_class(tw("shrink-0 self-center rounded-sm object-cover"))
+        .w(move || px(size()))
+        .h(move || px(size()))
+        .accessible(false)
+        .into_element()
+}
+
+fn model_glyph(driver: &str, name: &str) -> AnyElement {
+    let size = chip_font_size();
+    view()
+        .app_class(tw("shrink-0 self-center"))
+        .w(move || px(size()))
+        .h(move || px(size()))
+        .child(provider_icon(
+            driver,
+            name,
+            "z-auto size-full shrink-0 self-center",
+        ))
+        .into_element()
 }
 
 /// Port of contextChipParts.tsx ContextChipPopover; content is mounted only while open.
@@ -239,8 +312,12 @@ fn context_chip_popover(
     content: impl Fn() -> AnyElement + 'static,
 ) -> AnyElement {
     let handle = popover::popover_create_handle();
+    let size = chip_font_size();
     let trigger = nsh_base::button()
         .app_class(interactive_chip_class(kind))
+        // gap-[0.2em] and leading-[normal] are bound through NSH's typed style API.
+        .gap(move || px(size() * 0.2))
+        .line_height(nsh_core::LineHeight::Normal)
         .accessibility_label(move || {
             Some(
                 tr(
@@ -294,9 +371,12 @@ fn context_chip(
     hint: Option<Text>,
     action: Option<Rc<dyn Fn()>>,
 ) -> AnyElement {
+    let size = chip_font_size();
     let control = if let Some(action) = action {
         nsh_base::button()
             .app_class(interactive_chip_class(kind))
+            .gap(move || px(size() * 0.2))
+            .line_height(nsh_core::LineHeight::Normal)
             .accessibility_label(move || Some(accessible_label.resolve()))
             .on_press(move || action())
             .child(icon)
@@ -305,6 +385,8 @@ fn context_chip(
     } else {
         view()
             .app_class(context_chip_class(kind))
+            .gap(move || px(size() * 0.2))
+            .line_height(nsh_core::LineHeight::Normal)
             .focusable(true)
             .accessible(true)
             .label(move || accessible_label.resolve())
@@ -504,8 +586,7 @@ pub fn composer_model_node_view(node: &Node, context: ChipContext) -> AnyElement
             let source = source.clone();
             context_chip_popover(
                 "neutral",
-                provider_icon(&driver, &provider, "z-auto size-[1em] shrink-0 self-center")
-                    .into_element(),
+                model_glyph(&driver, &provider),
                 Text::content(label.clone()),
                 accessible,
                 move || {
@@ -579,8 +660,31 @@ pub fn composer_context_reference_chip(
 ) -> AnyElement {
     dynamic(move || {
         let record = context.data.with(|data| data.records.get(&id).cloned());
+        let attachment = context.data.with(|data| {
+            data.draft_attachments
+                .iter()
+                .find(|item| {
+                    let item_kind = if item.image { "image" } else { "file" };
+                    kind == item_kind && kind_context_id(item_kind, &item.id) == id
+                })
+                .cloned()
+        });
         let context = context.clone();
-        untracked(|| render_context_reference(&kind, &id, &label, record.as_ref(), context, true))
+        untracked(|| {
+            attachment.map_or_else(
+                || {
+                    render_context_reference(
+                        &kind,
+                        &id,
+                        &label,
+                        record.as_ref(),
+                        context.clone(),
+                        true,
+                    )
+                },
+                |item| draft_attachment_chip(item, context.clone()),
+            )
+        })
     })
     .into_element()
 }
@@ -607,6 +711,12 @@ pub fn user_message_chip_renderer(
     context: ChipContext,
 ) -> crate::screens::thread::rows::user::ContextChipRenderer {
     Rc::new(move |reference, record, row| {
+        if !matches!(
+            reference.kind.as_str(),
+            "image" | "file" | "preview-annotation"
+        ) {
+            return user_message_context_reference_chip(reference, record, context.clone());
+        }
         let attachments = row
             .message
             .attachments
@@ -639,6 +749,12 @@ pub fn user_message_chip_renderer(
             let records = row
                 .records
                 .iter()
+                .filter(|record| {
+                    annotation
+                        .screenshot_context_id
+                        .as_ref()
+                        .is_some_and(|id| record_id(record) == id.0)
+                })
                 .map(|record| (record_id(record).to_owned(), record.clone()))
                 .collect();
             let annotations = row
@@ -836,15 +952,39 @@ fn render_context_reference(
             )
         }
         ComposerContextRecord::ReviewComment(record) => {
+            let presentation = review_comment_presentation(record);
+            if let Some(metadata) = &record.pull_request {
+                return pull_request_chip(
+                    metadata.clone(),
+                    presentation.state,
+                    presentation.label,
+                    context,
+                );
+            }
             let record = record.clone();
-            let label = record.label.clone();
-            let accessible = Text::content(tr(
-                "Review comment, {label}",
-                &[("label", Value::Text(label.clone()))],
-            ));
+            let label = presentation.label;
+            let accessible = Text::content(if presentation.summary {
+                tr(
+                    "Pull request, {label}",
+                    &[("label", Value::Text(label.clone()))],
+                )
+            } else {
+                tr(
+                    "Review comment, {label}",
+                    &[("label", Value::Text(label.clone()))],
+                )
+            });
             context_chip_popover(
-                "review-comment",
-                glyph(Icon::MessageCircle),
+                if presentation.summary {
+                    "pull-request"
+                } else {
+                    "review-comment"
+                },
+                glyph(if presentation.summary {
+                    Icon::GitPullRequestArrow
+                } else {
+                    Icon::MessageCircle
+                }),
                 Text::content(label),
                 accessible,
                 move || {
@@ -896,6 +1036,123 @@ fn render_context_reference(
         }
         ComposerContextRecord::Unknown(_) => unresolved_chip(label.to_owned(), draft),
     }
+}
+
+fn pull_request_state(
+    state: Option<PullRequestDisplayState>,
+) -> (&'static str, Icon, &'static str, &'static str) {
+    match state {
+        Some(PullRequestDisplayState::Open) => (
+            "pr-open",
+            Icon::GitPullRequestArrow,
+            "Open",
+            "text-emerald-600 dark:text-emerald-300/90",
+        ),
+        Some(PullRequestDisplayState::Draft) => (
+            "pr-draft",
+            Icon::GitPullRequestDraft,
+            "Draft",
+            "text-zinc-500 dark:text-zinc-400/80",
+        ),
+        Some(PullRequestDisplayState::Merged) => (
+            "pr-merged",
+            Icon::GitMerge,
+            "Merged",
+            "text-violet-600 dark:text-violet-300/90",
+        ),
+        Some(PullRequestDisplayState::Closed) => (
+            "pr-closed",
+            Icon::GitPullRequestClosed,
+            "Closed",
+            "text-red-600 dark:text-red-300/90",
+        ),
+        None => ("pull-request", Icon::GitPullRequestArrow, "", ""),
+    }
+}
+
+/// Port of contextChipParts.tsx PullRequestChip (metadata tooltip when a preview host is absent).
+fn pull_request_chip(
+    metadata: PullRequestContextMetadata,
+    state: Option<PullRequestDisplayState>,
+    label: String,
+    context: ChipContext,
+) -> AnyElement {
+    let (kind, icon, state_label, tone) = pull_request_state(state);
+    let accessible = Text::content(tr(
+        "Open {state} pull request {label}: {title}",
+        &[
+            (
+                "state",
+                Value::Text(Text::client_key(state_label).resolve().to_string()),
+            ),
+            ("label", Value::Text(label.clone())),
+            ("title", Value::Text(metadata.title.clone())),
+        ],
+    ));
+    let action = context.open_pull_request.map(|open| {
+        let url = metadata.url.clone();
+        Rc::new(move || open(&url)) as Rc<dyn Fn()>
+    });
+    let chip = context_chip(
+        kind,
+        glyph(icon),
+        context_chip_label(Text::content(label)).into_element(),
+        accessible,
+        None,
+        action,
+    );
+    view()
+        .app_class(tw("inline-flex min-w-0 max-w-full"))
+        .tooltip(tooltip::tooltip(
+            tooltip::tooltip_create_handle(),
+            TooltipOptions::default(),
+            pull_request_context_details(metadata, icon, state_label, tone),
+        ))
+        .child(chip)
+        .into_element()
+}
+
+/// Port of PullRequestContextDetails.tsx PullRequestContextDetails.
+fn pull_request_context_details(
+    metadata: PullRequestContextMetadata,
+    icon: Icon,
+    state: &'static str,
+    tone: &'static str,
+) -> impl IntoElement {
+    view()
+        .app_class(tw("max-w-80 space-y-1 overflow-hidden py-0.5 text-left"))
+        .child(
+            view()
+                .app_class(tw("flex items-center gap-1.5 text-xs font-medium"))
+                .child(icon_with_class(
+                    icon,
+                    &theme::cn([Some("size-3.5 shrink-0"), Some(tone)]),
+                ))
+                .child(
+                    text(tr(
+                        "Pull request #{number}",
+                        &[("number", Value::Int(metadata.number as i64))],
+                    ))
+                    .app_class(tw("text-foreground")),
+                )
+                .child(text(Text::client_key(state).resolve()).app_class(tw(tone))),
+        )
+        .child(text(SharedString::from(metadata.title)).app_class(tw("text-foreground")))
+        .child(
+            view()
+                .app_class(tw(
+                    "flex min-w-0 items-center gap-1 text-secondary-label text-3xs",
+                ))
+                .child(
+                    text(SharedString::from(metadata.head_branch))
+                        .app_class(tw("truncate font-mono")),
+                )
+                .child(icon_with_class(Icon::ArrowRight, "size-3 shrink-0"))
+                .child(
+                    text(SharedString::from(metadata.base_branch))
+                        .app_class(tw("truncate font-mono")),
+                ),
+        )
 }
 
 fn source_label(source: Option<&ElementContextSource>) -> Option<String> {
@@ -1132,7 +1389,7 @@ fn terminal_context_inline_chip_with_expiration(
                 } else {
                     tr("Lines {start}–{end}", &[("start", Value::Int(record.line_start as i64)), ("end", Value::Int(record.line_end as i64))])
                 }).app_class(tw("ml-auto shrink-0 text-secondary-label text-xs"))))
-            // overflow-auto is a real scroll view; terminal output retains native newlines/tabs.
+            // Text has no tab-size/white-space prop; captured output keeps native wrapping and tab stops.
             .child(scroll().app_class(tw("max-h-80"))
                 .child(text(SharedString::from(record.text.clone())).app_class(tw("bg-muted p-3 font-mono text-foreground text-xs leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"))
                     .focusable(true).label(t("Captured terminal output"))))
@@ -1204,17 +1461,7 @@ fn attachment_chip(
         Rc::new(move || open(&id)) as Rc<dyn Fn()>
     });
     let icon = if kind == "image" {
-        preview.map_or_else(
-            || glyph(Icon::Image),
-            |url| {
-                image(url)
-                    .app_class(tw(
-                        "size-[1em] shrink-0 self-center rounded-sm object-cover",
-                    ))
-                    .accessible(false)
-                    .into_element()
-            },
-        )
+        preview.map_or_else(|| glyph(Icon::Image), image_chip_thumbnail)
     } else if video {
         glyph(Icon::Film)
     } else {
@@ -1223,7 +1470,7 @@ fn attachment_chip(
     context_chip(
         document_kind(&name).unwrap_or(kind),
         icon,
-        file_chip_content(&name, &size).into_element(),
+        file_chip_content(&name, &size, None).into_element(),
         accessible,
         Some(Text::content(format!("{name}\n{size}"))),
         action,
@@ -1231,10 +1478,76 @@ fn attachment_chip(
 }
 
 /// Port of contextChipParts.tsx FileChipContent and ImageChipButton's label.
-fn file_chip_content(name: &str, size: &str) -> impl IntoElement + use<> {
-    view().app_class(tw("flex min-w-0 self-baseline items-baseline gap-[0.33em] overflow-hidden text-ellipsis underline decoration-transparent decoration-1 underline-offset-[0.2em] transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
+fn file_chip_content(name: &str, size: &str, suffix: Option<Text>) -> impl IntoElement + use<> {
+    let font = chip_font_size();
+    view().app_class(tw("flex min-w-0 self-baseline items-baseline overflow-hidden text-ellipsis underline decoration-transparent decoration-1 transition-colors motion-reduce:transition-none group-hover/chip:decoration-current"))
+        .gap(move || px(font() * 0.33))
+        .underline_offset(move || px(font() * 0.2))
         .child(text(SharedString::from(middle_truncate_attachment_name(name, 36))).app_class(tw("min-w-0 max-w-72 overflow-hidden text-ellipsis")).number_of_lines(1_u32))
         .child(text(SharedString::from(size.to_owned())).app_class(tw("shrink-0 text-3xs text-current")))
+        .child(suffix.map(|suffix| text(move || suffix.resolve()).app_class(tw("text-3xs text-current"))))
+}
+
+/// Port of composerContextPresentation.tsx FileContextChip and ImageContextChip.
+fn draft_attachment_chip(item: AttachmentItem, context: ChipContext) -> AnyElement {
+    let suffix = if item.needs_reattach {
+        Some(Text::from("attach again"))
+    } else if matches!(item.upload, UploadState::Failed(_)) {
+        Some(Text::from("upload failed"))
+    } else {
+        None
+    };
+    let size = format_attachment_size(item.size);
+    let args = [
+        ("name", Value::Text(item.name.clone())),
+        ("size", Value::Text(size.clone())),
+    ];
+    let label = if item.image {
+        tr("Image attachment, {name}, {size}", &args)
+    } else {
+        tr("File attachment, {name}, {size}", &args)
+    };
+    let label = suffix.as_ref().map_or(label.clone(), |suffix| {
+        format!("{label}, {}", suffix.resolve())
+    });
+    let tooltip = match &item.upload {
+        UploadState::Failed(reason) => format!("{}\n{size}\n\n{reason}", item.name),
+        _ => format!("{}\n{size}", item.name),
+    };
+    let action = (!item.needs_reattach)
+        .then_some(context.open_attachment)
+        .flatten()
+        .map(|open| {
+            let id = item.id.clone();
+            Rc::new(move || open(&id)) as Rc<dyn Fn()>
+        });
+    let kind = if item.needs_reattach {
+        "neutral"
+    } else if matches!(item.upload, UploadState::Failed(_)) {
+        "invalid"
+    } else if item.image {
+        "image"
+    } else if item.video {
+        "video"
+    } else {
+        document_kind(&item.name).unwrap_or("file")
+    };
+    let icon = if item.needs_reattach {
+        glyph(Icon::CircleDashed)
+    } else if item.image {
+        item.preview
+            .map_or_else(|| glyph(Icon::Image), image_chip_thumbnail)
+    } else {
+        glyph(if item.video { Icon::Film } else { Icon::File })
+    };
+    context_chip(
+        kind,
+        icon,
+        file_chip_content(&item.name, &size, suffix).into_element(),
+        Text::content(label),
+        Some(Text::content(tooltip)),
+        action,
+    )
 }
 
 /// Port of composerInlineChip.ts middleTruncateAttachmentName (Unicode scalar values).

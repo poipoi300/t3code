@@ -622,13 +622,20 @@ pub fn markdown_thread_link(
 ) -> impl IntoElement {
     let runtime = rt();
     let nav = navigator();
-    let selectors = computed(move || {
+    let environments = computed(move || {
         runtime
             .environments()
             .into_iter()
-            .map(|entry| {
-                let shell = runtime.store.shell(entry.id.clone());
-                (entry.id, shell)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>()
+    });
+    let selectors = computed(move || {
+        environments
+            .get()
+            .into_iter()
+            .map(|id| {
+                let shell = runtime.store.shell(id.clone());
+                (id, shell)
             })
             .collect::<Vec<_>>()
     });

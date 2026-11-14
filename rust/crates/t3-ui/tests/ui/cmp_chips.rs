@@ -6,6 +6,7 @@ use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use serde_json::json;
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use t3_client::thread_views::composer::attachment_intake::{AttachmentItem, UploadState};
 use t3_client::thread_views::user_message::context_references;
 use t3_ui::screens::composer::{
     chips::{
@@ -15,7 +16,7 @@ use t3_ui::screens::composer::{
     editor::{ComposerEditor, ComposerPromptEditorProps, ComposerResolvers, EditorMode},
 };
 
-const SOURCE: &str = "@src/main.rs $browser [capture](t3-context://v1/terminal/term) /command ";
+const SOURCE: &str = "@src/main.rs $browser [capture](t3-context://v1/terminal/term) [notes](t3-context://v1/file/file_local) /command ";
 
 fn data() -> ChipData {
     let terminal = serde_json::from_value(json!({
@@ -32,6 +33,18 @@ fn data() -> ChipData {
     ChipData {
         records: BTreeMap::from([("term".into(), terminal)]),
         skills: vec![skill],
+        draft_attachments: vec![AttachmentItem {
+            id: "local".into(),
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            size: 3,
+            image: false,
+            video: false,
+            preview: None,
+            needs_reattach: false,
+            non_persisted: false,
+            upload: UploadState::Failed("Server details".into()),
+        }],
         ..Default::default()
     }
 }
@@ -43,6 +56,7 @@ fn ChipsFixture() -> impl IntoElement {
     let opens = signal(String::new());
     let mut context = ChipContext::new(computed(move || catalogue.get()));
     context.open_mention = Some(Rc::new(move |path| opens.set(path.into())));
+    context.open_attachment = Some(Rc::new(move |id| opens.set(format!("attachment:{id}"))));
     let editor = ComposerEditor::new(
         SOURCE,
         0,
@@ -121,6 +135,13 @@ fn ChipsFixture() -> impl IntoElement {
                     })
                 })
                 .child(text("Expire captured output")),
+        )
+        .child(
+            nsh_base::button()
+                .on_press(move || {
+                    catalogue.update(|data| data.draft_attachments[0].needs_reattach = true)
+                })
+                .child(text("Require reattach")),
         )
         .child(
             view()
@@ -227,6 +248,27 @@ fn provider_content_does_not_become_a_translation_key_after_a_language_change() 
         !app.screen().shows("Paramètres"),
         "the skill label must not become a translation key"
     );
+}
+
+#[test]
+fn a_pending_attachment_renders_from_the_client_item_and_reattach_removes_its_action() {
+    for window in [PHONE, DESKTOP] {
+        let mut app = start(window);
+        app.press("role:button[File attachment, notes.txt, 1 KB, upload failed]")
+            .expect("failed local attachment remains previewable");
+        app.wait_for("Opened: attachment:local")
+            .expect("draft attachment identity");
+        app.press("text:Require reattach")
+            .expect("resource was lost");
+        app.wait_for("label:File attachment, notes.txt, 1 KB, attach again")
+            .expect("reattach takes precedence");
+        assert!(
+            !app.screen()
+                .matches("role:button[File attachment, notes.txt, 1 KB, attach again]")
+                .expect("no preview action without local or uploaded bytes")
+        );
+        assert!(app.screen().shows(&format!("Source: {SOURCE}")));
+    }
 }
 
 #[test]

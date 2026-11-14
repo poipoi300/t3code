@@ -55,7 +55,9 @@ pub struct SavePlan {
     pub relative_path: String,
     pub contents: String,
 }
-pub type WritePlan = Rc<dyn Fn(SavePlan) -> LocalBoxFuture<'static, Result<String, String>>>;
+/// None is the client's interrupted command outcome; it must not announce a saved file.
+pub type WritePlan =
+    Rc<dyn Fn(SavePlan) -> LocalBoxFuture<'static, Result<Option<String>, String>>>;
 pub type DownloadPlan = Rc<dyn Fn(String, String) -> LocalBoxFuture<'static, Result<(), String>>>;
 
 /// Service plumbing only: the card owns its markdown, menu, form and feedback.
@@ -105,6 +107,7 @@ struct PlanState {
     open: Signal<bool>,
     saving: Signal<bool>,
     last_path: Signal<String>,
+    draft_path: Signal<String>,
     render: Stored<PlanRender>,
     keys: Signal<Vec<BlockId>>,
     slots: Stored<Vec<Signal<Shared<PlanLeaf>>>>,
@@ -129,6 +132,7 @@ impl PlanRowsState {
                     open: signal(false),
                     saving: signal(false),
                     last_path: signal(String::new()),
+                    draft_path: signal(String::new()),
                     render: stored(PlanRender::new(id)),
                     keys: signal(Vec::new()),
                     slots: stored(Vec::new()),
@@ -157,7 +161,8 @@ struct PlanRender {
 struct PlanLeaf {
     block: Rc<Block>,
     preview: Rc<str>,
-    visible_after: usize,
+    preview_state: PreviewState,
+    code_first: Option<usize>,
 }
 impl PlanRender {
     fn new(id: &str) -> Self {
@@ -221,15 +226,24 @@ impl PlanRender {
                 let before = at
                     .checked_sub(1)
                     .and_then(|at| self.leaves.get(at))
-                    .map_or(0, |leaf| leaf.visible_after);
+                    .map_or(PreviewState::default(), |leaf| leaf.preview_state);
                 let raw = source[start..]
                     .get(block.source.bytes.clone())
                     .unwrap_or("");
-                let (preview, visible_after) = preview_chunk(raw, before);
+                let (preview, preview_state) = preview_chunk(raw, before);
+                let code_first = match &block.kind {
+                    BlockKind::Code(code) if code.first => Some(at),
+                    BlockKind::Code(_) => at
+                        .checked_sub(1)
+                        .and_then(|at| self.leaves.get(at))
+                        .and_then(|leaf| leaf.code_first),
+                    _ => None,
+                };
                 let leaf = Rc::new(PlanLeaf {
                     block,
                     preview: Rc::from(preview),
-                    visible_after,
+                    preview_state,
+                    code_first,
                 });
                 if at == self.leaves.len() {
                     self.leaves.push(leaf.clone());
@@ -298,23 +312,37 @@ impl PlanRender {
     }
 }
 
-fn preview_chunk(raw: &str, mut visible: usize) -> (String, usize) {
-    if visible > 10 {
-        return (String::new(), visible);
+#[derive(Clone, Copy, Default)]
+struct PreviewState {
+    visible: usize,
+    pending_newlines: usize,
+}
+fn preview_chunk(raw: &str, mut state: PreviewState) -> (String, PreviewState) {
+    if state.visible > 10 {
+        return (String::new(), state);
     }
-    let mut lines = Vec::new();
-    for line in raw.split('\n') {
-        let line = line.trim_end_matches(|c: char| trim_js(c.encode_utf8(&mut [0; 4])).is_empty());
-        if !trim_js(line).is_empty() {
-            visible += 1;
-            if visible > 10 {
-                lines.extend(["", "..."]);
-                break;
+    let mut preview = String::new();
+    for raw_line in raw.split_inclusive('\n') {
+        let newline = raw_line.ends_with('\n');
+        let line =
+            raw_line.trim_end_matches(|c: char| trim_js(c.encode_utf8(&mut [0; 4])).is_empty());
+        if trim_js(line).is_empty() {
+            if newline && state.visible > 0 {
+                state.pending_newlines += 1;
             }
+            continue;
         }
-        lines.push(line);
+        state.visible += 1;
+        if state.visible > 10 {
+            preview.push_str("\n\n...");
+            state.pending_newlines = 0;
+            break;
+        }
+        preview.extend(std::iter::repeat_n('\n', state.pending_newlines));
+        preview.push_str(line);
+        state.pending_newlines = usize::from(newline);
     }
-    (lines.join("\n"), visible)
+    (preview, state)
 }
 
 /// Port of TimelineAssistantRows.tsx ProposedPlanTimelineRow.
@@ -447,6 +475,14 @@ fn proposed_plan_card(
                         && root.get_untracked().is_some()
                         && !state.saving.get_untracked()
                     {
+                        let last = state.last_path.get_untracked();
+                        state.draft_path.set(if last.is_empty() {
+                            contents(row)
+                                .map(|(filename, _)| filename)
+                                .unwrap_or_default()
+                        } else {
+                            last
+                        });
                         state.open.set(true);
                     }
                 },
@@ -456,7 +492,7 @@ fn proposed_plan_card(
         .child(view().app_class(tw("flex flex-wrap items-center justify-between gap-3"))
             .child(view().app_class(tw("flex min-w-0 items-center gap-2"))
                 .child(badge::badge(badge::Props { variant: badge::Variant::Secondary, ..Default::default() }, vec![badge::Child::Text(Text::from("Plan"))]))
-                .child(text(move || state.title.get().unwrap_or_else(|| t("Proposed plan"))).app_class(tw("truncate text-sm font-medium text-foreground"))))
+                .child(text(move || state.title.get().unwrap_or_else(|| t("Proposed plan"))).role(AccessibilityRole::Header).app_class(tw("truncate text-sm font-medium text-foreground"))))
             .child(menu::menu(button(ButtonContent::Icon { icon: Icon::Ellipsis, label: t("Plan actions") }, ButtonVariant::Outline, ButtonSize::IconXs, || false, || {}), menu::MenuOptions { align: Align::End, ..Default::default() }, popup)))
         .child(view().app_class(tw("mt-4"))
             .child(view().app_class(move || tw(&cn([Some("relative"), (state.collapsible.get() && !state.expanded.get()).then_some("max-h-104 overflow-hidden")])))
@@ -473,7 +509,7 @@ fn proposed_plan_card(
                     .child(button(ButtonContent::Label(t("Collapse plan")), ButtonVariant::Outline, ButtonSize::Sm, || false, move || state.expanded.set(false))))))))
         .child(dialog::dialog(state.open, move |dialog| {
             dialog.on_open_change(move |open| if !state.saving.get_untracked() { state.open.set(open); });
-            dialog::dialog_popup(dialog, Default::default(), move || save_plan_to_workspace_form(row, state, dialog, saving_context.clone()))
+            dialog::dialog_popup(dialog, Default::default(), move || untracked(|| save_plan_to_workspace_form(row, state, dialog, saving_context.clone())))
         }))
 }
 fn plan_blocks(state: PlanState, preview: bool) -> impl IntoElement {
@@ -549,6 +585,14 @@ fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState) -> AnyEleme
     let BlockKind::Code(code) = &initial.block.kind else {
         return view().into_element();
     };
+    let mut id = initial.block.id.clone();
+    id.index = initial.code_first.unwrap_or(id.index);
+    let copy_index = id.index;
+    let code_state = state.owner.run(|| {
+        state
+            .code_states
+            .with(|states| *states.entry(id).or_default())
+    });
     let body = move || {
         text(move || {
             slot.with(|leaf| {
@@ -556,18 +600,16 @@ fn plan_code_chunk(slot: Signal<Shared<PlanLeaf>>, state: PlanState) -> AnyEleme
             })
         })
         .select_text()
-        .app_class(tw("font-mono"))
+        .app_class(move || {
+            tw(&cn([
+                Some("font-mono"),
+                (!code_state.wrap_override.get().unwrap_or(true)).then_some("whitespace-nowrap"),
+            ]))
+        })
     };
     if !code.first {
         return body().into_element();
     }
-    let id = initial.block.id.clone();
-    let copy_index = id.index;
-    let code_state = state.owner.run(|| {
-        state
-            .code_states
-            .with(|states| *states.entry(id).or_default())
-    });
     let props = computed(move || {
         slot.with(|leaf| {
             let BlockKind::Code(code) = &leaf.block.kind else {
@@ -622,11 +664,7 @@ fn save_plan_to_workspace_form(
 ) -> impl IntoElement {
     let owner = context.state.owner;
     let filename = contents(row).map(|(name, _)| name).unwrap_or_default();
-    let path = signal(if state.last_path.get_untracked().is_empty() {
-        filename.clone()
-    } else {
-        state.last_path.get_untracked()
-    });
+    let path = state.draft_path;
     let can_write = context.can_write;
     let workspace = context.workspace_root;
     let write = context.write_file.clone();
@@ -662,7 +700,7 @@ fn save_plan_to_workspace_form(
                 let result = write(request).await;
                 state.saving.set(false);
                 match result {
-                    Ok(path) => {
+                    Ok(Some(path)) => {
                         state.open.set(false);
                         plan_toast(
                             toast::Variant::Success,
@@ -670,6 +708,7 @@ fn save_plan_to_workspace_form(
                             Some(path),
                         );
                     }
+                    Ok(None) => {}
                     Err(error) => {
                         plan_toast(toast::Variant::Error, "Could not save plan", Some(error))
                     }
@@ -788,12 +827,12 @@ mod tests {
             "```rust\nlet x = 1;\n```\n\nNext",
             "a  \r\n\r\nb  \r\n",
         ] {
-            let mut visible = 0;
+            let mut state = PreviewState::default();
             let preview = body
                 .split_inclusive("\n\n")
                 .map(|block| {
-                    let (preview, after) = preview_chunk(block, visible);
-                    visible = after;
+                    let (preview, after) = preview_chunk(block, state);
+                    state = after;
                     preview
                 })
                 .collect::<String>();

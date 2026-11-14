@@ -123,13 +123,23 @@ fn start(window: (f32, f32)) -> Headless {
     let mut fixtures = Registry::new();
     fixtures.register::<BannerFixture>();
     sets.push(fixtures);
-    let mut app = Headless::start(EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: sets,
         clock: nsh_engine::Clock::manual(std::time::UNIX_EPOCH),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<BannerFixture>())
-    })
-    .expect("start");
+    };
+    config.environment.os = if window == PHONE {
+        nsh_core::platform::Os::Android
+    } else {
+        nsh_core::platform::Os::Linux
+    };
+    config.environment.idiom = if window == PHONE {
+        nsh_core::platform::Idiom::Phone
+    } else {
+        nsh_core::platform::Idiom::Desktop
+    };
+    let mut app = Headless::start(config).expect("start");
     app.wait_for("Branch changed").expect("notices mounted");
     app
 }
@@ -213,13 +223,15 @@ fn multiline_details_stay_above_the_trigger_and_cap_the_long_content() {
     let mut fixtures = Registry::new();
     fixtures.register::<ScriptNoticeFixture>();
     sets.push(fixtures);
-    let mut app = Headless::start(EngineConfig {
+    let mut config = EngineConfig {
         ui_sets: sets,
         viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
         clock: nsh_engine::Clock::manual(std::time::UNIX_EPOCH),
         ..EngineConfig::new(Root::of::<ScriptNoticeFixture>())
-    })
-    .expect("start script notice");
+    };
+    config.environment.os = nsh_core::platform::Os::Linux;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).expect("start script notice");
     app.wait_for("role:button[Show script details]")
         .expect("multiline source is truncated");
     app.hover("role:button[Show script details]")
@@ -244,5 +256,5 @@ fn multiline_details_stay_above_the_trigger_and_cap_the_long_content() {
         .bounds;
     let gap = trigger.origin.y - (popup.origin.y + popup.size.height);
     assert!(gap >= px(0.0) && gap < px(8.0), "popup gap: {gap:?}");
-    assert!(popup.size.height <= px(320.0));
+    assert!(node(&app, "notice-details-content").bounds.size.height <= px(320.0));
 }

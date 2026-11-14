@@ -17,14 +17,23 @@ t3-contracts = { path = "../t3-contracts" }
 t3-theme = { path = "../t3-theme" }
 t3-i18n = { path = "../t3-i18n", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-serde_json = "1"
+# raw_value: SH-ROUTES validates project keys as JSON without rejecting overflowing numbers.
+serde_json = { version = "1", features = ["raw_value"] }
 percent-encoding = "2"
 t3-platform = { path = "../t3-platform" }
 log = "0.4"
+# TL-BLOCKS-2's code tokenizer: the versions and features nsh-base's `highlight` already builds.
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
+two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
 
 # The client's network and storage runtime on native hosts (`runtime/client.rs`).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+
+# The process's Java VM for t3-platform's Android Keystore store (`runtime/client.rs`).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+libc = "0.2"
 
 [dev-dependencies]
 futures = { version = "0.3", features = ["executor"] }

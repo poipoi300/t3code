@@ -40,6 +40,7 @@ fn KeybindingsFixture() -> impl IntoElement {
     let catalogue = signal(vec![EnvironmentEntry {
         id: environment.clone(),
         label: "a".into(),
+        routes: Vec::new(),
         state: ConnectionState {
             phase: ConnectionPhase::Connected,
             ..Default::default()
@@ -107,6 +108,18 @@ fn KeybindingsFixture() -> impl IntoElement {
                 .test_id("remove-primary")
                 .on_press(move || primary.set(None))
                 .child(text(SharedString::from("remove primary"))),
+        )
+        .child(
+            nsh_base::button()
+                .test_id("standalone")
+                .on_press(move || nav.open(Route::Pair))
+                .child(text(SharedString::from("standalone"))),
+        )
+        .child(
+            nsh_base::button()
+                .test_id("menu")
+                .on_press(move || keys.dispatch_menu("sidebar.toggle"))
+                .child(text(SharedString::from("menu"))),
         )
         .child(
             nsh_base::button()
@@ -185,6 +198,13 @@ fn primary_loading_stays_authoritative_and_scope_cleanup_restores_the_older_hand
     app.press_key("mod+y").expect("older handler restored");
     app.wait_for("sidebar open").expect("older scope runs");
     assert!(app.screen().shows("newest 1"));
+    app.press("id:menu").expect("desktop menu action");
+    app.wait_for("sidebar closed")
+        .expect("menu shares the shell action");
+    app.press("id:standalone").expect("leave workspace");
+    app.press("id:menu").expect("menu on standalone page");
+    app.press_key("mod+y").expect("shortcut on standalone page");
+    assert!(app.screen().shows("sidebar closed"));
 }
 
 #[test]

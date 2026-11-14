@@ -349,7 +349,7 @@ impl AppendState {
                 });
             }
             self.continuation = freeze;
-            self.local = Box::new(MessageFlattener::new(&self.local.message_id));
+            *self.local = MessageFlattener::new(&self.local.message_id);
         }
         change
     }

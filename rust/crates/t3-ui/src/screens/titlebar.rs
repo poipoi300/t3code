@@ -56,13 +56,9 @@ pub fn workspace_titlebar_geometry(window: &WindowRef) -> WorkspaceTitlebarGeome
     let desktop = window.state().is_some();
     let area = window.title_bar();
     let safe = safe_area();
-    let height = if desktop {
-        // macOS has no Window Controls Overlay; its web topbar remains 52px in full screen.
-        if os() == Os::MacOs {
-            52.0
-        } else {
-            area.top.0.max(40.0)
-        }
+    // .wco applies only while the native overlay is visible; otherwise index.css uses 52px.
+    let height = if desktop && os() != Os::MacOs && area.top.0 > 0.0 {
+        area.top.0.max(40.0)
     } else {
         52.0
     };

@@ -415,9 +415,22 @@ mod tests {
                             break;
                         }
                     }
-                    for (index, literal) in text[start..end].split('"').enumerate() {
-                        if index % 2 == 1 && !literal.trim().is_empty() {
-                            found.push((path.display().to_string(), literal.to_owned()));
+                    // `tw_with`'s third argument is attributes, not classes.
+                    let region = &text[start..end];
+                    let region = match call {
+                        "tw_with(" => region.split("&[").next().unwrap_or(region),
+                        _ => region,
+                    };
+                    // A compared value or a match pattern is not a class list.
+                    let pieces: Vec<&str> = region.split('"').collect();
+                    for (index, piece) in pieces.iter().enumerate() {
+                        let before = index.checked_sub(1).map_or("", |i| pieces[i].trim_end());
+                        let after = pieces.get(index + 1).map_or("", |p| p.trim_start());
+                        let not_classes = before.ends_with("==")
+                            || before.ends_with("!=")
+                            || after.starts_with("=>");
+                        if index % 2 == 1 && !piece.trim().is_empty() && !not_classes {
+                            found.push((path.display().to_string(), (*piece).to_owned()));
                         }
                     }
                 }

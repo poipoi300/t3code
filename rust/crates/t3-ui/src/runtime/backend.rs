@@ -7,11 +7,15 @@
 
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
+use std::rc::Rc;
+
 use futures::{FutureExt, StreamExt};
 use t3_client::composition::ClientRuntime;
 use t3_client::connection::{ConnectionFailure, FailureKind, PairingInput};
 use t3_client::platform::Platform;
 use t3_client::types::{EnvironmentId, ThreadKey};
+
+use crate::screens::composer::send::ComposerSendClient;
 
 pub use t3_client::composition::{EnvironmentEntry, SendError};
 
@@ -42,6 +46,12 @@ pub trait Backend {
         key: &ThreadKey,
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>>;
+
+    /// CMP-SEND's binding to the client's send service: validated submit, and the queued, failed
+    /// and restored messages (U1, U2). None where no client-backed send service exists.
+    fn composer_send_client(&self) -> Option<Rc<dyn ComposerSendClient>> {
+        None
+    }
 }
 
 /// The composition root is the backend: each method is the client's own.
@@ -75,6 +85,10 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>> {
         ClientRuntime::send_message(self, key, text)
+    }
+
+    fn composer_send_client(&self) -> Option<Rc<dyn ComposerSendClient>> {
+        Some(Rc::new(self.clone()))
     }
 }
 

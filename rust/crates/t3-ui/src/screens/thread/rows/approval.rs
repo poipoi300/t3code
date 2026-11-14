@@ -237,7 +237,7 @@ pub fn approval_timeline_row(
 /// Requests can arrive before their turn item. Keep those actionable without duplicating
 /// requests already mounted by Work/WorkLive rows from the client projection.
 pub fn unmatched_pending_approval_rows(
-    rows: Memo<Vec<Rc<MessagesTimelineRow>>>,
+    rows: Memo<Shared<Vec<Rc<MessagesTimelineRow>>>>,
     context: ApprovalContext,
 ) -> impl IntoElement {
     let projection = context.projection;
@@ -291,12 +291,12 @@ pub fn timeline_pending_approval_row(
         let response = context.state.get(&context.thread, &approval.request.id);
         // WorkLogLine's cap-relative icon baseline has no NSH equivalent. Detail remains
         // selectable and complete; the timeline contract excludes the web's inner scroller.
-        view().role(AccessibilityRole::Group).label(SharedString::from(t(label)))
+        view().role(AccessibilityRole::Group).label(Text::from(label).resolve())
             .app_class(tw("group/timeline-row relative w-full min-w-0 rounded-md px-0.5 py-0.5 text-left transition-colors"))
             .child(view().app_class(tw("flex min-h-6 min-w-0 gap-1.5 text-sm leading-relaxed items-start"))
                 .child(view().app_class(tw("flex min-w-0 flex-1 items-baseline gap-1.5"))
                     .child(view().app_class(tw("relative w-6 shrink-0 leading-0")).child(view().app_class(tw("inline-block size-6 overflow-hidden")).child(view().app_class(tw("flex size-full items-center justify-center")).child(icon_with_class(glyph, "block size-4 shrink-0 stroke-2 text-icon-muted")))))
-                    .child(view().app_class(tw("min-w-0 flex-1 text-secondary-label")).child(text(detail.map(SharedString::from).unwrap_or_else(|| t(label).into())).label(SharedString::from(t(detail_label))).select_text().app_class(tw("block min-w-0 font-mono text-xs leading-5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"))))))
+                    .child(view().app_class(tw("min-w-0 flex-1 text-secondary-label")).child(text(detail.map(SharedString::from).unwrap_or_else(|| Text::from(label).resolve())).label(Text::from(detail_label).resolve()).select_text().focusable(true).app_class(tw("block min-w-0 font-mono text-xs leading-5 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"))))))
             .child(view().app_class(tw("ms-7.5 flex min-w-0 flex-col gap-1 pb-1 text-xs"))
                 .child(app.map(|app| text(SharedString::from(app)).app_class(tw("text-muted-foreground"))))
                 .child(reason.map(|reason| text(SharedString::from(reason)).select_text().app_class(tw("text-muted-foreground"))))
@@ -363,6 +363,7 @@ fn respond(row: Memo<Option<ApprovalRow>>, context: &ApprovalContext, decision: 
 }
 
 /// Port of ComposerPendingApprovalActions.tsx ComposerPendingApprovalActions (inline variant).
+// InlineButton's --inline-button-text-align defaults to center; native text handles wrapping.
 pub fn composer_pending_approval_actions(
     row: Memo<Option<ApprovalRow>>,
     context: ApprovalContext,
@@ -381,7 +382,7 @@ pub fn composer_pending_approval_actions(
                 .child(warning.as_ref().map(|_| icon_with_class(Icon::TriangleAlert, "size-3 shrink-0")))
                 .child(text(label.clone()));
             let control = nsh_base::button().accessibility_label(label).disabled(move || disabled(row, &can))
-                .app_class(tw(&cn([Some("inline-flex shrink-0 cursor-pointer items-center gap-0.5 font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64"), Some(if decision == Decision::Accept { "text-foreground" } else { "text-muted-foreground hover:text-foreground" })])))
+                .app_class(tw(&cn([Some("inline-flex shrink-0 cursor-pointer items-center gap-0.5 font-medium text-center underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64"), Some(if decision == Decision::Accept { "text-foreground" } else { "text-muted-foreground hover:text-foreground" })])))
                 .on_press(move || respond(row, &action, decision)).child(content);
             let wrapper = view().app_class(tw("w-fit")).child(control);
             root = root.child(if let Some(warning) = warning {
@@ -392,7 +393,7 @@ pub fn composer_pending_approval_actions(
         if !more.is_empty() {
             let can = context.clone(); let actions = context.clone();
             let trigger = nsh_base::button().accessibility_label(t("More approval options")).disabled(move || disabled(row, &can))
-                .app_class(tw("inline-flex shrink-0 cursor-pointer items-center gap-0.5 font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64 text-muted-foreground hover:text-foreground"))
+                .app_class(tw("inline-flex shrink-0 cursor-pointer items-center gap-0.5 font-medium text-center underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64 text-muted-foreground hover:text-foreground"))
                 .child(text(more_label.clone()));
             root = root.child(menu::menu(trigger, menu::MenuOptions { side: Placement::Top, align: Align::End, width: menu::Width::Content, ..Default::default() }, menu::menu_popup_with(move || {
                 let mut popup = view();

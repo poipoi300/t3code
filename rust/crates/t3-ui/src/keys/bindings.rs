@@ -534,7 +534,9 @@ pub fn install_shell_commands(keys: Keybindings, panels: Panels, nav: Navigator)
         }),
     );
     keys.register_menu("sidebar.toggle", move || {
-        panels.sidebar_open.update(|open| *open = !*open)
+        if !nav.top().is_standalone() {
+            panels.sidebar_open.update(|open| *open = !*open);
+        }
     });
 }
 
