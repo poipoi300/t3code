@@ -552,3 +552,53 @@ async fn connector_supervisor_observes_a_real_owned_child_and_joins_shutdown() {
     assert!(facts.changed().await.is_ok());
     assert!(facts.changed().await.is_err());
 }
+
+#[test]
+fn reachability_classification_prioritizes_origin_and_dns_over_a_failed_tcp_probe() {
+    use t3_cloud::reachability::{EndpointProbe, ReachabilityFacts, classify};
+    use t3_contracts::environment_http::{
+        EnvironmentConnectReachability, EnvironmentConnectReachabilityCause,
+    };
+    let mut facts = ReachabilityFacts {
+        configured: true,
+        connector: Some(ConnectorFacts {
+            ready_connections: Some(0),
+            ..Default::default()
+        }),
+        endpoint: Some(EndpointProbe::Status {
+            status: 502,
+            cloudflare_error: None,
+        }),
+        edge_reachable: Some(false),
+        exit_node: None,
+    };
+    assert!(matches!(
+        classify(&facts, "date".into()),
+        EnvironmentConnectReachability::Unreachable {
+            cause: EnvironmentConnectReachabilityCause::OriginUnreachable,
+            ..
+        }
+    ));
+    facts.connector.as_mut().unwrap().ready_connections = Some(1);
+    facts.endpoint = Some(EndpointProbe::DnsFailed {
+        exists_publicly: Some(true),
+    });
+    assert!(matches!(
+        classify(&facts, "date".into()),
+        EnvironmentConnectReachability::Unreachable {
+            cause: EnvironmentConnectReachabilityCause::DnsFailed,
+            ..
+        }
+    ));
+    facts.endpoint = Some(EndpointProbe::Status {
+        status: 530,
+        cloudflare_error: Some("1016".into()),
+    });
+    assert!(matches!(
+        classify(&facts, "date".into()),
+        EnvironmentConnectReachability::Unreachable {
+            cause: EnvironmentConnectReachabilityCause::UnexpectedResponse,
+            ..
+        }
+    ));
+}

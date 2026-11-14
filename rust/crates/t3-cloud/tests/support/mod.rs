@@ -125,3 +125,41 @@ pub fn remote_error(rejection: t3_cloud::Rejection) -> Error {
         retry_after_ms: None,
     }
 }
+
+#[cfg(feature = "auth")]
+pub async fn auth_at(temp: &tempfile::TempDir, now: i64) -> t3_auth::EnvironmentAuth {
+    let path = temp.path().join("state.sqlite");
+    let db = tokio::task::spawn_blocking(move || t3_persistence::Database::open(path))
+        .await
+        .unwrap()
+        .unwrap();
+    let secrets = t3_auth::ServerSecretStore::open(temp.path().join("secrets"))
+        .await
+        .unwrap();
+    t3_auth::EnvironmentAuth::new(
+        db,
+        secrets,
+        t3_auth::AuthConfig {
+            port: 3773,
+            host: Some("127.0.0.1".into()),
+            environment_id: "env-one".into(),
+            state_dir: temp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+        None,
+        t3_auth::clock::TokioClock::at(now),
+    )
+    .await
+    .unwrap()
+}
+
+#[cfg(feature = "auth")]
+pub async fn issuer() -> (t3_cloud::cloud::AuthCredentialIssuer, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("fixture directory");
+    let auth = auth_at(&temp, NOW).await;
+    let settings = t3_config::settings::SettingsService::new(temp.path().join("settings.json"));
+    (
+        t3_cloud::cloud::AuthCredentialIssuer::new(auth, settings),
+        temp,
+    )
+}

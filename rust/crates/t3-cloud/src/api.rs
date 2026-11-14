@@ -1,14 +1,22 @@
 use crate::{
     Error, Rejection, Result, Secret, SharedClock,
-    cloud::{self, CloudLink, CredentialIssuer, LinkRequestContext, Registration},
+    cloud::CloudLink,
     http::{Http, Sensitive},
+    store::SecretStore,
+};
+#[cfg(feature = "auth")]
+use crate::{
+    cloud::{self, AuthCredentialIssuer, LinkRequestContext, Registration},
     managed::{EndpointStatus, ManagedEndpoint},
     reachability::ConnectReachability,
-    store::{SecretStore, read_text},
+    store::read_text,
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
-use t3_contracts::{auth::AuthEnvironmentScope as Scope, environment_http::*, relay::*};
+use t3_contracts::auth::AuthEnvironmentScope as Scope;
+#[cfg(feature = "auth")]
+use t3_contracts::{environment_http::*, relay::*};
+#[cfg(feature = "auth")]
 use tokio::sync::{Mutex, watch};
 
 pub struct RequestContext {
@@ -83,25 +91,44 @@ impl PeerService {
     }
 }
 
+/// The production mint cannot substitute an issuer that skips host approval.
+/// ```
+/// use std::sync::Arc;
+/// use t3_cloud::{api::CloudServices, cloud::AuthCredentialIssuer};
+/// fn concrete_issuer(services: CloudServices) -> Arc<AuthCredentialIssuer> {
+///     services.issuer
+/// }
+/// ```
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use t3_cloud::api::CloudServices;
+/// struct UnconditionalIssuer;
+/// fn bypass(mut services: CloudServices) {
+///     services.issuer = Arc::new(UnconditionalIssuer);
+/// }
+/// ```
+#[cfg(feature = "auth")]
 pub struct CloudServices {
     pub link: Arc<CloudLink>,
     pub secrets: SecretStore,
     pub runtime: Arc<dyn ManagedEndpoint>,
     pub reachability: Arc<ConnectReachability>,
-    pub issuer: Arc<dyn CredentialIssuer>,
+    pub issuer: Arc<AuthCredentialIssuer>,
     pub origin: RelayManagedEndpointOrigin,
     pub connect_allowed: watch::Receiver<bool>,
 }
+#[cfg(feature = "auth")]
 pub struct CloudService {
     pub link: Arc<CloudLink>,
     secrets: SecretStore,
     runtime: Arc<dyn ManagedEndpoint>,
     reachability: Arc<ConnectReachability>,
-    issuer: Arc<dyn CredentialIssuer>,
+    issuer: Arc<AuthCredentialIssuer>,
     origin: RelayManagedEndpointOrigin,
     allowed: watch::Receiver<bool>,
     mutation: Arc<Mutex<()>>,
 }
+#[cfg(feature = "auth")]
 impl CloudService {
     pub fn new(services: CloudServices) -> Result<Arc<Self>> {
         crate::direct::validate_tunnel_origin(&services.origin)?;

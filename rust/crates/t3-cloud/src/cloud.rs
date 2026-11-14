@@ -6,7 +6,6 @@ use crate::{
     iso,
     store::{SecretStore, consume_replay, read_text},
 };
-use async_trait::async_trait;
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -32,11 +31,7 @@ const CONFIG_NAMES: [&str; 7] = [
     REVOKED,
 ];
 
-/// Issues a proof-bound Connect credential through the host's shared auth service.
-#[async_trait]
-pub trait CredentialIssuer: Send + Sync {
-    async fn issue_cloud_pairing(&self, proof_key_thumbprint: &str) -> Result<IssuedCredential>;
-}
+#[cfg(feature = "auth")]
 #[derive(Debug)]
 pub struct IssuedCredential {
     pub credential: Secret,
@@ -56,11 +51,10 @@ impl AuthCredentialIssuer {
     ) -> Self {
         Self { auth, settings }
     }
-}
-#[cfg(feature = "auth")]
-#[async_trait]
-impl CredentialIssuer for AuthCredentialIssuer {
-    async fn issue_cloud_pairing(&self, proof_key_thumbprint: &str) -> Result<IssuedCredential> {
+    pub async fn issue_cloud_pairing(
+        &self,
+        proof_key_thumbprint: &str,
+    ) -> Result<IssuedCredential> {
         let require_approval = self
             .settings
             .snapshot()
@@ -650,10 +644,11 @@ impl CloudLink {
             proof: crate::text(signed.expose()),
         }))
     }
+    #[cfg(feature = "auth")]
     pub async fn mint(
         &self,
         proof: Secret,
-        issuer: &dyn CredentialIssuer,
+        issuer: &AuthCredentialIssuer,
     ) -> Result<Sensitive<RelayEnvironmentMintResponse>> {
         let _lock = self.state_lock.lock().await;
         let config = self.installed().await?;
@@ -685,9 +680,6 @@ impl CloudLink {
         let issued = issuer
             .issue_cloud_pairing(payload.client_proof_key_thumbprint.0.as_str())
             .await?;
-        if issued.expires_at_ms <= now || issued.expires_at_ms > now.saturating_add(600_000) {
-            return Err(Error::Protocol);
-        }
         let mut response = self.claims(&config.issuer, 120);
         response["exp"] = json!(issued.expires_at_ms.div_euclid(1000));
         response["clientProofKeyThumbprint"] = encode(&payload.client_proof_key_thumbprint)?;

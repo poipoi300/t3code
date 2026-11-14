@@ -1,3 +1,4 @@
+#![cfg(feature = "auth")]
 #![allow(clippy::unwrap_used)]
 mod support;
 use async_trait::async_trait;
@@ -5,13 +6,7 @@ use serde_json::json;
 use std::sync::Arc;
 use support::*;
 use t3_cloud::{
-    Error, Result, Secret,
-    api::*,
-    cloud::{CredentialIssuer, IssuedCredential},
-    http::Sensitive,
-    managed::*,
-    reachability::*,
-    store::Secrets,
+    Error, Result, Secret, api::*, http::Sensitive, managed::*, reachability::*, store::Secrets,
     tunnel::ConnectorFacts,
 };
 use t3_contracts::{auth::AuthEnvironmentScope as Scope, environment_http::*, relay::*};
@@ -69,16 +64,6 @@ impl ReachabilityProbe for Probe {
         panic!("healthy endpoint needs no exit-node probe")
     }
 }
-struct Issuer;
-#[async_trait]
-impl CredentialIssuer for Issuer {
-    async fn issue_cloud_pairing(&self, _: &str) -> Result<IssuedCredential> {
-        Ok(IssuedCredential {
-            credential: Secret::new("marker-pairing"),
-            expires_at_ms: NOW + 120_000,
-        })
-    }
-}
 fn context(scopes: Vec<Scope>) -> RequestContext {
     RequestContext {
         request_url: Secret::new("http://127.0.0.1:3773/api/connect/link-state"),
@@ -92,28 +77,98 @@ async fn service() -> (
     Arc<Runtime>,
     Arc<MemorySecrets>,
     Arc<Relay>,
+    tempfile::TempDir,
+) {
+    service_with_policy(watch::channel(true).1).await
+}
+async fn service_with_policy(
+    connect_allowed: watch::Receiver<bool>,
+) -> (
+    Arc<CloudService>,
+    Arc<Runtime>,
+    Arc<MemorySecrets>,
+    Arc<Relay>,
+    tempfile::TempDir,
 ) {
     let (link, secrets, relay, time, _) = cloud().await;
     let runtime = Arc::new(Runtime {
         changes: Mutex::new(Vec::new()),
         notices: broadcast::channel(10).0,
     });
+    let (issuer, directory) = issuer().await;
     let service = CloudService::new(CloudServices {
         link,
         secrets: secrets.clone(),
         runtime: runtime.clone(),
         reachability: Arc::new(ConnectReachability::new(Arc::new(Probe), time)),
-        issuer: Arc::new(Issuer),
+        issuer: Arc::new(issuer),
         origin: serde_json::from_value(json!({"localHttpHost":"127.0.0.1","localHttpPort":3773}))
             .unwrap(),
-        connect_allowed: watch::channel(true).1,
+        connect_allowed,
     })
     .unwrap();
-    (service, runtime, secrets, relay)
+    (service, runtime, secrets, relay, directory)
+}
+
+#[tokio::test(start_paused = true)]
+async fn mint_policy_refuses_before_spending_proofs_and_observes_live_changes() {
+    let (allowed, receiver) = watch::channel(false);
+    let (service, _, secrets, relay, _directory) = service_with_policy(receiver).await;
+    let signer = t3_cloud::crypto::EnvironmentKey::generate().unwrap();
+    secrets
+        .set(t3_cloud::cloud::MINT_KEY, signer.public_key.as_bytes())
+        .await
+        .unwrap();
+    let proof = signer.sign(t3_cloud::crypto::MINT_REQUEST,&json!({
+        "iss":"https://issuer.test","aud":"t3-env:env-one","sub":"user-one",
+        "iat":NOW/1000,"exp":NOW/1000+120,"jti":"policy-jti","nonce":"policy-nonce",
+        "environmentId":"env-one","scope":["environment:connect"],"clientProofKeyThumbprint":"policy-key","cnf":{"jkt":"policy-key"}
+    })).unwrap();
+    let input = || Sensitive::new(serde_json::from_value(json!({"proof":proof.expose()})).unwrap());
+    assert!(matches!(
+        service.mint_credential(input()).await,
+        Err(Error::Disabled)
+    ));
+    assert!(
+        secrets
+            .get("cloud-mint-jti-policy-jti")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        secrets
+            .get("cloud-mint-nonce-policy-nonce")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .link_state(&context(vec![Scope::RelayRead]))
+            .await
+            .unwrap()
+            .linked
+    );
+    allowed.send_replace(true);
+    assert!(service.mint_credential(input()).await.is_ok());
+    assert!(
+        secrets
+            .get("cloud-mint-jti-policy-jti")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    allowed.send_replace(false);
+    assert!(matches!(
+        service.mint_credential(input()).await,
+        Err(Error::Disabled)
+    ));
+    relay.done().await;
 }
 #[tokio::test]
 async fn cloud_routes_authorize_activate_report_and_unlink_without_disclosing_secrets() {
-    let (service, runtime, secrets, relay) = service().await;
+    let (service, runtime, secrets, relay, _directory) = service().await;
     assert!(service.link_state(&context(vec![])).await.is_err());
     let state = service
         .link_state(&context(vec![Scope::RelayRead]))
@@ -175,7 +230,7 @@ async fn cloud_routes_authorize_activate_report_and_unlink_without_disclosing_se
 }
 #[tokio::test]
 async fn hosted_approval_requires_matching_active_host_and_keeps_peer_links_local() {
-    let (service, _, secrets, _) = service().await;
+    let (service, _, secrets, _, _directory) = service().await;
     let redirect = service
         .approval_redirect(
             "https://env.test",
@@ -220,7 +275,7 @@ async fn hosted_approval_requires_matching_active_host_and_keeps_peer_links_loca
 }
 #[tokio::test]
 async fn publish_only_preferences_do_not_require_or_contact_a_relay() {
-    let (service, _, secrets, relay) = service().await;
+    let (service, _, secrets, relay, _directory) = service().await;
     service.link.unlink().await.unwrap();
     let state = service
         .preferences(
@@ -235,49 +290,4 @@ async fn publish_only_preferences_do_not_require_or_contact_a_relay() {
     assert!(state.publish_agent_activity);
     assert!(secrets.get(t3_cloud::cloud::HOLD).await.unwrap().is_none());
     relay.done().await;
-}
-#[test]
-fn reachability_classification_prioritizes_origin_and_dns_over_a_failed_tcp_probe() {
-    let mut facts = ReachabilityFacts {
-        configured: true,
-        connector: Some(ConnectorFacts {
-            ready_connections: Some(0),
-            ..Default::default()
-        }),
-        endpoint: Some(EndpointProbe::Status {
-            status: 502,
-            cloudflare_error: None,
-        }),
-        edge_reachable: Some(false),
-        exit_node: None,
-    };
-    assert!(matches!(
-        classify(&facts, "date".into()),
-        EnvironmentConnectReachability::Unreachable {
-            cause: EnvironmentConnectReachabilityCause::OriginUnreachable,
-            ..
-        }
-    ));
-    facts.connector.as_mut().unwrap().ready_connections = Some(1);
-    facts.endpoint = Some(EndpointProbe::DnsFailed {
-        exists_publicly: Some(true),
-    });
-    assert!(matches!(
-        classify(&facts, "date".into()),
-        EnvironmentConnectReachability::Unreachable {
-            cause: EnvironmentConnectReachabilityCause::DnsFailed,
-            ..
-        }
-    ));
-    facts.endpoint = Some(EndpointProbe::Status {
-        status: 530,
-        cloudflare_error: Some("1016".into()),
-    });
-    assert!(matches!(
-        classify(&facts, "date".into()),
-        EnvironmentConnectReachability::Unreachable {
-            cause: EnvironmentConnectReachabilityCause::UnexpectedResponse,
-            ..
-        }
-    ));
 }

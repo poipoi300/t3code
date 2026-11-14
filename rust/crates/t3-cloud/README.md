@@ -11,7 +11,7 @@ Connect relay. The deployed Worker is unchanged. This crate does not target
 Transports decode the contracts and build `api::RequestContext` from a verified
 session, then call one method below. `api::reply` supplies no-store response data
 and `HttpFailure::from` maps typed failures without exposing causes or credentials.
-Construct `api::CloudService` with `CloudServices`; native connector ownership is
+Enable the `auth` feature and construct `api::CloudService` with `CloudServices`; native connector ownership is
 `managed::NativeManagedEndpoint`. No dependency on `t3-server` is introduced.
 
 | Route or RPC | Service method | Access / composition |
@@ -23,7 +23,7 @@ Construct `api::CloudService` with `CloudServices`; native connector ownership i
 | POST `/api/connect/unlink` | `CloudService::unlink` | relay:write; stops owned connector and clears trust/preferences |
 | POST `/api/connect/preferences` | `CloudService::preferences` | relay:write; omitted hold preference does not contact relay |
 | POST `/api/t3-connect/health` | `CloudService::health` | signed relay proof, no ordinary client session |
-| POST `/api/t3-connect/mint-credential` | `CloudService::mint_credential` | signed relay proof + auth-backed CredentialIssuer |
+| POST `/api/t3-connect/mint-credential` | `CloudService::mint_credential` | signed relay proof + concrete AuthCredentialIssuer |
 | GET `/oauth/mcp/authorize` hosted decision | `CloudService::approval_redirect` | call only after MCP client/redirect validation; peer clients stay local |
 | guest Connect hostname | `CloudService::state` → tunnelHostname | inject into GuestThreads; guest content/storage are owned by t3-host |
 | `cloud.getRelayClientStatus` | `RelayClient::status` | relay:read |
@@ -72,7 +72,12 @@ duplicate speech or t3-host's `GuestShareContent` here.
   redirects. Its errors omit URLs, headers, bodies and nested transport causes.
 
 Enable `auth` and construct `cloud::AuthCredentialIssuer::new(shared_auth.clone(),
-shared_settings.clone())` for `CloudServices.issuer`. The adapter reads the current
+shared_settings.clone())` and put it in an `Arc` for `CloudServices.issuer`. Both
+`CloudServices` and `CloudService`, as well as `CloudLink::mint`, are available only
+with `auth`. They take the concrete issuer; the injectable `CredentialIssuer` trait
+was removed, including its test implementations. Tests use the same real-auth
+constructor as the host. A compile-pass doc test pins the concrete field type and
+a compile-fail test rejects an unrelated issuer. The adapter reads the current
 `SettingsService::snapshot()` on every mint and calls
 `EnvironmentAuth::issue_connect_credential`, which owns `connect_trust_lock` shared
 with exchange/revoke and finishes mutations after cancellation. Do not construct
@@ -198,9 +203,11 @@ run from `rust/`: `cargo fmt -p t3-cloud`,
 `cargo clippy -p t3-cloud --all-targets --features auth -- -D warnings`, and
 `cargo test -p t3-cloud --features auth`.
 
-Verified this round on Windows: `cargo fmt -p t3-cloud`, all-target Clippy
-with `auth,orchestration` and `-D warnings`, 55 default-feature tests and 57 tests
-with `auth` pass. `cargo check -p t3-cloud --features auth,orchestration` also passes.
+Verified after the re-review follow-up on Windows: `cargo fmt -p t3-cloud`,
+all-target Clippy with both default features and `auth,orchestration` and
+`-D warnings`, 50 default-feature tests, 61 tests with `auth`, and two auth doc
+tests (compile-pass/compile-fail) pass. Connect service/mint tests now require
+`auth`, matching the production API, and use the real issuer instead of stand-ins.
 All cargo commands used `D:\t3code-rust-target\cloud`, two jobs and sccache; no
 wrapper fallback or machine-memory retry was needed. No commits were made.
 The inherited baseline had 38 passing default-feature tests. Earlier regression
@@ -219,6 +226,25 @@ checked before auth issuance. `tests/protocol.rs` rejects independently signed
 wrong-account/environment/audience/scope/clock/key/cnf/type requests before consuming
 replay guards. Rust is stricter on numeric JSON syntax, JWT type spelling,
 critical/b64 headers and filesystem-safe replay IDs as noted above; valid relay
-proofs match. Mint response expiry now follows auth's two/ten-minute answer instead
-of rejecting pending answers at two minutes. No tokens or credentials enter Debug,
+proofs match. Mint response expiry passes auth's answer through without comparing it against the
+earlier relay-proof clock. Auth owns the two/ten-minute issuance lifetimes; replay
+storage and settings/DB work can advance its issue time past proof verification.
+A one-millisecond positive skew first reproduced rejection; separate clocks ahead
+and behind now return the auth expiry and still refuse unapproved consumption. No tokens or credentials enter Debug,
 errors or application logs.
+
+
+## Approval re-review follow-up
+
+The server must depend directly on `t3-cloud` with `features = ["auth"]`
+(and `"orchestration"` for the native peer store). It cannot get Connect mint
+composition from a default-feature dependency. `t3-host` currently imports only
+`t3-cloud::guest` and guest/token primitives: its dependency without `auth` is
+correct for that responsibility. Do not add a second auth service there.
+
+Additional coverage uses real auth, SQLite and synthetic P-256 DPoP signatures:
+unapproved/missing-proof/wrong-key bootstrap is refused, approval permits the
+bound one-use session and remembers the key, then a trusted mint has a two-minute
+expiry. An actual settings I/O failure produces a redacted internal failure and
+no auth grant, and a repaired read resumes approval. Managed policy denial runs
+before replay consumption, remains live when changed, and leaves state readable.

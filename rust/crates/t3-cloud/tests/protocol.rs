@@ -15,6 +15,7 @@ use t3_contracts::relay::*;
 fn health_claims() -> Value {
     json!({"iss":"https://issuer.test","aud":"t3-env:env-one","sub":"user-one","jti":"health-jti","iat":NOW/1000,"exp":NOW/1000+120,"environmentId":"env-one","nonce":"health-nonce","scope":["environment:status"]})
 }
+#[cfg(feature = "auth")]
 fn mint_claims() -> Value {
     let mut v = health_claims();
     v["scope"] = json!(["environment:connect"]);
@@ -22,21 +23,11 @@ fn mint_claims() -> Value {
     v["cnf"] = json!({"jkt":"client-key"});
     v
 }
-struct Issuer;
-#[async_trait]
-impl CredentialIssuer for Issuer {
-    async fn issue_cloud_pairing(&self, thumb: &str) -> Result<IssuedCredential> {
-        assert_eq!(thumb, "client-key");
-        Ok(IssuedCredential {
-            credential: Secret::new("marker-pairing-secret"),
-            expires_at_ms: NOW + 120_000,
-        })
-    }
-}
-
-#[tokio::test]
+#[cfg(feature = "auth")]
+#[tokio::test(start_paused = true)]
 async fn signed_health_and_mint_check_identity_binding_and_consume_both_replay_guards() {
     let (cloud, secrets, _, _, mint) = cloud().await;
+    let (issuer, _auth_directory) = issuer().await;
     let proof = mint.sign(crypto::HEALTH_REQUEST, &health_claims()).unwrap();
     let answer = cloud.health(proof.clone()).await.unwrap();
     let verified: RelayEnvironmentHealthResponseProofPayload = crypto::verify(
@@ -67,7 +58,7 @@ async fn signed_health_and_mint_check_identity_binding_and_consume_both_replay_g
             .is_some()
     );
     let proof = mint.sign(crypto::MINT_REQUEST, &mint_claims()).unwrap();
-    let answer = cloud.mint(proof.clone(), &Issuer).await.unwrap();
+    let answer = cloud.mint(proof.clone(), &issuer).await.unwrap();
     let verified: RelayEnvironmentMintResponseProofPayload = crypto::verify(
         &cloud.signing_key.public_key,
         &Secret::new(&answer.expose().proof.0),
@@ -77,19 +68,21 @@ async fn signed_health_and_mint_check_identity_binding_and_consume_both_replay_g
         NOW / 1000,
     )
     .unwrap();
-    assert_eq!(verified.credential.0, "marker-pairing-secret");
+    assert_eq!(verified.credential, answer.expose().credential);
     assert_eq!(verified.client_proof_key_thumbprint.0, "client-key");
     assert_eq!(verified.exp, NOW / 1000 + 120);
-    assert!(!format!("{answer:?}").contains("marker-pairing-secret"));
+    assert!(!format!("{answer:?}").contains(&answer.expose().credential.0));
     assert!(matches!(
-        cloud.mint(proof, &Issuer).await,
+        cloud.mint(proof, &issuer).await,
         Err(Error::Replay)
     ));
 }
 
-#[tokio::test]
+#[cfg(feature = "auth")]
+#[tokio::test(start_paused = true)]
 async fn rejects_signed_wrong_account_environment_scope_clock_key_and_cnf_without_spending_proof() {
     let (cloud, secrets, _, _, mint) = cloud().await;
+    let (issuer, _auth_directory) = issuer().await;
     for (field, value) in [
         ("iss", json!("https://other.test")),
         ("aud", json!("t3-env:other")),
@@ -112,7 +105,7 @@ async fn rejects_signed_wrong_account_environment_scope_clock_key_and_cnf_withou
         let mut payload = mint_claims();
         payload[field] = value;
         let error = cloud
-            .mint(mint.sign(crypto::MINT_REQUEST, &payload).unwrap(), &Issuer)
+            .mint(mint.sign(crypto::MINT_REQUEST, &payload).unwrap(), &issuer)
             .await
             .err()
             .unwrap();
@@ -133,7 +126,7 @@ async fn rejects_signed_wrong_account_environment_scope_clock_key_and_cnf_withou
                     .unwrap()
                     .sign(crypto::MINT_REQUEST, &mint_claims())
                     .unwrap(),
-                &Issuer
+                &issuer
             )
             .await,
         Err(Error::Proof)
@@ -142,7 +135,7 @@ async fn rejects_signed_wrong_account_environment_scope_clock_key_and_cnf_withou
         cloud
             .mint(
                 mint.sign(crypto::HEALTH_REQUEST, &mint_claims()).unwrap(),
-                &Issuer
+                &issuer
             )
             .await,
         Err(Error::Proof)
@@ -151,7 +144,7 @@ async fn rejects_signed_wrong_account_environment_scope_clock_key_and_cnf_withou
     cloud
         .mint(
             mint.sign(crypto::MINT_REQUEST, &mint_claims()).unwrap(),
-            &Issuer,
+            &issuer,
         )
         .await
         .unwrap();
