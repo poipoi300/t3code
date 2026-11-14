@@ -45,6 +45,18 @@ impl ManagedPolicy {
             source_json,
         })
     }
+    /// A document a platform source supplied, with the JSON it was decoded from.
+    pub(crate) fn from_source(
+        path: impl Into<PathBuf>,
+        document: ManagedPolicyDocument,
+        source_json: Value,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            document: Some(document),
+            source_json: Some(source_json),
+        }
+    }
     pub fn loaded_policy(&self) -> Result<Option<LoadedPolicy>> {
         let Some(document) = &self.document else {
             return Ok(None);

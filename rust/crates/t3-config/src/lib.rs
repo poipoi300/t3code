@@ -8,6 +8,7 @@ mod files;
 pub mod home;
 pub mod keybindings;
 pub mod policy;
+pub mod policy_sources;
 pub mod runtime;
 pub mod secrets;
 pub mod settings;
@@ -24,6 +25,11 @@ pub enum Error {
     },
     #[error("invalid {context}: {detail}")]
     Invalid { context: String, detail: String },
+    /// `ManagedPolicyFileError` for a platform source: the server will not start.
+    #[error(
+        "T3 Code cannot use the managed policy at {path}: {reason}. It will not start until an administrator fixes this."
+    )]
+    ManagedPolicy { path: String, reason: String },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]

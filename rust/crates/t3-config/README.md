@@ -82,6 +82,28 @@ access and ownership. It does not start a server or discover the user's home.
   policy and malformed/unknown properties fail. `loaded_policy` returns the
   12-hex SHA-256 fingerprint of the encoded document, retaining record insertion
   order. Only development builds honor `T3CODE_DEV_MANAGED_POLICY_PATH`.
+- `policy_sources::read_selected_managed_policy` is what the server calls
+  (`readManagedPolicy` in `packages/shared/src/managedPolicyFile.ts`). Sources by platform:
+
+  | Platform | Platform source | Policy file |
+  | --- | --- | --- |
+  | Windows | `HKLM\SOFTWARE\Policies\T3Tools\T3Code`, 64-bit view, HKLM only (no HKCU): a `Policy` REG_SZ holding the JSON document, or the Group Policy template's values plus its `Clients` and `AllowedDrivers` checkbox subkeys | `C:\Program Files\T3Code\policy.json` |
+  | macOS | `/Library/Managed Preferences/com.t3tools.t3code.plist`, converted by `/usr/bin/plutil -convert json` (binary or XML; a `Forced[0].mcx_preference_settings` wrapper is unwrapped; `Payload*` and `_*` keys dropped) | `/Library/Application Support/T3Code/policy.json` |
+  | Linux and others | none | `/etc/t3code/policy.json` |
+
+  Each document goes through the file's strict `policy::decode`. Start is refused when: a
+  platform source and the file both hold a policy; the registry key or profile exists but cannot
+  be checked, opened or enumerated (any Win32 error but "not found"), or plutil fails, exits
+  non-zero or runs past 10 seconds; a registry value is not one the template writes, has the
+  wrong type (only REG_SZ and 4-byte REG_DWORD count; REG_EXPAND_SZ never does), or a DWORD other
+  than 0 or 1; a subkey is not `Clients`/`AllowedDrivers` or nests further; `Policy` sits beside
+  template values or non-empty subkeys; template values set anything without `Organization`; or
+  the document fails decoding. A key that is absent, empty, or holds only Disabled policies is no
+  policy. Development builds also honor `T3CODE_DEV_MANAGED_POLICY_REGISTRY_KEY` (a key below
+  HKCU read in place of the Policies key) and `T3CODE_DEV_MANAGED_PREFERENCES_PATH` (a property
+  list in place of the managed preferences); with either set, the file read beside it is
+  `T3CODE_DEV_MANAGED_POLICY_PATH` when given. With only `T3CODE_DEV_MANAGED_POLICY_PATH`, that
+  file is the only source, as in TypeScript.
 
 ## Resolution precedence
 

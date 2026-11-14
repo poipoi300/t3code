@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadUUID</key>
+	<string>e8c7f49b</string>
+	<key>_manualProfile</key>
+	<true/>
+	<key>limits</key>
+	<dict>
+		<key>maxRuntimeMode</key>
+		<string>auto-accept-edits</string>
+	</dict>
+	<key>organization</key>
+	<string>Acme</string>
+	<key>schemaVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>
