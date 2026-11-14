@@ -1,4 +1,3 @@
-#![cfg(doc)]
 //! FILES-2: headless tests of the file viewer as PNL-HOST mounts it (a Files surface), over the
 //! client's read view. The fakes answer reads and the tree's folder reads only.
 
@@ -19,7 +18,7 @@ use t3_contracts::{assets::AssetResource, project::{ProjectReadFileError, Projec
 use t3_ui::screens::panel::{
     Action, PanelHost, PanelStore, SurfaceContext,
     file_viewer::{FileReadHandle, FileViewerRuntime, FileViewerService, file_preview_panel},
-    files_tree::{FilesRuntime, FilesService},
+    files_tree::FilesRuntime,
 };
 
 pub struct FakeRead(pub FileReadView);

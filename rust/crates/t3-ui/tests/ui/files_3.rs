@@ -1,4 +1,3 @@
-#![cfg(doc)]
 //! FILES-3: the delimited-table and notebook previews, mounted as a Files surface.
 
 use std::rc::Rc;

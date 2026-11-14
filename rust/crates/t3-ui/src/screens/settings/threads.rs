@@ -185,13 +185,13 @@ pub fn threads_settings_panel() -> impl IntoElement {
             .app_class(tw("flex flex-col gap-8"))
             .child(settings_section(
                 "new-projects",
-                t("New projects"),
+                Text::from("New projects"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("add-project-starts-in")
                             .first()
                             .server(&["addProjectBaseDirectory"])
-                            .description(|| t("Leave empty to use \"~/\" when the Add Project browser opens."))
+                            .description(|| Text::from("Leave empty to use \"~/\" when the Add Project browser opens."))
                             .reset(reset(context, "addProjectBaseDirectory", "add project base directory"))
                             .control(move || {
                                 let mixed = move || context.mixed(&["addProjectBaseDirectory"]);
@@ -206,46 +206,46 @@ pub fn threads_settings_panel() -> impl IntoElement {
                     .child(settings_row(
                         SettingsRowProps::searchable("ghq-clone-layout")
                             .server(&["ghqCloneLayout"])
-                            .description(|| t("Clones go to github.com/owner/repo under the folder above, like ghq."))
+                            .description(|| Text::from("Clones go to github.com/owner/repo under the folder above, like ghq."))
                             .reset(reset(context, "ghqCloneLayout", "clone into host folders"))
                             .control(move || bool_switch(context, "ghqCloneLayout", &["ghqCloneLayout"], "Clone into host folders")),
                     )),
             ))
             .child(settings_section(
                 "usage-limits",
-                t("Usage limits"),
+                Text::from("Usage limits"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("auto-resume-limited-threads")
                             .first()
                             .server(&["autoResumeLimitedThreads"])
-                            .description(|| t("Automatically resume threads when their usage limits reset. You can cancel auto-resume in each thread."))
+                            .description(|| Text::from("Automatically resume threads when their usage limits reset. You can cancel auto-resume in each thread."))
                             .control(move || bool_switch(context, "autoResumeLimitedThreads", &["autoResumeLimitedThreads"], "Resume after usage limits")),
                     ))
                     .child(settings_row(
                         SettingsRowProps::searchable("snooze-limited-threads")
                             .server(&["snoozeLimitedThreads"])
-                            .description(|| t("Snooze threads until their usage limits reset. Enable auto-resume to continue the agent after the reset."))
+                            .description(|| Text::from("Snooze threads until their usage limits reset. Enable auto-resume to continue the agent after the reset."))
                             .control(move || bool_switch(context, "snoozeLimitedThreads", &["snoozeLimitedThreads"], "Snooze until limits reset")),
                     )),
             ))
             .child(when(has_server_targets, move || {
                 settings_section(
                     "auto-settle",
-                    t("Auto-settle"),
+                    Text::from("Auto-settle"),
                     view()
                         .child(settings_row(
                             SettingsRowProps::searchable("auto-settle-merged-threads")
                                 .first()
                                 .server(&["sidebarAutoSettleOnMerge"])
-                                .description(|| t("Settle a thread when its pull request merges. Closed pull requests still settle automatically."))
+                                .description(|| Text::from("Settle a thread when its pull request merges. Closed pull requests still settle automatically."))
                                 .reset(reset(context, "sidebarAutoSettleOnMerge", "auto-settle on merge"))
                                 .control(move || bool_switch(context, "sidebarAutoSettleOnMerge", &["sidebarAutoSettleOnMerge"], "Auto-settle merged threads")),
                         ))
                         .child(settings_row(
                             SettingsRowProps::searchable("auto-settle-inactive-threads")
                                 .server(&["sidebarAutoSettleAfterDays"])
-                                .description(|| t("Sidebar threads with no activity for this long settle automatically."))
+                                .description(|| Text::from("Sidebar threads with no activity for this long settle automatically."))
                                 .reset(reset(context, "sidebarAutoSettleAfterDays", "auto-settle"))
                                 .control(move || {
                                     scoped_switch(
@@ -264,7 +264,7 @@ pub fn threads_settings_panel() -> impl IntoElement {
                         .child(when(auto_settle_on, move || {
                             let mut row = SettingsRowProps::searchable("days-before-auto-settle")
                                 .server(&["sidebarAutoSettleAfterDays"])
-                                .description(|| t("Any new activity un-settles a thread automatically."))
+                                .description(|| Text::from("Any new activity un-settles a thread automatically."))
                                 .control(move || auto_settle_days_input(context));
                             // The web passes only the registry title here, not the anchor.
                             row.id = "";
@@ -273,7 +273,7 @@ pub fn threads_settings_panel() -> impl IntoElement {
                         .child(when(move || auto_settle_on() && supports_auto_settlement_scope(), move || {
                             let mut row = SettingsRowProps::searchable("keep-threads-with-pull-requests")
                                 .server(&["sidebarAutoSettleKeepPullRequests"])
-                                .description(|| t("Inactivity does not settle threads with a pull request. Merge and close still do."))
+                                .description(|| Text::from("Inactivity does not settle threads with a pull request. Merge and close still do."))
                                 .control(move || bool_switch(context, "sidebarAutoSettleKeepPullRequests", &["sidebarAutoSettleKeepPullRequests"], "Keep threads with a PR"));
                             row.title = Text::from("Keep threads with a PR");
                             row.id = "";
@@ -283,13 +283,13 @@ pub fn threads_settings_panel() -> impl IntoElement {
             }))
             .child(settings_section(
                 "text-generation",
-                t("Text generation"),
+                Text::from("Text generation"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("text-generation-model")
                             .first()
                             .server(&["textGenerationModelSelection"])
-                            .description(|| t("For thread titles and other generated text. Source control has its own setting. Text generators from Providers also appear here."))
+                            .description(|| Text::from("For thread titles and other generated text. Source control has its own setting. Text generators from Providers also appear here."))
                             .reset(RowReset::new(
                                 "text generation model",
                                 move || has_server_targets() && value(context, "textGenerationModelSelection") != default_unified_settings()["textGenerationModelSelection"],
@@ -314,9 +314,9 @@ pub fn threads_settings_panel() -> impl IntoElement {
                                 .server(&["responseStreamingMode"])
                                 .description(move || {
                                     if context.mixed(&["responseStreamingMode"]) {
-                                        t("The selected targets use different streaming modes.")
+                                        Text::from("The selected targets use different streaming modes.")
                                     } else {
-                                        t(response_streaming_description(value(context, "responseStreamingMode").as_str().unwrap_or("paragraph")))
+                                        Text::from(response_streaming_description(value(context, "responseStreamingMode").as_str().unwrap_or("paragraph")))
                                     }
                                 })
                                 .reset(reset(context, "responseStreamingMode", "response streaming"))

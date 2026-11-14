@@ -183,7 +183,13 @@ struct LinkFake {
 }
 impl NewThreadClient for LinkFake {
     fn watch(&self, _: Target) -> LocalBoxStream<'static, Rc<NewThreadView>> {
-        if self.opened {return futures::stream::once(futures::future::ready(Rc::new(NewThreadView::LinkOpened))).chain(futures::stream::pending()).boxed_local();}
+        if self.opened {
+            return futures::stream::once(futures::future::ready(Rc::new(
+                NewThreadView::LinkOpened,
+            )))
+            .chain(futures::stream::pending())
+            .boxed_local();
+        }
         futures::stream::once(futures::future::ready(Rc::new(NewThreadView::LinkChoice {
             title: Text::content("Source link"),
             message: Text::content("Read before sending"),
@@ -198,8 +204,8 @@ impl NewThreadClient for LinkFake {
     }
     fn retry(&self, target: Target) -> LocalBoxFuture<'static, Result<(), Text>> {
         if self.opened {
-            assert_eq!(target,Target::Link(LINK_QUERY.into()));
-            self.calls.update(|calls|*calls+=1);
+            assert_eq!(target, Target::Link(LINK_QUERY.into()));
+            self.calls.update(|calls| *calls += 1);
             return futures::future::ready(Err(Text::content("Reopen failed"))).boxed_local();
         }
         unused()
@@ -395,13 +401,22 @@ fn an_accepted_link_replaces_its_url_instead_of_trapping_back_navigation() {
 
 #[test]
 fn an_opened_link_exposes_the_source_reopen_action_and_retains_a_failure() {
-    for window in [DESKTOP,PHONE] {
-        let mut app=Headless::start(EngineConfig {
-            ui_sets:t3_ui::registries(),viewport:size(px(window.0),px(window.1)),
-            ..EngineConfig::new(Root::new::<LinkHarness>(||LinkHarnessProps {action:choice_label(LinkAction::ReplaceDraft).into(),disabled:false,success:false,opened:true}))
-        }).expect("opened link harness");
-        app.wait_for("This link is open").expect("opened entry view");
-        app.press("role:button[Open it again]").expect("explicit reopen");
+    for window in [DESKTOP, PHONE] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(window.0), px(window.1)),
+            ..EngineConfig::new(Root::new::<LinkHarness>(|| LinkHarnessProps {
+                action: choice_label(LinkAction::ReplaceDraft).into(),
+                disabled: false,
+                success: false,
+                opened: true,
+            }))
+        })
+        .expect("opened link harness");
+        app.wait_for("This link is open")
+            .expect("opened entry view");
+        app.press("role:button[Open it again]")
+            .expect("explicit reopen");
         app.wait_for("Reopen failed").expect("reopen error");
         assert!(app.screen().shows("Link actions: 1"));
     }

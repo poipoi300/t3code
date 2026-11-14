@@ -11,7 +11,7 @@ use super::shell::{
     RowReset, SettingsContext, SettingsRowProps, settings_page_container, settings_row,
     settings_section, settings_select, use_settings,
 };
-use crate::i18n::t;
+use crate::i18n::Text;
 use crate::ui::switch::{ControlState, Size as SwitchSize, switch};
 
 /// The settings page body; the shell provides the modal, nav and scope.
@@ -62,7 +62,7 @@ fn switch_row(
     switch_label: &'static str,
 ) -> SettingsRowProps {
     SettingsRowProps::searchable(id)
-        .description(move || t(description))
+        .description(move || Text::from(description))
         .reset(reset(context, key, reset_label))
         .control(move || setting_switch(context, key, switch_label))
 }
@@ -82,7 +82,7 @@ fn notification_settings(context: SettingsContext) -> impl IntoElement {
         SettingsRowProps::searchable("thread-notifications")
             .first()
             .description(move || {
-                t(permission_message.get().unwrap_or(
+                Text::from(permission_message.get().unwrap_or(
                     "System alerts when a thread finishes, fails, or needs input or approval. Applies to this device while T3 Code is open.",
                 ))
             })
@@ -172,7 +172,7 @@ pub fn general_settings_panel() -> impl IntoElement {
             .app_class(crate::theme::tw("flex flex-col gap-8"))
             .child(settings_section(
                 "notifications",
-                t("Notifications"),
+                Text::from("Notifications"),
                 view()
                     .child(notification_settings(context))
                     .child(settings_row(switch_row(
@@ -186,12 +186,12 @@ pub fn general_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "sidebar",
-                t("Sidebar"),
+                Text::from("Sidebar"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("project-grouping")
                             .first()
-                            .description(|| t("Combine matching repositories across environments."))
+                            .description(|| Text::from("Combine matching repositories across environments."))
                             .reset(reset(context, "sidebarProjectGroupingMode", "project grouping"))
                             .control(move || {
                                 switch(
@@ -228,7 +228,7 @@ pub fn general_settings_panel() -> impl IntoElement {
                     ))
                     .child(settings_row(
                         SettingsRowProps::searchable("project-order")
-                            .description(|| t("Order of projects in the sidebar project picker and command palette."))
+                            .description(|| Text::from("Order of projects in the sidebar project picker and command palette."))
                             .reset(reset(context, "sidebarProjectSortOrder", "project order"))
                             .control(move || {
                                 settings_select(
@@ -256,7 +256,7 @@ pub fn general_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "confirmations",
-                t("Confirmations"),
+                Text::from("Confirmations"),
                 view()
                     .child(settings_row(
                         switch_row(
@@ -289,7 +289,7 @@ pub fn general_settings_panel() -> impl IntoElement {
                     .child(desktop.then(|| {
                         settings_row(
                             SettingsRowProps::searchable("quit-confirmation")
-                                .description(|| t("Hold mode also quits on two quick presses."))
+                                .description(|| Text::from("Hold mode also quits on two quick presses."))
                                 .reset(reset(context, "confirmQuit", "quit shortcut behavior"))
                                 .control(move || {
                                     settings_select(
@@ -306,12 +306,12 @@ pub fn general_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "display",
-                t("Display"),
+                Text::from("Display"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("language")
                             .first()
-                            .description(|| t("System default follows your browser or OS language."))
+                            .description(|| Text::from("System default follows your browser or OS language."))
                             .reset(reset(context, "language", "language"))
                             .control(move || {
                                 let mut items = vec![(t3_i18n::SYSTEM_LANGUAGE, "System default".to_owned())];
@@ -340,7 +340,7 @@ pub fn general_settings_panel() -> impl IntoElement {
                     ))
                     .child(settings_row(
                         SettingsRowProps::searchable("time-format")
-                            .description(|| t("System default follows your browser or OS clock preference."))
+                            .description(|| Text::from("System default follows your browser or OS clock preference."))
                             .reset(reset(context, "timestampFormat", "time format"))
                             .control(move || {
                                 settings_select(

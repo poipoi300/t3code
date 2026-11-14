@@ -197,8 +197,9 @@ pub fn screen(route: &Route) -> AnyElement {
         Route::Draft(id) => new_thread::screen(Some(id)),
         Route::NewThread => {
             let urls = use_context::<UrlState>().expect("App provides the URL service");
+            let search = computed(move || urls.location.with(|location| location.search.clone()));
             dynamic(move || {
-                let search = urls.location.with(|location| location.search.clone());
+                let search = search.get();
                 untracked(|| new_thread::new_thread_link_route(&search))
             })
             .into_element()

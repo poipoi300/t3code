@@ -182,6 +182,9 @@ pub fn index_draft_landing(target: Target) -> AnyElement {
         }
         let mut changes = match (target.get(), navigation.urls) {
             (Target::Link(search), Some(urls)) => {
+                if urls.location.get_untracked().search != search {
+                    return;
+                }
                 let Some(entry) = urls.entry_identity() else {
                     return;
                 };

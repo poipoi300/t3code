@@ -402,7 +402,7 @@ fn primary_group(
                         .child(dynamic(move || {
                             primary.with(|p| p.as_ref().map(|p| p.icon.clone())).map(|icon| script_icon(icon, "size-4 shrink-0 text-muted-foreground"))
                         }))
-                        .child(text(move || name()).app_class(tw("ml-0 truncate"))),
+                        .child(text(name).app_class(tw("ml-0 truncate"))),
                     move || {
                         if let Some(script) = primary.get_untracked() {
                             run_script(backend, snapshot, script);

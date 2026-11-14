@@ -1,7 +1,8 @@
 //! SET-SHELL: headless tests of the settings shell (navigation, scope, breadcrumb), mounted as the
-//! router mounts it, over a real `ClientRuntime` on the fake platform. The harness is shared by the
+//! router mounts it, over the real client runtime the app boots. The harness is shared by the
 //! other settings test modules.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -11,9 +12,8 @@ use nsh_core::time::Clock;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::ClientStore;
-use t3_client::composition::ClientRuntime;
-use t3_client::testing::FakePlatform;
-use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+use t3_ui::runtime::Rt;
+use t3_ui::runtime::host::Started;
 use t3_ui::screens::settings::shell;
 use t3_ui::state::nav::{Navigator, Route, SettingsPage};
 use t3_ui::theme;
@@ -25,56 +25,72 @@ struct HarnessProps {
     page: usize,
 }
 
+/// `App`'s root as far as settings need it: the real client runtime (`runtime::client::start`,
+/// `Rt::boot`) over a fresh data directory, the navigator, and the production
+/// `settings::shell::screen`. Nothing settings-specific is provided by the test.
 #[component]
 fn Harness(props: HarnessProps) -> impl IntoElement {
     theme::install(&theme::ThemeChoice::default());
     let nav = Navigator::new(Route::Settings(SettingsPage::ALL[props.page]));
     provide_context(nav);
-    let client = ClientRuntime::new(
-        FakePlatform::default(),
-        ClientStore::default(),
-        OrchestrationV2CreationSource::Web,
-        Rc::new(|future| {
-            spawn(future);
-        }),
-    );
-    provide_context(t3_ui::runtime::services::settings::settings(&client));
-    // What the client's record holds, so tests assert on the store and not only the screen.
-    let settings = client.settings();
-    let record = signal(Vec::<String>::new());
-    let read = settings.clone();
-    let probe = move || {
-        let s = read.client_settings();
-        vec![
-            format!("delete={}", s.confirm_thread_delete),
-            format!("language={}", s.language),
-            format!(
-                "send={}",
-                serde_json::to_value(&s.send_shortcut)
-                    .unwrap_or_default()
-                    .as_str()
-                    .unwrap_or_default()
-            ),
-        ]
-    };
-    record.set(probe());
-    let mut changes = settings.changes();
-    spawn(async move {
-        while changes.next().await.is_some() {
-            let _ = record.try_set(probe());
+    let booted = signal(false);
+    let slot: Rc<RefCell<Option<Started>>> = Rc::default();
+    let store = ClientStore::default();
+    {
+        let slot = slot.clone();
+        let store = store.clone();
+        spawn(async move {
+            *slot.borrow_mut() = Some(t3_ui::runtime::client::start(store).await);
+            booted.set(true);
+        });
+    }
+    view().flex_1().child(dynamic(move || {
+        if !booted.get() {
+            return None;
         }
-    });
+        let started = slot.borrow_mut().take()?;
+        Some(untracked(|| booted_root(store.clone(), started)))
+    }))
+}
+
+fn booted_root(store: ClientStore, started: Started) -> AnyElement {
+    let rt = Rt::boot(store, started);
+    let nav = t3_ui::state::nav::navigator();
+    // What the client's record holds, read through the same client the shell uses.
+    let settings = rt.backend().client().map(|client| client.settings());
+    let record = signal(Vec::<String>::new());
+    if let Some(settings) = settings {
+        let read = settings.clone();
+        let probe = move || {
+            let s = read.client_settings();
+            vec![
+                format!("delete={}", s.confirm_thread_delete),
+                format!("language={}", s.language),
+                format!(
+                    "send={}",
+                    serde_json::to_value(&s.send_shortcut)
+                        .unwrap_or_default()
+                        .as_str()
+                        .unwrap_or_default()
+                ),
+            ]
+        };
+        record.set(probe());
+        let mut changes = settings.changes();
+        spawn(async move {
+            while changes.next().await.is_some() {
+                record.set(probe());
+            }
+        });
+    }
+    let line = move |index: usize| {
+        text(move || SharedString::from(record.with(|r| r.get(index).cloned().unwrap_or_default())))
+    };
     view()
         .flex_1()
-        .child(text(move || {
-            SharedString::from(record.with(|r| r.first().cloned().unwrap_or_default()))
-        }))
-        .child(text(move || {
-            SharedString::from(record.with(|r| r.get(1).cloned().unwrap_or_default()))
-        }))
-        .child(text(move || {
-            SharedString::from(record.with(|r| r.get(2).cloned().unwrap_or_default()))
-        }))
+        .child(line(0))
+        .child(line(1))
+        .child(line(2))
         .child(text(move || {
             SharedString::from(match nav.top() {
                 Route::Settings(page) => format!("Route {}", page.slug()),
@@ -85,6 +101,19 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
             Route::Settings(page) => untracked(|| shell::screen(page)),
             _ => view().into_element(),
         }))
+        .into_element()
+}
+
+/// A data directory no other test shares, so each harness starts with no saved settings.
+fn fresh_data_dir() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "t3-ui-settings-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
 }
 
 pub fn start(window: (f32, f32), page: SettingsPage) -> Headless {
@@ -96,6 +125,7 @@ pub fn start(window: (f32, f32), page: SettingsPage) -> Headless {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         clock: Clock::manual(SystemTime::UNIX_EPOCH),
+        data_dir: Some(fresh_data_dir()),
         ..EngineConfig::new(Root::new::<Harness>(move || HarnessProps { page: index }))
     };
     config.environment.idiom = if window == PHONE {
@@ -104,7 +134,8 @@ pub fn start(window: (f32, f32), page: SettingsPage) -> Headless {
         nsh_core::platform::Idiom::Desktop
     };
     let mut app = Headless::start(config).expect("settings harness starts");
-    app.wait_for("delete=true").expect("harness mounted");
+    app.wait_for("delete=true")
+        .expect("the real client booted and read its record");
     app
 }
 

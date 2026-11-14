@@ -9,7 +9,7 @@ use t3_client::{
     platform::Platform,
     services::settings::{
         scope::SettingsScopeSearch,
-        scoped::SettingsPatch,
+        scoped::{ProjectOverrideEntry, SettingsPatch},
         search::SettingsSearchAvailability,
         service::{
             SettingsScopeView, SettingsService as ClientSettings, SettingsUpdateOutcome,
@@ -52,6 +52,14 @@ impl<P: Platform + Clone + 'static> SettingsService for SettingsBinding<P> {
         keys: Vec<&'static str>,
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome> {
         self.0.clear(view, &keys)
+    }
+    fn clear_project_overrides(
+        &self,
+        view: &SettingsScopeView,
+        entries: Vec<ProjectOverrideEntry>,
+        keys: Vec<&'static str>,
+    ) -> LocalBoxFuture<'static, SettingsUpdateOutcome> {
+        self.0.clear_project_overrides(view, &entries, &keys)
     }
     fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str> {
         self.0.last_enabled_grouping_mode()

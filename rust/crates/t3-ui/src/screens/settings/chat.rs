@@ -10,7 +10,7 @@ use super::shell::{
     RowReset, SettingsContext, SettingsRowProps, advanced_settings, settings_page_container,
     settings_row, settings_section, settings_select, use_settings,
 };
-use crate::i18n::{t, tr};
+use crate::i18n::{Text, t, tr};
 use crate::theme::tw;
 use crate::ui::switch::{ControlState, Size as SwitchSize, switch};
 
@@ -121,18 +121,18 @@ pub fn chat_settings_panel() -> impl IntoElement {
             .app_class(tw("flex flex-col gap-8"))
             .child(settings_section(
                 "composer",
-                t("Composer"),
+                Text::from("Composer"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("composer-rich-text")
                             .first()
-                            .description(|| t("Show formatted Markdown as you type."))
+                            .description(|| Text::from("Show formatted Markdown as you type."))
                             .reset(reset(context, "composerRichTextEnabled", "rich text composer"))
                             .control(move || setting_switch(context, "composerRichTextEnabled", "Rich text composer")),
                     ))
                     .child(settings_row(
                         SettingsRowProps::searchable("send-shortcut")
-                            .description(|| t("Choose when Enter sends a prompt or inserts a new line"))
+                            .description(|| Text::from("Choose when Enter sends a prompt or inserts a new line"))
                             .reset(reset(context, "sendShortcut", "send shortcut"))
                             .control(move || {
                                 settings_select(
@@ -154,7 +154,7 @@ pub fn chat_settings_panel() -> impl IntoElement {
                         settings_row(
                             SettingsRowProps::searchable("skills-in-slash-menu")
                                 .first()
-                                .description(|| t("Also include skills in the / command menu. Skills always appear when you type $."))
+                                .description(|| Text::from("Also include skills in the / command menu. Skills always appear when you type $."))
                                 .reset(reset(context, "showSkillsInSlashMenu", "skills in slash menu"))
                                 .control(move || setting_switch(context, "showSkillsInSlashMenu", "Show skills in slash menu")),
                         ),
@@ -162,11 +162,11 @@ pub fn chat_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "follow-ups",
-                t("Follow-ups"),
+                Text::from("Follow-ups"),
                 settings_row(
                     SettingsRowProps::searchable("follow-up-behavior")
                         .first()
-                        .description(move || follow_up_description(&text_value(context, "sendShortcut")))
+                        .description(move || Text::content(follow_up_description(&text_value(context, "sendShortcut"))))
                         .reset(reset(context, "followUpBehavior", "follow-up behavior"))
                         .control(move || {
                             settings_select(
@@ -182,11 +182,11 @@ pub fn chat_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "activity",
-                t("Activity"),
+                Text::from("Activity"),
                 settings_row(
                     SettingsRowProps::searchable("tool-call-visibility")
                         .first()
-                        .description(|| t("Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show."))
+                        .description(|| Text::from("Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show."))
                         .reset(reset(context, "toolCallVisibility", "tool calls in chat"))
                         .control(move || {
                             settings_select(
@@ -202,12 +202,12 @@ pub fn chat_settings_panel() -> impl IntoElement {
             ))
             .child(settings_section(
                 "screen-reader",
-                t("Screen reader"),
+                Text::from("Screen reader"),
                 view()
                     .child(settings_row(
                         SettingsRowProps::searchable("screen-reader-announcements")
                             .first()
-                            .description(|| t("What a screen reader hears from the open thread: a turn starting, needing you, and ending. Status and messages adds what the agent writes before its last message. Everything adds each step."))
+                            .description(|| Text::from("What a screen reader hears from the open thread: a turn starting, needing you, and ending. Status and messages adds what the agent writes before its last message. Everything adds each step."))
                             .reset(reset(context, "screenReaderAnnouncements", "screen reader announcements"))
                             .control(move || {
                                 settings_select(
@@ -222,7 +222,7 @@ pub fn chat_settings_panel() -> impl IntoElement {
                     ))
                     .child(settings_row(
                         SettingsRowProps::searchable("screen-reader-window-title")
-                            .description(|| t("Start the window title with the thread's status, like Needs approval, and its name, so screen readers read them first when you switch apps. Taskbars, shared screens, and time trackers see it too."))
+                            .description(|| Text::from("Start the window title with the thread's status, like Needs approval, and its name, so screen readers read them first when you switch apps. Taskbars, shared screens, and time trackers see it too."))
                             .reset(reset(context, "screenReaderWindowTitle", "screen reader window title"))
                             .control(move || setting_switch(context, "screenReaderWindowTitle", "Screen reader window title")),
                     )),

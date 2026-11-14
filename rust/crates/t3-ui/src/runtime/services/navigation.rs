@@ -150,7 +150,7 @@ impl<P: Platform + Clone + 'static> ui_project::AddProjectClient for AddProjectB
             .map(move |_| {
                 session.publishing().map(|value| {
                     Rc::new(ui_project::PublishingView {
-                        title: Text::client_key("Create private repository"),
+                        title: project_label(&value.title),
                         description: Text::content(value.repository),
                         selected: value.selected.kind,
                         targets: value
@@ -565,5 +565,15 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
                 .map_err(error)
         }
         .boxed_local()
+    }
+}
+
+pub fn palette_search_runtime<P: Platform + Clone + 'static>(
+    service: t3_client::navigation::palette_service::PaletteService<P>,
+    open_file: crate::screens::palette::files::OpenFile,
+) -> crate::screens::palette::files::PaletteSearchRuntime {
+    crate::screens::palette::files::PaletteSearchRuntime {
+        client: Rc::new(service),
+        open_file,
     }
 }

@@ -23,8 +23,8 @@ use t3_client::services::settings::{
         validate_settings_route_search,
     },
     scoped::{
-        ScopedSettingSource, SettingsPatch, SettingsText, is_project_scoped_setting_key,
-        scoped_settings_are_mixed, scoped_settings_source,
+        ProjectOverrideEntry, ScopedSettingSource, SettingsPatch, SettingsText,
+        is_project_scoped_setting_key, scoped_settings_are_mixed, scoped_settings_source,
     },
     search::{
         SettingsSearchAvailability, SettingsSearchItem, SettingsSearchPlatform,
@@ -68,13 +68,19 @@ pub trait SettingsService {
         view: &SettingsScopeView,
         keys: Vec<&'static str>,
     ) -> LocalBoxFuture<'static, SettingsUpdateOutcome>;
+    fn clear_project_overrides(
+        &self,
+        view: &SettingsScopeView,
+        entries: Vec<ProjectOverrideEntry>,
+        keys: Vec<&'static str>,
+    ) -> LocalBoxFuture<'static, SettingsUpdateOutcome>;
     fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str>;
     fn remember_enabled_grouping_mode(&self, mode: &str) -> LocalBoxFuture<'static, ()>;
     fn search_availability(&self) -> SettingsSearchAvailability;
 }
 
-/// Provide one to override the host client (tests); otherwise the shell builds it from
-/// `rt().backend().client()`.
+/// The settings pages' services, built by the shell from `rt().backend().client()` (the only
+/// source: there is no context override).
 #[derive(Clone)]
 pub struct SettingsRuntime(pub Rc<dyn SettingsService>);
 
@@ -83,7 +89,7 @@ pub fn settings_text(text: &SettingsText) -> String {
     let args: Vec<(&str, t3_i18n::Value)> = text
         .args
         .iter()
-        .map(|(name, value)| (*name, t3_i18n::Value::Text(value.clone().into())))
+        .map(|(name, value)| (*name, t3_i18n::Value::Text(value.clone())))
         .collect();
     tr(text.key, &args) // client English key
 }
@@ -334,6 +340,19 @@ impl SettingsContext {
         spawn(async move { show_outcome(&outcome.await) });
     }
 
+    /// `useClearProjectOverrides()(entries, keys)`.
+    pub fn clear_project_overrides(
+        self,
+        entries: Vec<ProjectOverrideEntry>,
+        keys: Vec<&'static str>,
+    ) {
+        let (Some(runtime), Some(view)) = (self.runtime.get(), self.view_untracked()) else {
+            return;
+        };
+        let outcome = runtime.0.clear_project_overrides(&view, entries, keys);
+        spawn(async move { show_outcome(&outcome.await) });
+    }
+
     pub fn last_enabled_grouping_mode(self) -> Option<LocalBoxFuture<'static, &'static str>> {
         self.runtime
             .get()
@@ -417,12 +436,12 @@ pub fn screen(page: SettingsPage) -> AnyElement {
     untracked(|| settings_route_layout(page).into_element())
 }
 
+/// `None` only for the demo backend and an unavailable host, which have no settings store.
 fn host_runtime() -> Option<SettingsRuntime> {
-    use_context::<SettingsRuntime>().or_else(|| {
-        use_context::<crate::runtime::Rt>()
-            .and_then(|rt| rt.backend().client())
-            .map(|client| crate::runtime::services::settings::settings(&client))
-    })
+    crate::runtime::rt()
+        .backend()
+        .client()
+        .map(|client| crate::runtime::services::settings::settings(&client))
 }
 
 /// `SettingsRouteLayout` with `SettingsScopeProvider`.
@@ -629,7 +648,7 @@ fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
     let page = context.page;
     let blocked = computed(move || {
         let view = context.view();
-        let message = if is_device_only_settings_page(page) || page == SettingsPage::Projects {
+        if is_device_only_settings_page(page) || page == SettingsPage::Projects {
             None
         } else {
             match &view {
@@ -642,7 +661,7 @@ fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
                             "Reconnect {label} to change its settings.",
                             &[(
                                 "label",
-                                t3_i18n::Value::Text(scope_label(&view.scope.label).into()),
+                                t3_i18n::Value::Text(scope_label(&view.scope.label)),
                             )],
                         ))
                     }
@@ -650,8 +669,7 @@ fn settings_scope_boundary(context: SettingsContext) -> impl IntoElement {
                 },
                 None => None,
             }
-        };
-        message
+        }
     });
     dynamic(move || match blocked.get() {
         Some(message) => settings_page_container_plain(
@@ -712,7 +730,7 @@ fn restore_defaults(context: SettingsContext, labels: Vec<&'static str>) {
         t("Restore default settings?"),
         tr(
             "This will reset: {labels}.",
-            &[("labels", t3_i18n::Value::Text(list.into()))]
+            &[("labels", t3_i18n::Value::Text(list))]
         )
     );
     let Some(confirm) = crate::ui::confirm::request_confirm_dialog(
@@ -999,7 +1017,7 @@ pub fn settings_page_container(children: impl IntoElement) -> impl IntoElement {
 /// `SettingsSection` (grouped variant) with its `SettingsGroup`.
 pub fn settings_section(
     id: &'static str,
-    title: String,
+    title: Text,
     children: impl IntoElement,
 ) -> impl IntoElement {
     view()
@@ -1010,7 +1028,7 @@ pub fn settings_section(
                 .app_class(tw("flex min-h-7 flex-row items-start justify-between gap-4 px-3 sm:px-4"))
                 .child(
                     view().app_class(tw("flex min-w-0 flex-row items-center gap-1")).child(
-                        text(title)
+                        text(move || title.resolve())
                             .role(AccessibilityRole::Header)
                             .app_class(tw("flex min-h-7 items-center gap-2 text-base font-semibold text-foreground")),
                     ),
@@ -1031,12 +1049,16 @@ pub struct SettingsRowProps {
     /// The search anchor (`searchableSetting(id).id`).
     pub id: &'static str,
     pub title: Text,
-    pub description: Option<Box<dyn Fn() -> String>>,
+    pub description: Option<Box<dyn Fn() -> Text>>,
     /// The reset button and when to show it (`resetAction`).
     pub reset: Option<RowReset>,
     pub control: Option<Box<dyn Fn() -> AnyElement>>,
     pub server_scoped: bool,
     pub setting_keys: &'static [&'static str],
+    /// Dot paths inside a setting an administrator can lock (`managedPaths`).
+    pub managed_paths: &'static [&'static str],
+    /// Why policy turns this row's control off (`managed`), from the contract's denial helpers.
+    pub managed: Option<Text>,
     /// Not the first row of its group: draws the divider (`[&>*+*]:border-t`).
     pub divided: bool,
 }
@@ -1053,10 +1075,12 @@ impl SettingsRowProps {
             control: None,
             server_scoped: false,
             setting_keys: &[],
+            managed_paths: &[],
+            managed: None,
             divided: true,
         }
     }
-    pub fn description(mut self, description: impl Fn() -> String + 'static) -> Self {
+    pub fn description(mut self, description: impl Fn() -> Text + 'static) -> Self {
         self.description = Some(Box::new(description));
         self
     }
@@ -1071,6 +1095,14 @@ impl SettingsRowProps {
     pub fn server(mut self, keys: &'static [&'static str]) -> Self {
         self.server_scoped = true;
         self.setting_keys = keys;
+        self
+    }
+    pub fn managed_paths(mut self, paths: &'static [&'static str]) -> Self {
+        self.managed_paths = paths;
+        self
+    }
+    pub fn managed(mut self, reason: Text) -> Self {
+        self.managed = Some(reason);
         self
     }
     pub fn first(mut self) -> Self {
@@ -1112,8 +1144,25 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
         control,
         server_scoped,
         setting_keys,
+        managed_paths,
+        managed,
         divided,
     } = props;
+    let lockable: Vec<&'static str> = setting_keys.iter().chain(managed_paths).copied().collect();
+    let managed_by = computed(move || {
+        context.view().and_then(|view| {
+            t3_client::services::settings::inheritance::managed_by(&view, &lockable)
+        })
+    });
+    let inheritance = computed(move || {
+        if !server_scoped || setting_keys.is_empty() {
+            return None;
+        }
+        context.view().and_then(|view| {
+            t3_client::services::settings::inheritance::row_inheritance(&view, setting_keys)
+        })
+    });
+    let managed = stored(managed);
     let wide = move || {
         context.content_width.get() >= 512.0
             || context.content_width.get() == 0.0 && window().width.0 >= 640.0
@@ -1142,13 +1191,24 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
             (access, environment_wide, project_scope, source)
         }
     });
+    // An administrator's lock on any target wins over every other reason a control is inert.
     let inert_message = move || {
+        if let Some(reason) = managed.get() {
+            return Some(reason.resolve().to_string());
+        }
+        if let Some(organization) = managed_by.get() {
+            return Some(tr(
+                "Managed by {organization}.",
+                &[("organization", t3_i18n::Value::Text(organization))],
+            ));
+        }
         let (access, environment_wide, _, _) = state.get();
         access.text().map(|text| settings_text(&text)).or_else(|| {
             environment_wide
                 .then(|| t("Environment-wide setting. Select an environment to change it."))
         })
     };
+    let locked = move || managed.with(|m| m.is_some()) || managed_by.with(Option::is_some);
     let reset = reset.map(Rc::new);
     let title_text = title.clone();
     view()
@@ -1179,6 +1239,21 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                         .role(AccessibilityRole::Header)
                                         .app_class(tw("text-sm font-medium text-foreground")),
                                 )
+                                .child(dynamic(move || {
+                                    let inheritance = inheritance.get()?;
+                                    let quiet = inheritance.quiet;
+                                    let can_clear = context.write_access() == SettingsWriteAccess::Writable;
+                                    Some(
+                                        view()
+                                            .app_class(tw(&cn([
+                                                Some("inline-flex h-5 w-5 shrink-0 items-center justify-center"),
+                                                // Values set right here explain nothing new: the marker waits for hover or focus.
+                                                quiet.then_some("opacity-0 hover:opacity-100 focus-within:opacity-100"),
+                                            ])))
+                                            .child(setting_inheritance(context, inheritance, setting_keys, can_clear))
+                                            .into_element(),
+                                    )
+                                }))
                                 .child(
                                     view()
                                         .app_class(tw("inline-flex h-5 w-5 shrink-0 items-center justify-center"))
@@ -1188,7 +1263,7 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                             let title = title.clone();
                                             move || {
                                                 let (access, _, project_scope, source) = state.get();
-                                                if access != SettingsWriteAccess::Writable {
+                                                if access != SettingsWriteAccess::Writable || locked() {
                                                     return None;
                                                 }
                                                 if project_scope && !scoped_keys.is_empty() {
@@ -1222,7 +1297,7 @@ pub fn settings_row(props: SettingsRowProps) -> impl IntoElement {
                                 ),
                         )
                         .child(description.map(|description| {
-                            text(move || description())
+                            text(move || description().resolve())
                                 .app_class(tw("max-w-2xl text-xs leading-normal text-muted-foreground"))
                         })),
                 )
@@ -1273,7 +1348,7 @@ pub fn setting_reset_button(
     let handle = tooltip_create_handle();
     let accessible = tr(
         "Reset {label} to default",
-        &[("label", t3_i18n::Value::Text(label.into()))],
+        &[("label", t3_i18n::Value::Text(label))],
     );
     view()
         .app_class(tw("relative flex shrink-0"))
@@ -1647,5 +1722,290 @@ pub fn advanced_settings(
                 !reduce_motion(),
                 view().app_class(tw("border-t border-border/50")).child(children),
             )),
+    )
+}
+
+fn shown(value: &t3_client::services::settings::inheritance::Shown) -> String {
+    use t3_client::services::settings::inheritance::Shown;
+    match value {
+        Shown::Text(text) => settings_text(text),
+        Shown::Content(content) => content.clone(),
+    }
+}
+
+/// Port of SettingInheritance.tsx: where a row's value comes from, per environment, with the
+/// projects that override it and their reset.
+fn setting_inheritance(
+    context: SettingsContext,
+    inheritance: t3_client::services::settings::inheritance::RowInheritance,
+    keys: &'static [&'static str],
+    can_clear: bool,
+) -> impl IntoElement {
+    use crate::ui::popover::{Padding, PopoverOptions, Size, popover, popover_create_handle};
+    use t3_client::services::settings::inheritance::{InheritanceState, LayerKey};
+    let summary = inheritance
+        .summary
+        .iter()
+        .map(settings_text)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let handle = popover_create_handle();
+    let hint = tooltip_create_handle();
+    let state = inheritance.state;
+    let label = tr(
+        "{summary}. Show where this value comes from",
+        &[("summary", t3_i18n::Value::Text(summary.clone()))],
+    );
+    let trigger = view()
+        .app_class(tw("relative flex shrink-0"))
+        .tooltip(tooltip(hint, TooltipOptions::default(), text(summary)))
+        .child(
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(label)))
+                .on_layout(move |bounds: &Bounds<Points>| handle.measure_anchor(*bounds))
+                .on_press(move || handle.set_open(!handle.is_open()))
+                // UI-BUTTON has no icon-micro size; its 20px ghost-muted look is written here.
+                .app_class(tw("flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring"))
+                .child(icon(Icon::Layers, 12.0, move || match state {
+                    InheritanceState::Overridden => palette().primary,
+                    InheritanceState::Mixed => palette().warning,
+                    _ => palette().muted_foreground,
+                })),
+        );
+    let inheritance = Rc::new(inheritance);
+    popover(
+        handle,
+        PopoverOptions {
+            align: Align::Start,
+            width: Size::Md,
+            padding: Padding::None,
+            ..Default::default()
+        },
+        trigger,
+        move || {
+            let inheritance = inheritance.clone();
+            let multiple = inheritance.multiple_environments;
+            let group_count = inheritance.groups.len();
+            let mut sections = view().app_class(tw("flex flex-col"));
+            for (index, members) in inheritance.groups.iter().enumerate() {
+                let Some(first) = members.first() else {
+                    continue;
+                };
+                let chain = {
+                    let mut list = view()
+                        .role(AccessibilityRole::List)
+                        .app_class(tw("flex flex-col text-sm"));
+                    for layer in &first.layers {
+                        let name = if layer.key == LayerKey::Environment {
+                            t("Environment")
+                        } else {
+                            shown(&layer.label)
+                        };
+                        list = list.child(
+                            view()
+                                .app_class(tw(&cn([
+                                    Some("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 rounded-md px-2 py-1"),
+                                    layer.effective.then_some("bg-foreground/[0.06]"),
+                                ])))
+                                .child(text(name).number_of_lines(1u32).app_class(tw(if layer.effective {
+                                    "min-w-0 truncate font-medium text-foreground"
+                                } else {
+                                    "min-w-0 truncate text-muted-foreground"
+                                })))
+                                .child(
+                                    view()
+                                        .app_class(tw(if layer.effective {
+                                            "flex flex-row items-center gap-1.5 text-foreground"
+                                        } else if layer.set {
+                                            "flex flex-row items-center gap-1.5 text-muted-foreground"
+                                        } else {
+                                            "flex flex-row items-center gap-1.5 text-muted-foreground/60"
+                                        }))
+                                        .child(
+                                            text(shown(&layer.value))
+                                                .number_of_lines(1u32)
+                                                .app_class(tw("max-w-32 truncate")),
+                                        )
+                                        .child(if layer.effective {
+                                            icon(Icon::Check, 14.0, move || palette().primary).into_element()
+                                        } else {
+                                            view().app_class(tw("size-3.5 shrink-0")).into_element()
+                                        }),
+                                ),
+                        );
+                    }
+                    list
+                };
+                let mut section = view().app_class(tw(&cn([
+                    Some("px-3 py-2.5"),
+                    (index > 0).then_some("border-t border-border/60"),
+                ])));
+                if !multiple {
+                    section = section.child(
+                        text(first.target_label.clone())
+                            .role(AccessibilityRole::Header)
+                            .number_of_lines(1u32)
+                            .app_class(tw("pb-1.5 text-xs font-medium text-muted-foreground")),
+                    );
+                }
+                if multiple && group_count > 1 {
+                    let winning = first.winning();
+                    let value = winning.map(|l| shown(&l.value)).unwrap_or_default();
+                    let layer = winning
+                        .map(|l| {
+                            if l.key == LayerKey::Environment {
+                                t("Environment")
+                            } else {
+                                shown(&l.label)
+                            }
+                        })
+                        .unwrap_or_default();
+                    let fold = crate::ui::collapsible::CollapsibleHandle::new(false);
+                    let mut members_list = view().app_class(tw(
+                        "flex min-w-0 flex-col gap-0.5 text-xs text-muted-foreground",
+                    ));
+                    for member in members {
+                        members_list = members_list.child(
+                            text(member.label.clone())
+                                .number_of_lines(1u32)
+                                .app_class(tw("truncate")),
+                        );
+                    }
+                    section = section
+                        .child(crate::ui::collapsible::collapsible_trigger(
+                            fold,
+                            Text::content(value.clone()),
+                            view()
+                                .app_class(tw("flex w-full min-w-0 flex-col"))
+                                .child(
+                                    view()
+                                        .app_class(tw("flex min-w-0 flex-row items-center gap-2"))
+                                        .child(text(value).number_of_lines(1u32).app_class(tw(
+                                            "min-w-0 flex-1 truncate text-sm text-foreground",
+                                        )))
+                                        .child(
+                                            text(layer)
+                                                .app_class(tw("text-xs text-muted-foreground")),
+                                        )
+                                        .child(icon_with_class(
+                                            Icon::ChevronRight,
+                                            "size-3 shrink-0 text-muted-foreground",
+                                        )),
+                                )
+                                .child(members_list),
+                            "w-full justify-start rounded-md px-2 py-1.5 text-left hover:bg-accent",
+                        ))
+                        .child(crate::ui::collapsible::collapsible_panel(
+                            fold,
+                            !reduce_motion(),
+                            view().app_class(tw("pt-1.5")).child(chain),
+                        ));
+                } else {
+                    section = section.child(chain).child(multiple.then(|| {
+                        text(t("Same on all machines"))
+                            .app_class(tw("px-2 pt-1.5 text-xs text-muted-foreground"))
+                    }));
+                }
+                let overriding: Vec<_> = inheritance
+                    .overriding
+                    .iter()
+                    .filter(|p| {
+                        members
+                            .iter()
+                            .any(|m| m.environment_id == p.entry.environment_id.0)
+                    })
+                    .cloned()
+                    .collect();
+                if !overriding.is_empty() {
+                    let entries: Vec<_> = overriding.iter().map(|p| p.entry.clone()).collect();
+                    let scoped: Vec<&'static str> = keys
+                        .iter()
+                        .copied()
+                        .filter(|k| is_project_scoped_setting_key(k))
+                        .collect();
+                    let mut projects = view()
+                        .role(AccessibilityRole::List)
+                        .app_class(tw("mt-0.5 flex flex-col text-sm"));
+                    for project in overriding.iter().cloned() {
+                        let value = members
+                            .iter()
+                            .flat_map(|m| m.override_values.iter())
+                            .find(|(id, _)| *id == project.entry.project_id.0)
+                            .map(|(_, v)| shown(v))
+                            .unwrap_or_default();
+                        let machine = if multiple {
+                            members
+                                .iter()
+                                .find(|m| m.environment_id == project.entry.environment_id.0)
+                                .map(|m| m.machine_label.clone())
+                        } else {
+                            None
+                        };
+                        let open = project.open.clone();
+                        projects = projects.child(
+                            view()
+                                .app_class(tw("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 px-2 py-1"))
+                                .child(
+                                    view()
+                                        .app_class(tw("flex min-w-0 flex-col items-start"))
+                                        .child(
+                                            nsh_base::button()
+                                                .accessibility_label(Some(SharedString::from(project.label.clone())))
+                                                .on_press(move || {
+                                                    handle.set_open(false);
+                                                    context.select_scope(open.clone());
+                                                })
+                                                .app_class(tw("min-w-0 max-w-full text-left font-medium text-foreground underline-offset-4 hover:underline"))
+                                                .child(
+                                                    text(project.label.clone())
+                                                        .number_of_lines(1u32)
+                                                        .app_class(tw("truncate")),
+                                                ),
+                                        )
+                                        .child(machine.map(|m| {
+                                            text(m)
+                                                .number_of_lines(1u32)
+                                                .app_class(tw("max-w-full truncate text-xs text-muted-foreground"))
+                                        })),
+                                )
+                                .child(
+                                    text(value)
+                                        .number_of_lines(1u32)
+                                        .app_class(tw("max-w-32 truncate text-muted-foreground")),
+                                ),
+                        );
+                    }
+                    let count = entries.len();
+                    let reset_label = if count == 1 {
+                        t("Reset it")
+                    } else {
+                        t("Reset all")
+                    };
+                    section = section.child(
+                        view()
+                            .app_class(tw("mt-2 border-t border-border/60 pt-2"))
+                            .child(
+                                view()
+                                    .app_class(tw("flex flex-row items-center justify-between gap-3 px-2 text-xs text-muted-foreground"))
+                                    .child(text(t("Overridden by")))
+                                    .child(can_clear.then(|| {
+                                        let entries = entries.clone();
+                                        let scoped = scoped.clone();
+                                        nsh_base::button()
+                                            .accessibility_label(Some(SharedString::from(reset_label.clone())))
+                                            .on_press(move || {
+                                                context.clear_project_overrides(entries.clone(), scoped.clone())
+                                            })
+                                            .app_class(tw("text-xs font-medium text-foreground underline-offset-4 hover:underline"))
+                                            .child(text(reset_label.clone()))
+                                    })),
+                            )
+                            .child(projects),
+                    );
+                }
+                sections = sections.child(section);
+            }
+            sections.into_element()
+        },
     )
 }

@@ -16,7 +16,7 @@ use t3_contracts::orchestration_v2::{
     OrchestrationV2CreationSource, OrchestrationV2ShellStreamItem,
 };
 use t3_ui::runtime::services::terminal::TerminalServices;
-use t3_ui::screens::terminal::drawer::thread_terminal_drawer;
+use t3_ui::screens::terminal::drawer::terminal_registration;
 use t3_ui::theme;
 
 use crate::support::{DESKTOP, PHONE};
@@ -68,17 +68,21 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
     if props.open {
         services.0.set_open(&key, true);
     }
-    let toggle = (services.clone(), key.clone());
+    // The production builder: the header's control and the workspace's drawer slot both come
+    // from it (the panel host mounts it; `ui-mounts-notes.md` has the line).
+    let registration = terminal_registration(services, key.clone());
+    let control = registration.control.clone();
+    let available = control.available;
     view()
         .size_full()
         .child(
             nsh_base::button()
                 .accessibility_label(Some(SharedString::from("Toggle terminal")))
-                // The chord's action (`terminal.toggle`); the shell installs the key itself.
-                .on_press(move || toggle.0.0.toggle(&toggle.1))
+                .on_press(move || (control.on_toggle)())
                 .child(text("Toggle terminal")),
         )
-        .child(thread_terminal_drawer(services, key))
+        .child(text(move || format!("Available: {}", available.get())))
+        .child((registration.render)(key))
 }
 
 fn start(window: (f32, f32), thread: &str, open: bool) -> Headless {
@@ -116,6 +120,8 @@ fn a_disconnected_thread_shows_the_empty_drawer_with_new_terminal_disabled() {
             app.screen()
                 .shows("No terminal sessions for this thread yet.")
         );
+        // The header's toggle is unavailable without read or operate access.
+        assert!(app.screen().shows("Available: false"));
     }
 }
 
