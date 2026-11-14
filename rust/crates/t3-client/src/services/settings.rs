@@ -4,6 +4,7 @@ pub mod scoped;
 pub mod search;
 mod search_items;
 pub mod inheritance;
+pub mod models;
 pub mod panels;
 pub mod service;
 

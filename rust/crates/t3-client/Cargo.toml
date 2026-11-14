@@ -27,3 +27,7 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 
 [lints]
 workspace = true
+
+[features]
+# A connectable fake environment for other crates' tests (`testing::environment`); dev-dependency use only.
+testing = []

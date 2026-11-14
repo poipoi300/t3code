@@ -331,7 +331,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     }
 
     pub fn palette(&self) -> crate::navigation::palette_service::PaletteService<P> {
-        crate::navigation::palette_service::PaletteService::new(self.clone(),self.inner.platform.clone())
+        crate::navigation::palette_service::PaletteService::new(
+            self.clone(),
+            self.inner.platform.clone(),
+        )
     }
 
     pub fn add_project(&self) -> crate::navigation::project_flow::AddProjectSession<P> {

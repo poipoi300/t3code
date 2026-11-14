@@ -172,7 +172,10 @@ fn match_at(text: &str, at: usize) -> Option<(usize, Found)> {
         let start = at + 2;
         let mut end = start + scheme;
         let mut units = 0;
-        while let Some(ch) = text[end..].chars().next() {
+        loop {
+            let Some(ch) = text[end..].chars().next() else {
+                break;
+            };
             if ch == '(' {
                 let close = text[end + 1..]
                     .char_indices()
@@ -224,8 +227,16 @@ fn trim_punctuation(link: &str) -> &str {
 
 /// The trailing run of `*` or `_` (at most three), as `(\*{1,3}|_{1,3})$` finds it.
 fn trailing_run(link: &str) -> Option<&str> {
-    let last = link.chars().next_back().filter(|ch| matches!(ch, '*' | '_'))?;
-    let count = link.chars().rev().take_while(|ch| *ch == last).count().min(3);
+    let last = link
+        .chars()
+        .next_back()
+        .filter(|ch| matches!(ch, '*' | '_'))?;
+    let count = link
+        .chars()
+        .rev()
+        .take_while(|ch| *ch == last)
+        .count()
+        .min(3);
     Some(&link[link.len() - count..])
 }
 
@@ -503,13 +514,22 @@ mod tests {
                 "Sign in at https://a.dev/login?state=abc(def).",
                 Some("https://a.dev/login?state=abc(def)"),
             ),
-            ("(Sign in at https://a.dev/login.)", Some("https://a.dev/login")),
-            ("Open **https://a.dev/x?s=1** and sign in.", Some("https://a.dev/x?s=1")),
+            (
+                "(Sign in at https://a.dev/login.)",
+                Some("https://a.dev/login"),
+            ),
+            (
+                "Open **https://a.dev/x?s=1** and sign in.",
+                Some("https://a.dev/x?s=1"),
+            ),
             (
                 "Open https://a.dev/x?state=u7o_ and sign in.",
                 Some("https://a.dev/x?state=u7o_"),
             ),
-            ("**Sign in at https://a.dev/device**", Some("https://a.dev/device")),
+            (
+                "**Sign in at https://a.dev/device**",
+                Some("https://a.dev/device"),
+            ),
             ("_Open https://a.dev/device_.", Some("https://a.dev/device")),
             (
                 "_https://a.dev/x?state=u7o_&client_id=cli_",
@@ -519,25 +539,40 @@ mod tests {
                 "Use client_id acme at https://a.dev/x?state=u7o_",
                 Some("https://a.dev/x?state=u7o_"),
             ),
-            ("_Sign in_ at https://a.dev/x?state=u7o_", Some("https://a.dev/x?state=u7o_")),
+            (
+                "_Sign in_ at https://a.dev/x?state=u7o_",
+                Some("https://a.dev/x?state=u7o_"),
+            ),
             (
                 "_Required_: Open https://a.dev/x?state=u7o_",
                 Some("https://a.dev/x?state=u7o_"),
             ),
             ("(**https://a.dev/login**)", Some("https://a.dev/login")),
-            ("Open ***https://a.dev/device***", Some("https://a.dev/device")),
-            ("Open **_https://a.dev/device_**", Some("https://a.dev/device")),
+            (
+                "Open ***https://a.dev/device***",
+                Some("https://a.dev/device"),
+            ),
+            (
+                "Open **_https://a.dev/device_**",
+                Some("https://a.dev/device"),
+            ),
             (
                 "Open [https://a.dev/x?s=u7o_](https://a.dev/x?s=u7o_) and sign in.",
                 Some("https://a.dev/x?s=u7o_"),
             ),
-            ("Open `https://a.dev/x?s=1.` and sign in.", Some("https://a.dev/x?s=1.")),
+            (
+                "Open `https://a.dev/x?s=1.` and sign in.",
+                Some("https://a.dev/x?s=1."),
+            ),
             (
                 "Open https://a.dev/x?s=1, then if needed https://a.dev/x?s=1 again.",
                 Some("https://a.dev/x?s=1"),
             ),
             ("Open https://a.dev or https://b.dev.", None),
-            ("Open https://a.dev (also written https://a.dev/).", Some("https://a.dev/")),
+            (
+                "Open https://a.dev (also written https://a.dev/).",
+                Some("https://a.dev/"),
+            ),
             ("Paste the code the CLI printed.", None),
         ] {
             assert_eq!(
@@ -570,7 +605,10 @@ mod tests {
         let other = RpcCallError::Rejected(vec![serde_json::json!({
             "_tag": "SchemaError", "message": "Expected string, got \"whsec_1\""
         })]);
-        assert_eq!(secret_request_failure_message(&other), SECRET_REQUEST_FAILURE);
+        assert_eq!(
+            secret_request_failure_message(&other),
+            SECRET_REQUEST_FAILURE
+        );
         assert_eq!(
             secret_request_failure_message(&RpcCallError::Unknown),
             SECRET_REQUEST_FAILURE

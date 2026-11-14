@@ -21,6 +21,9 @@ fn settings_runtime(
     let mut h = fake_server::Harness::new("env");
     h.server().state.borrow_mut().permissions =
         Some(permissions.iter().map(|p| (*p).to_owned()).collect());
+    // The settings pages also list text generator models.
+    h.server().state.borrow_mut().extra_methods =
+        vec![("server.listTextGeneratorModels", t3_rpc::CallKind::Unary)];
     let mut config = fake_server::config("env");
     let mut base = serde_json::to_value(t3_contracts::settings::ServerSettings::default()).unwrap();
     base.as_object_mut()
@@ -256,5 +259,40 @@ fn the_last_enabled_grouping_mode_is_remembered() {
     assert_eq!(
         h.run(settings.last_enabled_grouping_mode()),
         "repository_path"
+    );
+}
+
+#[test]
+fn text_generator_models_load_into_the_picker_targets() {
+    let (mut h, runtime) = settings_runtime(
+        &["orchestration:read", "settings:write", "providers:manage"],
+        json!({"textGenerators": {"work": {"kind": "anthropic", "baseUrl": "https://api.anthropic.com/v1", "apiKey": "", "enabled": true}}}),
+    );
+    h.server()
+        .state
+        .borrow_mut()
+        .rpc_script
+        .entry("server.listTextGeneratorModels".into())
+        .or_default()
+        .push_back(Ok(json!({"models": [{"id": "claude-small", "name": "Claude Small"}]})));
+    let settings = runtime.settings();
+    let mut changes = settings.changes();
+    let view = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
+    let loading = settings.text_generation_targets(&view);
+    let generator = loading
+        .providers
+        .iter()
+        .find(|p| p.instance_id.0 == "work")
+        .expect("the generator stands in as a provider");
+    assert!(generator.models.is_empty(), "its list is still loading");
+    h.settle();
+    assert!(changes.next().now_or_never().is_some(), "the list's arrival is a change");
+    let loaded = settings.text_generation_targets(&view);
+    let generator = loaded.providers.iter().find(|p| p.instance_id.0 == "work").expect("generator");
+    assert_eq!(generator.models[0].slug.0, "claude-small");
+    assert_eq!(
+        h.server().state.borrow().rpc_calls.iter().filter(|(tag, _)| tag == "server.listTextGeneratorModels").count(),
+        1,
+        "the list is fetched once and then read from the cache"
     );
 }

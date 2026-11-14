@@ -131,6 +131,8 @@ pub struct SettingsUpdateOutcome {
 #[derive(Default)]
 struct SettingsState {
     lanes: RefCell<BTreeMap<EnvironmentId, LocalLimiter>>,
+    generators: Rc<super::models::GeneratorLists>,
+    listeners: Rc<RefCell<Vec<futures::channel::mpsc::UnboundedSender<()>>>>,
 }
 
 /// Reached through [`ClientRuntime::settings`].
@@ -138,6 +140,7 @@ struct SettingsState {
 pub struct SettingsService<P: Platform + Clone + 'static> {
     runtime: ClientRuntime<P>,
     platform: Rc<P>,
+    spawn: crate::composition::Spawner,
     state: Rc<SettingsState>,
 }
 
@@ -158,12 +161,35 @@ fn grouping_mode(mode: &SidebarProjectGroupingMode) -> GroupingMode {
 }
 
 impl<P: Platform + Clone + 'static> SettingsService<P> {
-    pub fn new(runtime: ClientRuntime<P>, platform: Rc<P>) -> Self {
+    pub fn new(runtime: ClientRuntime<P>, platform: Rc<P>, spawn: crate::composition::Spawner) -> Self {
         Self {
             runtime,
             platform,
+            spawn,
             state: Rc::default(),
         }
+    }
+
+    pub(super) fn generator_lists(&self) -> Rc<super::models::GeneratorLists> {
+        self.state.generators.clone()
+    }
+
+    /// Tells every `changes()` subscriber that a read may answer differently.
+    pub(super) fn notifier(&self) -> impl Fn() + 'static {
+        let listeners = self.state.listeners.clone();
+        move || {
+            listeners
+                .borrow_mut()
+                .retain(|listener| listener.unbounded_send(()).is_ok());
+        }
+    }
+
+    pub(super) fn spawn(&self, future: LocalBoxFuture<'static, ()>) {
+        (self.spawn)(future);
+    }
+
+    pub(super) fn session_for(&self, environment: &EnvironmentId) -> Option<crate::rpc::SessionEndpoint> {
+        self.session(environment)
     }
 
     fn grouping_key() -> StorageKey {
@@ -213,7 +239,10 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
     /// Thread streams are not read here, so their changes are skipped.
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {
         use crate::store::Scope;
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        self.state.listeners.borrow_mut().push(sender);
         futures::stream::select_all(vec![
+            receiver.boxed_local(),
             self.runtime.changes(),
             self.runtime
                 .store()

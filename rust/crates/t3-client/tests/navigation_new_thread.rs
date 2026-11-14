@@ -1401,12 +1401,27 @@ fn palette_catalogue_uses_scoped_projects_and_rechecks_action_availability() {
         h.run(async move { service.activate(&item).await }),
         Err(ClientError::Cancelled)
     ));
+    let drafts = c.composer_drafts();
+    let loading = drafts.clone();
+    h.run(async move { loading.load().await }).unwrap();
+    drafts
+        .update(|doc| {
+            doc["draftsByThreadKey"]["env:t1"]["interactionMode"] = json!("plan");
+            Ok(())
+        })
+        .unwrap();
     let service = palette.clone();
     let project = palette.catalogue().projects[0].clone();
-    assert!(matches!(
-        h.run(async move { service.activate(&project).await }),
-        Ok(Action::Navigate(Route::Draft(_)))
-    ));
+    let Action::Navigate(Route::Draft(id)) = h
+        .run(async move { service.activate(&project).await })
+        .unwrap()
+    else {
+        panic!("project opens a draft");
+    };
+    assert_eq!(
+        drafts.document().borrow()["draftThreadsByThreadKey"][&id]["interactionMode"],
+        "plan"
+    );
     let usage = palette.filter(">usage", None, &[]);
     assert!(
         usage
@@ -1524,6 +1539,39 @@ fn palette_search_debounces_queries_and_revocation_clears_results() {
         }
     });
     assert!(denied.entries.is_empty());
+    c.client(&environment("env"))
+        .unwrap()
+        .session()
+        .unwrap()
+        .update_grants(t3_client::permissions::SessionGrants {
+            valid: true,
+            scopes: ["orchestration:read".into(), "filesystem:read".into()].into(),
+        });
+    let previous = h.server().state.borrow().extra_rpc.clone().unwrap();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        if request.tag != "projects.searchEntries" {
+            return previous(request);
+        }
+        Some(t3_rpc::HandlerOutput::Unary(
+            async { t3_rpc::Exit::die("Unknown request tag: projects.searchEntries") }
+                .boxed_local(),
+        ))
+    }));
+    let mut missing = palette.files(target, "not-served".into());
+    let (done, ready) = futures::channel::oneshot::channel();
+    h.spawn(async move {
+        while let Some(view) = missing.next().await {
+            if !view.pending {
+                done.send(view).unwrap();
+                break;
+            }
+        }
+    });
+    h.settle();
+    h.advance(250);
+    let failure = h.run(async move { ready.await.unwrap() });
+    assert!(failure.entries.is_empty());
+    assert!(failure.error.as_deref().unwrap().contains("does not serve"));
 }
 
 #[test]
@@ -1572,5 +1620,26 @@ fn palette_message_search_uses_cjk_token_policy_and_server_snippets() {
             .unwrap()
             .1["query"],
         "漢字"
+    );
+    let previous = h.server().state.borrow().extra_rpc.clone().unwrap();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        if request.tag != "orchestration.searchThreads" {
+            return previous(request);
+        }
+        Some(t3_rpc::HandlerOutput::Unary(
+            async { t3_rpc::Exit::die("Unknown request tag: orchestration.searchThreads") }
+                .boxed_local(),
+        ))
+    }));
+    let (done, ready) = futures::channel::oneshot::channel();
+    h.spawn(async move {
+        done.send(palette.message_matches("漢字").await).unwrap();
+    });
+    h.settle();
+    h.advance(250);
+    assert!(
+        h.run(async move { ready.await.unwrap() })
+            .unwrap()
+            .is_empty()
     );
 }

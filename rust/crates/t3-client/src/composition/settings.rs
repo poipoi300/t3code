@@ -6,6 +6,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         crate::services::settings::service::SettingsService::new(
             self.clone(),
             Rc::new(self.inner.platform.clone()),
+            self.inner.spawn.clone(),
         )
     }
 }

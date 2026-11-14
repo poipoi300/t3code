@@ -530,7 +530,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             title,
             label.as_deref(),
             &Default::default(),
-            &|date| crate::time::epoch_ms(date).map(|d| d as i64),
+            &crate::time::epoch_ms,
         )
     }
     pub fn filter(&self, query: &str, active: Option<&[Group]>, messages: &[Item]) -> Vec<Group> {
@@ -652,10 +652,16 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                     .ok_or(ClientError::Cancelled)?;
                 return Ok(Action::Navigate(Route::ProjectLink(group.project_key)));
             }
+            let origin = match &*self.route.borrow() {
+                Route::Draft(id) => Some(id.clone()),
+                _ => self
+                    .key()
+                    .map(|key| self.runtime.composer_drafts().thread_draft_key(&key)),
+            };
             let id = self
                 .runtime
                 .new_threads()
-                .open_project(key.clone(), None, None)
+                .open_project(key.clone(), origin.as_deref(), None)
                 .await?;
             return Ok(Action::Navigate(Route::Draft(id)));
         }

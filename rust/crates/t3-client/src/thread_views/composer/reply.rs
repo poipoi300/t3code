@@ -199,7 +199,9 @@ pub fn reply_to<P: Platform + Clone + 'static>(
     let draft_key = drafts.thread_draft_key(key);
     let document = drafts.document();
     let document = document.borrow();
-    let raw = document["draftsByThreadKey"].get(&draft_key)?.get("replyTo")?;
+    let raw = document["draftsByThreadKey"]
+        .get(&draft_key)?
+        .get("replyTo")?;
     serde_json::from_value(raw.clone()).ok()
 }
 

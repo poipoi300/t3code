@@ -6,6 +6,7 @@ pub mod drafts;
 pub mod embedded_content;
 pub mod entities;
 pub mod languages;
+pub mod link_request;
 pub mod lists;
 pub mod messages_timeline;
 pub mod outbox;

@@ -39,12 +39,10 @@ pub fn model_mention_keys(view: &ComposerModelsView) -> BTreeSet<(String, String
     view.providers
         .iter()
         .flat_map(|provider| {
-            provider.options.iter().map(move |option| {
-                (
-                    provider.snapshot.instance_id.0.clone(),
-                    option.slug.clone(),
-                )
-            })
+            provider
+                .options
+                .iter()
+                .map(move |option| (provider.snapshot.instance_id.0.clone(), option.slug.clone()))
         })
         .collect()
 }

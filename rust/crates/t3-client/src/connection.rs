@@ -1207,7 +1207,10 @@ pub fn pairing_link(link: &str) -> Option<PairingInput> {
             .map(|(_, value)| value.trim().to_owned())
             .filter(|value| !value.is_empty())?
     } else if matches!(url.scheme(), "http" | "https") {
-        let token = |text: &str| url::form_urlencoded::parse(text.as_bytes()).any(|(key, value)| key == "token" && !value.is_empty());
+        let token = |text: &str| {
+            url::form_urlencoded::parse(text.as_bytes())
+                .any(|(key, value)| key == "token" && !value.is_empty())
+        };
         if !url.fragment().is_some_and(token) && !url.query().is_some_and(token) {
             return None;
         }
