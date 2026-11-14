@@ -48,8 +48,7 @@ fn original_live_input_rules_and_code_pair_precedence_match() {
     for (index, case) in cases.into_iter().enumerate() {
         let mut doc = json!({"type":"doc","content":[{"type":case["block"]}]});
         if case["block"] == "codeBlock" {
-            doc["content"][0]["attrs"] = json!({"language":"","fence":"```","close":"
-```"});
+            doc["content"][0]["attrs"] = json!({"language":"","fence":"```","close":"\n```"});
         }
         let mut marks = match case["mark"].as_str() {
             Some(mark @ ("bold" | "code")) => vec![json!({ "type": mark })],

@@ -13,7 +13,11 @@ use crate::{
     },
     environment::EnvironmentRegistry,
     platform::{NetworkStatus, Platform},
-    rpc::SessionEndpoint,
+    rpc::{RpcMethod, SessionEndpoint},
+    services::{
+        resources::{Resource, ResourcePolicy},
+        sessions::{QueryConnection, QueryConnectionPhase, ServiceSession, drive_query},
+    },
     store::Scope,
     thread_views::composer::send::SendService,
     types::{EnvironmentId, Generation, ThreadKey},
@@ -70,6 +74,8 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Open threads: how many opens each has, and its lease once its environment is connected.
     threads: RefCell<BTreeMap<ThreadKey, (usize, Option<ThreadLease>)>>,
     listeners: RefCell<Vec<mpsc::UnboundedSender<()>>>,
+    /// Mounted queries by identity, so every reader of one query shares one driver.
+    queries: RefCell<BTreeMap<String, std::rc::Weak<dyn std::any::Any>>>,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
@@ -119,6 +125,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 environments: RefCell::new(Vec::new()),
                 threads: RefCell::new(BTreeMap::new()),
                 listeners: RefCell::new(Vec::new()),
+                queries: RefCell::new(BTreeMap::new()),
             }),
         }
     }
@@ -382,6 +389,148 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .and_then(|entry| entry.client.clone())
     }
 
+    /// A server query for `environment` as a resource screens read. Every lease of the same
+    /// method and input shares one driver, which runs while any lease is held: it waits for a
+    /// session, re-runs on each new session, and follows the policy's staleness and refresh.
+    pub fn query<M>(
+        &self,
+        environment: &EnvironmentId,
+        input: M::Input,
+        policy: ResourcePolicy,
+    ) -> QueryLease<M::Output>
+    where
+        M: RpcMethod + 'static,
+        M::Input: Clone + serde::Serialize,
+        M::Output: PartialEq + serde::Serialize + 'static,
+    {
+        let identity = format!(
+            "{}\u{0}{}\u{0}{}",
+            environment.0,
+            M::NAME,
+            serde_json::to_string(&input).unwrap_or_default()
+        );
+        let existing = self
+            .inner
+            .queries
+            .borrow()
+            .get(&identity)
+            .and_then(std::rc::Weak::upgrade);
+        if let Some(shared) =
+            existing.and_then(|shared| shared.downcast::<QueryShared<M::Output>>().ok())
+        {
+            return QueryLease { shared };
+        }
+        let resource = Rc::new(Resource::new(policy, Generation(0)));
+        let connections = self.query_connections(environment);
+        let driver = {
+            let resource = resource.clone();
+            let platform = self.inner.platform.clone();
+            let environment = environment.clone();
+            async move {
+                let _ = drive_query::<M, SessionEndpoint, P>(
+                    &resource,
+                    &platform,
+                    environment,
+                    connections,
+                    input,
+                    None,
+                    |_| {},
+                )
+                .await;
+            }
+            .boxed_local()
+        };
+        let shared = Rc::new(QueryShared {
+            resource,
+            driver: self.spawn(driver),
+        });
+        let erased: Rc<dyn std::any::Any> = shared.clone();
+        let mut queries = self.inner.queries.borrow_mut();
+        queries.retain(|_, query| query.strong_count() > 0);
+        queries.insert(identity, Rc::downgrade(&erased));
+        QueryLease { shared }
+    }
+
+    /// The diff of a thread's turns, `orchestration.getTurnDiff`.
+    pub fn turn_diff(
+        &self,
+        key: &ThreadKey,
+        from_turn_count: u64,
+        to_turn_count: u64,
+        ignore_whitespace: bool,
+    ) -> QueryLease<t3_contracts::checkpoint_diff::OrchestrationGetFullThreadDiffResult> {
+        self.query::<t3_contracts::rpc::WsOrchestrationV2GetTurnDiffRpc>(
+            &key.environment,
+            t3_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput {
+                from_turn_count,
+                to_turn_count,
+                thread_id: key.thread.clone(),
+                ignore_whitespace: ignore_whitespace.then_some(true),
+            },
+            ResourcePolicy::default(),
+        )
+    }
+
+    /// The environment's connection as query drivers read it: the current state first, then
+    /// each change of phase, failure or session, with one endpoint object per session.
+    fn query_connections(
+        &self,
+        environment: &EnvironmentId,
+    ) -> LocalBoxStream<'static, QueryConnection<SessionEndpoint>> {
+        let runtime = Rc::downgrade(&self.inner);
+        let environment = environment.clone();
+        let changes = self.inner.store.subscribe_environment(&environment);
+        let mut last: Option<(QueryConnectionPhase, Option<String>, Option<Generation>)> = None;
+        let mut session: Option<ServiceSession<SessionEndpoint>> = None;
+        changes
+            .filter_map(move |_| {
+                let client = runtime.upgrade().and_then(|inner| {
+                    inner
+                        .environments
+                        .borrow()
+                        .iter()
+                        .find(|entry| entry.id == environment)
+                        .and_then(|entry| entry.client.clone())
+                });
+                let state = client
+                    .as_ref()
+                    .map(ConnectedClient::state)
+                    .unwrap_or_default();
+                let endpoint = client.as_ref().and_then(ConnectedClient::session);
+                let generation = endpoint.as_ref().map(|_| state.generation);
+                if session.as_ref().map(|session| session.identity.generation) != generation {
+                    session = endpoint.map(|endpoint| ServiceSession {
+                        identity: crate::environment::SessionIdentity {
+                            environment: environment.clone(),
+                            generation: state.generation,
+                            account: None,
+                            dpop_thumbprint: None,
+                        },
+                        endpoint: Rc::new(endpoint),
+                    });
+                }
+                let phase = match state.phase {
+                    Phase::Available => QueryConnectionPhase::Available,
+                    Phase::Offline => QueryConnectionPhase::Offline,
+                    Phase::Connecting => QueryConnectionPhase::Connecting,
+                    Phase::Backoff => QueryConnectionPhase::Backoff,
+                    Phase::Connected => QueryConnectionPhase::Connected,
+                    Phase::Blocked => QueryConnectionPhase::Blocked,
+                };
+                let failure = state.last_failure.map(|failure| failure.detail);
+                let next = (phase, failure.clone(), generation);
+                let changed = last.as_ref() != Some(&next);
+                last = Some(next);
+                let connection = changed.then(|| QueryConnection {
+                    phase,
+                    failure,
+                    session: session.clone(),
+                });
+                async move { connection }
+            })
+            .boxed_local()
+    }
+
     fn notify(&self) {
         self.inner
             .listeners
@@ -540,4 +689,36 @@ fn bind_sessions<P: Platform + 'static>(
         }
     }
     .boxed_local()
+}
+
+struct QueryShared<T> {
+    resource: Rc<Resource<T>>,
+    driver: AbortHandle,
+}
+
+impl<T> Drop for QueryShared<T> {
+    fn drop(&mut self) {
+        self.driver.abort();
+        self.resource.close();
+    }
+}
+
+/// Keeps a query's driver running while held; read the value through [`QueryLease::resource`].
+#[must_use = "the query runs only while its lease is held"]
+pub struct QueryLease<T: 'static> {
+    shared: Rc<QueryShared<T>>,
+}
+
+impl<T: 'static> Clone for QueryLease<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T: 'static> QueryLease<T> {
+    pub fn resource(&self) -> &Rc<Resource<T>> {
+        &self.shared.resource
+    }
 }

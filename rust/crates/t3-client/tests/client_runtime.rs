@@ -172,3 +172,29 @@ fn messages_need_text_and_a_live_session() {
         Err(SendError::Rejected("Enter a message.".into()))
     );
 }
+
+#[test]
+fn a_query_shares_one_driver_across_leases_and_stops_with_the_last() {
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    let first = client.turn_diff(&key("t1"), 0, 2, false);
+    let second = client.turn_diff(&key("t1"), 0, 2, false);
+    harness.settle();
+    assert!(std::rc::Rc::ptr_eq(first.resource(), second.resource()));
+    assert_eq!(harness.server().state.borrow().turn_diffs, 1, "one driver");
+    let value = first.resource().snapshot().value.unwrap();
+    assert_eq!(value.diff, "diff --git a/x b/x");
+    assert_eq!(value.to_turn_count, 2);
+    let other = client.turn_diff(&key("t1"), 1, 2, false);
+    harness.settle();
+    assert_eq!(
+        harness.server().state.borrow().turn_diffs,
+        2,
+        "another input, another query"
+    );
+    drop((first, other));
+    assert!(!second.resource().is_closed(), "one lease still holds it");
+    let resource = second.resource().clone();
+    drop(second);
+    assert!(resource.is_closed(), "the last lease stops the driver");
+}

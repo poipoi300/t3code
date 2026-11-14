@@ -7,83 +7,14 @@ pub enum Direction {
     Ltr,
     Rtl,
 }
-fn rtl(c: char) -> bool {
-    matches!(c,'\u{0590}'..='\u{08ff}'|'\u{fb1d}'..='\u{fdff}'|'\u{fe70}'..='\u{feff}'|'\u{10800}'..='\u{10fff}'|'\u{1e800}'..='\u{1efff}')
-}
-fn majority(units: impl IntoIterator<Item = Option<Direction>>) -> Option<Direction> {
-    let mut first = None;
-    let mut right = 0;
-    let mut left = 0;
-    for direction in units.into_iter().flatten() {
-        first.get_or_insert(direction);
-        match direction {
-            Direction::Ltr => left += 1,
-            Direction::Rtl => right += 1,
-        }
-    }
-    if right == left {
-        first
-    } else {
-        Some(if right > left {
-            Direction::Rtl
-        } else {
-            Direction::Ltr
-        })
-    }
-}
-fn words(text: &str) -> Option<Direction> {
-    majority(text.split_whitespace().map(|word| {
-        word.chars().find(|c| c.is_alphabetic()).map(|c| {
-            if rtl(c) {
-                Direction::Rtl
-            } else {
-                Direction::Ltr
-            }
-        })
-    }))
-}
+/// The shared `textDirection.ts` decision (`view_logic::session::text`), which the composer's
+/// TypeScript imports too, in the composer's direction type.
 pub fn text_direction(text: &str) -> Option<Direction> {
-    if !text.chars().any(rtl) {
-        return text
-            .chars()
-            .any(char::is_alphabetic)
-            .then_some(Direction::Ltr);
-    }
-    let mut sentences = vec![];
-    let mut start = 0;
-    let mut previous = '\0';
-    for (index, c) in text.char_indices() {
-        let abbreviation = text
-            .get(index.saturating_sub(4)..index)
-            .is_some_and(|suffix| {
-                suffix.eq_ignore_ascii_case("e.g.") || suffix.eq_ignore_ascii_case("i.e.")
-            });
-        if c == '\n'
-            || (c.is_whitespace() && matches!(previous, '.' | '!' | '?' | '؟') && !abbreviation)
-        {
-            sentences.push(words(&text[start..index]));
-            start = index + c.len_utf8();
-        }
-        previous = c;
-    }
-    sentences.push(words(&text[start..]));
-    let rtl_count = sentences
-        .iter()
-        .filter(|d| **d == Some(Direction::Rtl))
-        .count();
-    let ltr_count = sentences
-        .iter()
-        .filter(|d| **d == Some(Direction::Ltr))
-        .count();
-    if rtl_count == ltr_count {
-        words(text)
-    } else {
-        Some(if rtl_count > ltr_count {
-            Direction::Rtl
-        } else {
-            Direction::Ltr
-        })
-    }
+    use crate::view_logic::session::text::TextDirection;
+    crate::view_logic::session::text::text_direction(text).map(|direction| match direction {
+        TextDirection::Ltr => Direction::Ltr,
+        TextDirection::Rtl => Direction::Rtl,
+    })
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockDirection {
@@ -279,6 +210,13 @@ mod tests {
                 "{source}"
             );
         }
+    }
+    #[test]
+    fn letters_are_unicode_letters_as_in_the_shared_typescript() {
+        // `textDirection.ts` (Node 22): Ⅻ is alphabetic but not \p{L}, so it carries no
+        // direction and the Hebrew word decides.
+        assert_eq!(text_direction("Ⅻ שלום"), Some(Direction::Rtl));
+        assert_eq!(text_direction("שלום Ⅻ"), Some(Direction::Rtl));
     }
     #[test]
     fn code_does_not_change_inheritance() {

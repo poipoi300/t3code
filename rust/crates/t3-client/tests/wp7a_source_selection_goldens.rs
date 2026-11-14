@@ -8,6 +8,11 @@ use t3_client::thread_views::{
 };
 fn canonical(node: &mut Value) {
     if let Some(fields) = node.as_object_mut() {
+        // These fixtures were captured without the list items' source attrs (indent, marker,
+        // space); the editor goldens pin those. This file pins text nodes and selections.
+        if fields.get("type").and_then(Value::as_str) == Some("listItem") {
+            fields.remove("attrs");
+        }
         for field in ["attrs", "marks", "content"] {
             if fields.get(field).is_some_and(|v| {
                 v.as_object().is_some_and(|x| x.is_empty())

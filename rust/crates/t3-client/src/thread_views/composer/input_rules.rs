@@ -1,9 +1,7 @@
 //! Live inline input rules run after the typed-pair handler and before ordinary insertion.
 use super::{
     code_pairs::CodePairs,
-    editor::{
-        children, marks, name, node_size, splice_inline, textblocks, transform_marks,
-    },
+    editor::{children, marks, name, node_size, splice_inline, textblocks, transform_marks},
 };
 use crate::thread_views::{
     document::{Selection, utf16_byte_offset, utf16_len},
@@ -11,12 +9,17 @@ use crate::thread_views::{
 };
 use serde_json::{Value, json};
 pub struct Rewrite {
-    pub document:Value,
-    pub selection:Selection,
-    pub stored_marks:Vec<Value>,
+    pub document: Value,
+    pub selection: Selection,
+    pub stored_marks: Vec<Value>,
 }
-fn mark_name(mark:Mark)->&'static str {
-    match mark {Mark::Bold=>"bold",Mark::Italic=>"italic",Mark::Strike=>"strike",Mark::Code=>"code"}
+fn mark_name(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Bold => "bold",
+        Mark::Italic => "italic",
+        Mark::Strike => "strike",
+        Mark::Code => "code",
+    }
 }
 
 fn source_touches(block: &Value, from: usize, to: usize) -> bool {
@@ -70,6 +73,35 @@ fn rule(text: &str, marker: &str, code: bool) -> Option<(usize, usize)> {
     }
     None
 }
+/// TipTap's bullet-list input rule (`/^\s*([-+*])\s$/`) for a paragraph directly in the
+/// document: the paragraph becomes an empty item of a new bullet list, with no stored marks.
+fn wrap_in_bullet_list(doc: &Value, start: usize, before: &str) -> Option<Rewrite> {
+    let rest = before.trim_start();
+    let mut chars = rest.chars();
+    if !matches!(chars.next(), Some('-' | '+' | '*'))
+        || !chars.next().is_some_and(char::is_whitespace)
+        || chars.next().is_some()
+    {
+        return None;
+    }
+    let mut next = doc.clone();
+    let content = next["content"].as_array_mut()?;
+    let mut position = 0;
+    let index = content.iter().position(|node| {
+        let found = position + 1 == start;
+        position += node_size(node);
+        found
+    })?;
+    if name(&content[index]) != "paragraph" {
+        return None;
+    }
+    content[index] = json!({"type":"bulletList","content":[{"type":"listItem","content":[{"type":"paragraph"}]}]});
+    Some(Rewrite {
+        document: next,
+        selection: Selection::caret(start + 2),
+        stored_marks: vec![],
+    })
+}
 pub fn type_text(
     pairs: &mut CodePairs,
     doc: &Value,
@@ -78,11 +110,34 @@ pub fn type_text(
     stored_marks: &[Value],
     composing: bool,
 ) -> Option<Rewrite> {
-    let known=stored_marks.iter().filter_map(|mark|match mark["type"].as_str(){Some("bold")=>Some(Mark::Bold),Some("italic")=>Some(Mark::Italic),Some("strike")=>Some(Mark::Strike),Some("code")=>Some(Mark::Code),_=>None}).collect::<Vec<_>>();
-    if text == "`" && !stored_marks.iter().any(|mark|mark["type"]=="markdownSource")
+    let known = stored_marks
+        .iter()
+        .filter_map(|mark| match mark["type"].as_str() {
+            Some("bold") => Some(Mark::Bold),
+            Some("italic") => Some(Mark::Italic),
+            Some("strike") => Some(Mark::Strike),
+            Some("code") => Some(Mark::Code),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // TipTap runs no input rule next to a code mark, and the typed text takes the stored marks.
+    let in_code = known.contains(&Mark::Code);
+    if text == "`"
+        && !in_code
+        && !stored_marks
+            .iter()
+            .any(|mark| mark["type"] == "markdownSource")
         && let Some(rewrite) = pairs.type_tick(doc, selection, &known, composing)
     {
-        return Some(Rewrite{document:rewrite.document,selection:rewrite.selection,stored_marks:rewrite.stored_marks.into_iter().map(|mark|json!({"type":mark_name(mark)})).collect()});
+        return Some(Rewrite {
+            document: rewrite.document,
+            selection: rewrite.selection,
+            stored_marks: rewrite
+                .stored_marks
+                .into_iter()
+                .map(|mark| json!({"type":mark_name(mark)}))
+                .collect(),
+        });
     }
     let (start, block) = textblocks(doc).into_iter().find(|(start, block)| {
         selection.from() >= *start && selection.to() <= *start + node_size(block) - 2
@@ -113,7 +168,7 @@ pub fn type_text(
         }
     });
     let caret = selection.from() + inserted_len;
-    if composing || name(&block) == "codeBlock" {
+    if composing || in_code || name(&block) == "codeBlock" {
         return Some(Rewrite {
             document: next,
             selection: Selection::caret(caret),
@@ -128,6 +183,13 @@ pub fn type_text(
         .map(|node| node["text"].as_str().unwrap_or("\u{fffc}"))
         .collect::<String>();
     let before = &content[..utf16_byte_offset(&content, caret - start)?];
+    if text == " "
+        && name(&block) == "paragraph"
+        && let Some(rewrite) = wrap_in_bullet_list(&next, start, before)
+    {
+        pairs.map(|_, _| None);
+        return Some(rewrite);
+    }
     for (marker, mark) in [
         ("*", Mark::Italic),
         ("**", Mark::Bold),
@@ -178,10 +240,11 @@ pub fn type_text(
             if !current.contains(&mark) {
                 current.push(mark);
             }
+            // The editor schema's mark order.
             current.sort_by_key(|mark| match mark {
-                Mark::Strike => 0,
-                Mark::Bold => 1,
-                Mark::Italic => 2,
+                Mark::Bold => 0,
+                Mark::Italic => 1,
+                Mark::Strike => 2,
                 Mark::Code => 3,
             });
             node["marks"]=current.iter().map(|mark|json!({"type":match mark{Mark::Strike=>"strike",Mark::Bold=>"bold",Mark::Italic=>"italic",Mark::Code=>"code"}})).collect::<Vec<_>>().into();

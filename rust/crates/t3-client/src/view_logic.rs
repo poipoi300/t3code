@@ -5,6 +5,8 @@ pub mod chat_view;
 pub mod context_references;
 #[path = "view_logic/errors.rs"]
 pub mod errors;
+#[path = "view_logic/onboarding.rs"]
+pub mod onboarding;
 #[path = "view_logic/session.rs"]
 pub mod session;
 #[path = "view_logic/shell.rs"]

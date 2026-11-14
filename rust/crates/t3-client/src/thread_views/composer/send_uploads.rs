@@ -144,7 +144,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         for (original, uploaded) in next.attachments.iter_mut().zip(attachments) {
             let mut value = original.value().clone();
             value["uploadEnvironmentId"] = json!(message.environment_id);
-            value["uploadedAttachmentId"] = json!(super::send_commands::attachment_id(uploaded));
+            value["uploadedAttachmentId"] = json!(crate::operations::attachment_id(uploaded));
             *original = DraftAttachment::decode(value)?;
         }
         if next.attachments == message.attachments {

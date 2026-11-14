@@ -153,7 +153,7 @@ fn persisted_image_readback_tracks_concurrent_removal_and_new_images_without_dro
     assert!(sync_persisted_attachments(
         &mut state,
         "e:t",
-        &[captured.clone()]
+        std::slice::from_ref(&captured)
     ));
     let bytes=serde_json::to_vec(&json!({"version":9,"state":{"draftsByThreadKey":{"e:t":{"prompt":"keep","attachments":[captured.clone()]}}}})).expect("json");
     let persisted = persisted_attachment_ids(Some(&bytes), "e:t");

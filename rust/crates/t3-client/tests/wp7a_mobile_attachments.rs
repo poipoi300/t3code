@@ -49,7 +49,7 @@ fn overflow_preserves_recovery_attachments_but_context_limits_still_apply() {
         .collect();
     let draft = json!({"text":"","attachments":all});
     let incoming = file("extra", "extra.txt", "text/plain");
-    let capped = append(&draft, &[incoming.clone()], Default::default());
+    let capped = append(&draft, std::slice::from_ref(&incoming), Default::default());
     assert_eq!(capped.rejected, 1);
     assert_eq!(capped.draft, draft);
     let allowed = append(

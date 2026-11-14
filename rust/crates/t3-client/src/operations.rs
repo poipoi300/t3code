@@ -1629,7 +1629,7 @@ impl SendAttachment {
         }
     }
 }
-fn attachment_id(attachment: &t3_contracts::chat_attachment::ChatAttachment) -> &str {
+pub(crate) fn attachment_id(attachment: &t3_contracts::chat_attachment::ChatAttachment) -> &str {
     use t3_contracts::chat_attachment::ChatAttachment::*;
     match attachment {
         Image(a) => &a.id,

@@ -16,8 +16,11 @@ use t3_client::{
 
 const ENV: &str = "env";
 
+/// Set when the connection driver finished, with its result.
+type Ended = Rc<RefCell<Option<Result<(), String>>>>;
+
 /// Connects with a saved bearer and keeps the connection driver running on the harness.
-fn connected(harness: &mut Harness) -> (ConnectedClient, Rc<RefCell<Option<Result<(), String>>>>) {
+fn connected(harness: &mut Harness) -> (ConnectedClient, Ended) {
     let platform = harness.platform.clone();
     let (client, driver) = harness
         .run(async move {

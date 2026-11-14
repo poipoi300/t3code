@@ -468,6 +468,10 @@ fn timeline_streaming_keeps_unchanged_entries_and_attachment_identity() {
         new.attachments.as_ref().unwrap()
     ));
     assert_eq!(new.text, "First plus streamed text");
+    // Nothing changed: the whole entry list keeps its Rc, which t3-ui's timeline memo compares.
+    let again =
+        derive_timeline_entries_from_visible_turn_items_with_state(next.input.clone(), Some(&next));
+    assert!(Rc::ptr_eq(&next.entries, &again.entries));
 }
 
 #[test]

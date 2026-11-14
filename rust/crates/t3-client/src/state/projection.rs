@@ -20,6 +20,7 @@ pub fn event_thread(event: &OrchestrationV2DomainEvent) -> &ThreadId {
         OrchestrationV2DomainEvent::ThreadActiveReordered(e) => &e.thread_id,
         OrchestrationV2DomainEvent::ThreadTagsUpdated(e) => &e.thread_id,
         OrchestrationV2DomainEvent::ThreadVisited(e) => &e.thread_id,
+        OrchestrationV2DomainEvent::ThreadVisitRecorded(e) => &e.thread_id,
         OrchestrationV2DomainEvent::ThreadMarkedUnread(e) => &e.thread_id,
         OrchestrationV2DomainEvent::ThreadMetadataUpdated(e) => &e.thread_id,
         OrchestrationV2DomainEvent::ThreadPullRequestSynced(e) => &e.thread_id,
@@ -121,6 +122,7 @@ pub fn apply_event(
         ThreadVisited(e) => {
             p.thread = e.payload;
         }
+        ThreadVisitRecorded(_) => return Ok(false),
         ThreadMarkedUnread(e) => {
             p.thread = e.payload;
         }

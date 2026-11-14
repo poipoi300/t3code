@@ -586,6 +586,18 @@ where
                                         })
                                         .collect(),
                                 ))
+                            } else if !cause.is_empty()
+                                && cause.iter().all(|cause| {
+                                    matches!(cause, Cause::Die { defect } if defect
+                                        .as_str()
+                                        .is_some_and(|d| d.starts_with("Unknown request tag: ")))
+                                })
+                            {
+                                // Effect's RpcServer answer for a method it has no handler for:
+                                // nothing ran, and the server does not serve this method.
+                                Err(RpcCallError::NotSent(ClientError::Unsupported(
+                                    "the server does not serve this RPC method",
+                                )))
                             } else if cause.iter().any(|cause| matches!(cause, Cause::Die { .. })) {
                                 Err(RpcCallError::Defect)
                             } else if !cause.is_empty()
@@ -848,6 +860,17 @@ mod tests {
                 exit: Exit::die(json!("private")),
             });
             assert!(matches!(call.await, Err(RpcCallError::Defect)));
+            // Effect's answer for a method the server has no handler for is not a defect: the
+            // method is not served there, and nothing ran.
+            let call = endpoint.command::<WsServerProbeRpc>(Empty {});
+            driver.deliver(CallEvent::Exit {
+                id: 2.into(),
+                exit: Exit::die(json!("Unknown request tag: server.probe")),
+            });
+            assert!(matches!(
+                call.await,
+                Err(RpcCallError::NotSent(ClientError::Unsupported(_)))
+            ));
         });
     }
     #[test]

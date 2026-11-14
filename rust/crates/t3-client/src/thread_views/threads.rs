@@ -84,6 +84,7 @@ pub mod families;
 pub mod feedback;
 pub mod item_support;
 pub mod lifecycle;
+pub mod notifications;
 pub mod older_settled;
 pub mod pending_work;
 pub mod queries;

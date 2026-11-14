@@ -110,7 +110,7 @@ impl<P: Platform> MobileDraftStore<P> {
         project: &t3_contracts::environment::ScopedProjectRef,
     ) -> Result<String, ClientError> {
         let id = crate::operations::allocate_command_id(self.platform.as_ref(), None)?;
-        let now = super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let now = crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms());
         let mut key = String::new();
         self.update(|current| {
             let mut document = current.clone();
@@ -133,7 +133,7 @@ impl<P: Platform> MobileDraftStore<P> {
         project: &t3_contracts::environment::ScopedProjectRef,
     ) -> Result<bool, ClientError> {
         self.load().await?;
-        let now = super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let now = crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms());
         let mut found = false;
         self.update(|current| {
             let Some(draft) = current["drafts"].get(key) else {
@@ -282,7 +282,7 @@ impl<P: Platform> MobileDraftStore<P> {
                 || json!({"schemaVersion":1,"drafts":{}}),
                 |document| document.raw().clone(),
             );
-        let now = super::send_commands::epoch_iso(self.platform.now_epoch_ms());
+        let now = crate::time::iso_from_epoch_ms(self.platform.now_epoch_ms());
         let mut id_error = None;
         let migrated = mobile_drafts::migrate_document(&raw, &now, || {
             match crate::operations::allocate_command_id(self.platform.as_ref(), None) {

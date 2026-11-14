@@ -615,7 +615,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             dispatch_mode: options.dispatch_mode,
             compact_before_send: options.compact_before_send.then_some(true),
             fresh_context: options.fresh_context.then_some(true),
-            created_at: super::send_commands::epoch_iso(self.inner.platform.now_epoch_ms()),
+            created_at: crate::time::iso_from_epoch_ms(self.inner.platform.now_epoch_ms()),
             extra,
         };
         let pending = self.inner.outbox.enqueue(message);

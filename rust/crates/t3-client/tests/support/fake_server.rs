@@ -40,6 +40,8 @@ pub struct ServerState {
     /// `subscribeThread` streams the server is still serving, by thread.
     pub open_threads: BTreeMap<String, usize>,
     pub shell_subscribes: usize,
+    /// `getTurnDiff` requests answered.
+    pub turn_diffs: usize,
     pub http: Vec<String>,
     /// Ends every socket the server holds, as a dropped connection does.
     hangups: Vec<mpsc::UnboundedSender<()>>,
@@ -277,6 +279,7 @@ impl Platform for TestPlatform {
                         (tag::<WsSubscribeServerConfigRpc>(), Stream),
                         (tag::<WsOrchestrationV2SubscribeShellRpc>(), Stream),
                         (tag::<WsOrchestrationV2SubscribeThreadRpc>(), Stream),
+                        (tag::<WsOrchestrationV2GetTurnDiffRpc>(), Unary),
                     ] {
                         rpc.state.register(tag, kind);
                     }
@@ -401,6 +404,14 @@ impl Handler for FakeHandler {
                 ],
                 (),
             )
+        } else if tag == self::tag::<WsOrchestrationV2GetTurnDiffRpc>() {
+            server.state.borrow_mut().turn_diffs += 1;
+            let mut answer = request.payload.clone();
+            answer["diff"] = json!("diff --git a/x b/x");
+            if let Some(object) = answer.as_object_mut() {
+                object.remove("ignoreWhitespace");
+            }
+            HandlerOutput::Unary(async move { Exit::success(answer) }.boxed_local())
         } else if tag == self::tag::<WsOrchestrationV2SubscribeThreadRpc>() {
             let thread = request.payload["threadId"].as_str().unwrap().to_owned();
             {

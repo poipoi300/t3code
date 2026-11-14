@@ -63,6 +63,33 @@ what it shows with the pure selectors below, and changes server state only throu
 session and the operation services. `t3-ui`'s `runtime::store::StoreSignals` is the one adapter
 from the store to signals; extend it rather than writing a second one.
 
+### The composition root
+
+`composition::ClientRuntime` is the one object the UI holds. Build it once with the app's
+`Platform`, the `ClientStore`, the creation source (web or mobile) and a spawner that runs local
+futures on the UI's executor (the crate owns none):
+
+```rust,ignore
+let runtime = ClientRuntime::new(platform, store.clone(), CreationSource::Web, Rc::new(|f| spawn(f)));
+runtime.restore().await?;                    // reconnect every saved environment
+let id = runtime.pair(pairing_input).await?; // validate, pair, save, connect
+runtime.environments();                      // Vec<EnvironmentEntry { id, label, state }>
+runtime.changes();                           // fires when the list or a connection state changes
+runtime.open_thread(&key); runtime.close_thread(&key); // counted; follows on every session
+runtime.send_message(&key, text).await?;     // durable outbox; Err(Disconnected | Rejected)
+let diff = runtime.turn_diff(&key, 0, 2, false);  // QueryLease: diff.resource().snapshot()
+runtime.remove(&id).await?;                  // ends follows and delivery, forgets data and credentials
+```
+
+`t3-ui`'s `runtime::backend::Backend` maps onto these one to one. `query::<M>(environment,
+input, policy)` mounts any other server query: every lease of the same method and input shares
+one driver, which stops with the last lease. `messages(environment)` is the environment's
+`SendService` (pending messages and their states) and `client(environment)` its
+`ConnectedClient`. Below the root, `ConnectedClient::open_thread(ThreadId) -> ThreadLease` is
+the lease the root counts: the connection runtime follows every leased thread on every new
+session, stops all follows when the session ends (disconnect, sign-out, removal), and never
+follows a lease that was dropped meanwhile.
+
 ### The store
 
 `client.store()` returns the one `ClientStore` for the app. It maps `EnvironmentId` to an
@@ -105,12 +132,16 @@ pins.
 Selectors are pure functions of shared rows. Recompute one when an input `Rc` changes; most
 of them reuse unchanged output `Rc`s when given their previous result.
 
-- **Sidebar.** `services::models::present_thread_shell` turns a shell row into an
-  `EnvironmentThreadShell`. `workspace::sidebar::build_sidebar_snapshots` groups projects into
-  logical groups (WP8 is the only grouping policy). `view_logic::shell::sidebar::presentation`
-  composes them: `ThreadInput::from_environment_shell`, then `present_sidebar`. The resulting
-  `Sidebar` rows carry the shelf, status pill, unread, woke, active, selected and receded flags.
-  `sidebar::next_snooze_wake` is the only timer the sidebar needs.
+- **Sidebar.** `view_logic::shell::sidebar::presentation::sidebar_rows(environment,
+  &shared_shell, groups, options, previous)` is the selector: `present_sidebar` (the port of
+  `Sidebar.logic.ts`: working shelf, inbox order, folders) over `present_thread_shell`, returning
+  `Rc<SidebarRow>`s that hold the store's shared thread row and keep their `Rc` while unchanged.
+  `groups` come from `workspace::sidebar::build_sidebar_snapshots` (WP8 is the only grouping
+  policy); pass none for a flat list. Re-run it at `next_snooze_wake`, the only timer it needs.
+- **Thread route.** `view_logic::shell::navigation::route_render_state(&snapshot, &key,
+  draft_exists)` answers loading, ready or missing as `ThreadRouteView` does.
+- **Notifications.** `thread_views::threads::notifications::{NotificationGate,
+  next_background_announcement}`: when a thread notifies, and what a screen reader announces.
 - **Timeline.** `view_logic::session::derive_timeline_entries_from_visible_turn_items_with_state`
   takes the thread view's rows and the previous result, and returns entries whose unchanged
   members keep their `Rc`. `thread_views::threads::detail::ThreadDetailViews::update` derives the
@@ -126,8 +157,10 @@ of them reuse unchanged output `Rc`s when given their previous result.
 - **Pull requests.** `workspace::{pr_list, pr_views}`. Several views need forge adapters that
   do not exist yet (see the list below).
 - **App shell.** `view_logic::shell::{palette, keybindings, shortcuts, panels, navigation,
-  ui_state, terminal_state}` are plain state plus transitions. Each store has a `STORAGE_KEY`
-  and `encode`/`decode` for the host to persist.
+  ui_state, terminal_state, request_latency}` are plain state plus transitions. Each store has a
+  `STORAGE_KEY` and `encode`/`decode`; `ui_state::UiPreferences::{load, save}` read and write the
+  UI preferences, shelf expansion and sidebar width through `Platform` storage.
+- **Onboarding.** `view_logic::onboarding`: the first-run decision and project import.
 
 ### Operations
 
@@ -154,7 +187,8 @@ of them reuse unchanged output `Rc`s when given their previous result.
 - Keep its own copy of server state: copied rows, a cached projection, a private list of
   threads. Hold the shared `Rc`s and derive from them.
 - Hold a `StoreSnapshot`, an `Rc<ThreadState>` or a projection taken from one past the read that
-  needed it (see the measured cost above).
+  needed it (see the measured cost above). In a UI test, `store.pinned()` after a frame settles
+  lists any environment or thread a screen still holds; it should be empty.
 - Reach into the connection: no raw RPC clients, credentials, tokens, `ConnectionEvent`s or
   supervisor state. `ConnectedClient` (`store`, `session`, `reconnect`, `close`, `ready`) is the
   surface.
@@ -164,23 +198,13 @@ of them reuse unchanged output `Rc`s when given their previous result.
 
 ### Not exposed yet
 
-What a screen will need that this crate does not provide today:
-
-1. **Opening a thread on a live connection.** `ThreadSync` is complete, but nothing drives it.
-   `ConnectedClient` has no thread-demand API, so `shared_thread` stays empty against a real
-   server. Proposed shape: `ConnectedClient::open_thread(ThreadId) -> ThreadLease`. The runtime
-   keeps the set of open threads, starts `ThreadSync::follow` for each one on every new session
-   context, and stops it when the last lease drops.
-2. **More than one environment.** `connect` runs one environment. There is no runtime for the
-   saved catalog (the list, add and remove, relay routes) and none of the registry change
-   streams that the WP6, WP8a and WP8b services wait for (see the seam queue).
-3. **Driver ownership for mounted resources.** Each mounted resource needs exactly one
-   `drive_query` (or terminal, review or usage) driver, whichever screens read it. The shell
-   needs a keyed lease to hold that driver.
-4. **Pull-request forge, Markdown and anchor adapters** (`pr_views::forge::{ForgeViews,
+1. **Pull-request forge, Markdown and anchor adapters** (`pr_views::forge::{ForgeViews,
    ThreadLinkViews, PullRequestAnchors}`, `pr_views::markdown::PullRequestMarkdownParser`).
-5. **Command-row terminal output** (the `terminalOutput.ts` fold). Expanded command rows have
+2. **Command-row terminal output** (the `terminalOutput.ts` fold). Expanded command rows have
    no incremental ANSI screen yet.
+3. **Timeline display rows** (`MessagesTimeline.logic.ts`: work groups, folds, assistant meta).
+4. **Relay, SSH and cloud-account environments in the composition root.** It pairs and restores
+   direct (bearer) environments; relay discovery and account sign-in are separate services.
 
 ## Real-server proof
 
@@ -191,14 +215,14 @@ cargo test -p t3-platform --features integration-server --test client_connection
 ```
 
 The test starts the real Rust server CLI in a child process, with an ephemeral loopback port
-and temporary server/client directories. It uses the public entry point to pair, receive
-config and a shell snapshot, probe through the guarded RPC session, reconnect, and restore a
-saved bearer. It captures and stops that
-child's PID. No raw RPC request or direct snapshot load bypasses the connection runtime.
+and temporary server and client directories, and stops that child by its captured PID. With the
+public entry point it pairs, receives config and the shell snapshot, probes through the guarded
+RPC session, reconnects, and restores the saved bearer. Then, through `ClientRuntime` alone, it
+restores the saved environment, loads the shell, creates a thread over the guarded session
+(`orchestration.dispatchCommand`), opens it and receives its timeline live, and waits for the
+shell to list it. No raw RPC request or direct snapshot load bypasses the connection runtime.
 
-The current Rust server registers `orchestration.subscribeShell` as unimplemented, even with
-its `orchestration` feature, and does not mount the orchestration HTTP snapshot routes in
-`http::router`. The real-server test currently fails at its required shell snapshot after
-pairing, config and the guarded RPC probe succeed. It keeps the snapshot assertion in place
-for the server owner; reconnect and bearer restoration are verified before that assertion. `ready()`
-cannot finish until the server supplies a snapshot and a live stream completion marker.
+The server does not serve the `projects.*` methods yet, so the proof thread names a project id
+directly. The lease lifecycle (reconnect, close, removal, a lease dropped during a reconnect) is
+tested against an in-process server in `tests/connection_threads.rs` and
+`tests/client_runtime.rs`.

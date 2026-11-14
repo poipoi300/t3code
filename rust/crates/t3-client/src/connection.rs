@@ -204,6 +204,11 @@ fn map_declared_remote_error(
 ) -> ConnectionFailure {
     use t3_contracts::environment_http::EnvironmentHttpCommonError as E;
     let (kind, detail, trace) = match error {
+        E::EnvironmentConnectApprovalPendingError(e) => (
+            FailureKind::Permission,
+            "This device is waiting for approval on the host.",
+            &e.trace_id,
+        ),
         E::EnvironmentAuthInvalidError(e) => (
             FailureKind::Authentication,
             "The environment credential is invalid.",
