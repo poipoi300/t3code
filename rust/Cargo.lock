@@ -5603,6 +5603,7 @@ dependencies = [
  "t3-codex-app-server",
  "t3-contracts",
  "t3-git",
+ "t3-orchestration",
  "t3-persistence",
  "t3-process",
  "t3-shared",
