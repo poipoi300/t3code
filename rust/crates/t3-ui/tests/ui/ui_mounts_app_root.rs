@@ -921,7 +921,8 @@ fn a_completed_turn_plays_the_alert_only_in_a_sound_mode() {
     };
     let speaker = Speaker::default();
     let mut app = start_app_tree_with_speaker(speaker.clone());
-    app.press("role:button[Complete the turn]").expect("complete");
+    app.press("role:button[Complete the turn]")
+        .expect("complete");
     app.settle();
     assert_eq!(plays(&speaker), 0, "control: alerts off by default");
     let speaker = Speaker::default();
@@ -929,9 +930,15 @@ fn a_completed_turn_plays_the_alert_only_in_a_sound_mode() {
     app.press("role:button[Choose sound alerts]")
         .expect("sound mode");
     app.settle();
-    app.press("role:button[Complete the turn]").expect("complete");
+    app.press("role:button[Complete the turn]")
+        .expect("complete");
     app.settle();
-    assert_eq!(plays(&speaker), 1, "one alert: {:?}", speaker.0.lock().expect("speaker"));
+    assert_eq!(
+        plays(&speaker),
+        1,
+        "one alert: {:?}",
+        speaker.0.lock().expect("speaker")
+    );
 }
 
 /// BackgroundThreadAnnouncer's `effectiveSnoozed`: a snoozed thread finishing is not spoken.
