@@ -71,13 +71,21 @@ impl Orchestration for IntakeDispatchBackend {
         if let Some(id) = &task.thread_id
             && destination_changed
         {
-            let thread =
-                self.intake.thread(id).await?.ok_or_else(|| {
-                    Error::Invalid("The destination thread was not found.".into())
-                })?;
-            if thread.deleted || thread.archived || thread.project_id != task.project_id {
+            // TypeScript's `requireDestinationThread` messages, in its order.
+            let thread = self
+                .intake
+                .thread(id)
+                .await?
+                .filter(|thread| !thread.deleted)
+                .ok_or_else(|| Error::Invalid("That thread no longer exists.".into()))?;
+            if thread.archived {
                 return Err(Error::Invalid(
-                    "The destination thread is deleted, archived, or in another project.".into(),
+                    "That thread is archived. Unarchive it or pick another destination.".into(),
+                ));
+            }
+            if thread.project_id != task.project_id {
+                return Err(Error::Invalid(
+                    "That thread belongs to a different project.".into(),
                 ));
             }
         }
