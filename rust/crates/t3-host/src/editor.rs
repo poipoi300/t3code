@@ -367,11 +367,12 @@ impl ExternalLauncher {
                 None
             };
             if let Some(distro) = &distro {
-                target = format!(
-                    "\\\\wsl.localhost\\{distro}{}",
-                    path.to_string_lossy().replace('/', "\\")
-                );
-                args = vec![target.clone()];
+                let linux = path.to_string_lossy();
+                let reveal = input.reveal == Some(Some(true));
+                let (shown, wsl_args) =
+                    wsl_explorer_arguments(distro, &linux, reveal).ok_or_else(unsupported)?;
+                target = shown;
+                args = wsl_args;
             }
             let explorer = cfg!(windows)
                 && distro.is_none()
@@ -388,16 +389,8 @@ impl ExternalLauncher {
                 } else if explorer {
                     args = vec![format!("/select,\"{target}\"")];
                     verbatim = true;
-                } else if let Some(distro) = &distro {
-                    // WSL interop re-quotes arguments, so Explorer's selection syntax cannot be
-                    // passed intact: open the containing folder instead.
-                    args = vec![format!(
-                        "\\\\wsl.localhost\\{distro}{}",
-                        path.parent()
-                            .ok_or_else(unsupported)?
-                            .to_string_lossy()
-                            .replace('/', "\\")
-                    )];
+                } else if distro.is_some() {
+                    // `wsl_explorer_arguments` already chose the containing folder.
                 } else {
                     if try_reveal_linux(&path).await {
                         return Ok(());
@@ -725,6 +718,31 @@ pub fn editor_install_candidates(
     candidates
 }
 
+/// `ShowItems`' argument: a GVariant text literal, which is data. `Url::from_file_path`
+/// percent-encodes `"`; backslashes are encoded too, so the literal holds no escape.
+pub fn show_items_argument(uri: &str) -> String {
+    format!("[\"{}\"]", uri.replace('\\', "%5C"))
+}
+
+/// Explorer's argument for a Linux path under WSL: the `\\wsl.localhost` path shown, and the
+/// arguments. WSL interop rebuilds Explorer's command line from argv, so Explorer's own quoting
+/// cannot be passed through: Reveal opens the containing folder. `None` when the path cannot be
+/// handed to Explorer as one location.
+pub fn wsl_explorer_arguments(
+    distro: &str,
+    linux_path: &str,
+    reveal: bool,
+) -> Option<(String, Vec<String>)> {
+    let windows = |path: &str| format!("\\\\wsl.localhost\\{distro}{}", path.replace('/', "\\"));
+    let target = windows(linux_path);
+    let shown = if reveal {
+        let (parent, _) = linux_path.rsplit_once('/')?;
+        windows(if parent.is_empty() { "/" } else { parent })
+    } else {
+        target.clone()
+    };
+    Some((target, vec![shown]))
+}
 fn wsl_distribution() -> Option<String> {
     if std::env::var_os("SSH_CONNECTION").is_some()
         || std::env::var_os("SSH_TTY").is_some()
@@ -785,8 +803,7 @@ async fn try_reveal_linux(path: &Path) -> bool {
         "/org/freedesktop/FileManager1",
         "--method",
         "org.freedesktop.FileManager1.ShowItems",
-        // A GVariant text literal is data; with backslashes encoded the URI holds no escape.
-        &format!("[\"{}\"]", uri.as_str().replace('\\', "%5C")),
+        &show_items_argument(uri.as_str()),
         "",
     ]);
     options.timeout = Some(std::time::Duration::from_secs(2));

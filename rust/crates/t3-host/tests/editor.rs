@@ -457,3 +457,48 @@ async fn file_manager_expands_home_and_requires_its_literal_discovered_target() 
         "file manager must not interpret a filename as an editor position"
     );
 }
+
+/// Under WSL, Explorer receives one `\wsl.localhost` location rebuilt by WSL interop, which quotes
+/// only arguments with whitespace. Explorer splits at commas outside quotes, so a Linux name
+/// holding `,` (or `"`, which toggles quoting, or `\`, which a Linux name cannot carry over
+/// `\wsl.localhost` faithfully) would become a second location: refused for Open and Reveal.
+#[test]
+fn wsl_paths_explorer_could_split_or_misread_are_refused() {
+    for path in [
+        "/home/me/docs,\\attacker.example\x/readme.md",
+        "/home/me/docs,x/readme.md",
+        "/home/me/q\"uote/readme.md",
+        "/home/me/back\slash/readme.md",
+        "/home/me/new\nline/readme.md",
+    ] {
+        for reveal in [false, true] {
+            assert_eq!(
+                wsl_explorer_arguments("Ubuntu", path, reveal),
+                None,
+                "{path:?} reveal={reveal}"
+            );
+        }
+    }
+    // Everything else Explorer reads as one location: the exact argument vector.
+    let name = "/home/me/my project/a\u{2019}b;c&d$(x)`y%PATH%.md";
+    let target = "\\wsl.localhost\Ubuntu\home\me\my project\a\u{2019}b;c&d$(x)`y%PATH%.md";
+    assert_eq!(
+        wsl_explorer_arguments("Ubuntu", name, false),
+        Some((target.to_owned(), vec![target.to_owned()]))
+    );
+    assert_eq!(
+        wsl_explorer_arguments("Ubuntu", name, true),
+        Some((
+            target.to_owned(),
+            vec!["\\wsl.localhost\Ubuntu\home\me\my project".to_owned()]
+        ))
+    );
+}
+
+/// The D-Bus `ShowItems` argument is a GVariant text literal: no backslash or quote inside it.
+#[test]
+fn the_dbus_show_items_argument_holds_no_escape() {
+    let argument = show_items_argument("file:///home/me/a%22b/c\d\%22.txt");
+    assert_eq!(argument, "[\"file:///home/me/a%22b/c%5Cd%5C%22.txt\"]");
+    assert!(!argument[2..argument.len() - 2].contains(['\', '"']));
+}
