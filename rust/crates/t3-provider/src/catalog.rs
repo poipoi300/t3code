@@ -668,6 +668,9 @@ struct ManifestState {
 #[derive(Clone)]
 pub struct ManifestSource(watch::Receiver<Arc<Manifest>>);
 impl ManifestSource {
+    pub fn subscribe(&self) -> watch::Receiver<Arc<Manifest>> {
+        self.0.clone()
+    }
     pub fn current(&self) -> Arc<Manifest> {
         self.0.borrow().clone()
     }

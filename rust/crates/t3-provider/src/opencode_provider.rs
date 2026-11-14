@@ -28,8 +28,36 @@ pub struct OpenCodeProvider {
     models: Mutex<Option<(Arc<OpenCodeHttp>, Arc<OpenCodeModelLoader>)>>,
     unsupported_usage: Mutex<Option<String>>,
     maintenance: Option<[Arc<crate::maintenance_resolution::NativeMaintenance>; 2]>,
+    service_replacement: Option<Arc<crate::opencode_service::OpenCodeServiceReplacement>>,
 }
 impl OpenCodeProvider {
+    pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
+        let fallback = opencode_catalog::fallback_capabilities();
+        let message = if self.spec.enabled {
+            "OpenCode provider status has not been checked in this session yet."
+        } else if self.runtime.external() {
+            "OpenCode is disabled in T3 Code settings. A server URL is configured."
+        } else {
+            "OpenCode is disabled in T3 Code settings."
+        };
+        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"opencode","displayName":self.spec.display_name.as_deref().unwrap_or("OpenCode"),"enabled":self.spec.enabled,"installed":false,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown"},"models":catalog::custom_models(&[],&self.custom(),Some(&fallback)),"checkedAt":self.checked()?,"continuation":{"groupKey":self.spec.default_continuation_key()},"supportsConversationRollback":false,"showInteractionModeToggle":false,"message":message});
+        if let Some(color) = &self.spec.accent_color {
+            value["accentColor"] = json!(color);
+        }
+        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    }
+    pub fn into_managed(
+        self,
+        options: crate::managed_provider::ManagedOptions,
+    ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
+        let initial = self.initial_snapshot()?;
+        let manifest = self.manifest.subscribe();
+        let background = options.background.clone();
+        let provider =
+            crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)?;
+        provider.recheck_on_manifest(manifest, background);
+        Ok(provider)
+    }
     pub fn new(
         spec: Arc<InstanceSpec>,
         context: NativeProviderContext,
@@ -49,7 +77,15 @@ impl OpenCodeProvider {
             models: Mutex::new(None),
             unsupported_usage: Mutex::new(None),
             maintenance: None,
+            service_replacement: None,
         }
+    }
+    pub fn with_service_replacement(
+        mut self,
+        replacement: Arc<crate::opencode_service::OpenCodeServiceReplacement>,
+    ) -> Self {
+        self.service_replacement = Some(replacement);
+        self
     }
     pub fn with_maintenance(
         mut self,
@@ -498,7 +534,25 @@ impl ProviderInstanceService for OpenCodeProvider {
         Ok(())
     }
     async fn after_update(&self) -> ServiceResult<()> {
-        self.invalidate_caches().await
+        let replaced = if let Some(replacement) = &self.service_replacement
+            && let Some(server) = self.spec.config["serverUrl"]
+                .as_str()
+                .filter(|url| !url.trim().is_empty())
+        {
+            replacement
+                .replace(
+                    self.spec.config["binaryPath"]
+                        .as_str()
+                        .unwrap_or("opencode"),
+                    server,
+                    &self.environment(),
+                )
+                .await
+        } else {
+            Ok(())
+        };
+        let forgotten = self.invalidate_caches().await;
+        replaced.and(forgotten)
     }
     async fn maintenance(
         &self,

@@ -219,7 +219,15 @@ pub async fn probe_version(
                 None
             };
             let message = if output.code != Some(0) {
-                Some(format!("{command} is installed but failed to run."))
+                Some(
+                    if driver == Driver::Muse
+                        && output.stderr_text().contains("installed binary is missing")
+                    {
+                        "Muse installed binary is missing.".into()
+                    } else {
+                        format!("{command} is installed but failed to run.")
+                    },
+                )
             } else if let Some(minimum) = driver.minimum_version() {
                 match version.as_deref() {
                     None => Some(format!(

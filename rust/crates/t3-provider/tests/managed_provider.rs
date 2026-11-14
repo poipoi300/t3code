@@ -23,9 +23,26 @@ struct Source {
     id: ProviderInstanceId,
     requests: mpsc::UnboundedSender<Request>,
     policy: watch::Receiver<BackgroundPolicy>,
+    enrichment: Option<mpsc::UnboundedSender<Enrichment>>,
+}
+struct Enrichment {
+    snapshot: ServerProvider,
+    answer: oneshot::Sender<ServiceResult<ServerProvider>>,
 }
 #[async_trait]
 impl ProviderInstanceService for Source {
+    fn has_enrichment(&self) -> bool {
+        self.enrichment.is_some()
+    }
+    async fn enrich_snapshot(&self, snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
+        let (answer, response) = oneshot::channel();
+        self.enrichment
+            .as_ref()
+            .unwrap()
+            .send(Enrichment { snapshot, answer })
+            .unwrap();
+        response.await.map_err(|_| ServiceError::Response)?
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.id
     }
@@ -62,12 +79,24 @@ fn setup(
     watch::Sender<BackgroundPolicy>,
     mpsc::UnboundedReceiver<Request>,
 ) {
+    setup_all(initial, usage, None)
+}
+fn setup_all(
+    initial: ServerProvider,
+    usage: Option<Arc<dyn ManagedUsage>>,
+    enrichment: Option<mpsc::UnboundedSender<Enrichment>>,
+) -> (
+    Arc<ManagedProvider>,
+    watch::Sender<BackgroundPolicy>,
+    mpsc::UnboundedReceiver<Request>,
+) {
     let (policy, background) = watch::channel(BackgroundPolicy::default());
     let (requests, events) = mpsc::unbounded_channel();
     let source = Arc::new(Source {
         id: "codex".into(),
         requests,
         policy: background.clone(),
+        enrichment,
     });
     let mut options = ManagedOptions::new(background);
     options.usage = usage;
@@ -258,4 +287,99 @@ async fn dropping_a_managed_provider_cancels_its_pending_owned_background_probe(
     drop(provider);
     request.answer.closed().await;
     assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn correlated_cache_hydrates_only_the_placeholder_before_the_first_successful_check() {
+    let (provider, _policy, mut requests) = setup(snapshot("warning"), None);
+    let cached = snapshot("ready");
+    provider
+        .hydrate_cached_snapshot(cached.clone())
+        .await
+        .unwrap();
+    assert_eq!(provider.current().await.status, ServerProviderState::Ready);
+    assert!(provider.is_awaiting_first_check().await);
+    let refresh = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.snapshot(None, false).await }
+    });
+    let mut fresh = cached.clone();
+    fresh.version = Some("2.0.0".into());
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .answer
+        .send(Ok(fresh.clone()))
+        .unwrap();
+    refresh.await.unwrap().unwrap();
+    assert_eq!(
+        provider
+            .hydrate_cached_snapshot(cached)
+            .await
+            .unwrap()
+            .version,
+        fresh.version
+    );
+}
+
+#[tokio::test]
+async fn enrichment_runs_after_the_base_check_and_is_cancelled_on_refresh_and_teardown() {
+    let (enrichment, mut callbacks) = mpsc::unbounded_channel();
+    let (provider, _policy, mut requests) = setup_all(snapshot("warning"), None, Some(enrichment));
+    let mut changes = provider.subscribe_snapshots().unwrap();
+    let first = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.snapshot(None, false).await }
+    });
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .answer
+        .send(Ok(snapshot("ready")))
+        .unwrap();
+    first.await.unwrap().unwrap();
+    let mut old = callbacks.recv().await.unwrap();
+    assert_eq!(old.snapshot.status, ServerProviderState::Ready);
+    let second = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.snapshot(None, false).await }
+    });
+    let mut newer = snapshot("ready");
+    newer.version = Some("2.0.0".into());
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .answer
+        .send(Ok(newer))
+        .unwrap();
+    second.await.unwrap().unwrap();
+    old.answer.closed().await;
+    let mut current = callbacks.recv().await.unwrap();
+    current.snapshot.version = Some("3.0.0".into());
+    current.answer.send(Ok(current.snapshot)).unwrap();
+    observed(&mut changes, |snapshot| {
+        snapshot
+            .version
+            .as_ref()
+            .is_some_and(|version| version.0 == "3.0.0")
+    })
+    .await;
+    let third = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.snapshot(None, false).await }
+    });
+    requests
+        .recv()
+        .await
+        .unwrap()
+        .answer
+        .send(Ok(snapshot("ready")))
+        .unwrap();
+    third.await.unwrap().unwrap();
+    let mut pending = callbacks.recv().await.unwrap();
+    drop(provider);
+    pending.answer.closed().await;
 }

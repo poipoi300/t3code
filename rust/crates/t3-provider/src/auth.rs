@@ -244,6 +244,9 @@ impl Drop for AuthController {
     }
 }
 impl AuthController {
+    pub fn instance_id(&self) -> &ProviderInstanceId {
+        &self.instance
+    }
     pub async fn new(
         instance: ProviderInstanceId,
         binding: CredentialBinding,

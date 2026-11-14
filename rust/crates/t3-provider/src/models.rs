@@ -247,41 +247,31 @@ pub fn muse_models(catalog: &Value) -> Result<Vec<ServerProviderModel>> {
             .get("isDefault")
             .and_then(Value::as_bool)
             .ok_or_else(|| invalid("Muse catalog", "missing isDefault"))?;
-        if entry
-            .get("variants")
-            .filter(|v| !v.is_null())
-            .is_some_and(|v| match v {
-                Value::String(s) => s != "unknown",
-                Value::Array(values) => !values.iter().all(Value::is_string),
-                _ => true,
-            })
-            || entry
-                .get("defaultReasoningEffort")
-                .filter(|v| !v.is_null())
-                .is_some_and(|v| !v.is_string())
-            || entry
-                .get("reasoningEffortVariants")
-                .filter(|v| !v.is_null())
-                .is_some_and(|v| {
-                    v.as_array().is_none_or(|values| {
-                        values.iter().any(|v| {
-                            v.get("tier").is_none_or(|v| !v.is_string())
-                                || v.get("description")
-                                    .filter(|v| !v.is_null())
-                                    .is_some_and(|v| !v.is_string())
-                        })
+        if entry.get("variants").is_some_and(|v| match v {
+            Value::String(s) => s != "unknown",
+            Value::Array(values) => !values.iter().all(Value::is_string),
+            _ => true,
+        }) || entry
+            .get("defaultReasoningEffort")
+            .is_some_and(|v| !v.is_string())
+            || entry.get("reasoningEffortVariants").is_some_and(|v| {
+                v.as_array().is_none_or(|values| {
+                    values.iter().any(|v| {
+                        v.get("tier").is_none_or(|v| !v.is_string())
+                            || v.get("description").is_some_and(|v| !v.is_string())
                     })
                 })
+            })
         {
             return Err(invalid("Muse catalog", "invalid reasoning variants"));
         }
         if provider != "meta" || !seen.insert(id) {
             continue;
         }
-        let label = if label.trim().is_empty() {
+        let label = if t3_contracts::wire::trim_js(label).is_empty() {
             id
         } else {
-            label.trim()
+            t3_contracts::wire::trim_js(label)
         };
         let name = if label == id && label.starts_with("muse-") {
             let title = label.replace('-', " ");
@@ -387,7 +377,15 @@ pub fn kiro_auth_from_whoami(
             let account = serde_json::from_str::<Value>(
                 output.trim_start().lines().next().unwrap_or("").trim(),
             )
-            .ok();
+            .ok()
+            .filter(|account| {
+                account.is_object()
+                    && ["accountType", "email"].iter().all(|field| {
+                        account
+                            .get(*field)
+                            .is_none_or(|value| value.is_null() || value.is_string())
+                    })
+            });
             if account
                 .as_ref()
                 .and_then(|a| a.get("accountType"))
@@ -445,11 +443,13 @@ pub fn kiro_models_from_list(code: i32, stdout: &str) -> Result<Option<Vec<Serve
     #[derive(Deserialize)]
     struct Listed {
         models: Vec<ListedModel>,
+        #[serde(default, with = "t3_contracts::wire::optional")]
         default_model: Option<String>,
     }
     #[derive(Deserialize)]
     struct ListedModel {
         model_id: String,
+        #[serde(default, with = "t3_contracts::wire::optional")]
         model_name: Option<String>,
     }
     if code != 0 {
@@ -493,6 +493,24 @@ pub fn kiro_models_from_list(code: i32, stdout: &str) -> Result<Option<Vec<Serve
 }
 
 pub fn kiro_agent_descriptor(template: &Value) -> Option<ProviderOptionDescriptor> {
+    let options = template.get("configOptions")?.as_array()?;
+    if options.iter().any(|option| {
+        !option["id"].is_string()
+            || !option["type"].is_string()
+            || option.get("options").is_some_and(|choices| {
+                choices.as_array().is_none_or(|choices| {
+                    choices.iter().any(|choice| {
+                        !choice["value"].is_string()
+                            || !choice["name"].is_string()
+                            || choice.get("description").is_some_and(|description| {
+                                !description.is_null() && !description.is_string()
+                            })
+                    })
+                })
+            })
+    }) {
+        return None;
+    }
     let option = template
         .get("configOptions")?
         .as_array()?

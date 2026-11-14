@@ -217,6 +217,7 @@ impl ManagedCodexProvider {
         options: crate::managed_provider::ManagedOptions,
     ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
         let initial = self.initial_snapshot()?;
+        let manifest = self.manifest.subscribe();
         let background = options.background.clone();
         let changes = self
             .runtime
@@ -224,7 +225,8 @@ impl ManagedCodexProvider {
             .subscribe("managed-codex-snapshot".into());
         let provider =
             crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)?;
-        provider.recheck_on_auth(changes, background).await;
+        provider.recheck_on_auth(changes, background.clone()).await;
+        provider.recheck_on_manifest(manifest, background);
         Ok(provider)
     }
 }

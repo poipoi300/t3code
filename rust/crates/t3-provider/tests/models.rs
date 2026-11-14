@@ -28,6 +28,21 @@ fn muse_distinguishes_unknown_variants_from_an_explicit_empty_effort_list() {
         );
     }
     let catalog = json!({"providerId":"meta","models":[{"modelId":"muse-1-pro","displayLabel":"","providerId":"meta","isDefault":true,"variants":["ultra","bogus","low"],"defaultReasoningEffort":"ultra","reasoningEffortVariants":[{"tier":"ultra","description":"More reasoning"}]},{"modelId":"muse-1-pro","displayLabel":"Duplicate","providerId":"meta","isDefault":false},{"modelId":"foreign","displayLabel":"Foreign","providerId":"other","isDefault":false}]});
+    for field in [
+        "variants",
+        "defaultReasoningEffort",
+        "reasoningEffortVariants",
+    ] {
+        let mut invalid = catalog.clone();
+        invalid["models"][0][field] = serde_json::Value::Null;
+        assert!(
+            muse_models(&invalid).is_err(),
+            "{field} must reject explicit null"
+        );
+    }
+    let mut invalid = catalog.clone();
+    invalid["models"][0]["reasoningEffortVariants"][0]["description"] = serde_json::Value::Null;
+    assert!(muse_models(&invalid).is_err());
     let models = muse_models(&catalog).unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].name.0, "Muse 1 Pro");
@@ -63,6 +78,16 @@ fn grok_effort_order_defaults_and_unfamiliar_tokens_follow_advertised_metadata()
 #[test]
 fn kiro_whoami_reads_first_line_and_never_infers_auth_from_a_failed_command() {
     let env = Environment::new();
+    assert!(
+        kiro_auth_from_whoami(
+            Some(0),
+            Some(r#"{"accountType":4,"email":"must-not-retain@example.invalid"}"#),
+            &env
+        )
+        .unwrap()
+        .email
+        .is_none()
+    );
     let auth = kiro_auth_from_whoami(
         Some(0),
         Some("{\"email\":\"ada@example.com\",\"accountType\":\"IdentityCenter\"}\nProfile: work"),
@@ -97,6 +122,16 @@ fn kiro_whoami_reads_first_line_and_never_infers_auth_from_a_failed_command() {
 
 #[test]
 fn kiro_default_model_alias_has_no_effort_and_known_models_keep_exact_effort_defaults() {
+    for invalid in [
+        json!({"models":[{"model_id":"future","model_name":null}]}),
+        json!({"models":[{"model_id":"future"}],"default_model":null}),
+    ] {
+        assert!(
+            kiro_models_from_list(0, &invalid.to_string())
+                .unwrap()
+                .is_none()
+        );
+    }
     let models=kiro_models_from_list(0,&json!({"default_model":"claude-opus-5.5","models":[{"model_id":"claude-opus-5.5","model_name":"Opus"},{"model_id":"claude-opus-4.7"}]}).to_string()).unwrap().unwrap();
     assert_eq!(models[0].slug.0, "default");
     assert!(descriptors(models[0].capabilities.as_ref().unwrap()).is_empty());
@@ -118,6 +153,7 @@ fn kiro_default_model_alias_has_no_effort_and_known_models_keep_exact_effort_def
 
 #[test]
 fn kiro_agent_picker_requires_multiple_choices_and_preserves_descriptions() {
+    assert!(kiro_agent_descriptor(&json!({"configOptions":[{"id":"mode","type":"select","options":[{"value":"one","name":"One"},{"value":"two","name":"Two"}]},{"id":3,"type":"boolean"}]})).is_none());
     assert!(kiro_agent_descriptor(&json!({"configOptions":[{"id":"mode","type":"select","options":[{"value":"default","name":"Default"}]}]})).is_none());
     let descriptor=kiro_agent_descriptor(&json!({"configOptions":[{"id":"mode","type":"select","currentValue":"work","options":[{"value":"default","name":"Default"},{"value":" work ","name":"Work","description":" Company agent "}]}]})).unwrap();
     assert!(

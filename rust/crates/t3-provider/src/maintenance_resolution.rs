@@ -80,6 +80,7 @@ enum Lookup {
     Npm,
     NativeCodex,
     NativeClaude,
+    Muse,
     Mise {
         command: String,
         tool: String,
@@ -129,6 +130,9 @@ impl NativeMaintenance {
         match self.context.driver.as_str() {
             "codex" => Ok("@openai/codex"),
             "claudeAgent" => Ok("@anthropic-ai/claude-code"),
+            "grok" => Ok("@xai-official/grok"),
+            "pi" => Ok("@earendil-works/pi-coding-agent"),
+            "muse" => Ok(""),
             "opencode" => match self.opencode_generation {
                 Some(1) => Ok("opencode-ai"),
                 Some(2) => Ok("@opencode/cli"),
@@ -141,13 +145,18 @@ impl NativeMaintenance {
         Ok(Resolved {
             capabilities: MaintenanceCapabilities {
                 driver: self.context.driver.clone(),
-                package: Some(self.package()?.into()),
+                package: Some(self.package()?.into())
+                    .filter(|package: &String| !package.is_empty()),
                 update: None,
                 install_path: path,
                 manual_command: None,
             },
-            lookup: Lookup::Npm,
-            public_fallback: true,
+            lookup: if self.context.driver == "muse" {
+                Lookup::Muse
+            } else {
+                Lookup::Npm
+            },
+            public_fallback: self.context.driver != "muse",
         })
     }
     fn managed(
@@ -162,7 +171,8 @@ impl NativeMaintenance {
         Ok(Resolved {
             capabilities: MaintenanceCapabilities {
                 driver: self.context.driver.clone(),
-                package: Some(self.package()?.into()),
+                package: Some(self.package()?.into())
+                    .filter(|package: &String| !package.is_empty()),
                 update: Some(action(
                     command,
                     args,
@@ -266,6 +276,9 @@ impl NativeMaintenance {
                 }
             }
         }
+        if context.driver == "muse" && context.platform == Platform::Windows {
+            return self.manual(Some(real));
+        }
         let paths = [resolved.as_str(), real.as_str()];
         if context.driver == "claudeAgent" && context.platform == Platform::Windows {
             if paths.iter().any(|p|regex::Regex::new(r"^[a-z]:/(?:users/[^/]+/appdata/local/microsoft|program files(?: \(x86\))?)/winget/(?:links|packages/anthropic\.claudecode_[^/]+)/claude\.exe$").is_ok_and(|re|re.is_match(&normalize(p)))){return self.manual(Some(real));}
@@ -280,11 +293,66 @@ impl NativeMaintenance {
         if let Some(mise) = self.mise(&resolved, &real).await? {
             return Ok(mise);
         }
+        if context.driver == "muse" {
+            let launcher = std::fs::metadata(&real)
+                .is_ok_and(|metadata| metadata.len() <= 128 * 1024)
+                && std::fs::read_to_string(&real).is_ok_and(|source| {
+                    source.contains("muse-code/launcher-") && source.contains("MUSE_SYNC_UPDATE")
+                });
+            if !launcher {
+                return self.manual(Some(real));
+            }
+            let mut environment = context.environment.clone();
+            environment.insert("MUSE_NO_AUTO_UPDATE".into(), "0".into());
+            environment.insert("MUSE_SYNC_UPDATE".into(), "1".into());
+            environment.insert("MUSE_UPDATE_INTERVAL_SECONDS".into(), "0".into());
+            let mut value = self.managed(
+                &resolved,
+                vec!["--version".into()],
+                &format!("muse:{real}"),
+                environment,
+                Lookup::Muse,
+                false,
+            )?;
+            if let Some(action) = &mut value.capabilities.update {
+                let overrides = context
+                    .environment
+                    .get("MUSE_CHANNEL")
+                    .filter(|channel| !channel.is_empty())
+                    .map(|channel| {
+                        format!(
+                            "MUSE_CHANNEL={} ",
+                            maintenance::quote_shell_word(channel, context.platform)
+                        )
+                    })
+                    .unwrap_or_default();
+                action.command = format!(
+                    "{overrides}MUSE_NO_AUTO_UPDATE=0 MUSE_SYNC_UPDATE=1 MUSE_UPDATE_INTERVAL_SECONDS=0 {} --version",
+                    maintenance::quote_shell_word(&resolved, context.platform)
+                );
+            }
+            return Ok(value);
+        }
         if paths
             .iter()
             .any(|p| normalize(p).starts_with("/nix/store/"))
         {
             return self.manual(Some(real));
+        }
+        if context.driver == "grok"
+            && !maintenance::homebrew_ownership(&real).is_some_and(|ownership| ownership.cask)
+        {
+            let mut environment = context.environment.clone();
+            environment.retain(|name, _| !name.eq_ignore_ascii_case("npm_config_allow_scripts"));
+            environment.insert("npm_config_allow_scripts".into(), package.into());
+            return self.managed(
+                &resolved,
+                vec!["update".into()],
+                "grok",
+                environment,
+                Lookup::Npm,
+                true,
+            );
         }
         if context.driver == "opencode"
             && paths
@@ -485,12 +553,29 @@ impl NativeMaintenance {
                 }
             }
         }
+        if context.driver == "pi"
+            && !paths
+                .iter()
+                .any(|path| normalize(path).contains("/node_modules/"))
+        {
+            return self.managed(
+                &resolved,
+                vec!["update".into(), "--self".into()],
+                "pi-native",
+                context.environment.clone(),
+                Lookup::Npm,
+                true,
+            );
+        }
         self.manual(Some(real))
     }
     async fn mise(&self, resolved: &str, real: &str) -> ServiceResult<Option<Resolved>> {
         let tool = match self.context.driver.as_str() {
             "claudeAgent" => "claude",
             "opencode" => "opencode",
+            "grok" => "grok",
+            "muse" => "muse",
+            "pi" => "pi",
             _ => "codex",
         };
         let paths = [resolved, real];
@@ -661,6 +746,37 @@ impl NativeMaintenance {
         let package = self.package()?;
         let context = &self.context;
         let found = match &resolved.lookup {
+            Lookup::Muse => {
+                let channel = context
+                    .environment
+                    .get("MUSE_CHANNEL")
+                    .map(String::as_str)
+                    .filter(|channel| !channel.is_empty())
+                    .unwrap_or("muse-stable");
+                if !matches!(channel, "muse-stable" | "muse-canary") {
+                    None
+                } else {
+                    match tokio::time::timeout(
+                        Duration::from_secs(4),
+                        self.http.send(get(format!(
+                            "https://api.meta.ai/muse-code/channels/{channel}"
+                        ))),
+                    )
+                    .await
+                    {
+                        Ok(Ok(response)) if (200..300).contains(&response.status) => {
+                            response.body.expose()["version"]
+                                .as_str()
+                                .filter(|version| {
+                                    regex::Regex::new(r"^\d+\.\d+\.\d+-R\d+(?:\.\d+)?$")
+                                        .is_ok_and(|pattern| pattern.is_match(version))
+                                })
+                                .map(str::to_owned)
+                        }
+                        _ => None,
+                    }
+                }
+            }
             Lookup::NativeCodex => {
                 let request = get("https://releases.openai.com/codex/channels/latest".into());
                 match tokio::time::timeout(Duration::from_secs(4), self.http.send(request)).await {

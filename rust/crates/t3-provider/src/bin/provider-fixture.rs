@@ -8,6 +8,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let path = std::env::var_os("T3_PROVIDER_FIXTURE").ok_or("missing fixture path")?;
     let config: Value = serde_json::from_slice(&fs::read(path)?)?;
+    for (name, value) in config["expectedEnvironment"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        if std::env::var(name).ok().as_deref() != value.as_str() {
+            return Err("unexpected fixture environment".into());
+        }
+    }
     if let Some(log) = config["log"].as_str() {
         writeln!(
             OpenOptions::new().create(true).append(true).open(log)?,
@@ -22,7 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?
             .block_on(opencode_server(config, args));
     }
-    if config["protocol"] == "acp" {
+    if config["protocol"] == "pi" && args.windows(2).any(|args| args == ["--mode", "rpc"]) {
+        return pi_protocol(&config, &args);
+    }
+    if config["protocol"] == "acp"
+        || config["protocol"] == "grok" && args == ["agent", "stdio"]
+        || config["protocol"] == "kiro" && args.first().is_some_and(|argument| argument == "acp")
+    {
         return acp_protocol(&config);
     }
     if config["protocol"] == "codex" && args.first().is_some_and(|s| s == "app-server")
@@ -41,6 +56,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprint!("{}", config["versionStderr"].as_str().unwrap_or(""));
             std::process::exit(config["versionExit"].as_i64().unwrap_or(0) as i32);
         }
+        ["auth", "check", "--provider", _, "--json", "--no-refresh"] => {
+            print!(
+                "{}",
+                config
+                    .get("piAuthCheck")
+                    .unwrap_or(&json!({"reason":"credentials_not_configured"}))
+            );
+        }
         ["status", "--json"] => {
             print!(
                 "{}",
@@ -58,6 +81,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(&json!({"ids":["meta/muse","other"]}))
             );
             std::process::exit(config["modelsExit"].as_i64().unwrap_or(0) as i32);
+        }
+        ["models"] => {
+            let calls = config["log"]
+                .as_str()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Vec<String>>(line).ok())
+                .filter(|call| call == &["models"])
+                .count();
+            let output = config["grokModels"]
+                .as_array()
+                .and_then(|outputs| {
+                    outputs
+                        .get(calls.saturating_sub(1))
+                        .or_else(|| outputs.last())
+                })
+                .or_else(|| config.get("grokModels"));
+            print!(
+                "{}",
+                output
+                    .and_then(Value::as_str)
+                    .unwrap_or("You are logged in\n- grok-build (default)\n")
+            );
+            std::process::exit(config["modelsExit"].as_i64().unwrap_or(0) as i32);
+        }
+        ["inspect", "--json"] => {
+            print!("{}", config.get("inspect").unwrap_or(&json!({"skills":[]})));
+            std::process::exit(config["inspectExit"].as_i64().unwrap_or(0) as i32);
+        }
+        ["whoami", "--format", "json"] => {
+            let value = config.get("whoami").cloned().unwrap_or_else(
+                || json!({"accountType":"IdentityCenter","email":"kiro@example.invalid"}),
+            );
+            print!(
+                "{}",
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string())
+            );
+            std::process::exit(config["whoamiExit"].as_i64().unwrap_or(0) as i32);
+        }
+        ["chat", "--list-models", "--format", "json"] => {
+            print!(
+                "{}",
+                config
+                    .get("kiroModels")
+                    .unwrap_or(&json!({"models":[{"model_id":"auto"}]}))
+            );
+            std::process::exit(config["kiroModelsExit"].as_i64().unwrap_or(0) as i32);
         }
         ["--cache=false", "read", _, "--no-newline", reference] => {
             if let Some(value) = config["secrets"][reference].as_str() {
@@ -89,6 +163,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+fn pi_protocol(config: &Value, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, BufRead};
+    let text = args.iter().any(|arg| arg == "--no-extensions");
+    for line in io::stdin().lock().lines() {
+        let request: Value = serde_json::from_str(&line?)?;
+        let command = request["type"].as_str().ok_or("missing request type")?;
+        if let Some(log) = config["rpcLog"].as_str() {
+            writeln!(
+                OpenOptions::new().create(true).append(true).open(log)?,
+                "{}",
+                json!({"method":command,"textGeneration":text})
+            )?;
+        }
+        let data = match command {
+            "get_state" => config.get("piState").cloned().unwrap_or(json!({})),
+            "get_available_models" => config
+                .get(if text { "piTextModels" } else { "piModels" })
+                .cloned()
+                .unwrap_or(json!({"models":[]})),
+            "get_commands" => config
+                .get("piCommands")
+                .cloned()
+                .unwrap_or(json!({"commands":[]})),
+            _ => return Err("fixture refuses provider turns and unknown controls".into()),
+        };
+        println!(
+            "{}",
+            json!({"type":"response","id":request["id"],"command":command,"success":true,"data":data})
+        );
+        io::stdout().flush()?;
+    }
+    Ok(())
+}
 fn acp_protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::BufRead;
     let mut output = std::io::stdout().lock();
@@ -110,6 +217,12 @@ fn acp_protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
             return Err("fixture forbids turns".into());
         }
         let mut error = None;
+        if method == "initialize"
+            && let Some(expected) = config.get("expectedInitializeMeta")
+            && message["params"]["_meta"] != *expected
+        {
+            error = Some(json!({"code":-32602,"message":"unexpected initialize metadata"}));
+        }
         let result=match method{
             "initialize"=>config.get("initialize").cloned().unwrap_or_else(||json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{},"delete":{},"resume":{}},"auth":{"logout":{}}},"authMethods":[{"id":"login","name":"Sign in"}]})),
             "session/new"=>{
@@ -128,6 +241,7 @@ fn acp_protocol(config: &Value) -> Result<(), Box<dyn std::error::Error>> {
             "session/delete"|"logout"|"auth/logout"|"providers/set"|"providers/disable"=>json!({}),
             "session/list"=>config.get("sessions").cloned().unwrap_or_else(||json!({"sessions":[{"sessionId":"one","cwd":"/fixture","title":"One"}],"nextCursor":null})),
             "providers/list"=>config.get("providers").cloned().unwrap_or_else(||json!({"providers":[{"providerId":"openai","supported":["openai"],"required":false,"current":null}]})),
+            "_kiro/config/template"=>config.get("kiroTemplate").cloned().unwrap_or_else(||json!({"configOptions":[]})),
             _=>{error=Some(json!({"code":-32601,"message":"unsupported fixture method"}));json!({})}
         };
         if let Some(id) = message.get("id") {

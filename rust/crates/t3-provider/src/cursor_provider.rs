@@ -23,6 +23,43 @@ pub struct CursorProvider {
     machine: tokio::sync::Mutex<Option<ServerProvider>>,
 }
 impl CursorProvider {
+    pub fn initial_snapshot(&self) -> ServiceResult<ServerProvider> {
+        let checked = chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
+            .ok_or(ServiceError::Response)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let browser = !self.auth.uses_api_key();
+        let fallback = catalog::capabilities(vec![]);
+        let custom = self.spec.config["customModels"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut value = json!({"instanceId":self.spec.instance_id,"driver":"cursor","displayName":self.spec.display_name.as_deref().unwrap_or("Cursor"),"enabled":self.spec.enabled,"installed":self.spec.enabled,"version":null,"status":if self.spec.enabled{"warning"}else{"disabled"},"auth":{"status":"unknown","canLogout":browser},"models":catalog::custom_models(&[],&custom,Some(&fallback)),"checkedAt":checked,"setup":{"canAuthenticate":browser,"canInstall":false},"continuation":{"groupKey":self.spec.default_continuation_key()},"supportsConversationRollback":false,"showInteractionModeToggle":true,"supportedRuntimeModes":["approval-required","auto-accept-edits","auto","full-access"],"message":if self.spec.enabled{"Checking Cursor SDK availability..."}else{"Cursor is disabled in T3 Code settings."}});
+        if let Some(color) = &self.spec.accent_color {
+            value["accentColor"] = json!(color);
+        }
+        serde_json::from_value(value).map_err(|_| ServiceError::Response)
+    }
+    pub async fn into_managed(
+        self,
+        options: crate::managed_provider::ManagedOptions,
+        controller: Option<Arc<crate::auth::AuthController>>,
+    ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
+        let initial = self.initial_snapshot()?;
+        let manifest = self.manifest.subscribe();
+        let background = options.background.clone();
+        let provider =
+            crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)?;
+        if let Some(controller) = controller {
+            provider
+                .recheck_on_auth(
+                    controller.subscribe("cursor-snapshot".into()),
+                    background.clone(),
+                )
+                .await;
+        }
+        provider.recheck_on_manifest(manifest, background);
+        Ok(provider)
+    }
     pub fn new(
         spec: Arc<InstanceSpec>,
         context: NativeProviderContext,

@@ -63,12 +63,26 @@ async fn native_models_follow_a_refreshed_shared_manifest_without_rebuilding_the
     );
     let source = manifest.source();
     let fixture = Fixture::new(json!({"protocol":"claude","version":"2.1.200 (Claude Code)"}));
-    let provider = with_manifest(&fixture, "claudeAgent", manifest.clone());
+    let (_policy, background) =
+        tokio::sync::watch::channel(t3_provider::managed_provider::BackgroundPolicy {
+            server_ready: true,
+            ..Default::default()
+        });
+    let provider = with_manifest(&fixture, "claudeAgent", manifest.clone())
+        .into_managed(t3_provider::managed_provider::ManagedOptions::new(
+            background,
+        ))
+        .unwrap();
+    let mut changes = provider.subscribe_snapshots().unwrap();
+    let initial = loop {
+        let current = changes.borrow_and_update().clone().unwrap();
+        if current.status == ServerProviderState::Ready {
+            break current;
+        }
+        changes.changed().await.unwrap();
+    };
     assert!(
-        !provider
-            .snapshot(None, true)
-            .await
-            .unwrap()
+        !initial
             .models
             .iter()
             .any(|model| model.slug.0 == "future-model")
@@ -96,7 +110,17 @@ async fn native_models_follow_a_refreshed_shared_manifest_without_rebuilding_the
         .unwrap();
     server.await.unwrap();
     assert!(Arc::ptr_eq(&source.current(), &manifest.current().await));
-    let snapshot = provider.snapshot(None, true).await.unwrap();
+    let snapshot = loop {
+        let current = changes.borrow_and_update().clone().unwrap();
+        if current
+            .models
+            .iter()
+            .any(|model| model.slug.0 == "future-model")
+        {
+            break current;
+        }
+        changes.changed().await.unwrap();
+    };
     assert_eq!(snapshot.models[0].slug.0, "future-model");
     assert_eq!(snapshot.models[0].name.0, "Future Model");
     assert_eq!(

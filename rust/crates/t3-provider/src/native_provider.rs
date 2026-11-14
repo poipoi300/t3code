@@ -187,7 +187,12 @@ impl NativeProvider {
         options: crate::managed_provider::ManagedOptions,
     ) -> ServiceResult<Arc<crate::managed_provider::ManagedProvider>> {
         let initial = self.initial_snapshot()?;
-        crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)
+        let manifest = self.manifest.subscribe();
+        let background = options.background.clone();
+        let provider =
+            crate::managed_provider::ManagedProvider::new(Arc::new(self), initial, options)?;
+        provider.recheck_on_manifest(manifest, background);
+        Ok(provider)
     }
     fn stamp(&self, value: &mut Value, checked: &str, models: &[ServerProviderModel]) {
         value["instanceId"] = json!(self.spec.instance_id);
@@ -593,20 +598,6 @@ impl NativeProvider {
                 .ok_or(ServiceError::Response)?
                 .remove("compatibilityAdvisory");
         }
-        if let Some(maintenance) = self.maintenance.as_ref() {
-            let capabilities = maintenance.capabilities(false).await?;
-            let latest = if self.update_checks {
-                maintenance.latest(false).await?
-            } else {
-                None
-            };
-            value["versionAdvisory"] = json!(crate::maintenance::version_advisory(
-                &capabilities,
-                value["version"].as_str(),
-                latest.as_deref(),
-                Some(&checked)
-            ));
-        }
         Ok((
             serde_json::from_value(value).map_err(|_| ServiceError::Response)?,
             pending,
@@ -615,6 +606,26 @@ impl NativeProvider {
 }
 #[async_trait]
 impl ProviderInstanceService for NativeProvider {
+    fn has_enrichment(&self) -> bool {
+        self.maintenance.is_some()
+    }
+    async fn enrich_snapshot(&self, mut snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
+        if let Some(maintenance) = &self.maintenance {
+            let capabilities = maintenance.capabilities(false).await?;
+            let latest = if self.update_checks {
+                maintenance.latest(false).await?
+            } else {
+                None
+            };
+            snapshot.version_advisory = Some(crate::maintenance::version_advisory(
+                &capabilities,
+                snapshot.version.as_ref().map(|version| version.0.as_str()),
+                latest.as_deref(),
+                Some(&snapshot.checked_at.0),
+            ));
+        }
+        Ok(snapshot)
+    }
     async fn invalidate_usage_cache(&self) -> ServiceResult<()> {
         self.probe_cache.invalidate().await;
         Ok(())

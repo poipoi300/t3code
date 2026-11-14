@@ -96,6 +96,105 @@ fn build_resolver(
         Arc::new(LatestVersions::default()),
     )
 }
+
+#[tokio::test]
+async fn muse_updates_only_its_proven_launcher_or_active_mise_install_and_uses_validated_channels()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let launcher = temp.path().join("muse");
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\nmuse-code/launcher-linux MUSE_SYNC_UPDATE",
+    )
+    .unwrap();
+    let path = launcher.to_string_lossy().into_owned();
+    for (platform, channel, update, latest) in [
+        (Platform::Windows, "muse-stable", false, Some("1.2.3-R4")),
+        (Platform::Linux, "muse-canary", true, Some("1.2.3-R5.2")),
+        (Platform::Linux, "../secret-never-format", true, None),
+    ] {
+        let mut context = context("muse", &path);
+        context.platform = platform;
+        context
+            .environment
+            .insert("MUSE_CHANNEL".into(), channel.into());
+        let probe = Arc::new(Probe {
+            resolved: BTreeMap::from([("provider".into(), path.clone())]),
+            ..Default::default()
+        });
+        let http = Arc::new(Http::default());
+        http.replies.lock().await.extend([
+            (
+                "https://api.meta.ai/muse-code/channels/muse-stable".into(),
+                json!({"version":"1.2.3-R4"}),
+            ),
+            (
+                "https://api.meta.ai/muse-code/channels/muse-canary".into(),
+                json!({"version":"1.2.3-R5.2"}),
+            ),
+        ]);
+        let resolver = build_resolver(context, probe, http.clone());
+        let capabilities = resolver.capabilities(false).await.unwrap();
+        assert_eq!(capabilities.update.is_some(), update);
+        assert!(capabilities.package.is_none());
+        if let Some(action) = &capabilities.update {
+            assert_eq!(action.args, ["--version"]);
+            assert_eq!(action.environment["MUSE_NO_AUTO_UPDATE"], "0");
+            assert_eq!(action.environment["MUSE_SYNC_UPDATE"], "1");
+            assert!(!format!("{action:?}").contains("secret-never-format"));
+        }
+        assert_eq!(resolver.latest(false).await.unwrap().as_deref(), latest);
+        assert_eq!(http.calls.lock().await.len(), usize::from(latest.is_some()));
+    }
+    std::fs::write(&launcher, "#!/bin/sh\nstandalone binary").unwrap();
+    let mut context = context("muse", &path);
+    context.platform = Platform::Linux;
+    let probe = Arc::new(Probe {
+        resolved: BTreeMap::from([("provider".into(), path)]),
+        ..Default::default()
+    });
+    assert!(
+        build_resolver(context, probe, Arc::new(Http::default()))
+            .capabilities(false)
+            .await
+            .unwrap()
+            .update
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn grok_uses_its_native_update_command_preserves_manager_ownership_and_allows_only_its_postinstall()
+ {
+    for (path, command) in [
+        ("C:/tools/grok.exe", Some("update")),
+        ("/nix/store/pkg/bin/grok", None),
+    ] {
+        let probe = Arc::new(Probe {
+            resolved: BTreeMap::from([("provider".into(), path.into())]),
+            ..Default::default()
+        });
+        let resolver = build_resolver(context("grok", path), probe, Arc::new(Http::default()));
+        let capabilities = resolver.capabilities(false).await.unwrap();
+        assert_eq!(capabilities.package.as_deref(), Some("@xai-official/grok"));
+        assert_eq!(
+            capabilities
+                .update
+                .as_ref()
+                .and_then(|update| update.args.first())
+                .map(String::as_str),
+            command
+        );
+        if let Some(update) = capabilities.update {
+            assert_eq!(update.executable, path);
+            assert_eq!(update.lock_key, "grok");
+            assert_eq!(
+                update.environment["npm_config_allow_scripts"],
+                "@xai-official/grok"
+            );
+        }
+    }
+}
 #[tokio::test]
 async fn opencode_updates_keep_the_package_generation_and_native_home_and_never_upgrade_mise_v1_to_v2()
  {

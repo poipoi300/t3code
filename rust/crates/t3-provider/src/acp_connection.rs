@@ -200,7 +200,23 @@ impl AcpConnection {
         Ok(connection)
     }
     pub async fn initialize(&self, name: &str, terminal_auth: bool) -> AcpResult<Sensitive<Value>> {
-        self.client.initialize(json!({"clientInfo":{"name":name,"version":"0.0.0"},"clientCapabilities":{"auth":{"terminal":terminal_auth},"elicitation":{"url":{}},"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}})).await.map(|result|Sensitive::new(result.response)).map_err(|error|protocol_error(&error,Reason::ProbeFailed))
+        self.initialize_with_meta(name, terminal_auth, None).await
+    }
+    pub async fn initialize_with_meta(
+        &self,
+        name: &str,
+        terminal_auth: bool,
+        meta: Option<Value>,
+    ) -> AcpResult<Sensitive<Value>> {
+        let mut input = json!({"clientInfo":{"name":name,"version":"0.0.0"},"clientCapabilities":{"auth":{"terminal":terminal_auth},"elicitation":{"url":{}},"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}});
+        if let Some(meta) = meta {
+            input["_meta"] = meta;
+        }
+        self.client
+            .initialize(input)
+            .await
+            .map(|result| Sensitive::new(result.response))
+            .map_err(|error| protocol_error(&error, Reason::ProbeFailed))
     }
     pub async fn new_session(&self, cwd: &std::path::Path) -> AcpResult<Sensitive<Value>> {
         let mut setup = self

@@ -274,7 +274,7 @@ async fn policy_changes_retire_live_instances_and_unblocking_rebuilds_unchanged_
     let changes = registry
         .reconcile(&settings, &resolver, &BTreeSet::new(), false, &blocked)
         .await;
-    assert_eq!(changes.retired, [id.clone()]);
+    assert_eq!(changes.retired.as_slice(), std::slice::from_ref(&id));
     assert!(matches!(
         registry.get(&id).await.unwrap().status,
         InstanceStatus::Unavailable(UnavailableReason::Blocked(_))
@@ -288,7 +288,7 @@ async fn policy_changes_retire_live_instances_and_unblocking_rebuilds_unchanged_
             &BTreeMap::new(),
         )
         .await;
-    assert_eq!(changes.prepared, [id.clone()]);
+    assert_eq!(changes.prepared.as_slice(), std::slice::from_ref(&id));
     prepared(&registry.get(&id).await.unwrap());
     assert!(fixture.calls().is_empty());
 }
@@ -301,4 +301,98 @@ fn unavailable_reason_debug_does_not_echo_configuration_or_vault_details() {
     ] {
         assert!(!format!("{reason:?}").contains("never-format-secret"));
     }
+}
+
+#[tokio::test]
+async fn failed_secret_reloads_keep_working_instances_and_checked_values_carry_every_other_live_secret()
+ {
+    let fixture = Fixture::new(
+        json!({"secrets":{"op://vault/item/a":"first-a","op://vault/item/b":"first-b"}}),
+    );
+    let resolver = SecretResolver::new(OnePassword::with_executable(
+        fixture.binary(),
+        fixture.environment.clone(),
+    ));
+    let registry = InstanceRegistry::new(core_driver_definitions());
+    let settings = settings(
+        json!({"secretProviders":{"vault":{"kind":"one_password","label":"Vault","config":{"account":"work"}}},"providerInstances":{
+            "work":{"driver":"opencode","enabled":true,"environment":[{"name":"A","secret":{"provider":"vault","reference":"op://vault/item/a"}}],"config":{"serverPassword":{"provider":"vault","reference":"op://vault/item/b"}}},
+            "personal":{"driver":"codex","enabled":true,"environment":[{"name":"A","secret":{"provider":"vault","reference":"op://vault/item/a"}}]},
+            "disabled":{"driver":"codex","enabled":false,"environment":[{"name":"DISABLED","secret":{"provider":"vault","reference":"op://vault/item/disabled"}}]}
+        }}),
+    );
+    let id = ProviderInstanceId("work".into());
+    registry
+        .reconcile(
+            &settings,
+            &resolver,
+            &BTreeSet::new(),
+            false,
+            &BTreeMap::new(),
+        )
+        .await;
+    let original = prepared(&registry.get(&id).await.unwrap());
+    assert_eq!(original.config["serverPassword"], "first-b");
+    let calls = fixture.calls();
+    assert_eq!(
+        registry
+            .reload_secrets(
+                &settings,
+                &resolver,
+                Some(&"disabled".into()),
+                &BTreeMap::new()
+            )
+            .await,
+        ReconcileChanges::default()
+    );
+    assert_eq!(fixture.calls(), calls);
+    fixture.write(json!({"secrets":{"op://vault/item/a":"resolver-a"}}));
+    let unchanged = registry
+        .reload_secrets(&settings, &resolver, Some(&id), &BTreeMap::new())
+        .await;
+    assert_eq!(unchanged, ReconcileChanges::default());
+    assert!(Arc::ptr_eq(
+        &original,
+        &prepared(&registry.get(&id).await.unwrap())
+    ));
+    let calls = fixture.calls();
+    let reference =
+        serde_json::from_value(json!({"provider":"vault","reference":"op://vault/item/a"}))
+            .unwrap();
+    let changed = registry
+        .apply_secret(
+            &settings,
+            &resolver,
+            &reference,
+            "checked-a",
+            &BTreeMap::new(),
+        )
+        .await;
+    assert_eq!(
+        changed.prepared,
+        [ProviderInstanceId("personal".into()), id.clone()]
+    );
+    assert_eq!(fixture.calls(), calls);
+    let work = prepared(&registry.get(&id).await.unwrap());
+    assert_eq!(work.variables[0].value, "checked-a");
+    assert_eq!(work.config["serverPassword"], "first-b");
+    assert_eq!(
+        prepared(&registry.get(&"personal".into()).await.unwrap()).variables[0].value,
+        "checked-a"
+    );
+    let no_change = registry
+        .apply_secret(
+            &settings,
+            &resolver,
+            &reference,
+            "checked-a",
+            &BTreeMap::new(),
+        )
+        .await;
+    assert_eq!(no_change, ReconcileChanges::default());
+    assert!(Arc::ptr_eq(
+        &work,
+        &prepared(&registry.get(&id).await.unwrap())
+    ));
+    assert_eq!(fixture.calls(), calls);
 }

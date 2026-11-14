@@ -111,6 +111,7 @@ struct Core {
     usage_queue: UsageQueue,
     usage: Option<Arc<dyn ManagedUsage>>,
     changes: watch::Sender<Option<ServerProvider>>,
+    enrichment: StdMutex<Option<Task>>,
 }
 impl ManagedProvider {
     pub fn new(
@@ -137,6 +138,7 @@ impl ManagedProvider {
             usage_queue: Arc::new(StdMutex::new(None)),
             usage: options.usage,
             changes,
+            enrichment: StdMutex::new(None),
         });
         let provider = Arc::new(Self {
             core,
@@ -234,6 +236,32 @@ impl ManagedProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Task(task));
     }
+    pub fn recheck_on_manifest(
+        &self,
+        mut manifest: watch::Receiver<Arc<crate::catalog::Manifest>>,
+        mut background: watch::Receiver<BackgroundPolicy>,
+    ) {
+        manifest.borrow_and_update();
+        let weak = Arc::downgrade(&self.core);
+        let task = tokio::spawn(async move {
+            while manifest.changed().await.is_ok() {
+                manifest.borrow_and_update();
+                while !background.borrow_and_update().server_ready {
+                    if background.changed().await.is_err() {
+                        return;
+                    }
+                }
+                let Some(provider) = weak.upgrade() else {
+                    return;
+                };
+                let _ = provider.check(None, false, false).await;
+            }
+        });
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Task(task));
+    }
 }
 impl Core {
     async fn background(
@@ -307,7 +335,7 @@ impl Core {
         true
     }
     async fn check(
-        &self,
+        self: &Arc<Self>,
         cwd: Option<&str>,
         fresh: bool,
         defer_failure: bool,
@@ -316,7 +344,7 @@ impl Core {
         self.check_locked(cwd, fresh, defer_failure).await
     }
     async fn check_locked(
-        &self,
+        self: &Arc<Self>,
         cwd: Option<&str>,
         fresh: bool,
         defer_failure: bool,
@@ -388,10 +416,32 @@ impl Core {
         state.checked = true;
         state.recheck = false;
         self.publish(&state);
+        let generation = state.generation;
+        drop(state);
+        self.restart_enrichment(next.clone(), generation);
         Ok(next)
     }
+    fn restart_enrichment(self: &Arc<Self>, snapshot: ServerProvider, generation: u64) {
+        let mut task = self
+            .enrichment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *task = None;
+        if !snapshot.enabled || !self.source.has_enrichment() {
+            return;
+        }
+        let source = self.source.clone();
+        let weak = Arc::downgrade(self);
+        *task = Some(Task(tokio::spawn(async move {
+            if let Ok(next) = source.enrich_snapshot(snapshot).await
+                && let Some(provider) = weak.upgrade()
+            {
+                provider.publish_enrichment(generation, next).await;
+            }
+        })));
+    }
     pub async fn settings_applied(
-        &self,
+        self: &Arc<Self>,
         changed: bool,
         recheck: bool,
     ) -> ServiceResult<ServerProvider> {
@@ -408,7 +458,11 @@ impl Core {
         let _gate = self.refresh_gate.lock().await;
         let mut state = self.state.lock().await;
         state.generation = state.generation.wrapping_add(1);
-        Ok(state.snapshot.clone())
+        let snapshot = state.snapshot.clone();
+        let generation = state.generation;
+        drop(state);
+        self.restart_enrichment(snapshot.clone(), generation);
+        Ok(snapshot)
     }
     pub async fn apply_usage(&self, update: RuntimeUsageUpdate) {
         let mut state = self.state.lock().await;
@@ -456,7 +510,7 @@ impl Core {
         state.usage_revision = state.usage_revision.wrapping_add(1);
         self.publish(&state);
     }
-    pub async fn refresh_usage(&self) -> ServiceResult<()> {
+    pub async fn refresh_usage(self: &Arc<Self>) -> ServiceResult<()> {
         let snapshot = self.current().await;
         if !snapshot.enabled
             || snapshot
@@ -533,6 +587,14 @@ impl Core {
 }
 #[async_trait]
 impl ProviderInstanceService for ManagedProvider {
+    async fn hydrate_cached_snapshot(&self, cached: ServerProvider) -> Option<ServerProvider> {
+        let mut state = self.core.state.lock().await;
+        if !state.checked {
+            state.snapshot = crate::status_cache::hydrate(&cached, state.snapshot.clone());
+            self.core.publish(&state);
+        }
+        Some(state.snapshot.clone())
+    }
     fn instance_id(&self) -> &ProviderInstanceId {
         self.core.source.instance_id()
     }

@@ -531,6 +531,16 @@ async fn cursor_status_uses_the_shipped_sdk_http_catalog_and_disabled_instances_
             Arc::new(Manifest::bundled().unwrap()).into(),
             Arc::new(Clock(AtomicI64::new(0))),
         );
+        let (_policy, background) =
+            tokio::sync::watch::channel(t3_provider::managed_provider::BackgroundPolicy::default());
+        let provider = provider
+            .into_managed(
+                t3_provider::managed_provider::ManagedOptions::new(background),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(usage.calls.lock().await.is_empty());
         let snapshot = serde_json::to_value(provider.snapshot(None, true).await.unwrap()).unwrap();
         assert_eq!(snapshot["installed"], enabled);
         assert_eq!(snapshot["setup"]["canAuthenticate"], false);

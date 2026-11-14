@@ -18,6 +18,15 @@ pub trait ProviderInstanceService: Send + Sync {
     fn subscribe_snapshots(&self) -> Option<watch::Receiver<Option<ServerProvider>>> {
         None
     }
+    async fn hydrate_cached_snapshot(&self, _cached: ServerProvider) -> Option<ServerProvider> {
+        None
+    }
+    fn has_enrichment(&self) -> bool {
+        false
+    }
+    async fn enrich_snapshot(&self, snapshot: ServerProvider) -> ServiceResult<ServerProvider> {
+        Ok(snapshot)
+    }
     async fn reload_secrets(&self) -> ServiceResult<()> {
         Ok(())
     }
@@ -124,6 +133,7 @@ pub struct ProviderService {
     manifest: crate::catalog::ManifestSource,
     text_generators: RwLock<Option<Arc<crate::text_generators::TextGenerators>>>,
     sources: RwLock<Option<Arc<dyn GlobalProviderSources>>>,
+    status_cache: RwLock<Option<Arc<crate::status_cache::ProviderStatusCache>>>,
 }
 struct SnapshotWatcher(tokio::task::JoinHandle<()>);
 impl Drop for SnapshotWatcher {
@@ -159,6 +169,7 @@ impl ProviderService {
             manifest: manifest.into(),
             text_generators: RwLock::new(None),
             sources: RwLock::new(None),
+            status_cache: RwLock::new(None),
         })
     }
     pub async fn set_text_generators(&self, service: Arc<crate::text_generators::TextGenerators>) {
@@ -303,8 +314,14 @@ impl ProviderService {
         if let Some(previous) = snapshots.get(id) {
             value.update_state = previous.update_state.clone();
         }
+        if let Some(cache) = self.status_cache.read().await.as_ref() {
+            let _ = cache.write(&value).await;
+        }
         snapshots.insert(id.clone(), value);
         true
+    }
+    pub async fn set_status_cache(&self, cache: Arc<crate::status_cache::ProviderStatusCache>) {
+        *self.status_cache.write().await = Some(cache);
     }
     pub async fn unregister(&self, id: &ProviderInstanceId) {
         self.watchers.lock().await.remove(id);
@@ -324,29 +341,7 @@ impl ProviderService {
     }
     pub async fn get_providers(&self) -> ServerProviders {
         let mut providers: Vec<_> = self.snapshots.read().await.values().cloned().collect();
-        const ORDER: &[&str] = &[
-            "codex",
-            "claudeAgent",
-            "cursor",
-            "grok",
-            "opencode",
-            "antigravity",
-            "fx",
-            "kiro",
-        ];
-        let rank = |driver: &str| {
-            ORDER
-                .iter()
-                .position(|d| *d == driver)
-                .unwrap_or(ORDER.len())
-        };
-        providers.sort_by(|a, b| {
-            rank(&a.driver.0)
-                .cmp(&rank(&b.driver.0))
-                .then_with(|| a.driver.cmp(&b.driver))
-                .then_with(|| a.display_name.cmp(&b.display_name))
-                .then_with(|| a.instance_id.cmp(&b.instance_id))
-        });
+        crate::status_cache::order(&mut providers);
         ServerCompatibleArray(providers)
     }
     pub async fn refresh_providers(
@@ -575,11 +570,10 @@ impl ProviderService {
             }
             match refresh {
                 Ok(value) => {
-                    self.snapshots
-                        .write()
-                        .await
-                        .insert(id.clone(), value.clone());
-                    verified.push(value);
+                    drop(current);
+                    if self.store_snapshot(&instance, value.clone()).await {
+                        verified.push(value);
+                    }
                 }
                 Err(_) => {
                     if let Some(value) = self.snapshots.write().await.get_mut(id) {
