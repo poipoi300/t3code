@@ -143,10 +143,14 @@ impl ContainedFile {
         while filled < length {
             let position = offset + filled as u64;
             #[cfg(unix)]
-            let read = std::os::unix::fs::FileExt::read_at(&self.file, &mut buffer[filled..], position);
-            #[cfg(windows)]
             let read =
-                std::os::windows::fs::FileExt::seek_read(&self.file, &mut buffer[filled..], position);
+                std::os::unix::fs::FileExt::read_at(&self.file, &mut buffer[filled..], position);
+            #[cfg(windows)]
+            let read = std::os::windows::fs::FileExt::seek_read(
+                &self.file,
+                &mut buffer[filled..],
+                position,
+            );
             match read {
                 Ok(0) => break,
                 Ok(count) => filled += count,
