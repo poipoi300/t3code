@@ -30,6 +30,12 @@ pub(super) async fn dispatch(
 ) -> Result<HostReply, PlatformError> {
     match action {
         HostAction::ClipboardRead => clipboard_read(platform).await,
+        HostAction::PickResources { multiple, .. } => super::files::pick(platform, multiple).await,
+        HostAction::ReadResource { handle, max_bytes }
+            if platform.inner.picked.contains(&handle) =>
+        {
+            super::files::read(platform, &handle, max_bytes).await
+        }
         HostAction::ClipboardWrite(data) => clipboard_write(platform, data).await,
         HostAction::OpenUrl(url) => {
             let url = validate_open_url(
