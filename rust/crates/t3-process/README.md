@@ -27,6 +27,17 @@ hook progress without embedding Git behavior in this crate.
 POSIX descendants that deliberately create a new session/process group escape
 that group; Linux cgroup/systemd isolation is a separate service.
 
+`spawn_non_blocking(&options).await` is the asynchronous spawn entry point used
+by `run()`. On Linux it probes GNU `/usr/bin/env -C` once, checks cwd/executable
+access off the reactor (one check per directory and two globally), then spawns
+only absolute `env` with no native cwd. GNU env performs chdir and PATH lookup
+after exec, preserving argv, environment and textual symlink/`..` resolution.
+Missing/denied checks retain typed spawn errors. Empty, single-dash and
+assignment-like program names bypass the trampoline. Other hosts or env without
+`-C` keep native spawn behavior on the blocking pool. Explicit shell commands
+(`/bin/sh -c ...`) work through the same API; each caller-owned pipeline leg
+must use it too. The synchronous `spawn` remains a blocking compatibility API.
+
 Windows resolution follows PATH/PATHEXT, explicit-path fallback and the native
 Git-for-Windows binary preference. Successful bare-command resolutions use a
 512-entry, 30-second cache keyed by program, effective PATH, normalized PATHEXT
@@ -66,7 +77,7 @@ These are local process-service types; none belong in `t3-contracts`.
 
 ## Windows spawn cost
 
-`run()` keeps process creation on Tokio's blocking pool; synchronous `spawn()`
+`run()` keeps process creation on Tokio's blocking pool on every host; synchronous `spawn()`
 retains its existing API. Windows creates an armed, non-inheritable job handle
 before spawning, starts the child normally with `CREATE_NO_WINDOW`, and assigns
 its actual process handle immediately, without an async yield. Cleanup closes

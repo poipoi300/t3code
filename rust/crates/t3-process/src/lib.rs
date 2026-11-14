@@ -1,7 +1,9 @@
 //! Native asynchronous child processes with owned process-tree lifetimes.
 //! This crate does not compile for wasm32-unknown-unknown.
 
+mod non_blocking;
 mod resolve;
+pub use non_blocking::{env_trampoline, spawn_non_blocking, supports_env_chdir};
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
 pub use resolve::{ResolvedCommand, resolve_command};
@@ -371,19 +373,7 @@ async fn collect(
 
 pub async fn run(mut options: ProcessOptions) -> Result<ProcessOutput, ProcessError> {
     let input = options.stdin.take();
-    #[cfg(windows)]
-    let mut child = {
-        let spawn_options = options.clone();
-        // Native process creation can block; keep it off the reactor.
-        tokio::task::spawn_blocking(move || spawn(&spawn_options))
-            .await
-            .map_err(|source| ProcessError::Spawn {
-                program: options.program.clone(),
-                source: io::Error::other(source),
-            })??
-    };
-    #[cfg(not(windows))]
-    let mut child = spawn(&options)?;
+    let mut child = spawn_non_blocking(&options).await?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
