@@ -903,13 +903,15 @@ fn message_actions(
                 available.get().then(|| {
                     let action = action.clone();
                     let row = row.clone();
-                    button(
-                        ButtonContent::Label(label.clone()),
-                        ButtonVariant::Link,
-                        ButtonSize::Xs,
-                        || false,
-                        move || action(&row),
-                    )
+                    untracked(|| {
+                        button(
+                            ButtonContent::Label(label.clone()),
+                            ButtonVariant::Link,
+                            ButtonSize::Xs,
+                            || false,
+                            move || action(&row),
+                        )
+                    })
                 })
             })
         }));
@@ -1004,20 +1006,19 @@ fn message_copy_button(
         .child(dynamic(move || {
             let key = key.clone();
             let source = source.clone();
-            button(
-                ButtonContent::Icon {
-                    icon: if copied.get() {
-                        Icon::Check
-                    } else {
-                        kind.icon()
+            let icon = if copied.get() { Icon::Check } else { kind.icon() };
+            untracked(|| {
+                button(
+                    ButtonContent::Icon {
+                        icon,
+                        label: kind.label(),
                     },
-                    label: kind.label(),
-                },
-                ButtonVariant::GhostMuted,
-                ButtonSize::Xs,
-                move || copied.get(),
-                move || state.copy(key.clone(), source.as_ref().clone(), anchor),
-            )
+                    ButtonVariant::GhostMuted,
+                    ButtonSize::Xs,
+                    move || copied.get(),
+                    move || state.copy(key.clone(), source.as_ref().clone(), anchor),
+                )
+            })
         }))
 }
 
@@ -1114,24 +1115,27 @@ fn collapsible_user_message_body(
         .child(dynamic(move || {
             can_collapse().then(|| {
                 let toggle_id = toggle_id.clone();
-                let label = if fold.get().body_expanded {
-                    t("Show less")
-                } else {
-                    t("Show full message")
-                };
-                view()
-                    .app_class(tw("mt-1.5 flex items-center justify-end gap-2"))
-                    .child(view().app_class(tw("-ml-1")).child(button(
-                        ButtonContent::Label(label),
-                        ButtonVariant::GhostMuted,
-                        ButtonSize::Xs,
-                        || false,
-                        move || {
-                            state.update(&toggle_id, |state| {
-                                state.body_expanded = !state.body_expanded
-                            })
-                        },
-                    )))
+                let expanded = fold.get().body_expanded;
+                untracked(|| {
+                    let label = if expanded {
+                        t("Show less")
+                    } else {
+                        t("Show full message")
+                    };
+                    view()
+                        .app_class(tw("mt-1.5 flex items-center justify-end gap-2"))
+                        .child(view().app_class(tw("-ml-1")).child(button(
+                            ButtonContent::Label(label),
+                            ButtonVariant::GhostMuted,
+                            ButtonSize::Xs,
+                            || false,
+                            move || {
+                                state.update(&toggle_id, |state| {
+                                    state.body_expanded = !state.body_expanded
+                                })
+                            },
+                        )))
+                })
             })
         }))
 }
