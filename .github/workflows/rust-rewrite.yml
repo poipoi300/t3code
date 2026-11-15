@@ -395,11 +395,11 @@ jobs:
       - name: Check the generated fixtures
         run: bash rust/tools/ci/fixtures.sh check
 
-      # messages_timeline_differential runs the web app's TypeScript cases through Node.
-      - name: Install the web workspace dependencies
+      # The differential tests run the web and mobile apps' TypeScript through Node.
+      - name: Install the web and mobile workspace dependencies
         uses: ./.github/actions/setup-ci-deps
         with:
-          install-args: --filter=@t3tools/web...
+          install-args: --filter=@t3tools/web... --filter=@t3tools/mobile...
 
       - name: Set up
         run: |
