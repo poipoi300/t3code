@@ -396,17 +396,23 @@ fn composer_pending_user_input_card(questions: ComposerQuestions) -> impl IntoEl
                             .style_with(move |style| style.writing_direction(writing_direction(heading_directions.get().and_then(|directions| directions.1))))
                             .app_class(move || Some(tw(&cn([Some("min-w-0 flex-1 truncate text-secondary-label"), Some(align_class(direction.get()))]))))))))
                 .child(view().app_class(tw("flex flex-wrap items-center justify-end gap-0"))
-                    .child(dynamic(move || questions.view.with(|view| view.as_ref().filter(|view| view.questions.len() > 1).map(|view| banner::count(text(tr("{index}/{count}", &[("index", Value::from(view.question_index + 1)), ("count", Value::from(view.questions.len()))])))))))
+                    .child({
+                        let position = computed(move || questions.view.with(|view| view.as_ref().filter(|view| view.questions.len() > 1).map(|view| (view.question_index + 1, view.questions.len()))));
+                        dynamic(move || position.get().map(|(index, count)| untracked(|| banner::count(text(tr("{index}/{count}", &[("index", Value::from(index)), ("count", Value::from(count))]))))))
+                    })
                     .child(banner::toggle_icon(move || !collapsed.get()))))
-            .child(dynamic(move || questions.view.with(|view| view.as_ref().filter(|view| view.dismissible).map(|view| {
-                let request = view.request_id.clone();
-                banner::dismiss("Dismiss question without answering".into(), move || questions.view.with(|view| view.as_ref().is_none_or(|view| view.is_responding)), move || {
-                    if questions.view.with(|view| view.as_ref().is_none_or(|view| !view.dismissible || view.is_responding || view.request_id != request)) { return; }
-                    card.cancel_timer();
-                    let result = questions.client.with(|client| questions.thread.with(|thread| client.dismiss(thread, &request)));
-                    questions.report(result);
-                })
-            }))))
+            .child({
+                // Only the dismissible request selects the button; selection changes must not rebuild it.
+                let dismissible = computed(move || questions.view.with(|view| view.as_ref().filter(|view| view.dismissible).map(|view| view.request_id.clone())));
+                dynamic(move || dismissible.get().map(|request| untracked(move || {
+                    banner::dismiss("Dismiss question without answering".into(), move || questions.view.with(|view| view.as_ref().is_none_or(|view| view.is_responding)), move || {
+                        if questions.view.with(|view| view.as_ref().is_none_or(|view| !view.dismissible || view.is_responding || view.request_id != request)) { return; }
+                        card.cancel_timer();
+                        let result = questions.client.with(|client| questions.thread.with(|thread| client.dismiss(thread, &request)));
+                        questions.report(result);
+                    })
+                })))
+            })
     ).child(collapsible_panel(handle, true, dynamic(move || {
         body_question.get()?;
         let id = active.get()?;
