@@ -203,12 +203,20 @@ pub async fn event(socket: &mut Socket, client: &mut Client) -> CallEvent {
 
 pub async fn unary(socket: &mut Socket, client: &mut Client, tag: &str, payload: Value) -> Exit {
     let id = client.start(tag, payload, CallKind::Unary).unwrap();
-    match event(socket, client).await {
-        CallEvent::Exit { id: actual, exit } => {
-            assert_eq!(actual, id);
-            exit
+    loop {
+        match event(socket, client).await {
+            CallEvent::Exit { id: actual, exit } => {
+                assert_eq!(actual, id);
+                return exit;
+            }
+            // A background provider-status update from an open config stream (see `chunk`).
+            CallEvent::Chunk { id, values }
+                if values.iter().all(|value| value["type"] == "providerStatuses") =>
+            {
+                client.acknowledge(id);
+            }
+            other => panic!("unexpected {other:?}"),
         }
-        other => panic!("unexpected {other:?}"),
     }
 }
 
@@ -230,12 +238,20 @@ pub fn first_cause(exit: Exit) -> Value {
     serde_json::to_value(exit).unwrap()["cause"][0].clone()
 }
 
+/// The next stream chunk, skipping the server config stream's provider-status updates: provider
+/// probes settle in the background after the snapshot, as they do in TypeScript, and no test
+/// using this helper is about them (`composition_providers` asserts them with its own helper).
 pub async fn chunk(socket: &mut Socket, client: &mut Client) -> Value {
-    match event(socket, client).await {
-        CallEvent::Chunk { id, values } => {
-            client.acknowledge(id);
-            values.into_iter().next().unwrap()
+    loop {
+        match event(socket, client).await {
+            CallEvent::Chunk { id, values } => {
+                client.acknowledge(id);
+                let value = values.into_iter().next().unwrap();
+                if value["type"] != "providerStatuses" {
+                    return value;
+                }
+            }
+            other => panic!("unexpected {other:?}"),
         }
-        other => panic!("unexpected {other:?}"),
     }
 }

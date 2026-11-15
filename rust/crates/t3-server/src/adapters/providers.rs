@@ -647,6 +647,12 @@ pub fn config_stream_for(
         let Some(first)=existing.next().await else {return;};
         let mut first=first.map_err(|_|config_error(&services))?;
         if let ServerConfigStreamEvent::Snapshot(snapshot)=&mut first && let Some(adapter)=&adapter {snapshot.config.providers=adapter.domain.config_providers().await;}
+        // As TypeScript's `changesWith` seeded with the snapshot's providers: a status update goes
+        // out only when the providers differ from the last ones the client received.
+        let mut last_sent=match &first {
+            ServerConfigStreamEvent::Snapshot(snapshot)=>serde_json::to_value(&snapshot.config.providers).ok(),
+            _=>None,
+        };
         yield first;
         loop {
             let next=tokio::select! {
@@ -657,9 +663,13 @@ pub fn config_stream_for(
                 Either::Left(Some(event))=>{yield event.map_err(|_|config_error(&services))?;},
                 Either::Right(true)=>{
                     if let Some(adapter)=&adapter {
-                        let event=serde_json::from_value(serde_json::json!({"version":1,"type":"providerStatuses","payload":{"providers":adapter.domain.config_providers().await}}))
-                            .map_err(|_|config_error(&services))?;
-                        yield event;
+                        let providers=serde_json::to_value(adapter.domain.config_providers().await).map_err(|_|config_error(&services))?;
+                        if last_sent.as_ref()!=Some(&providers) {
+                            last_sent=Some(providers.clone());
+                            let event=serde_json::from_value(serde_json::json!({"version":1,"type":"providerStatuses","payload":{"providers":providers}}))
+                                .map_err(|_|config_error(&services))?;
+                            yield event;
+                        }
                     }
                 },
                 _=>break,

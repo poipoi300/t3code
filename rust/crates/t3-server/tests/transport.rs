@@ -69,13 +69,20 @@ async fn unary(socket: &mut Socket, client: &mut Client, tag: &str, payload: Val
         other => panic!("unexpected {other:?}"),
     }
 }
+/// The next stream chunk, skipping the config stream's background provider-status updates
+/// (probes settle after the snapshot, as in TypeScript); no test here is about them.
 async fn chunk(socket: &mut Socket, client: &mut Client) -> Value {
-    match event(socket, client).await {
-        CallEvent::Chunk { id, values } => {
-            client.acknowledge(id);
-            values.into_iter().next().unwrap()
+    loop {
+        match event(socket, client).await {
+            CallEvent::Chunk { id, values } => {
+                client.acknowledge(id);
+                let value = values.into_iter().next().unwrap();
+                if value["type"] != "providerStatuses" {
+                    return value;
+                }
+            }
+            other => panic!("unexpected {other:?}"),
         }
-        other => panic!("unexpected {other:?}"),
     }
 }
 async fn pair(http: &reqwest::Client, base: &str, credential: &str) -> String {
