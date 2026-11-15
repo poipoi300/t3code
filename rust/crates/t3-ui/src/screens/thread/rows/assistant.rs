@@ -916,13 +916,15 @@ pub fn assistant_message_meta(
                     false,
                 );
                 let hint = presenter.tooltip(&row.message.updated_at, &format);
-                text(SharedString::from(label))
-                    .app_class(tw("text-muted-foreground text-xs tabular-nums"))
-                    .tooltip(tooltip(
-                        tooltip_create_handle(),
-                        TooltipOptions::default(),
-                        text(SharedString::from(hint)),
-                    ))
+                untracked(|| {
+                    text(SharedString::from(label))
+                        .app_class(tw("text-muted-foreground text-xs tabular-nums"))
+                        .tooltip(tooltip(
+                            tooltip_create_handle(),
+                            TooltipOptions::default(),
+                            text(SharedString::from(hint)),
+                        ))
+                })
             })
         }))
 }
@@ -1034,7 +1036,7 @@ pub fn assistant_fork_button(
                     .is_some_and(|row| state.action(&message_key(row)).busy)
             })
         });
-        Some(
+        Some(untracked(move || {
             view()
                 .tooltip(assistant_tooltip("Fork from this response"))
                 .child(button(
@@ -1086,8 +1088,8 @@ pub fn assistant_fork_button(
                             })
                         });
                     },
-                )),
-        )
+                ))
+        }))
     })
 }
 
@@ -1103,7 +1105,7 @@ pub fn assistant_reply_button(
         current.projected_item.as_ref()?;
         let thread_ref = context.thread_ref.clone()?;
         let on_reply = context.on_reply_to_response.clone()?;
-        Some(
+        Some(untracked(move || {
             view()
                 .app_class(tw("group/assistant-reply"))
                 .tooltip(assistant_tooltip("Reply to this response"))
@@ -1132,8 +1134,8 @@ pub fn assistant_reply_button(
                             log::warn!("reply to response failed: {error}");
                         }
                     },
-                )),
-        )
+                ))
+        }))
     })
 }
 
