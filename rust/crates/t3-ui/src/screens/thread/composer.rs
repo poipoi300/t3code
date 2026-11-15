@@ -342,7 +342,11 @@ fn thread_composer_with_sender<P: Platform + Clone + 'static>(
     let picker_handle = model_picker_create_handle();
     let query = {
         move |request: Option<crate::screens::composer::suggestions::ComposerSuggestionRequest>| {
-            let session = suggestion_session.get_untracked();
+            // The suggestions controller cancels with `None` from its cleanup, after this
+            // composer's session memo is already disposed: there is nothing left to cancel.
+            let Some(session) = untracked(|| suggestion_session.try_get()) else {
+                return;
+            };
             let operation = session.query(request.as_ref().map(bindings::suggestion_request));
             crate::runtime::tasks::watch(async move {
                 let _ = operation.await;
