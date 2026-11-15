@@ -152,6 +152,7 @@ fn turn_events(input: &TurnInput) -> ProviderResult<Vec<ProviderEvent>> {
         let turn = json!({"id":provider_turn_id,"providerThreadId":provider_thread_id,"nodeId":input.root_node_id,"runAttemptId":input.attempt_id,"nativeTurnRef":null,"ordinal":input.provider_turn_ordinal,"status":status,"startedAt":NOW,"completedAt":completed});
         Ok(event(ProviderEventKind::Turn {
             provider_turn: Box::new(serde_json::from_value(turn).map_err(provider_error)?),
+            thread_id: None,
         }))
     };
     Ok(vec![
