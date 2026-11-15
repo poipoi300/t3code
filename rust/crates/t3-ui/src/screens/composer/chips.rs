@@ -165,8 +165,10 @@ pub fn install_composer_chip_views(session: &EditorSession) {
 struct ComposerChipNodeView(&'static str);
 
 // Dynamic regions can be replaced before mounting; controls create state under their component.
+/// Every chip region reads its inputs first and builds here: a theme or translation read during
+/// the build must not rebuild the chip and dispose its buttons.
 fn chip_scope(build: impl FnOnce() -> AnyElement + 'static) -> AnyElement {
-    popover::with_popup_context((), build).into_element()
+    untracked(|| popover::with_popup_context((), build).into_element())
 }
 
 impl NodeView for ComposerChipNodeView {
@@ -175,7 +177,8 @@ impl NodeView for ComposerChipNodeView {
         let selected = cx.selected();
         let context = use_context::<ChipContext>()
             .unwrap_or_else(|| ChipContext::new(computed(ChipData::default)));
-        view()
+        // The editor may call `create` while tracking; the frame's theme read must not subscribe it.
+        untracked(move || view()
             .app_class(tw(
                 "relative inline-flex min-w-0 max-w-full select-none items-baseline",
             ))
@@ -202,7 +205,7 @@ impl NodeView for ComposerChipNodeView {
                         }))
                     }),
             )
-            .into_element()
+            .into_element())
     }
 
     fn update(&self, node: &Node, _: &[nsh_base::rich_editor::state::Decoration]) -> bool {
@@ -782,17 +785,19 @@ pub fn user_message_context_reference_chip(
 ) -> AnyElement {
     let reference = reference.clone();
     let record = record.cloned();
-    popover::with_popup_context(SentChip, move || {
-        render_context_reference(
-            &reference.kind,
-            &reference.context_id,
-            &reference.label,
-            record.as_ref(),
-            context,
-            false,
-        )
+    untracked(|| {
+        popover::with_popup_context(SentChip, move || {
+            render_context_reference(
+                &reference.kind,
+                &reference.context_id,
+                &reference.label,
+                record.as_ref(),
+                context,
+                false,
+            )
+        })
+        .into_element()
     })
-    .into_element()
 }
 
 /// Fits UserRowContext::context_chip directly; the row supplies its canonical records.

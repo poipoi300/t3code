@@ -308,7 +308,9 @@ pub fn sidebar_thread_undo_notice(
     let width = signal(0.0_f32);
     dynamic(move || {
         let on_undo = on_undo.clone();
-        notice.get().map(|notice_value| {
+        // Only the notice selects what is built; translations and theme reads must not rebuild
+        // the button while it is mounted.
+        notice.get().map(|notice_value| untracked(move || {
             let summary = if notice_value.count == 1 {
                 t(&notice_value.action)
             } else {
@@ -337,7 +339,7 @@ pub fn sidebar_thread_undo_notice(
                             .child(glyph(UNDO).app_class(move || tw(&cn([Some("-ml-4 h-6 w-4"), (width.get() <= 16.0).then_some("invisible")]))))
                             .child(text(label))))
                     .child(text(tr("{summary},", &[("summary", Value::Text(summary))]))))
-        })
+        }))
     })
 }
 
