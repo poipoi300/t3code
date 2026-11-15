@@ -395,6 +395,12 @@ jobs:
       - name: Check the generated fixtures
         run: bash rust/tools/ci/fixtures.sh check
 
+      # messages_timeline_differential runs the web app's TypeScript cases through Node.
+      - name: Install the web workspace dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/web...
+
       - name: Set up
         run: |
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/target" >> "$GITHUB_ENV"
