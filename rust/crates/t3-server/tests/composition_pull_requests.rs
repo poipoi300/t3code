@@ -582,7 +582,6 @@ async fn only_the_methods_without_a_backend_stay_unserved() {
     assert_eq!(
         unserved,
         [
-            "pullRequests.generateReviewGuide",
             "pullRequests.subscribeLinkedThreadRefreshes"
         ]
     );

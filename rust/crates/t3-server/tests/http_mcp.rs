@@ -658,8 +658,8 @@ async fn token_endpoint_pkce_single_use_codes_and_mcp_only_tokens() {
     assert_eq!(response.status(), 400);
     assert_eq!(
         f.post("/mcp").send().await.unwrap().status(),
-        404,
-        "the MCP endpoint is not ported"
+        401,
+        "the MCP endpoint refuses a request without a bearer token"
     );
     f.stop().await;
 }

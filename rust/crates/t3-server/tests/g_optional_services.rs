@@ -302,7 +302,7 @@ async fn scheduler_rpc_stream_mutations_errors_and_scope_guards() {
 }
 
 #[tokio::test]
-async fn composition_keeps_unassembled_scheduler_commands_unavailable() {
+async fn composition_registers_the_scheduler_commands() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = t3_server::runtime::start(support::inputs(temp.path()))
         .await
@@ -329,10 +329,14 @@ async fn composition_keeps_unassembled_scheduler_commands_unavailable() {
         ),
         ("scheduledTasks.runNow", json!({"id":"task:one"})),
     ] {
+        // Served now: whatever the answer, it is not the unknown-method defect.
         let cause =
             support::first_cause(support::unary(&mut socket, &mut client, tag, payload).await);
-        assert_eq!(cause["_tag"], "Die");
-        assert_eq!(cause["defect"], format!("Unknown request tag: {tag}"));
+        assert_ne!(
+            cause["defect"],
+            format!("Unknown request tag: {tag}"),
+            "{tag} is registered"
+        );
     }
     #[cfg(feature = "usage")]
     {
@@ -345,16 +349,20 @@ async fn composition_keeps_unassembled_scheduler_commands_unavailable() {
             )
             .await,
         );
-        assert_eq!(
+        assert_ne!(
             cause["defect"],
-            "Unknown request tag: server.refreshUsageRates"
+            "Unknown request tag: server.refreshUsageRates",
+            "server.refreshUsageRates is registered"
         );
     }
     client
         .start("scheduledTasks.subscribe", json!({}), CallKind::Stream)
         .unwrap();
     let snapshot = support::chunk(&mut socket, &mut client).await;
-    assert_eq!(snapshot["tasks"], json!([]));
+    // The upsert above is served, so the snapshot holds the task it saved.
+    let tasks = snapshot["tasks"].as_array().expect("task list");
+    assert_eq!(tasks.len(), 1, "{snapshot}");
+    assert_eq!(tasks[0]["id"], "task:one");
     drop(socket);
     runtime.shutdown().await.unwrap();
 }

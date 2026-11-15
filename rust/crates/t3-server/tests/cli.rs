@@ -259,13 +259,6 @@ async fn every_unassembled_command_is_recognized_and_fails_explicitly() {
             "--service-unit",
             "unit",
         ],
-        &[
-            "__managed-chatgpt-token",
-            "endpoint",
-            "instance",
-            "environment",
-            "profile",
-        ],
         &["__document-text", "file", "docx"],
         &["__speech-worker", "discover", "module"],
         &["__claude-history", "method", "session", "{}"],
