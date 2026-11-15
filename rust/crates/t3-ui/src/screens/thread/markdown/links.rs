@@ -252,13 +252,13 @@ impl MarkdownLinkPlugin {
             "markdown-external-link" => {
                 let content = Document::new(vec![Block::paragraph(node.content.clone())]);
                 let plugin = self.clone();
+                let href = node.attributes.get("href")?.clone();
+                // TextView renders custom nodes while tracking; a theme or label read must not
+                // rebuild the link and dispose its props.
                 // TextView names a custom inline U+FFFC; the native link supplies the authored name.
-                Some(
+                Some(untracked(move || {
                     crate::runtime::services::links::external_link(
-                        {
-                            let href = node.attributes.get("href")?.clone();
-                            move || Some(href.clone())
-                        },
+                        move || Some(href.clone()),
                         |_| {},
                     )
                         .title(
@@ -281,8 +281,8 @@ impl MarkdownLinkPlugin {
                                     plugin.render(node).unwrap_or_else(|| view().into_element())
                                 }),
                         )
-                        .into_element(),
-                )
+                        .into_element()
+                }))
             }
             "markdown-file-link" => {
                 let href = node.attributes.get("href")?;
