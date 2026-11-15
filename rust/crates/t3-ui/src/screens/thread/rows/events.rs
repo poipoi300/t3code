@@ -205,7 +205,9 @@ fn config_sources(runtime: Rt) -> Signal<BTreeMap<EnvironmentId, Shared<ServerCo
 pub fn v2_event_timeline_row(row: TimelineRow, context: EventRowContext) -> impl IntoElement {
     dynamic(move || {
         let row = row.with(|row| row.as_ref().and_then(|row| EventRow::from_row(row)))?;
-        Some(
+        // Only the row selects what is built: a signal read while building must not rebuild the
+        // row and dispose the controls it already handed to the collapsible panel.
+        Some(untracked(|| {
             if matches!(row.projected_item.item, Item::Subagent(_))
                 && row.subagents.as_ref().map_or(1, Vec::len) > 1
             {
@@ -226,8 +228,8 @@ pub fn v2_event_timeline_row(row: TimelineRow, context: EventRowContext) -> impl
                 )
             } else {
                 v2_lifecycle_row(&row.projected_item.item, row.resource_summary, &context)
-            },
-        )
+            }
+        }))
     })
 }
 
