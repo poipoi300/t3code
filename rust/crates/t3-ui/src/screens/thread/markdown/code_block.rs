@@ -376,6 +376,12 @@ pub fn markdown_code_block_title_content(props: Memo<CodeBlockProps>) -> impl In
     let metadata = computed(move || props.with(|p| (p.language.clone(), p.fence_title.clone())));
     dynamic(move || {
         let (language, fence_title) = metadata.get();
+        untracked(move || title_content(language, fence_title))
+    })
+}
+
+fn title_content(language: String, fence_title: Option<String>) -> Vec<AnyElement> {
+    {
         let title = fence_title.filter(|title| !title.is_empty());
         let path = title
             .clone()
@@ -416,7 +422,7 @@ pub fn markdown_code_block_title_content(props: Memo<CodeBlockProps>) -> impl In
                 content
             }
         }
-    })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
