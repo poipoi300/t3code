@@ -3,6 +3,8 @@
 //! other settings test modules.
 
 use std::cell::RefCell;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -12,9 +14,13 @@ use nsh_core::time::Clock;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::ClientStore;
+use t3_client::composition::Spawner;
 use t3_client::testing::environment::FakeEnvironment;
+use t3_client::thread_views::composer::preferences::SettingsHydration;
+use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+use t3_platform::{EphemeralSecretStore, NativeConfig, NativePlatform};
 use t3_ui::runtime::Rt;
-use t3_ui::runtime::host::Started;
+use t3_ui::runtime::host::{Choice, Started};
 use t3_ui::screens::settings::shell;
 use t3_ui::state::nav::{Navigator, Route, SettingsPage};
 use t3_ui::theme;
@@ -26,14 +32,36 @@ struct HarnessProps {
     page: usize,
 }
 
-/// `App`'s root as far as settings need it: the real client runtime (`runtime::client::start`,
-/// `Rt::boot`) over a fresh data directory, the navigator, and the production
-/// `settings::shell::screen`. Nothing settings-specific is provided by the test.
+fn fixture_spawner() -> Spawner {
+    let owner = Owner::current();
+    Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    })
+}
+
+/// Mount the production settings route and client over an isolated SQLite store.
+/// Device settings use SQLite; the OS credential store is covered by the platform.
 #[component]
 fn Harness(props: HarnessProps) -> impl IntoElement {
     theme::install(&theme::ThemeChoice::default());
     let nav = Navigator::new(Route::Settings(SettingsPage::ALL[props.page]));
     provide_context(nav);
+    let config = NativeConfig::new(
+        data_dir()
+            .expect("the settings fixture has a data directory")
+            .join("client"),
+        Box::new(EphemeralSecretStore::default()),
+    );
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("settings fixture I/O runtime");
+    let handle = io.handle().clone();
+    cleanup(move || drop(io));
+    let spawner = fixture_spawner();
     let booted = signal(false);
     let slot: Rc<RefCell<Option<Started>>> = Rc::default();
     let store = ClientStore::default();
@@ -41,7 +69,25 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
         let slot = slot.clone();
         let store = store.clone();
         spawn(async move {
-            *slot.borrow_mut() = Some(t3_ui::runtime::client::start(store).await);
+            let mut opening = pin!(NativePlatform::open(config));
+            let platform = poll_fn(|cx| {
+                let _entered = handle.enter();
+                opening.as_mut().poll(cx)
+            })
+            .await
+            .expect("the settings fixture opened its SQLite store");
+            let (client, paired) = t3_ui::runtime::client::start_on(
+                platform,
+                store,
+                OrchestrationV2CreationSource::Web,
+                spawner,
+            )
+            .await;
+            *slot.borrow_mut() = Some(Started {
+                backend: Rc::new(client),
+                choice: Choice::Client,
+                paired,
+            });
             booted.set(true);
         });
     }
@@ -57,17 +103,26 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
 fn booted_root(store: ClientStore, started: Started) -> AnyElement {
     let rt = Rt::boot(store, started);
     let nav = t3_ui::state::nav::navigator();
-    // What the client's record holds, read through the same client the shell uses.
-    let settings = rt.backend().client().map(|client| {
-        theme::bind(&client, None);
-        client.settings()
-    });
+    let client = rt
+        .backend()
+        .client()
+        .expect("the settings fixture has a client");
+    theme::bind(&client, None);
+    let settings = client.settings();
+    let preferences = client.composer_preferences();
     let record = signal(Vec::<String>::new());
-    if let Some(settings) = settings {
-        let read = settings.clone();
-        let probe = move || {
-            let s = read.client_settings();
-            vec![
+    let mut changes = preferences.changes();
+    spawn(async move {
+        while changes.next().await.is_some() {
+            match preferences.hydration() {
+                SettingsHydration::Pending | SettingsHydration::Retrying => continue,
+                SettingsHydration::Failed => {
+                    panic!("settings fixture read failed: {:?}", preferences.error())
+                }
+                SettingsHydration::Ready => {}
+            }
+            let s = settings.client_settings();
+            record.set(vec![
                 format!("delete={}", s.confirm_thread_delete),
                 format!("language={}", s.language),
                 format!(
@@ -77,16 +132,9 @@ fn booted_root(store: ClientStore, started: Started) -> AnyElement {
                         .as_str()
                         .unwrap_or_default()
                 ),
-            ]
-        };
-        record.set(probe());
-        let mut changes = settings.changes();
-        spawn(async move {
-            while changes.next().await.is_some() {
-                record.set(probe());
-            }
-        });
-    }
+            ]);
+        }
+    });
     let line = move |index: usize| {
         text(move || SharedString::from(record.with(|r| r.get(index).cloned().unwrap_or_default())))
     };
@@ -234,19 +282,14 @@ struct ConnectedProps {
 #[component]
 fn Connected(props: ConnectedProps) -> impl IntoElement {
     use futures::FutureExt;
-    use t3_client::composition::{ClientRuntime, Spawner};
+    use t3_client::composition::ClientRuntime;
     use t3_client::types::EnvironmentId;
-    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
     theme::install(&theme::ThemeChoice::default());
     let page = SettingsPage::ALL[props.page];
     provide_context(Navigator::new(Route::Settings(page)));
     let store = ClientStore::default();
     let owner = Owner::current();
-    let spawner: Spawner = Rc::new(move |future| {
-        owner.run(|| {
-            spawn(future);
-        });
-    });
+    let spawner = fixture_spawner();
     let server = FakeEnvironment::new("env", spawner.clone());
     server.set_permissions(&[
         "orchestration:read",
