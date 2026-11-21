@@ -7,6 +7,8 @@ mod relay_tests;
 mod removal_tests;
 #[cfg(test)]
 mod route_policy_tests;
+#[cfg(test)]
+mod terminal_tests;
 use crate::{
     ClientError,
     platform::*,

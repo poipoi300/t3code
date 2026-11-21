@@ -42,6 +42,26 @@ pub const RELAY: &str = "https://relay.test";
 /// The account the host is signed in to after [`FakeEnvironment::sign_in`].
 pub const ACCOUNT: &str = "account";
 
+/// A terminal subscription whose next connection can be driven by the test.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum TerminalStream {
+    Attach,
+    Observe,
+    Metadata,
+}
+
+impl TerminalStream {
+    fn from_tag(tag: &str) -> Option<Self> {
+        use t3_contracts::rpc::*;
+        match tag {
+            WsTerminalAttachRpc::TAG => Some(Self::Attach),
+            WsTerminalObserveRpc::TAG => Some(Self::Observe),
+            WsSubscribeTerminalMetadataRpc::TAG => Some(Self::Metadata),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     shell: Option<Value>,
@@ -51,6 +71,7 @@ struct State {
     methods: Vec<(&'static str, CallKind)>,
     script: BTreeMap<String, VecDeque<Result<Value, Value>>>,
     calls: Vec<(String, Value)>,
+    terminal_streams: BTreeMap<TerminalStream, VecDeque<mpsc::UnboundedReceiver<Value>>>,
     sequence: u64,
     signed_in: bool,
     relay_refuses: bool,
@@ -145,6 +166,21 @@ impl FakeEnvironment {
             .entry(method.into())
             .or_default()
             .push_back(answer);
+    }
+
+    /// Queues a stream for the next subscription of this kind. Send snapshot, output
+    /// and exit frames in wire format. Dropping the sender ends the subscription.
+    /// Use `reply` to script the terminal's unary commands.
+    pub fn terminal_stream(&self, stream: TerminalStream) -> mpsc::UnboundedSender<Value> {
+        let (send, receive) = mpsc::unbounded();
+        self.server
+            .state
+            .borrow_mut()
+            .terminal_streams
+            .entry(stream)
+            .or_default()
+            .push_back(receive);
+        send
     }
 
     /// Signs the host in to T3 Connect as [`ACCOUNT`] (or out): the cloud identity and token it
@@ -411,6 +447,14 @@ impl Platform for EnvironmentPlatform {
                         CallKind::Unary,
                     ),
                     (WsProjectsSearchEntriesRpc::TAG, CallKind::Unary),
+                    (WsTerminalOpenRpc::TAG, CallKind::Unary),
+                    (WsTerminalWriteRpc::TAG, CallKind::Unary),
+                    (WsTerminalResizeRpc::TAG, CallKind::Unary),
+                    (WsTerminalClearRpc::TAG, CallKind::Unary),
+                    (WsTerminalCloseRpc::TAG, CallKind::Unary),
+                    (WsTerminalAttachRpc::TAG, CallKind::Stream),
+                    (WsTerminalObserveRpc::TAG, CallKind::Stream),
+                    (WsSubscribeTerminalMetadataRpc::TAG, CallKind::Stream),
                 ]
                 .into_iter()
                 .chain(methods)
@@ -510,6 +554,22 @@ fn unary(answer: Result<Value, Value>) -> HandlerOutput {
     )
 }
 
+fn terminal_snapshot(input: &Value) -> Value {
+    json!({
+        "threadId": input["threadId"],
+        "terminalId": input["terminalId"],
+        "cwd": input["cwd"].as_str().unwrap_or("/workspace/project"),
+        "worktreePath": input["worktreePath"],
+        "status": "running",
+        "pid": 1,
+        "history": "",
+        "exitCode": null,
+        "exitSignal": null,
+        "label": "",
+        "updatedAt": NOW
+    })
+}
+
 impl Handler for FakeHandler {
     fn handle(&mut self, request: Request) -> HandlerOutput {
         use t3_contracts::rpc::*;
@@ -524,6 +584,38 @@ impl Handler for FakeHandler {
         };
         if let Some(answer) = scripted {
             return unary(answer);
+        }
+        if let Some(stream) = TerminalStream::from_tag(&tag) {
+            let scripted = server
+                .state
+                .borrow_mut()
+                .terminal_streams
+                .get_mut(&stream)
+                .and_then(VecDeque::pop_front);
+            return if let Some(frames) = scripted {
+                HandlerOutput::Stream(frames.map(|frame| Ok(vec![frame])).boxed_local())
+            } else {
+                let initial = match stream {
+                    TerminalStream::Attach => {
+                        json!({"type": "snapshot", "snapshot": terminal_snapshot(&request.payload)})
+                    }
+                    TerminalStream::Observe => return live(vec![]),
+                    TerminalStream::Metadata => json!({"type": "snapshot", "terminals": []}),
+                };
+                live(vec![initial])
+            };
+        }
+        if tag == WsTerminalOpenRpc::TAG {
+            return unary(Ok(terminal_snapshot(&request.payload)));
+        }
+        if matches!(
+            tag.as_str(),
+            WsTerminalWriteRpc::TAG
+                | WsTerminalResizeRpc::TAG
+                | WsTerminalClearRpc::TAG
+                | WsTerminalCloseRpc::TAG
+        ) {
+            return unary(Ok(Value::Null));
         }
         let environment = server.environment.clone();
         let config = || {
