@@ -335,6 +335,16 @@ mod viewer {
         } else {
             Err(t3_preview::Error::TabNotFound)
         };
+        if let Err(t3_preview::Error::NodeRequired) = &viewer {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "_tag": "PreviewStreamNodeRequired",
+                    "message": t3_preview::Error::NodeRequired.to_string()
+                })),
+            )
+                .into_response();
+        }
         if let Err(error) = &viewer
             && !matches!(error, t3_preview::Error::TabNotFound)
             && t3_preview::stream::host_setup(error).is_none()

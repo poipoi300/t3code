@@ -891,3 +891,45 @@ async fn discovery_updates_when_a_real_terminal_child_opens_a_listener() {
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }
+#[tokio::test]
+async fn viewer_without_node_reports_a_typed_requirement() {
+    for explicit in [false, true] {
+        assert_missing_node_requirement(explicit).await;
+    }
+}
+
+async fn assert_missing_node_requirement(explicit: bool) {
+    let mut s = Server::start_with(false, |_, env| {
+        if explicit {
+            env.insert("T3_PREVIEW_NODE".into(), "missing-node-round4".into());
+        }
+    })
+    .await;
+    s.thread("one");
+    let opened = success(
+        s.call("preview.open", json!({"threadId":"one","runtime":"server"}))
+            .await,
+    );
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!(
+        "ws://{}/api/preview-stream/ws?threadId=one&tabId={}",
+        s.runtime.address,
+        opened["tabId"].as_str().unwrap()
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("cookie", s.cookie.parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 503);
+            let reason: Value =
+                serde_json::from_slice(response.body().as_deref().unwrap()).unwrap();
+            assert_eq!(reason["_tag"], "PreviewStreamNodeRequired");
+        }
+        result => panic!("expected HTTP launch refusal, got {result:?}"),
+    }
+    s.socket.close(None).await.unwrap();
+    s.runtime.shutdown().await.unwrap();
+}

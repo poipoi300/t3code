@@ -34,6 +34,8 @@ pub enum Error {
         input_length: usize,
         protocol: Option<String>,
     },
+    #[error("Server browser automation requires Node.js and playwright-core.")]
+    NodeRequired,
     #[error("The preview tab does not exist.")]
     TabNotFound,
     #[error("Server preview tabs require server control.")]
@@ -85,7 +87,7 @@ impl Error {
             Self::Timeout(_) => "PreviewAutomationTimeoutError",
             Self::Disconnected => "PreviewAutomationClientDisconnectedError",
             Self::Stop(_) => "PreviewStopLocalServerError",
-            Self::Io(_) => "PreviewAutomationExecutionError",
+            Self::NodeRequired | Self::Io(_) => "PreviewAutomationExecutionError",
             Self::InvalidInput(_) => "invalid_request",
         }
     }

@@ -518,6 +518,7 @@ async fn clear_inactive_profile(root: &Path, profile_id: &str) -> Result<()> {
 }
 
 pub(crate) struct UnavailableBrowserDriver {
+    pub missing_node: bool,
     pub profiles: PathBuf,
 }
 #[async_trait]
@@ -530,6 +531,7 @@ impl BrowserDriver for UnavailableBrowserDriver {
             BrowserCommand::Shutdown
             | BrowserCommand::Close { .. }
             | BrowserCommand::DiscardPopup { .. } => {}
+            _ if self.missing_node => return Err(Error::NodeRequired),
             _ => {
                 return Err(Error::operation(
                     "PreviewAutomationExecutionError",

@@ -44,7 +44,19 @@ fn configuration(message: impl Into<String>) -> Error {
 }
 impl RuntimeInputs {
     pub async fn validate(self) -> Result<ValidatedRuntime> {
-        let node=self.node.filter(|node| !node.as_os_str().is_empty()).ok_or_else(|| configuration("Preview requires a Node runtime path (or Electron with ELECTRON_RUN_AS_NODE=1)."))?;
+        self.validate_worker().await.map_err(|error| match error {
+            Error::NodeRequired => configuration(
+                "Preview requires a Node runtime path (or Electron with ELECTRON_RUN_AS_NODE=1).",
+            ),
+            other => other,
+        })
+    }
+    async fn validate_worker(self) -> Result<ValidatedRuntime> {
+        let node = self
+            .node
+            .filter(|node| !node.as_os_str().is_empty())
+            .ok_or(Error::NodeRequired)?;
+        let node = resolve_node(node)?;
         if !self.module_root.is_absolute() {
             return Err(configuration(
                 "Playwright module_root must be an absolute server package directory.",
@@ -57,7 +69,6 @@ impl RuntimeInputs {
         {
             return Err(configuration("Playwright module entry must be absolute."));
         }
-        let node = resolve_node(node)?;
         if std::env::current_exe()
             .ok()
             .is_some_and(|exe| same_file::is_same_file(exe, &node).unwrap_or(false))
@@ -148,7 +159,7 @@ impl PreviewHost {
             preview,
             html,
             discovery,
-        } = PreviewServices::build(input, Some(driver), discovery_enabled).await?;
+        } = PreviewServices::build(input, Ok(driver), discovery_enabled).await?;
         Ok(Self {
             runtime,
             preview,
@@ -168,14 +179,14 @@ impl PreviewServices {
     pub async fn start(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
         input.validate_paths()?;
         let worker = async {
-            let runtime = input.runtime.clone().validate().await?;
+            let runtime = input.runtime.clone().validate_worker().await?;
             Self::managed_driver(&input, &runtime).await
         }
         .await;
         if let Err(error) = &worker {
             tracing::info!(%error, "Server browser worker unavailable");
         }
-        Self::build(input, worker.ok(), discovery_enabled).await
+        Self::build(input, worker, discovery_enabled).await
     }
 
     async fn managed_driver(
@@ -213,11 +224,12 @@ impl PreviewServices {
 
     async fn build(
         input: HostInputs,
-        worker: Option<Arc<dyn BrowserDriver>>,
+        worker: Result<Arc<dyn BrowserDriver>>,
         discovery_enabled: bool,
     ) -> Result<Self> {
-        let driver = worker.clone().unwrap_or_else(|| {
+        let driver = worker.clone().unwrap_or_else(|error| {
             Arc::new(UnavailableBrowserDriver {
+                missing_node: matches!(error, Error::NodeRequired),
                 profiles: input.state_dir.join("server-browser/profiles"),
             })
         });
@@ -236,7 +248,7 @@ impl PreviewServices {
                 secrets_dir: input.secrets_dir,
                 recovery: input.recovery,
             },
-            worker,
+            worker.ok(),
         );
         Ok(Self {
             preview,
@@ -249,22 +261,34 @@ impl PreviewServices {
 fn resolve_node(node: PathBuf) -> Result<PathBuf> {
     let resolved =
         t3_process::resolve_command(node.as_os_str(), &[], &t3_process::Environment::new(), true)
-            .map_err(|error| configuration(format!("Node runtime resolution failed: {error}")))?;
+            .map_err(|error| match error {
+            t3_process::ProcessError::NotFound { .. } => Error::NodeRequired,
+            other => configuration(format!("Node runtime resolution failed: {other}")),
+        })?;
     let program = PathBuf::from(resolved.program);
     if program.is_absolute() {
-        return Ok(program);
+        return require_node_file(program);
     }
     let cwd = std::env::current_dir()
         .map_err(|error| configuration(format!("Node runtime resolution failed: {error}")))?;
     if program.components().count() > 1 {
-        return Ok(cwd.join(program));
+        return require_node_file(cwd.join(program));
     }
     std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| cwd.join(directory).join(&program))
         .find(|path| is_executable(path))
-        .ok_or_else(|| configuration("Node runtime was not found on PATH."))
+        .ok_or(Error::NodeRequired)
+}
+fn require_node_file(path: PathBuf) -> Result<PathBuf> {
+    match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(Error::NodeRequired),
+        Err(error) => Err(configuration(format!(
+            "Node runtime resolution failed: {error}"
+        ))),
+        Ok(_) => Ok(path),
+    }
 }
 fn is_executable(path: &std::path::Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {

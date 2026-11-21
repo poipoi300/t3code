@@ -537,7 +537,10 @@ impl PreviewService {
                                 .get(&tab.key)
                                 .is_some_and(|current| Arc::ptr_eq(&current, &tab))
                         {
-                            service.drop_tab(&tab.key, true).await;
+                            // Keep the native session addressable so a viewer can read the runtime requirement.
+                            service
+                                .drop_tab(&tab.key, !matches!(result, Err(Error::NodeRequired)))
+                                .await;
                         }
                         result
                     });
