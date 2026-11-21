@@ -26,7 +26,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::{Rc, Weak};
 
-use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc, future::LocalBoxFuture};
+use futures::{
+    FutureExt, SinkExt, StreamExt,
+    channel::{mpsc, oneshot},
+    future::LocalBoxFuture,
+};
 use serde_json::{Value, json};
 use t3_rpc::{CallKind, Exit, Frame, Handler, HandlerOutput, Request};
 
@@ -62,6 +66,12 @@ impl TerminalStream {
     }
 }
 
+enum ScriptedReply {
+    Ready(Result<Value, Value>),
+    Deferred(oneshot::Receiver<Result<Value, Value>>),
+}
+type DeferredRead = oneshot::Receiver<Option<Vec<u8>>>;
+
 #[derive(Default)]
 struct State {
     shell: Option<Value>,
@@ -69,8 +79,9 @@ struct State {
     config: Option<Value>,
     permissions: Option<Vec<String>>,
     methods: Vec<(&'static str, CallKind)>,
-    script: BTreeMap<String, VecDeque<Result<Value, Value>>>,
+    script: BTreeMap<String, VecDeque<ScriptedReply>>,
     calls: Vec<(String, Value)>,
+    deferred_reads: BTreeMap<StorageKey, DeferredRead>,
     terminal_streams: BTreeMap<TerminalStream, VecDeque<mpsc::UnboundedReceiver<Value>>>,
     sequence: u64,
     signed_in: bool,
@@ -80,6 +91,7 @@ struct State {
 
 struct Server {
     environment: String,
+    origin: String,
     state: RefCell<State>,
     spawn: Spawner,
 }
@@ -94,9 +106,15 @@ pub struct FakeEnvironment {
 
 impl FakeEnvironment {
     pub fn new(environment: &str, spawn: Spawner) -> Self {
+        Self::at_origin(environment, ORIGIN, spawn)
+    }
+
+    /// A second independently pairable environment for a multi-machine fixture.
+    pub fn at_origin(environment: &str, origin: &str, spawn: Spawner) -> Self {
         Self {
             server: Rc::new(Server {
                 environment: environment.into(),
+                origin: origin.into(),
                 state: RefCell::default(),
                 spawn,
             }),
@@ -110,13 +128,14 @@ impl FakeEnvironment {
         EnvironmentPlatform {
             fake: self.fake.clone(),
             server: self.server.clone(),
+            additional: BTreeMap::new(),
         }
     }
 
     /// What the pairing screen hands `ClientRuntime::pair` for this server.
     pub fn pairing(&self) -> PairingInput {
         PairingInput {
-            pairing_url: Some(format!("{ORIGIN}/pair#token=pairing-token")),
+            pairing_url: Some(format!("{}/pair#token=pairing-token", self.server.origin)),
             ..Default::default()
         }
     }
@@ -165,7 +184,31 @@ impl FakeEnvironment {
             .script
             .entry(method.into())
             .or_default()
-            .push_back(answer);
+            .push_back(ScriptedReply::Ready(answer));
+    }
+
+    /// Holds the next ordinary storage read of this key until the test supplies a result.
+    pub fn defer_read(&self, key: StorageKey) -> oneshot::Sender<Option<Vec<u8>>> {
+        let (send, receive) = oneshot::channel();
+        self.server
+            .state
+            .borrow_mut()
+            .deferred_reads
+            .insert(key, receive);
+        send
+    }
+
+    /// Holds the next unary reply for this method until the test supplies an answer.
+    pub fn defer_reply(&self, method: &str) -> oneshot::Sender<Result<Value, Value>> {
+        let (send, receive) = oneshot::channel();
+        self.server
+            .state
+            .borrow_mut()
+            .script
+            .entry(method.into())
+            .or_default()
+            .push_back(ScriptedReply::Deferred(receive));
+        send
     }
 
     /// Queues a stream for the next subscription of this kind. Send snapshot, output
@@ -338,10 +381,36 @@ fn response(status: u16, body: Value) -> HttpResponse {
 pub struct EnvironmentPlatform {
     pub fake: FakePlatform,
     server: Rc<Server>,
+    additional: BTreeMap<String, Rc<Server>>,
+}
+
+impl EnvironmentPlatform {
+    /// Route requests for an additional host to another independently pairable fixture.
+    pub fn with_environment(mut self, environment: &FakeEnvironment) -> Self {
+        if let Ok(url) = url::Url::parse(&environment.server.origin)
+            && let Some(host) = url.host_str()
+        {
+            self.additional
+                .insert(host.into(), environment.server.clone());
+        }
+        self
+    }
+
+    fn server_for(&self, url: &str) -> Rc<Server> {
+        url::Url::parse(url)
+            .ok()
+            .and_then(|url| self.additional.get(url.host_str()?).cloned())
+            .unwrap_or_else(|| self.server.clone())
+    }
 }
 
 impl Storage for EnvironmentPlatform {
     fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+        if area == StorageArea::Ordinary
+            && let Some(reply) = self.server.state.borrow_mut().deferred_reads.remove(&key)
+        {
+            return async move { reply.await.map_err(|_| PlatformError::Cancelled) }.boxed_local();
+        }
         self.fake.get(area, key)
     }
     fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
@@ -378,7 +447,7 @@ impl Platform for EnvironmentPlatform {
         self.fake.set_route_policy(policy);
     }
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
-        let server = self.server.clone();
+        let server = self.server_for(&request.url);
         async move {
             let url = url::Url::parse(&request.url)
                 .map_err(|error| PlatformError::Network(error.to_string()))?;
@@ -418,8 +487,8 @@ impl Platform for EnvironmentPlatform {
         }
         .boxed_local()
     }
-    fn websocket(&self, _request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
-        let server = self.server.clone();
+    fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
+        let server = self.server_for(&request.url);
         async move {
             let (to_server, server_incoming) = mpsc::unbounded::<Frame>();
             let (server_outgoing, from_server) = mpsc::unbounded::<Frame>();
@@ -582,8 +651,21 @@ impl Handler for FakeHandler {
             state.calls.push((tag.clone(), request.payload.clone()));
             state.script.get_mut(&tag).and_then(VecDeque::pop_front)
         };
-        if let Some(answer) = scripted {
-            return unary(answer);
+        match scripted {
+            Some(ScriptedReply::Ready(answer)) => return unary(answer),
+            Some(ScriptedReply::Deferred(reply)) => {
+                return HandlerOutput::Unary(
+                    async move {
+                        match reply.await {
+                            Ok(Ok(value)) => Exit::success(value),
+                            Ok(Err(error)) => Exit::fail(error),
+                            Err(_) => Exit::die("fake deferred reply cancelled"),
+                        }
+                    }
+                    .boxed_local(),
+                );
+            }
+            None => {}
         }
         if let Some(stream) = TerminalStream::from_tag(&tag) {
             let scripted = server

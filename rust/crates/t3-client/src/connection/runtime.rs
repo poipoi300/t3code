@@ -58,12 +58,17 @@ struct Owner {
     store_session: Cell<Option<Generation>>,
     threads: Rc<super::threads::ThreadDemand>,
     abort: AbortHandle,
+    close_requested: Cell<bool>,
     /// This connection's claim on the environment's connection state in the store.
     serial: u64,
 }
 impl Drop for Owner {
     fn drop(&mut self) {
-        self.abort.abort();
+        // Composition requests close and then drops its client handle. The driver
+        // still has to send the close frame in that case.
+        if !self.close_requested.get() {
+            self.abort.abort();
+        }
         if let Some(endpoint) = self.endpoint.get_mut().take() {
             endpoint.invalidate();
         }
@@ -117,7 +122,9 @@ impl ConnectedClient {
         self.owner.threads.lease(thread)
     }
     pub fn close(&self) -> Result<(), ClientError> {
-        self.send(ConnectionEvent::Disconnect)
+        self.send(ConnectionEvent::Disconnect)?;
+        self.owner.close_requested.set(true);
+        Ok(())
     }
     fn send(&self, event: ConnectionEvent) -> Result<(), ClientError> {
         self.owner
@@ -369,6 +376,7 @@ fn start<P: Platform + Clone + 'static>(
         store_session: Cell::new(None),
         threads: threads.clone(),
         abort,
+        close_requested: Cell::new(false),
         serial,
     });
     let runtime = Runtime {
@@ -1017,15 +1025,25 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
     }
     async fn run(mut self) -> Result<(), ClientError> {
         loop {
+            let disconnecting = self
+                .registry
+                .get(&self.environment)
+                .is_none_or(|handle| !handle.supervisor().state().desired);
+            // Release clears the context and invalidates all of its RPC handles. Keep
+            // just the session long enough to send the intentional close.
+            let closing = if disconnecting {
+                self.context.as_ref().map(|context| context.session.clone())
+            } else {
+                None
+            };
             while let Some(action) = self.pending.pop_front() {
                 self.action(action)?;
             }
-            if self
-                .registry
-                .get(&self.environment)
-                .is_none_or(|handle| !handle.supervisor().state().desired)
-            {
+            if disconnecting {
                 self.release();
+                if let Some(session) = closing {
+                    session.close().await;
+                }
                 return Ok(());
             }
             enum Input {

@@ -25,7 +25,7 @@ use crate::{
     composition::ClientRuntime,
     connection::ConnectionMode,
     navigation::SettingsPage,
-    platform::{Platform, StorageArea, StorageKey, StorageWrite},
+    platform::{Platform, PlatformError, StorageArea, StorageKey, StorageWrite},
     rpc::RpcEndpoint,
     services::resources::LocalLimiter,
     types::EnvironmentId,
@@ -148,6 +148,19 @@ const SAVE_FAILED: &str = "The save failed. Try reconnecting and saving again.";
 const MISSING_PERMISSION: &str = "This connection lacks permission to change these settings.";
 const DROPPED: &str = "This environment does not support this setting. Update T3 Code on it.";
 
+enum DevicePreferenceFormat {
+    Text,
+    Boolean,
+}
+
+fn device_preference_format(key: &str) -> Option<DevicePreferenceFormat> {
+    match key {
+        "t3code:theme" | "t3code:theme-appearance-mode" => Some(DevicePreferenceFormat::Text),
+        "t3code:typography-advanced" => Some(DevicePreferenceFormat::Boolean),
+        _ => None,
+    }
+}
+
 fn grouping_mode(mode: &SidebarProjectGroupingMode) -> GroupingMode {
     match serde_json::to_value(mode)
         .ok()
@@ -242,6 +255,7 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
     ) -> LocalBoxFuture<'static, Option<Value>> {
         let platform = self.platform.clone();
         async move {
+            let format = device_preference_format(key)?;
             let bytes = platform
                 .get(
                     StorageArea::Ordinary,
@@ -250,28 +264,36 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
                 .await
                 .ok()
                 .flatten()?;
-            if key == "t3code:typography-advanced" {
-                serde_json::from_slice(&bytes).ok()
-            } else {
-                String::from_utf8(bytes).ok().map(Value::String)
+            match format {
+                DevicePreferenceFormat::Text => String::from_utf8(bytes).ok().map(Value::String),
+                DevicePreferenceFormat::Boolean => {
+                    serde_json::from_slice::<bool>(&bytes).ok().map(Value::Bool)
+                }
             }
         }
         .boxed_local()
     }
 
-    /// Writes a device preference in the web's storage format.
+    /// Writes a supported device preference in the web's storage format.
     pub fn write_device_preference(
         &self,
         key: &'static str,
         value: Value,
-    ) -> LocalBoxFuture<'static, ()> {
+    ) -> LocalBoxFuture<'static, Result<(), PlatformError>> {
         let platform = self.platform.clone();
         async move {
-            let value = match value {
-                Value::String(text) => text.into_bytes(),
-                value => value.to_string().into_bytes(),
+            let value = match (device_preference_format(key), value) {
+                (Some(DevicePreferenceFormat::Text), Value::String(text)) => text.into_bytes(),
+                (Some(DevicePreferenceFormat::Boolean), Value::Bool(on)) => {
+                    on.to_string().into_bytes()
+                }
+                _ => {
+                    return Err(PlatformError::InvalidData(format!(
+                        "invalid value for {key}"
+                    )));
+                }
             };
-            let _ = platform
+            platform
                 .write(
                     StorageArea::Ordinary,
                     vec![StorageWrite {
@@ -279,7 +301,7 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
                         value: Some(value),
                     }],
                 )
-                .await;
+                .await
         }
         .boxed_local()
     }

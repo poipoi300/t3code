@@ -6,7 +6,7 @@ use std::rc::Rc;
 use t3_client::{
     composition::ClientRuntime,
     navigation::SettingsPage,
-    platform::Platform,
+    platform::{Platform, PlatformError},
     services::settings::{
         scope::SettingsScopeSearch,
         scoped::{ProjectOverrideEntry, SettingsPatch},
@@ -93,7 +93,7 @@ impl<P: Platform + Clone + 'static> SettingsService for SettingsBinding<P> {
         &self,
         key: &'static str,
         value: serde_json::Value,
-    ) -> LocalBoxFuture<'static, ()> {
+    ) -> LocalBoxFuture<'static, Result<(), PlatformError>> {
         self.0.write_device_preference(key, value)
     }
     fn search_availability(&self) -> SettingsSearchAvailability {

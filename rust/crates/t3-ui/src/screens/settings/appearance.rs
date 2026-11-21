@@ -209,36 +209,57 @@ fn heading(title: &'static str) -> impl IntoElement {
         ))
 }
 
-fn stored_preference(
-    context: SettingsContext,
+#[derive(Clone, Copy)]
+struct DevicePreference {
     key: &'static str,
-    fallback: Value,
-) -> Signal<Value> {
-    let preference = signal(fallback);
-    if let Some(load) = context.read_device_preference(key) {
-        crate::runtime::tasks::watch(async move {
-            if let Some(value) = load.await {
-                let _ = preference.try_set(value);
-            }
-        });
-    }
-    preference
+    value: Signal<Value>,
+    loading: Signal<bool>,
 }
 
-fn choose(context: SettingsContext, state: Signal<Value>, key: &'static str, value: Value) {
-    if state.get_untracked() != value && context.available() {
-        state.set(value.clone());
-        context.write_device_preference(key, value);
+impl DevicePreference {
+    fn load(context: SettingsContext, key: &'static str, fallback: Value) -> Self {
+        let load = context.read_device_preference(key);
+        let value = signal(fallback);
+        let loading = signal(load.is_some());
+        if let Some(load) = load {
+            crate::runtime::tasks::watch(async move {
+                let saved = load.await;
+                if loading.try_get() == Some(true) {
+                    let _ = loading.try_set(false);
+                    if let Some(saved) = saved {
+                        let _ = value.try_set(saved);
+                    }
+                }
+            });
+        }
+        Self {
+            key,
+            value,
+            loading,
+        }
+    }
+
+    fn choose(self, context: SettingsContext, value: Value) {
+        if context.available()
+            && (self.loading.get_untracked() || self.value.get_untracked() != value)
+        {
+            // Even a choice matching the fallback supersedes the pending saved value.
+            self.loading.set(false);
+            self.value.set(value.clone());
+            context.write_device_preference(self.key, value);
+        }
     }
 }
 
 fn theme_library(context: SettingsContext) -> impl IntoElement {
     use t3_theme::palette::THEME_APPEARANCE_MODE_STORAGE_KEY as MODE_KEY;
-    let mode = stored_preference(context, MODE_KEY, json!("system"));
-    let theme = stored_preference(context, THEME_KEY, json!("system"));
+    let mode = DevicePreference::load(context, MODE_KEY, json!("system"));
+    let theme = DevicePreference::load(context, THEME_KEY, json!("system"));
     let choice = computed(move || ThemeChoice {
-        theme: theme.with(|value| value.as_str().unwrap_or_default().to_owned()),
-        mode: mode.with(|value| {
+        theme: theme
+            .value
+            .with(|value| value.as_str().unwrap_or_default().to_owned()),
+        mode: mode.value.with(|value| {
             value
                 .as_str()
                 .and_then(AppearanceMode::parse)
@@ -259,9 +280,9 @@ fn theme_library(context: SettingsContext) -> impl IntoElement {
     ].into_iter().map(|(key, label, accessible)| {
         nsh_base::button()
             .accessibility_label(Text::from(accessible).resolve())
-            .selected(move || mode.with(|value| value.as_str() == Some(key)))
-            .on_press(move || choose(context, mode, MODE_KEY, json!(key)))
-            .app_class(move || Some(tw(if mode.with(|value| value.as_str() == Some(key)) {
+            .selected(move || mode.value.with(|value| value.as_str() == Some(key)))
+            .on_press(move || mode.choose(context, json!(key)))
+            .app_class(move || Some(tw(if mode.value.with(|value| value.as_str() == Some(key)) {
                 "flex flex-col items-stretch gap-1.5 rounded-xl border border-transparent bg-accent/30 p-2 ring-2 ring-inset ring-ring"
             } else {
                 "flex flex-col items-stretch gap-1.5 rounded-xl border border-border/70 bg-card/60 p-2 hover:bg-accent/10"
@@ -276,12 +297,12 @@ fn theme_library(context: SettingsContext) -> impl IntoElement {
         .chain(built_in_themes().iter().map(|theme| (theme.id.as_str(), theme.label.as_str(), true)))
         .map(|(id, name, literal)| {
             let name = if literal { Text::content(name) } else { Text::from("T3 Code") }.resolve();
-            let picked = move || theme.with(|value| value.as_str() == Some(id));
+            let picked = move || theme.value.with(|value| value.as_str() == Some(id));
             let tokens = crate::theme::tokens_for(&ThemeChoice { theme: id.to_owned(), ..ThemeChoice::default() });
             let swatches = crate::theme::Palette::of(&tokens);
             nsh_base::button()
                 .accessibility_label(name.clone())
-                .on_press(move || choose(context, theme, THEME_KEY, json!(id)))
+                .on_press(move || theme.choose(context, json!(id)))
                 .app_class(move || Some(tw(if picked() {
                     "flex flex-col gap-2 rounded-xl border border-ring bg-accent/30 p-3"
                 } else {
@@ -379,13 +400,17 @@ fn thread_details_row(context: SettingsContext) -> impl IntoElement {
     let visibility =
         computed(move || resolve_thread_details_visibility(&context.client_settings()));
     let count = computed(move || visibility.with(|items| items.values().filter(|on| **on).count()));
+    let is_default = move || visibility.with(is_default_thread_details_visibility);
+    let reset = move || {
+        context.update(json!({"threadDetailsItems": {}, "threadDetailsUsageEnabled": false}))
+    };
     settings_row(
         SettingsRowProps::searchable("thread-details-items")
             .description(|| Text::from("Choose what the thread details card shows. You can also right-click the card."))
             .reset(RowReset::new(
                 "thread details",
-                move || visibility.with(|items| !is_default_thread_details_visibility(items)),
-                move || context.update(json!({"threadDetailsItems": {}, "threadDetailsUsageEnabled": false})),
+                move || !is_default(),
+                reset,
             ))
             .control(move || {
                 let count_args = move || [
@@ -399,39 +424,48 @@ fn thread_details_row(context: SettingsContext) -> impl IntoElement {
                         .child(text(move || tr("{enabled} of {total} on", &count_args())))
                         .child(svg(Icon::ChevronDown.asset()).app_class(tw("size-4"))),
                     MenuOptions { align: Align::End, ..Default::default() },
-                    menu::menu_popup_with(move || menu::menu_group(
-                        t("Show in thread details"),
-                        view().child(menu::menu_group_label(t("Show in thread details"), false)).child(
-                            DETAILS_ITEMS.iter().map(|&(id, label, _)| {
-                                let label = Text::from(label).resolve();
-                                menu::menu_checkbox_item(
-                                    label.to_string(),
-                                    move || visibility.with(|items| items.get(id).copied().unwrap_or(false)),
-                                    CheckboxVariant::Default,
-                                    ItemOptions { close_on_select: false, ..Default::default() },
-                                    text(label),
-                                    move |checked| {
-                                        let items = set_thread_details_item(&context.client_settings(), id, checked);
-                                        context.update(json!({"threadDetailsItems": items}));
-                                    },
-                                ).into_element()
-                            }).collect::<Vec<_>>(),
-                        ),
-                    )),
+                    menu::menu_popup_with(move || {
+                        view()
+                            .child(menu::menu_group(
+                                t("Show in thread details"),
+                                view()
+                                    .child(menu::menu_group_label(t("Show in thread details"), false))
+                                    .child(DETAILS_ITEMS.iter().map(|&(id, label, _)| {
+                                        let label = Text::from(label).resolve();
+                                        menu::menu_checkbox_item(
+                                            label.to_string(),
+                                            move || visibility.with(|items| items.get(id).copied().unwrap_or(false)),
+                                            CheckboxVariant::Default,
+                                            ItemOptions { close_on_select: false, ..Default::default() },
+                                            text(label),
+                                            move |checked| {
+                                                let items = set_thread_details_item(&context.client_settings(), id, checked);
+                                                context.update(json!({"threadDetailsItems": items}));
+                                            },
+                                        ).into_element()
+                                    }).collect::<Vec<_>>()),
+                            ))
+                            .child(menu::menu_separator())
+                            .child(menu::menu_item(
+                                t("Reset to default"),
+                                ItemOptions { disabled: Prop::bind(is_default), ..Default::default() },
+                                text(t("Reset to default")),
+                                reset,
+                            ))
+                    }),
                 )
             }),
     )
 }
 
 fn typography(context: SettingsContext) -> impl IntoElement {
-    let preference = stored_preference(context, TYPOGRAPHY_ADVANCED_STORAGE_KEY, json!(false));
-    let separate = move || preference.with(|v| v.as_bool() == Some(true));
+    let preference = DevicePreference::load(context, TYPOGRAPHY_ADVANCED_STORAGE_KEY, json!(false));
+    let separate = move || preference.value.with(|v| v.as_bool() == Some(true));
     let show_advanced =
         computed(move || separate() || is_advanced_typography_target(&context.target_id()));
     effect(move || {
-        if is_advanced_typography_target(&context.target_id()) && !separate() {
-            preference.set(json!(true));
-            context.write_device_preference(TYPOGRAPHY_ADVANCED_STORAGE_KEY, json!(true));
+        if is_advanced_typography_target(&context.target_id()) {
+            preference.choose(context, json!(true));
         }
     });
     settings_section(
@@ -462,7 +496,7 @@ fn typography(context: SettingsContext) -> impl IntoElement {
                             "Separate fonts",
                             ControlState { checked: Prop::bind(move || show_advanced.get()), ..Default::default() },
                             Size::Default,
-                            move |next| choose(context, preference, TYPOGRAPHY_ADVANCED_STORAGE_KEY, json!(next)),
+                            move |next| preference.choose(context, json!(next)),
                         ))))
                     .child(crate::host::is_mac().then(|| settings_row(switch_row(
                         "font-smoothing",

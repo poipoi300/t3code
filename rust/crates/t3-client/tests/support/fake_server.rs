@@ -133,6 +133,8 @@ pub struct ServerState {
     pub refuse_sockets: bool,
     /// A transport still completing its close handshake after a server goes away.
     pub hold_socket_close: bool,
+    pub socket_closes: usize,
+    pub fail_device_preference_write: bool,
     /// Failure injection: dispatches are received and never answered.
     pub hold_dispatches: bool,
     /// Failure injection: the host cannot produce random bytes.
@@ -342,6 +344,13 @@ impl Storage for TestPlatform {
         self.fake.get(area, key)
     }
     fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
+        if self.server.state.borrow().fail_device_preference_write
+            && writes
+                .iter()
+                .any(|write| write.key.namespace == "ui-preference")
+        {
+            return async { Err(PlatformError::Storage("fixture disk full".into())) }.boxed_local();
+        }
         self.fake.write(area, writes)
     }
     fn list(&self, area: StorageArea, namespace: String) -> HostFuture<'_, Vec<StorageKey>> {
@@ -493,6 +502,7 @@ impl Platform for TestPlatform {
                 to_server: Some(to_server),
                 from_server,
                 closing: server.state.borrow().hold_socket_close,
+                server: Rc::downgrade(&self.server),
             }) as Box<dyn WebSocket>)
         }
         .boxed_local()
@@ -548,6 +558,7 @@ struct Socket {
     to_server: Option<mpsc::UnboundedSender<Frame>>,
     from_server: mpsc::UnboundedReceiver<Frame>,
     closing: bool,
+    server: Weak<FakeServer>,
 }
 
 impl WebSocket for Socket {
@@ -566,6 +577,9 @@ impl WebSocket for Socket {
     }
     fn close(&mut self) -> HostFuture<'_, ()> {
         async move {
+            if let Some(server) = self.server.upgrade() {
+                server.state.borrow_mut().socket_closes += 1;
+            }
             self.to_server = None;
             if self.closing {
                 futures::future::pending::<()>().await;

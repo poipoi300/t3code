@@ -594,37 +594,45 @@ pub fn sort_snooze_rows<K: Clone>(
 /// Port of shared/path.ts `resolvePastedPath`: accept a pasted host path even after
 /// a prefilled directory, while leaving ordinary typing and relative text alone.
 pub fn resolve_pasted_path(previous: &str, next: &str) -> String {
-    use crate::view_logic::session::links::{is_absolute, is_windows_absolute};
+    use crate::view_logic::{JsTrim, is_js_whitespace, session::links::is_windows_absolute};
 
-    fn host_path(value: &str) -> bool {
-        is_absolute(value) || value.starts_with("~/")
+    fn windows_path(value: &str) -> bool {
+        is_windows_absolute(value)
+            || matches!(value.as_bytes(), [drive, b':'] if drive.is_ascii_alphabetic())
     }
 
-    if next
-        .strip_prefix(previous)
-        .is_some_and(|suffix| suffix.encode_utf16().count() == 1)
-        || previous.starts_with(next)
-    {
+    fn host_path(value: &str) -> bool {
+        value.starts_with('/') || value.starts_with("~/") || windows_path(value)
+    }
+
+    let is_typing = match next.strip_prefix(previous) {
+        Some(suffix) => suffix.encode_utf16().count() == 1,
+        None => previous.starts_with(next),
+    };
+    if is_typing {
         return next.to_owned();
     }
 
-    let trimmed = next.trim_end();
+    let trimmed = next.js_trim_end();
     if let Some(quote @ ('\'' | '"')) = trimmed.chars().last() {
         let quoted = &trimmed[..trimmed.len() - 1];
-        for (index, _) in quoted.match_indices(quote) {
+        // Match QUOTED_PATH_AT_END first. If its leftmost match is rejected, fall
+        // through to unquoted handling without retrying at another quote.
+        let first = quoted.match_indices(quote).find_map(|(index, _)| {
             let inner = &quoted[index + 1..];
-            if inner.is_empty() || !previous.starts_with(quoted[..index].trim_end()) {
-                continue;
-            }
+            let valid = if quote == '\'' {
+                inner.split("'\\''").all(|part| !part.contains('\''))
+            } else {
+                !inner.contains('"')
+            };
+            (valid && !inner.is_empty()).then_some((index, inner))
+        });
+        if let Some((index, inner)) = first
+            && previous.starts_with(quoted[..index].js_trim_end())
+        {
             let candidate = if quote == '\'' {
-                if inner.split("'\\''").any(|part| part.contains('\'')) {
-                    continue;
-                }
                 inner.replace("'\\''", "'")
             } else {
-                if inner.contains('"') {
-                    continue;
-                }
                 inner.to_owned()
             };
             if host_path(&candidate) {
@@ -641,7 +649,7 @@ pub fn resolve_pasted_path(previous: &str, next: &str) -> String {
     if !host_path(path) {
         return next.to_owned();
     }
-    if is_windows_absolute(path) {
+    if windows_path(path) {
         return path.to_owned();
     }
 
@@ -649,9 +657,9 @@ pub fn resolve_pasted_path(previous: &str, next: &str) -> String {
     let mut decoded = String::with_capacity(path.len());
     while let Some(ch) = chars.next() {
         if ch == '\\'
-            && chars
-                .peek()
-                .is_some_and(|ch| ch.is_whitespace() || r#"'"\()[]{}<>|&;$`!*?#~^="#.contains(*ch))
+            && chars.peek().is_some_and(|ch| {
+                is_js_whitespace(*ch) || r#"'"\()[]{}<>|&;$`!*?#~^="#.contains(*ch)
+            })
             && let Some(escaped) = chars.next()
         {
             decoded.push(escaped);
@@ -665,6 +673,74 @@ pub fn resolve_pasted_path(previous: &str, next: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_pasted_paths_match_the_web_table() {
+        let copied = [
+            ("", "'/Users/me/Monarch Money'", "/Users/me/Monarch Money"),
+            ("", r"/Users/me/Bob\'s\ Stuff", "/Users/me/Bob's Stuff"),
+            ("", r"/Users/me/a\\\ b", r"/Users/me/a\ b"),
+            ("", r"/Users/me/\'My\ Folder\'", "/Users/me/'My Folder'"),
+            ("", r#""C:\Users\me\My Code""#, r"C:\Users\me\My Code"),
+            ("", r#""\\host\share\My Code""#, r"\\host\share\My Code"),
+            ("", r#""/Users/me/Bob's Stuff""#, "/Users/me/Bob's Stuff"),
+            ("", r"~/Bob\'s\ Stuff", "~/Bob's Stuff"),
+            ("", "  '/Users/me/My Code'\n", "/Users/me/My Code"),
+            ("", "\u{feff}\"C:\"\u{feff}", "C:"),
+            ("/Users/me/old", "'/Users/me/My Code'", "/Users/me/My Code"),
+            ("~/", "~/'/Users/me/My Code'", "/Users/me/My Code"),
+            ("~/", "~//Users/me/code", "/Users/me/code"),
+            (r"C:\Users\", r#"C:\Users\"D:\My Code""#, r"D:\My Code"),
+            ("", r"'/Users/me/Bob'\''s Work'", "/Users/me/Bob's Work"),
+            ("~/code/repo", "~/code/repo'/a b'", "/a b"),
+            ("~/code/old", "~/code/'/a b'", "/a b"),
+        ];
+        for (previous, next, expected) in copied {
+            assert_eq!(resolve_pasted_path(previous, next), expected, "{next:?}");
+        }
+        let unchanged = [
+            ("/Users/me", "/Users/me/"),
+            ("~/", "~//"),
+            ("/Users/My", "/Users/My "),
+            ("/Users/me/", "/Users/me"),
+            ("~/", "~/Documents/code"),
+            ("/Users/me", "/Users/me/code"),
+            ("/Users/me/", "/Users/me/code"),
+            ("", "'hello world'"),
+            ("", "'code/my app'"),
+            ("", "find '/tmp/repo'"),
+            ("", "'/Users/me/My Code"),
+            ("", "'/Users/me/it's here'"),
+            ("", r"C:\Users\me\code"),
+            ("", r"C:\Users\me\.config"),
+            ("", r"~/code\.vscode"),
+            ("", r"\\host\share\code"),
+            ("", r"/Users/me/a\b"),
+        ];
+        for (previous, next) in unchanged {
+            assert_eq!(resolve_pasted_path(previous, next), next);
+        }
+        for typed in [r"/Users/me/a\ b", r"~/code\.vscode", "'/Users/me/My Code'"] {
+            let actual = typed.chars().fold(String::new(), |mut text, ch| {
+                let previous = text.clone();
+                text.push(ch);
+                resolve_pasted_path(&previous, &text)
+            });
+            assert_eq!(actual, typed);
+        }
+    }
+
+    #[test]
+    fn review_equal_text_is_processed_as_a_paste() {
+        let path = r"/Users/me/a\ b";
+        assert_eq!(resolve_pasted_path(path, path), "/Users/me/a b");
+    }
+
+    #[test]
+    fn review_a_rejected_leftmost_quoted_match_falls_through() {
+        let next = r"'relative'\''/tmp/work'";
+        assert_eq!(resolve_pasted_path("'relative'\\''/old", next), next);
+    }
 
     #[test]
     fn snooze_editor_helpers_follow_the_web() {

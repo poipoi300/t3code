@@ -14,19 +14,22 @@ use crate::{
 };
 use futures::{
     FutureExt, Sink, SinkExt, StreamExt,
-    channel::mpsc,
+    channel::{mpsc, oneshot},
     future::{Either, LocalBoxFuture, select},
 };
 use std::{cell::RefCell, pin::Pin, rc::Rc};
 use t3_contracts::{base_schemas::EnvironmentId, server::ServerConfig};
 use t3_rpc::Frame;
 
+const CLOSE_TIMEOUT_MS: u64 = 5_000;
+
 type FrameSink = Pin<Box<dyn Sink<Frame, Error = PlatformError>>>;
 
 struct SessionScope {
     endpoint: SessionEndpoint,
     platform: Rc<dyn Platform>,
-    driver: RefCell<LocalBoxFuture<'static, ()>>,
+    close: RefCell<Option<oneshot::Sender<()>>>,
+    driver: RefCell<Option<LocalBoxFuture<'static, ()>>>,
     config: RefCell<Option<Rc<ServerConfig>>>,
     authorization: RemoteAuthorization,
     identity: crate::environment::SessionIdentity,
@@ -55,8 +58,26 @@ impl PlatformSession {
     pub fn invalidate(&self) {
         self.inner.endpoint.invalidate();
     }
+    /// Finish a user-initiated disconnect even if the RPC or frame pump is blocked.
+    pub(crate) async fn close(&self) {
+        if let Some(close) = self.inner.close.borrow_mut().take() {
+            let _ = close.send(());
+        }
+        self.run().await;
+    }
+
     pub async fn run(&self) {
-        futures::future::poll_fn(|cx| self.inner.driver.borrow_mut().as_mut().poll(cx)).await;
+        futures::future::poll_fn(|cx| {
+            let mut driver = self.inner.driver.borrow_mut();
+            if let Some(active) = driver.as_mut()
+                && active.as_mut().poll(cx).is_pending()
+            {
+                return std::task::Poll::Pending;
+            }
+            driver.take();
+            std::task::Poll::Ready(())
+        })
+        .await;
     }
     async fn initial_config(&self) -> Result<(), ClientError> {
         let operation = self
@@ -154,7 +175,7 @@ impl SessionFactory for PlatformSessionFactory {
                 .validate_session_at(&prepared.session, revision)
                 .await
                 .map_err(|error| map_remote_environment_error(&error, ConnectionVia::Direct))?;
-            let socket = self
+            let mut socket = self
                 .platform
                 .websocket(SocketRequest {
                     url: prepared.socket_url.expose().clone(),
@@ -193,37 +214,54 @@ impl SessionFactory for PlatformSessionFactory {
             };
             let authorization = self.authorization.clone();
             let identity = prepared.session.clone();
+            let (close, close_requested) = oneshot::channel();
+            let closing_clock = self.platform.clone();
             let driver = async move {
-                // Either half ending makes this session unusable. In particular, an old
-                // host socket's pending close must not keep the RPC session alive after EOF.
-                let io = select(
-                    rpc.run(ticks, move || clock.monotonic_ms()).boxed_local(),
-                    pump(socket, outgoing_rx, incoming_tx, frames, generation).boxed_local(),
-                )
-                .map(|_| ())
-                .boxed_local();
-                if let Some(expiration) = expiration {
-                    let renew = async move {
-                        if authorization
-                            .renew_dpop_before_expiry(&identity, expiration)
-                            .await
-                            .is_ok()
-                        {
-                            futures::future::pending::<()>().await;
+                let requested = {
+                    let socket = &mut *socket;
+                    let transport = async move {
+                        // Either half ending makes the session unusable. Transport failures
+                        // let the supervisor retry without waiting for a close handshake.
+                        let io = select(
+                            rpc.run(ticks, move || clock.monotonic_ms()).boxed_local(),
+                            pump(socket, outgoing_rx, incoming_tx, frames, generation)
+                                .boxed_local(),
+                        )
+                        .map(|_| ())
+                        .boxed_local();
+                        if let Some(expiration) = expiration {
+                            let renew = async move {
+                                if authorization
+                                    .renew_dpop_before_expiry(&identity, expiration)
+                                    .await
+                                    .is_ok()
+                                {
+                                    futures::future::pending::<()>().await;
+                                }
+                            }
+                            .boxed_local();
+                            let _ = select(io, renew).await;
+                        } else {
+                            io.await;
                         }
                     }
                     .boxed_local();
-                    let _ = select(io, renew).await;
-                } else {
-                    io.await;
+                    matches!(
+                        select(close_requested, transport).await,
+                        Either::Left((Ok(()), _)),
+                    )
+                };
+                if requested {
+                    let _ = select(socket.close(), closing_clock.sleep(CLOSE_TIMEOUT_MS)).await;
                 }
             }
             .boxed_local();
             Ok(PlatformSession {
                 inner: Rc::new(SessionScope {
                     endpoint,
+                    close: RefCell::new(Some(close)),
                     platform: self.platform.clone(),
-                    driver: RefCell::new(driver),
+                    driver: RefCell::new(Some(driver)),
                     config: RefCell::new(None),
                     authorization: self.authorization.clone(),
                     identity: prepared.session.clone(),
@@ -248,7 +286,7 @@ impl SessionFactory for PlatformSessionFactory {
 }
 
 async fn pump(
-    mut socket: Box<dyn WebSocket>,
+    socket: &mut dyn WebSocket,
     mut outgoing: mpsc::Receiver<Frame>,
     mut incoming: mpsc::Sender<Result<Frame, PlatformError>>,
     mut frames: Option<mpsc::Sender<super::ConnectionEvent>>,
@@ -296,20 +334,16 @@ async fn pump(
             }
         }
     }
-    drop(incoming);
-    let _ = socket.close().await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::HostFuture;
-    use std::cell::Cell;
 
     struct Socket {
         receive: mpsc::UnboundedReceiver<Frame>,
         sent: Rc<RefCell<Vec<Frame>>>,
-        closed: Rc<Cell<bool>>,
     }
     impl WebSocket for Socket {
         fn send(&mut self, frame: Frame) -> HostFuture<'_, ()> {
@@ -323,16 +357,12 @@ mod tests {
             async move { Ok(self.receive.next().await) }.boxed_local()
         }
         fn close(&mut self) -> HostFuture<'_, ()> {
-            async move {
-                self.closed.set(true);
-                Ok(())
-            }
-            .boxed_local()
+            async { Ok(()) }.boxed_local()
         }
     }
 
     #[test]
-    fn sends_and_close_progress_while_incoming_is_backpressured() {
+    fn sends_and_outgoing_shutdown_progress_while_incoming_is_backpressured() {
         let (receive, receive_rx) = mpsc::unbounded();
         for index in 0..8 {
             assert!(
@@ -342,16 +372,14 @@ mod tests {
             );
         }
         let sent = Rc::new(RefCell::new(Vec::new()));
-        let closed = Rc::new(Cell::new(false));
-        let socket = Box::new(Socket {
+        let mut socket = Socket {
             receive: receive_rx,
             sent: sent.clone(),
-            closed: closed.clone(),
-        });
+        };
         let (mut outgoing, outgoing_rx) = mpsc::channel(1);
         let (incoming, mut incoming_rx) = mpsc::channel(0);
         let mut driver = Box::pin(pump(
-            socket,
+            &mut socket,
             outgoing_rx,
             incoming,
             None,
@@ -366,6 +394,5 @@ mod tests {
         );
         drop(outgoing);
         assert!(driver.as_mut().now_or_never().is_some());
-        assert!(closed.get());
     }
 }

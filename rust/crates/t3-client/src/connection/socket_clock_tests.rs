@@ -44,9 +44,10 @@ fn readiness_samples_each_connections_first_config_and_ignores_repeated_timestam
                 inner: Rc::new(SessionScope {
                     endpoint,
                     platform: platform.clone(),
-                    driver: RefCell::new(
+                    close: RefCell::new(None),
+                    driver: RefCell::new(Some(
                         driver.run(futures::stream::pending(), || 0).boxed_local(),
-                    ),
+                    )),
                     config: RefCell::new(None),
                     revision: authorization.session_revision(&identity),
                     authorization: authorization.clone(),

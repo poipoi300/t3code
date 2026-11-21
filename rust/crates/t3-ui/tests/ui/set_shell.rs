@@ -208,11 +208,20 @@ pub struct Remote {
     pub policy: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum ReviewFixture {
+    #[default]
+    Normal,
+    SlowAppearance,
+    WorktreeCleanup,
+}
+
 #[derive(Clone, PartialEq, Props)]
 struct ConnectedProps {
     page: usize,
     auto_resume: bool,
     policy: bool,
+    review: usize,
 }
 
 /// The production `settings::shell::screen_for` over a client runtime really paired with
@@ -240,20 +249,66 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
         "orchestration:operate",
         "settings:write",
     ]);
-    let remote = Remote {
-        auto_resume: props.auto_resume,
-        policy: props.policy,
-    };
     server.edit_config(|config| {
-        config["settings"]["autoResumeLimitedThreads"] = serde_json::json!(remote.auto_resume);
+        config["settings"]["autoResumeLimitedThreads"] = serde_json::json!(props.auto_resume);
         config["settings"]["snoozeLimitedThreads"] = serde_json::json!(false);
-        if remote.policy {
+        if props.policy {
             config["managedPolicy"] =
                 serde_json::json!({"organization": "Acme", "lockedSettings": ["snoozeLimitedThreads"]});
         }
     });
+    let mut platform = server.platform();
+    let mut extra = None;
+    if props.review == ReviewFixture::WorktreeCleanup as usize {
+        let other = FakeEnvironment::at_origin("other", "https://other.test", spawner.clone());
+        for machine in [&server, &other] {
+            machine.set_permissions(&[
+                "orchestration:read",
+                "orchestration:operate",
+                "settings:write",
+            ]);
+            machine.edit_config(|config| {
+                config["environment"]["capabilities"]["storageCleanup"] = serde_json::json!(true);
+                config["environment"]["capabilities"]["settledWorktreeCleanup"] =
+                    serde_json::json!(true);
+                config["environment"]["capabilities"]["storageCleanupRun"] =
+                    serde_json::json!(true);
+                config["settings"]["worktreeCleanup"] = serde_json::Value::Null;
+                config["settings"]["storageCleanup"]["worktreeAfterDays"] = serde_json::json!(8);
+            });
+        }
+        other.edit_config(|config| {
+            config["settings"]["storageCleanup"]["worktreeKeepWhen"] =
+                serde_json::json!("tracked-changes");
+        });
+        platform = platform.with_environment(&other);
+        extra = Some(other);
+        let reply = Rc::new(RefCell::new(Some(
+            server.defer_reply("server.updateSettings"),
+        )));
+        on_key("ctrl+shift+e", move |_| {
+            if let Some(reply) = reply.borrow_mut().take() {
+                let _ = reply.send(Err(
+                    serde_json::json!({"message":"Fixture rejected the change"}),
+                ));
+            }
+        });
+    }
+    if props.review == ReviewFixture::SlowAppearance as usize {
+        use t3_client::platform::StorageKey;
+        let saved = Rc::new(RefCell::new(Some(server.defer_read(StorageKey::new(
+            "ui-preference",
+            None,
+            "t3code:theme-appearance-mode",
+        )))));
+        on_key("ctrl+shift+e", move |_| {
+            if let Some(saved) = saved.borrow_mut().take() {
+                let _ = saved.send(Some(b"light".to_vec()));
+            }
+        });
+    }
     let client = ClientRuntime::new(
-        server.platform(),
+        platform,
         store.clone(),
         OrchestrationV2CreationSource::Web,
         spawner.clone(),
@@ -264,12 +319,29 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
         t3_ui::runtime::host::Choice::Client,
     ));
     let pairing = client.pair(server.pairing());
-    spawner(
-        async move {
-            let _ = pairing.await;
-        }
-        .boxed_local(),
-    );
+    let additional_id = extra.as_ref().map(|_| EnvironmentId("other".into()));
+    {
+        let client = client.clone();
+        spawner(
+            async move {
+                let _ = pairing.await;
+                if let Some(extra) = extra {
+                    let _ = client.pair(extra.pairing()).await;
+                }
+            }
+            .boxed_local(),
+        );
+    }
+    {
+        let client = client.clone();
+        on_key("ctrl+shift+o", move |_| {
+            if let Some(client) = client.client(&EnvironmentId("other".into())) {
+                client
+                    .close()
+                    .expect("disconnect the second fixture machine");
+            }
+        });
+    }
     let ready = signal(false);
     {
         let client = client.clone();
@@ -287,7 +359,14 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
                     .environments
                     .get(&environment)
                     .is_some_and(|environment| environment.config.is_some());
-                ready.set(session && config);
+                let other_ready = additional_id.as_ref().is_none_or(|id| {
+                    client
+                        .client(id)
+                        .is_some_and(|client| client.session().is_some())
+                });
+                if session && config && other_ready {
+                    ready.set(true);
+                }
             }
         });
     }
@@ -326,6 +405,15 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
 }
 
 pub fn start_connected(window: (f32, f32), page: SettingsPage, remote: Remote) -> Headless {
+    start_connected_with(window, page, remote, ReviewFixture::Normal)
+}
+
+pub fn start_connected_with(
+    window: (f32, f32),
+    page: SettingsPage,
+    remote: Remote,
+    review: ReviewFixture,
+) -> Headless {
     let index = SettingsPage::ALL
         .iter()
         .position(|p| *p == page)
@@ -337,6 +425,7 @@ pub fn start_connected(window: (f32, f32), page: SettingsPage, remote: Remote) -
             page: index,
             auto_resume: remote.auto_resume,
             policy: remote.policy,
+            review: review as usize,
         }))
     };
     config.environment.idiom = if window == PHONE {

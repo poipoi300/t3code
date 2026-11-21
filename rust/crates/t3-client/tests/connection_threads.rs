@@ -131,7 +131,29 @@ fn a_reconnect_follows_every_open_thread_again_on_the_new_session() {
 }
 
 #[test]
-fn a_server_restart_refreshes_the_open_timeline_while_the_old_socket_closes() {
+fn review_intentional_disconnect_closes_the_socket_with_a_deadline() {
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().hold_socket_close = true;
+    let (client, ended) = connected(&mut harness);
+
+    client.close().unwrap();
+    drop(client);
+    harness.settle();
+    assert_eq!(harness.server().state.borrow().socket_closes, 1);
+    assert!(
+        ended.borrow().is_none(),
+        "the close handshake is in progress"
+    );
+    harness.advance(5_000);
+    assert_eq!(
+        *ended.borrow(),
+        Some(Ok(())),
+        "the deadline ends the handshake"
+    );
+}
+
+#[test]
+fn a_transport_loss_replaces_the_session_and_refreshes_the_open_timeline() {
     let mut harness = Harness::new(ENV);
     harness.server().state.borrow_mut().hold_socket_close = true;
     let (client, _ended) = connected(&mut harness);
@@ -145,8 +167,8 @@ fn a_server_restart_refreshes_the_open_timeline_while_the_old_socket_closes() {
     replacement["snapshotSequence"] = serde_json::json!(2);
     let mut visible = replacement["projection"]["visibleTurnItems"][0].clone();
     visible["position"] = serde_json::json!(1);
-    visible["sourceItemId"] = serde_json::json!("after-restart");
-    visible["item"]["id"] = serde_json::json!("after-restart");
+    visible["sourceItemId"] = serde_json::json!("after-reconnect");
+    visible["item"]["id"] = serde_json::json!("after-reconnect");
     visible["item"]["ordinal"] = serde_json::json!(2);
     replacement["projection"]["turnItems"]
         .as_array_mut()
@@ -167,8 +189,9 @@ fn a_server_restart_refreshes_the_open_timeline_while_the_old_socket_closes() {
 
     assert!(
         live_session(&client) > before,
-        "new socket despite the old close handshake"
+        "new socket after the old transport failed"
     );
+    assert_eq!(harness.server().state.borrow().socket_closes, 0);
     assert_eq!(harness.server().thread_subscribes("t1"), 2);
     assert_eq!(harness.server().open_threads_of("t1"), 1);
     assert_eq!(status(&client, "t1"), Some(SyncStatus::Live));

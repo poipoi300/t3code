@@ -84,6 +84,63 @@ fn update_calls(h: &fake_server::Harness) -> Vec<Value> {
 }
 
 #[test]
+fn review_device_preference_types_round_trip_and_reject_bad_storage_values() {
+    use t3_client::platform::{Storage, StorageArea, StorageKey, StorageWrite};
+
+    const ADVANCED: &str = "t3code:typography-advanced";
+    const THEME: &str = "t3code:theme";
+    const MODE: &str = "t3code:theme-appearance-mode";
+    let (mut h, runtime) = settings_runtime(&["orchestration:read"], json!({}));
+    let settings = runtime.settings();
+    for (key, value) in [
+        (ADVANCED, json!(true)),
+        (THEME, json!("system")),
+        (MODE, json!("dark")),
+    ] {
+        h.run(settings.write_device_preference(key, value.clone()))
+            .unwrap();
+        assert_eq!(h.run(settings.read_device_preference(key)), Some(value));
+    }
+    assert!(matches!(
+        h.run(settings.write_device_preference(THEME, json!(false))),
+        Err(t3_client::platform::PlatformError::InvalidData(_))
+    ));
+    assert_eq!(
+        h.run(settings.read_device_preference(THEME)),
+        Some(json!("system"))
+    );
+    let platform = h.platform.clone();
+    h.run(async move {
+        platform
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: StorageKey::new("ui-preference", None, ADVANCED),
+                    value: Some(br#""true""#.to_vec()),
+                }],
+            )
+            .await
+    })
+    .unwrap();
+    assert_eq!(h.run(settings.read_device_preference(ADVANCED)), None);
+}
+
+#[test]
+fn review_device_preference_writes_surface_storage_errors() {
+    let (mut h, runtime) = settings_runtime(&["orchestration:read"], json!({}));
+    h.server().state.borrow_mut().fail_device_preference_write = true;
+    let write = h.run(
+        runtime
+            .settings()
+            .write_device_preference("t3code:theme", json!("system")),
+    );
+    assert!(matches!(
+        write,
+        Err(t3_client::platform::PlatformError::Storage(_))
+    ));
+}
+
+#[test]
 fn the_scope_view_reads_environments_and_project_groups_from_the_store() {
     let (_h, runtime) = settings_runtime(&["orchestration:read", "settings:write"], json!({}));
     let settings = runtime.settings();

@@ -92,7 +92,7 @@ pub trait SettingsService {
         &self,
         key: &'static str,
         value: Value,
-    ) -> LocalBoxFuture<'static, ()>;
+    ) -> LocalBoxFuture<'static, Result<(), t3_client::platform::PlatformError>>;
     fn search_availability(&self) -> SettingsSearchAvailability;
 }
 
@@ -469,7 +469,17 @@ impl SettingsContext {
 
     pub(super) fn write_device_preference(self, key: &'static str, value: Value) {
         if let Some(runtime) = self.runtime.get() {
-            self.spawn(runtime.0.write_device_preference(key, value));
+            let write = runtime.0.write_device_preference(key, value);
+            self.spawn(async move {
+                if write.await.is_err() {
+                    toast_manager().add(ToastOptions {
+                        variant: ToastVariant::Error,
+                        title: Text::from("Setting not saved"),
+                        description: Some(Text::from("Could not save this device preference.")),
+                        ..Default::default()
+                    });
+                }
+            });
         }
     }
 

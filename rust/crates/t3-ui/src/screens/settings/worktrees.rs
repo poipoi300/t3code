@@ -9,7 +9,7 @@ use t3_contracts::environment::ExecutionEnvironmentCapabilities;
 use super::setting_controls::{choices, reset};
 use super::shell::{
     RowReset, SettingsContext, SettingsRowProps, advanced_settings, region,
-    settings_page_container, settings_row, settings_section, settings_select, use_settings,
+    settings_page_container, settings_row, settings_section, use_settings,
 };
 use crate::i18n::{Text, t};
 use crate::theme::{palette, tw};
@@ -440,7 +440,21 @@ fn cleanup_row(
     row = row
         .managed_paths(if project { &["worktreeCleanup"] } else { path })
         .status(move || {
-            cleanup_mixed(context, key).then(|| Text::from("Mixed across selected machines"))
+            let mixed = cleanup_mixed(context, key);
+            let offline = key == "worktreeSettledAfterDays"
+                && context.view().is_some_and(|view| {
+                    view.selected.environments.len() > view.selected.connected.len()
+                });
+            match (mixed, offline) {
+                (true, true) => Some(Text::content(format!(
+                    "{}. {}",
+                    t("Mixed across selected machines"),
+                    t("Offline machines will not get this setting"),
+                ))),
+                (true, false) => Some(Text::from("Mixed across selected machines")),
+                (false, true) => Some(Text::from("Offline machines will not get this setting")),
+                (false, false) => None,
+            }
         });
     if !project {
         row = row.server(&[]);
@@ -556,12 +570,14 @@ fn retention_control(
     let draft = signal(String::new());
     let editing = signal(false);
     let edited = signal(false);
+    let switched_off = signal(false);
     effect(move || {
         draft.set(saved.get().map(|days| days.to_string()).unwrap_or_default());
         editing.set(false);
         edited.set(false);
+        switched_off.set(false);
     });
-    let on = move || saved.get().is_some() || editing.get();
+    let on = move || (saved.get().is_some() && !switched_off.get()) || editing.get();
     let row = element_ref();
     let cancel = move || {
         draft.set(
@@ -632,7 +648,10 @@ fn retention_control(
                 } else {
                     cancel();
                     if saved.get_untracked().is_some() {
-                        context.update(cleanup_patch(project, key, Value::Null));
+                        switched_off.set(true);
+                        context.update_with(cleanup_patch(project, key, Value::Null), move || {
+                            let _ = switched_off.try_set(false);
+                        });
                     }
                 }
             },
@@ -640,6 +659,10 @@ fn retention_control(
 }
 
 fn keep_when(context: SettingsContext, project: bool) -> impl IntoElement {
+    use crate::ui::select::{
+        Popup, SelectItem, SelectProps, Size as SelectSize, Value as SelectValue, select,
+    };
+
     const KEY: &str = "worktreeKeepWhen";
     settings_row(
         cleanup_row(
@@ -657,23 +680,45 @@ fn keep_when(context: SettingsContext, project: bool) -> impl IntoElement {
             })
         })
         .control(move || {
-            settings_select(
-                "Keep worktrees with local changes",
-                "w-auto min-w-0",
-                choices(&[
-                    ("any-local-files", "Any local files"),
-                    ("uncommitted-changes", "Uncommitted changes"),
-                    ("tracked-changes", "Edited tracked files"),
-                ]),
-                move || {
+            let mut props = SelectProps::new("Keep worktrees with local changes");
+            props.items = choices(&[
+                ("any-local-files", "Any local files"),
+                ("uncommitted-changes", "Uncommitted changes"),
+                ("tracked-changes", "Edited tracked files"),
+            ])
+            .into_iter()
+            .map(|(id, label)| SelectItem::new(id, label.resolve()))
+            .collect::<Vec<_>>()
+            .into();
+            props.value = Prop::bind(move || {
+                let selection = if cleanup_mixed(context, KEY) {
+                    None
+                } else {
                     cleanup_value(context, KEY)
                         .as_str()
-                        .unwrap_or_default()
-                        .to_owned()
-                },
-                || false,
-                move |next| context.update(cleanup_patch(project, KEY, json!(next))),
-            )
+                        .map(|value| SharedString::from(value.to_owned()))
+                };
+                SelectValue::Controlled(selection)
+            });
+            props.placeholder = Prop::bind(move || {
+                if cleanup_mixed(context, KEY) {
+                    Text::from("Mixed")
+                } else {
+                    Text::content("")
+                }
+            });
+            props.size = SelectSize::Sm;
+            props.popup = Popup {
+                align: Align::End,
+                ..Popup::default()
+            };
+            view()
+                .app_class(tw("w-auto min-w-0"))
+                .child(select(props, move |next| {
+                    if let Some(next) = next {
+                        context.update(cleanup_patch(project, KEY, json!(next.to_string())));
+                    }
+                }))
         }),
     )
 }
