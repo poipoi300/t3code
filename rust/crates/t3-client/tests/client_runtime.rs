@@ -1267,13 +1267,10 @@ fn config_subscription_delivers_published_palette_updates_to_the_store() {
     use t3_contracts::rpc::{RpcMethod, WsSubscribeServerConfigRpc};
 
     let mut harness = Harness::new(ENV);
-    let input = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let recorded = input.clone();
     harness.server().state.borrow_mut().extra_rpc = Some(std::rc::Rc::new(move |request| {
         if request.tag != WsSubscribeServerConfigRpc::TAG {
             return None;
         }
-        recorded.replace(Some(request.payload.clone()));
         let mut events = vec![json!({"version":1, "type":"snapshot", "config":config(ENV)})];
         if request.payload["environmentThemes"] == true {
             events.push(json!({"version":1, "type":"environmentThemesUpdated", "payload":{
@@ -1297,12 +1294,29 @@ fn config_subscription_delivers_published_palette_updates_to_the_store() {
         "nightfall",
         "the server publishes palette events only to clients that requested them"
     );
+}
+
+#[test]
+fn config_subscription_requests_exactly_the_four_web_client_options() {
+    use serde_json::json;
+    use t3_contracts::rpc::{RpcMethod, WsSubscribeServerConfigRpc};
+    let mut harness = Harness::new(ENV);
+    let _client = paired(&mut harness);
+    let server = harness.server();
+    let calls = server.state.borrow();
+    let options = calls
+        .rpc_calls
+        .iter()
+        .find(|(tag, _)| tag == WsSubscribeServerConfigRpc::TAG)
+        .expect("production config subscription");
     assert_eq!(
-        *input.borrow(),
-        Some(json!({
-            "environmentThemes":true, "usageLimitSources":true, "usageLimitsCommand":true,
-            "workspaceSnapshotsOnDemand":true
-        }))
+        options.1,
+        json!({
+            "environmentThemes": true,
+            "usageLimitSources": true,
+            "usageLimitsCommand": true,
+            "workspaceSnapshotsOnDemand": true
+        })
     );
 }
 
