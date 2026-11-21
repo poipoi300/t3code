@@ -76,7 +76,7 @@ pub struct ThreadGuestShare {
     pub messages: Vec<ThreadGuestMessage>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuestShareCreateResult {
     pub url: crate::base_schemas::TrimmedNonEmptyString,
@@ -108,3 +108,4 @@ pub const GUEST_ATTACHMENT_ROUTE: &str = "/api/guest/attachment";
 pub const GUEST_MEDIA_ROUTE: &str = "/api/guest/media";
 
 crate::redacted_debug!(GuestRedeemRequest { name } redact { credential });
+crate::redacted_debug!(GuestShareCreateResult { share } redact { url });

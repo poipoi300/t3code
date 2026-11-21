@@ -250,7 +250,7 @@ async fn guest_access_rechecks_labs_flag_connect_hostname_archive_deletion_and_e
 }
 
 #[tokio::test(start_paused = true)]
-async fn open_guest_stream_rechecks_authority_and_emits_ended_without_a_backend_event() {
+async fn turning_off_guest_sharing_closes_the_stream_for_reconnect() {
     let (sharing, threads, time) = sharing().await;
     let invite = create(&sharing).await;
     let (session, _) = sharing.redeem(redeem_request(&invite)).await.unwrap();
@@ -258,6 +258,19 @@ async fn open_guest_stream_rechecks_authority_and_emits_ended_without_a_backend_
     threads.enabled.store(false, Ordering::Relaxed);
     time.advance(30_000);
     tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_guest_stream_ends_at_expiry_without_waiting_for_a_recheck() {
+    let (sharing, _, time) = sharing().await;
+    let invite = create(&sharing).await;
+    let (session, _) = sharing.redeem(redeem_request(&invite)).await.unwrap();
+    time.advance(GUEST_SHARE_TTL_MS as i64 - 1);
+    let mut stream = sharing.stream(&session).await.unwrap();
+    assert!(futures_util::poll!(stream.next()).is_pending());
+    time.advance(1);
+    tokio::time::advance(Duration::from_millis(1)).await;
     assert!(matches!(stream.next().await, Some(GuestStreamEvent::Ended)));
     assert!(stream.next().await.is_none());
 }

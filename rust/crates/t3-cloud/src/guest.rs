@@ -237,8 +237,8 @@ impl GuestSharing {
         request: Sensitive<GuestRedeemRequest>,
     ) -> Result<(Secret, GuestShareId)> {
         let request = request.expose();
-        let name = request.name.0.as_str().trim();
-        if name.is_empty() || name.encode_utf16().count() > GUEST_NAME_MAX_LENGTH {
+        let name = t3_contracts::wire::trim_js(&request.name.0);
+        if !valid_guest_name(name) {
             return Err(fail(GuestFailure::Invalid));
         }
         let thread = self
@@ -261,6 +261,23 @@ impl GuestSharing {
     pub async fn check(&self, session: &Secret) -> Result<()> {
         self.authorize(session, false).await.map(|_| ())
     }
+    /// Resolve a named share from its own verified cookie. The caller never supplies a thread id.
+    pub async fn thread_for_session(
+        &self,
+        session: &Secret,
+        share: &GuestShareId,
+    ) -> Result<ThreadId> {
+        let thread = self.authorize(session, false).await?;
+        if thread
+            .share
+            .as_ref()
+            .is_none_or(|current| &current.id != share)
+        {
+            return Err(fail(GuestFailure::Invalid));
+        }
+        Ok(thread.thread_id)
+    }
+
     pub async fn submit(&self, session: &Secret, request: GuestSubmitRequest) -> Result<()> {
         let thread = self.authorize(session, false).await?;
         if thread
@@ -271,7 +288,7 @@ impl GuestSharing {
             return Err(fail(GuestFailure::StalePage));
         }
         let text = request.text.0.as_str();
-        if text.trim().is_empty() {
+        if t3_contracts::wire::trim_js(text).is_empty() {
             return Err(fail(GuestFailure::Empty));
         }
         if text.encode_utf16().count() > GUEST_MESSAGE_MAX_LENGTH {
@@ -283,38 +300,72 @@ impl GuestSharing {
         let thread = self.authorize(session, false).await?;
         let share = thread.share.as_ref().ok_or(fail(GuestFailure::Inactive))?;
         let events = self.threads.stream(&thread.thread_id, &share.id).await?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&share.expires_at.0)
+            .map_err(|_| fail(GuestFailure::Inactive))?
+            .timestamp_millis();
+        let remaining = expires.saturating_sub(self.clock.now_ms()).max(0) as u64;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(remaining);
+        let host = share.host.0.clone();
         let auth = Self::new(
             self.threads.clone(),
             self.secrets.clone(),
             self.clock.clone(),
         );
         let token = session.clone();
-        let interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(30),
-        );
+        let spacing = std::time::Duration::from_secs(30);
+        let interval = tokio::time::interval_at(tokio::time::Instant::now() + spacing, spacing);
         Ok(Box::pin(futures_util::stream::unfold(
-            (events, auth, token, interval, false),
-            |(mut events, auth, token, mut interval, done)| async move {
+            (events, auth, token, interval, host, false),
+            move |(mut events, auth, token, mut interval, host, done)| async move {
                 if done {
                     return None;
                 }
                 loop {
-                    let event = tokio::select! {event=events.next()=>event,_=interval.tick()=>{
-                        if auth.check(&token).await.is_err() {Some(GuestStreamEvent::Ended)} else {continue;}
-                    }};
-                    let event = event?;
-                    let event = if auth.check(&token).await.is_err() {
-                        GuestStreamEvent::Ended
-                    } else {
-                        event
+                    let mut event = tokio::select! {
+                        biased;
+                        () = tokio::time::sleep_until(deadline) => {
+                            return Some((GuestStreamEvent::Ended, (events, auth, token, interval, host, true)));
+                        }
+                        _ = interval.tick() => None,
+                        event = events.next() => Some(event?),
                     };
-                    let ended = matches!(event, GuestStreamEvent::Ended);
-                    return Some((event, (events, auth, token, interval, ended)));
+                    if auth.check(&token).await.is_err() {
+                        // The browser reconnects after a temporary settings or tunnel interruption.
+                        if !auth.threads.enabled().await.unwrap_or(false)
+                            || auth
+                                .threads
+                                .connect_hostname()
+                                .await
+                                .ok()
+                                .flatten()
+                                .as_deref()
+                                != Some(&host)
+                        {
+                            return None;
+                        }
+                        event = Some(GuestStreamEvent::Ended);
+                    }
+                    if let Some(event) = event {
+                        let ended = matches!(event, GuestStreamEvent::Ended);
+                        return Some((event, (events, auth, token, interval, host, ended)));
+                    }
                 }
             },
         )))
     }
+}
+
+/// The guest name is used in the owner's UI and the agent's attribution line.
+pub fn valid_guest_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.encode_utf16().count() <= GUEST_NAME_MAX_LENGTH
+        && !name.chars().any(|ch| {
+            ch.is_control()
+                || matches!(ch,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}'
+                    | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                )
+        })
 }
 
 #[derive(Debug)]
