@@ -64,10 +64,7 @@ struct Forks {
 }
 impl TimelineRewindClient for Forks {
     fn state(&self, _: &ThreadKey) -> RewindState {
-        RewindState {
-            reverting: false,
-            can_fork: true,
-        }
+        RewindState { reverting: false }
     }
     fn availability(&self, _: &ThreadKey, _: &RewindTarget) -> RewindAvailability {
         RewindAvailability::default()

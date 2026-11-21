@@ -91,10 +91,7 @@ fn projection(kind: &str) -> Option<Rc<MessagesTimelineRow>> {
 struct Rewind(Signal<usize>);
 impl TimelineRewindClient for Rewind {
     fn state(&self, _: &ThreadKey) -> RewindState {
-        RewindState {
-            reverting: false,
-            can_fork: true,
-        }
+        RewindState { reverting: false }
     }
     fn availability(&self, _: &ThreadKey, _: &RewindTarget) -> RewindAvailability {
         RewindAvailability {

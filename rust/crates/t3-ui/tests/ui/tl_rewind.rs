@@ -39,10 +39,7 @@ struct Client {
 
 impl TimelineRewindClient for Client {
     fn state(&self, _: &ThreadKey) -> RewindState {
-        RewindState {
-            reverting: false,
-            can_fork: true,
-        }
+        RewindState { reverting: false }
     }
     fn availability(&self, _: &ThreadKey, _: &RewindTarget) -> RewindAvailability {
         RewindAvailability {
@@ -78,11 +75,13 @@ impl TimelineRewindClient for Client {
     }
     fn fork(
         &self,
-        _: ThreadKey,
-        _: t3_client::types::ThreadId,
+        viewed: ThreadKey,
+        source: t3_client::types::ThreadId,
         _: t3_contracts::base_schemas::TurnItemId,
         run: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
+        assert_eq!(viewed, key("parent"));
+        assert_eq!(source, key("ancestor").thread);
         assert_eq!(run.0, "run");
         self.forks.update(|count| *count += 1);
         futures::future::ready(if self.fail.get_untracked() {

@@ -26,7 +26,6 @@ pub struct RewindTarget {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RewindState {
     pub reverting: bool,
-    pub can_fork: bool,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RewindAvailability {
@@ -164,18 +163,6 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     pub fn rewind_state(&self, key: &ThreadKey) -> RewindState {
         RewindState {
             reverting: self.state.rewind.reverting.borrow().contains(key),
-            can_fork: self.can_operate(key)
-                && !self.state.rewind.reverting.borrow().contains(key)
-                && self.projection(key).is_ok_and(|p| {
-                    crate::thread_views::threads::workflows::resolve_thread_provider_session(&p)
-                        .is_some_and(|s| {
-                            (s.capabilities.threads.can_fork_thread
-                                && s.capabilities.threads.can_fork_from_turn
-                                && s.capabilities.identity.native_thread_ids
-                                    == OrchestrationV2NativeRefStrength::Strong)
-                                || s.capabilities.context.supports_full_thread_handoff
-                        })
-                }),
         }
     }
     fn check_rewind_context(
