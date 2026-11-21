@@ -1,3 +1,4 @@
+pub mod providers;
 use crate::ClientError;
 use crate::{
     platform::Platform,
