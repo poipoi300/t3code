@@ -234,7 +234,7 @@ async fn triage_writes_playbook_and_atomically_publishes_exact_local_source_comm
     )
     .await;
     git(&repo, &["tag", "v1.0.0"]).await;
-    let state = temp.path().join("state");
+    let state = temp.path().join("state with spaces");
     let base = temp.path().join("home with spaces");
     let paths = TriagePaths {
         base_dir: base.clone(),
@@ -276,7 +276,7 @@ async fn triage_writes_playbook_and_atomically_publishes_exact_local_source_comm
         .await
         .unwrap();
     assert!(result.prompt.starts_with("Read [triage-playbook.md]("));
-    assert!(result.prompt.contains("%5C") || result.prompt.contains("%20"));
+    assert!(result.prompt.contains("state%20with%20spaces"));
     let session = std::fs::read_dir(state.join("triage"))
         .unwrap()
         .next()
