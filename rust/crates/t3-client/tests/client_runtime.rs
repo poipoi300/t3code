@@ -1261,6 +1261,52 @@ fn signing_out_with_a_relay_only_and_a_mixed_environment_saved_together() {
 }
 
 #[test]
+fn config_subscription_delivers_published_palette_updates_to_the_store() {
+    use futures::StreamExt;
+    use serde_json::json;
+    use t3_contracts::rpc::{RpcMethod, WsSubscribeServerConfigRpc};
+
+    let mut harness = Harness::new(ENV);
+    let input = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let recorded = input.clone();
+    harness.server().state.borrow_mut().extra_rpc = Some(std::rc::Rc::new(move |request| {
+        if request.tag != WsSubscribeServerConfigRpc::TAG {
+            return None;
+        }
+        recorded.replace(Some(request.payload.clone()));
+        let mut events = vec![json!({"version":1, "type":"snapshot", "config":config(ENV)})];
+        if request.payload["environmentThemes"] == true {
+            events.push(json!({"version":1, "type":"environmentThemesUpdated", "payload":{
+                "themes":[{"id":"nightfall","name":"Nightfall","appearance":"dark","canvas":"#1a1b26","accent":"#7aa2f7"}]
+            }}));
+        }
+        Some(t3_rpc::HandlerOutput::Stream(
+            futures::stream::once(async move { Ok(events) })
+                .chain(futures::stream::pending())
+                .boxed_local(),
+        ))
+    }));
+    let client = paired(&mut harness);
+    let store = client.store().snapshot();
+    let config = store.environments[&environment(ENV)]
+        .config
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&config.environment_themes).unwrap()[0]["id"],
+        "nightfall",
+        "the server publishes palette events only to clients that requested them"
+    );
+    assert_eq!(
+        *input.borrow(),
+        Some(json!({
+            "environmentThemes":true, "usageLimitSources":true, "usageLimitsCommand":true,
+            "workspaceSnapshotsOnDemand":true
+        }))
+    );
+}
+
+#[test]
 fn a_malformed_config_chunk_resubscribes_on_the_same_socket() {
     // WP5: the runtime's config job ended on a chunk failure, which replaced a healthy session.
     use futures::StreamExt;

@@ -745,7 +745,10 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         self.schedule(
             Key::Config(generation.0),
             async move {
-                let input = match serde_json::from_value(serde_json::json!({})) {
+                let input = match serde_json::from_value(serde_json::json!({
+                    "environmentThemes": true, "usageLimitSources": true,
+                    "usageLimitsCommand": true, "workspaceSnapshotsOnDemand": true,
+                })) {
                     Ok(input) => input,
                     Err(error) => return Outcome::Ended(Err(error.into())),
                 };
