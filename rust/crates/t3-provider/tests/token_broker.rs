@@ -161,7 +161,7 @@ async fn post_creation_owner_must_match_even_when_the_root_owned_parent_is_trust
     assert_eq!(metadata.uid(), 0);
     assert!(metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0);
     let result = ManagedTokenBroker::new("fixture".into())
-        .bind(&parent, Some(uid.wrapping_add(1)))
+        .listen(&parent, Some(uid.wrapping_add(1)))
         .await;
     assert!(matches!(result, Err(ServiceError::Identity)));
 }
