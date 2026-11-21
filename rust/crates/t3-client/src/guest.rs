@@ -8,6 +8,20 @@ use url::Url;
 
 pub struct GuestAddress {
     share_id: Option<String>,
+    /// The unspent invite, kept in memory only until the page redeems it or ends.
+    credential: Option<String>,
+}
+
+impl std::fmt::Debug for GuestAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuestAddress")
+            .field("share_id", &self.share_id)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl GuestAddress {
@@ -25,10 +39,12 @@ impl GuestAddress {
             .fragment()
             .and_then(decode_fragment)
             .filter(|invite| !invite.trim().is_empty());
+        let mut credential = None;
         let share_id = if let Some(invite) = invite {
             let mut parts = invite.trim().split('.');
             match (parts.next(), parts.next()) {
                 (Some(id), Some(signature)) if !id.is_empty() && !signature.is_empty() => {
+                    credential = Some(invite.trim().to_owned());
                     Some(id.to_owned())
                 }
                 _ => None,
@@ -38,7 +54,15 @@ impl GuestAddress {
                 .find(|(key, _)| key == GUEST_SHARE_PARAM)
                 .map(|(_, id)| id.into_owned())
         };
-        Some(Self { share_id })
+        Some(Self {
+            share_id,
+            credential,
+        })
+    }
+
+    /// Hand the invite to the one place that redeems it. It cannot be read twice.
+    pub fn take_credential(&mut self) -> Option<String> {
+        self.credential.take()
     }
 
     pub fn share_id(&self) -> Option<&str> {

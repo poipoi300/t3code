@@ -366,6 +366,38 @@ fn the_composer_enforces_the_share_limits_and_surfaces_server_refusals() {
     assert_eq!(calls[calls.len() - 1], "submit share_1 hi");
 }
 
+fn message_event(sequence: u64, id: &str, kind: &str, ordinal: u64, text: &str) -> Value {
+    json!({"type":"thread","item":{"kind":"event","sequence":sequence,"event":{
+        "type":"turn-item.updated","id":format!("event-{sequence}"),"threadId":"thread:shared",
+        "occurredAt":NOW,"payload":{
+            "id":id,"type":kind,"threadId":"thread:shared","runId":null,"nodeId":null,
+            "providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,
+            "ordinal":ordinal,"status":"completed","title":null,"startedAt":null,"completedAt":null,
+            "updatedAt":NOW,"messageId":format!("msg-{id}"),"createdBy":"user","creationSource":"web","inputIntent":"turn_start","phase":"final_answer","streaming":false,"text":text,"attachments":[]}}}})
+}
+
+#[test]
+fn the_transcript_follows_ordered_deltas_and_ignores_replays() {
+    let page = page(false);
+    let mut stream = live_stream(0);
+    stream.extend([
+        Step::Frame(message_event(2, "b", "assistant_message", 2, "Hi Sam")),
+        Step::Frame(message_event(3, "a", "user_message", 1, "Hello")),
+        Step::Frame(message_event(3, "a", "user_message", 1, "replayed")),
+        Step::Hang,
+    ]);
+    page.wire.streams.borrow_mut().push_back(Ok(stream));
+    block_on(async {
+        page.client.start().await;
+        let still = page.client.run().now_or_never().is_none();
+        assert!(still, "ended: {:?}", phase(&page));
+    });
+    let rows = page.client.snapshot(|s| s.transcript());
+    let rows: Vec<_> = rows.iter().map(|r| (r.role, r.text.as_str())).collect();
+    use t3_client::guest::session::TranscriptRole::{Assistant, Person};
+    assert_eq!(rows, [(Person, "Hello"), (Assistant, "Hi Sam")]);
+}
+
 #[test]
 fn the_invite_never_appears_in_debug_output() {
     let credential = GuestCredential::new("share_1.signature");

@@ -328,3 +328,5 @@ mod ui_mounts_app_root;
 mod ui_mounts_links;
 #[path = "ui/tl_rows_viewed_images.rs"]
 mod tl_rows_viewed_images;
+#[path = "ui/guest_page.rs"]
+mod guest_page;

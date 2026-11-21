@@ -20,6 +20,21 @@ use crate::{
     types::Generation,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptRole {
+    /// Anyone who wrote into the thread (the owner or an approved guest).
+    Person,
+    Assistant,
+}
+
+/// One readable row of the shared conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRow {
+    pub id: String,
+    pub role: TranscriptRole,
+    pub text: String,
+}
+
 /// An invite credential. It lives only in memory, is never printed, and is dropped once it has
 /// been redeemed or has failed for good.
 pub struct GuestCredential(String);
@@ -93,6 +108,40 @@ impl GuestSession {
 
     pub fn thread(&self) -> Option<&ThreadState> {
         self.thread.as_ref()
+    }
+
+    /// The conversation as the guest reads it, in thread order. Tools, commands and files are
+    /// not rendered on this page.
+    pub fn transcript(&self) -> Vec<TranscriptRow> {
+        let Some(projection) = self
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.projection.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut rows: Vec<(u64, TranscriptRow)> = projection
+            .turn_items
+            .iter()
+            .filter_map(|item| {
+                let item = serde_json::to_value(item).ok()?;
+                let role = match item.get("type")?.as_str()? {
+                    "user_message" => TranscriptRole::Person,
+                    "assistant_message" => TranscriptRole::Assistant,
+                    _ => return None,
+                };
+                Some((
+                    item.get("ordinal")?.as_u64()?,
+                    TranscriptRow {
+                        id: item.get("id")?.as_str()?.to_owned(),
+                        role,
+                        text: item.get("text")?.as_str()?.to_owned(),
+                    },
+                ))
+            })
+            .collect();
+        rows.sort_by_key(|(ordinal, _)| *ordinal);
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
     pub fn pending_count(&self) -> usize {
