@@ -158,7 +158,8 @@ impl WorktreeRestore {
                 if let Some(current) = git.current_branch().await? {
                     let current = format!("refs/heads/{current}");
                     if git.has_commit(&current).await? {
-                        base_ref = Some(current.clone());
+                        base_ref =
+                            Some((current.trim_start_matches("refs/heads/").to_owned(), None));
                         reference = Some(current);
                     }
                 }
@@ -169,7 +170,10 @@ impl WorktreeRestore {
                     if git.has_commit(&head).await? {
                         reference =
                             Some(git.resolve_remote_tracking_commit("HEAD", remote).await?.0);
-                        base_ref = Some(head);
+                        if let Some(base) = git.default_branch_name(remote).await? {
+                            let tracking = format!("refs/remotes/{remote}/{base}");
+                            base_ref = Some((base, Some(tracking)));
+                        }
                     }
                 }
                 if reference.is_none() && git.has_commit("HEAD").await? {
@@ -184,12 +188,18 @@ impl WorktreeRestore {
             let mut options = t3_git::WorktreeOptions::new(&destination, reference);
             options.new_branch = Some(branch.into());
             git.add_worktree(options).await?;
-            if let Some(base) =
-                base_ref.and_then(|base| base.strip_prefix("refs/heads/").map(str::to_owned))
-            {
+            if let Some((base, tracking)) = base_ref {
                 let _ = git
                     .write_config_value(&format!("branch.{branch}.t3-merge-base"), &base)
                     .await;
+                if let Some(tracking) = tracking {
+                    let _ = git
+                        .write_config_value(
+                            &format!("branch.{branch}.t3-merge-base-ref"),
+                            &tracking,
+                        )
+                        .await;
+                }
             }
             Ok(CheckoutCreated)
         }
@@ -197,14 +207,14 @@ impl WorktreeRestore {
         result.map_err(recreate_error)
     }
 }
-fn verify_target(named: &Path, expected: &Path) -> Result<()> {
+pub fn verify_target(named: &Path, expected: &Path) -> Result<()> {
     if paths::nearest_real(named)?.0 != expected || paths::nearest_real(expected)?.0 != expected {
         return Err(Error::PathEscape(named.into()));
     }
     Ok(())
 }
 
-fn remove_leftovers(named: &Path, expected: &Path) -> Result<bool> {
+pub fn remove_leftovers(named: &Path, expected: &Path) -> Result<bool> {
     let parent = named
         .parent()
         .ok_or_else(|| Error::PathEscape(named.into()))?;
@@ -267,7 +277,7 @@ fn remove_leftovers(named: &Path, expected: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn is_leftover(path: &Path) -> bool {
+pub fn is_leftover(path: &Path) -> bool {
     if fs::symlink_metadata(path.join(".git")).is_ok() {
         return false;
     }
@@ -278,6 +288,109 @@ fn is_leftover(path: &Path) -> bool {
         entry.is_ok_and(|entry| {
             matches!(entry.file_name().to_str(), Some("node_modules" | ".next"))
                 && fs::metadata(entry.path()).is_ok_and(|info| info.is_dir())
+        })
+    })
+}
+
+// Keep the canonical path sampled for admission. A restore can unlink a symlink and recreate a
+// directory at its name, so retain the prospective named destination as well as its target.
+#[derive(Clone)]
+pub struct RestoreFolder(Option<Vec<FolderKey>>);
+
+impl RestoreFolder {
+    pub fn resolve(path: &Path) -> Self {
+        let keys = || {
+            let raw = std::path::absolute(path).ok()?;
+            let real = crate::paths::nearest_real(&raw).ok()?.0;
+            let mut keys = vec![FolderKey::new(real.clone())?];
+            if let Some((parent, name)) = raw.parent().zip(raw.file_name()) {
+                let named = crate::paths::nearest_real(parent).ok()?.0.join(name);
+                if named != real {
+                    keys.push(FolderKey::new(named)?);
+                }
+            }
+            Some(keys)
+        };
+        Self(keys())
+    }
+
+    /// A normalized name from the reservation service, including its filesystem identities.
+    pub fn from_resolved(path: PathBuf) -> Self {
+        Self(FolderKey::new(path).map(|key| vec![key]))
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => a
+                .iter()
+                .any(|x| b.iter().any(|y| x.contains(y) || y.contains(x))),
+            // An unreadable or dangling path cannot prove independence.
+            _ => true,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FolderKey {
+    path: PathBuf,
+    // Some case-folding filesystems preserve the spelling passed to realpath. Record directory
+    // identities and each remaining suffix while sampling, outside the admission mutex.
+    #[cfg(unix)]
+    anchors: Vec<((u64, u64), PathBuf)>,
+}
+
+impl FolderKey {
+    fn new(path: PathBuf) -> Option<Self> {
+        #[cfg(unix)]
+        let anchors = {
+            use std::os::unix::fs::MetadataExt;
+            let mut anchors = Vec::new();
+            for parent in path.ancestors() {
+                match std::fs::metadata(parent) {
+                    Ok(m) => {
+                        anchors.push(((m.dev(), m.ino()), path.strip_prefix(parent).ok()?.into()))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+            if anchors.is_empty() {
+                return None;
+            }
+            anchors
+        };
+        Some(Self {
+            path,
+            #[cfg(unix)]
+            anchors,
+        })
+    }
+
+    fn contains(&self, other: &Self) -> bool {
+        if other.path.starts_with(&self.path) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let (root, missing) = &self.anchors[0];
+            other
+                .anchors
+                .iter()
+                .any(|(id, tail)| id == root && folded_prefix(tail, missing))
+        }
+        #[cfg(windows)]
+        {
+            folded_prefix(&other.path, &self.path)
+        }
+    }
+}
+
+fn folded_prefix(path: &Path, prefix: &Path) -> bool {
+    let mut path = path.components();
+    prefix.components().all(|component| {
+        path.next().is_some_and(|p| {
+            p.as_os_str().to_string_lossy().to_lowercase()
+                == component.as_os_str().to_string_lossy().to_lowercase()
         })
     })
 }

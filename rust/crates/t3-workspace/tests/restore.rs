@@ -34,7 +34,8 @@ fn canonical(root: &Path) -> PathBuf {
     dunce::canonicalize(root).expect("canonical")
 }
 #[tokio::test]
-async fn missing_managed_checkout_and_leftover_folders_restore_once_under_the_shared_lease() {
+async fn missing_managed_checkout_and_leftover_folders_restore_once_under_the_restore_services_lease()
+ {
     let temp = tempfile::tempdir().expect("fixture");
     let root = canonical(temp.path());
     let repo = root.join("repo");
@@ -292,4 +293,111 @@ async fn recreates_deleted_branches_from_pushed_refs_before_the_current_project_
             .as_deref(),
         Some("main")
     );
+
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/release", "HEAD"],
+    )
+    .await;
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/release",
+        ],
+    )
+    .await;
+    git(&repo, &["checkout", "--detach"]).await;
+    let fallback = root.join("worktrees/repo/fallback");
+    assert_eq!(
+        restore
+            .restore(
+                Some(&repo),
+                Some(&fallback),
+                Some("fallback"),
+                source(&repo)
+            )
+            .await
+            .expect("remote default"),
+        RestoreOutcome::CheckoutCreated
+    );
+    let config = t3_git::Git::new(&repo);
+    assert_eq!(
+        config
+            .read_branch_base("fallback")
+            .await
+            .expect("base")
+            .as_deref(),
+        Some("release")
+    );
+    assert_eq!(
+        config
+            .read_config_value("branch.fallback.t3-merge-base-ref")
+            .await
+            .expect("base ref")
+            .as_deref(),
+        Some("refs/remotes/origin/release")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_leftover_is_unlinked_without_touching_the_other_checkout() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = canonical(temp.path());
+    let repo = root.join("repo");
+    fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-b", "main"]).await;
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=f@local",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    )
+    .await;
+    let parent = root.join("worktrees/repo");
+    let target = parent.join("original");
+    fs::create_dir_all(target.join(".next")).expect("leftovers");
+    fs::write(target.join(".next/data"), "keep").expect("fixture");
+    let alias = parent.join("linked");
+    std::os::unix::fs::symlink(&target, &alias).expect("alias");
+    let restore = fixture(&root);
+    assert_eq!(
+        restore
+            .restore(Some(&repo), Some(&alias), Some("linked"), source(&repo))
+            .await
+            .expect("recover"),
+        RestoreOutcome::CheckoutCreated
+    );
+    assert!(alias.join(".git").is_file());
+    assert!(!alias.is_symlink());
+    assert_eq!(
+        fs::read_to_string(target.join(".next/data")).expect("preserved"),
+        "keep"
+    );
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("node_modules")).expect("external");
+    let external = parent.join("external");
+    std::os::unix::fs::symlink(&outside, &external).expect("external link");
+    assert_eq!(
+        restore
+            .restore(
+                Some(&repo),
+                Some(&external),
+                Some("external"),
+                source(&repo)
+            )
+            .await
+            .expect("refuse"),
+        RestoreOutcome::Unchanged
+    );
+    assert!(external.is_symlink());
 }
