@@ -481,7 +481,28 @@ impl ProviderDomain {
         &self,
         input: t3_contracts::rpc::WsServerRefreshProvidersPayload,
     ) -> ServiceResult<t3_contracts::server::ServerProviderUpdatedPayload> {
-        if input.reload_secrets.flatten() == Some(true) {
+        self.refresh_providers_at(input, None)
+            .await
+            .map_err(crate::service::RefreshProvidersError::service_error)
+    }
+    pub async fn refresh_providers_at(
+        &self,
+        input: t3_contracts::rpc::WsServerRefreshProvidersPayload,
+        scan_cwd: Option<&str>,
+    ) -> Result<
+        t3_contracts::server::ServerProviderUpdatedPayload,
+        crate::service::RefreshProvidersError,
+    > {
+        let scoped = input
+            .instance_id
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some()
+            && input.cwd.as_ref().and_then(Option::as_ref).is_some();
+        if input.model_catalog_only.flatten() != Some(true)
+            && !scoped
+            && input.reload_secrets.flatten() == Some(true)
+        {
             self.host
                 .reload_secrets(
                     self.settings.as_ref(),
@@ -490,7 +511,7 @@ impl ProviderDomain {
                 )
                 .await?;
         }
-        self.providers.refresh_providers(input).await
+        self.providers.refresh_providers_at(input, scan_cwd).await
     }
     pub async fn apply_secret(
         &self,

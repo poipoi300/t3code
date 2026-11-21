@@ -26,6 +26,7 @@ struct Instance {
     value: Mutex<ServerProvider>,
     events: mpsc::UnboundedSender<String>,
     ownership: Mutex<String>,
+    model_error: Option<ServiceError>,
 }
 #[async_trait]
 impl ProviderInstanceService for Instance {
@@ -51,7 +52,7 @@ impl ProviderInstanceService for Instance {
     }
     async fn refresh_models(&self) -> ServiceResult<()> {
         self.events.send("models".into()).unwrap();
-        Ok(())
+        self.model_error.map_or(Ok(()), Err)
     }
     async fn maintenance(&self, _: bool) -> ServiceResult<MaintenanceCapabilities> {
         Ok(MaintenanceCapabilities {
@@ -98,6 +99,7 @@ fn instance_at(id: &str, enabled: bool) -> (Arc<Instance>, mpsc::UnboundedReceiv
             value: Mutex::new(value),
             events,
             ownership: Mutex::new("shared".into()),
+            model_error: None,
         }),
         receiver,
     )
@@ -185,6 +187,70 @@ async fn live_snapshots_remain_authoritative_during_refresh_and_replaced_instanc
     replacement.send_replace(None);
     assert!(service.get_providers().await.0.is_empty());
 }
+#[tokio::test]
+async fn global_model_refresh_attributes_the_failure_to_its_instance() {
+    let (mut instance, _events) = instance_at("model-error", true);
+    Arc::get_mut(&mut instance).unwrap().model_error = Some(ServiceError::Response);
+    let service = service(idle_executor());
+    service.register(instance).await;
+    let input = serde_json::from_value(json!({"refreshModels":true})).unwrap();
+    assert!(matches!(service.refresh_providers_at(input, None).await,
+        Err(RefreshProvidersError::Models { instance_id, error:ServiceError::Response }) if instance_id.0 == "model-error"));
+}
+
+#[tokio::test]
+async fn parked_workspace_reads_the_project_catalog_under_the_requested_key() {
+    let (instance, mut events) = instance(true);
+    let service = service(idle_executor());
+    let scan = "/project";
+    let requested = "/worktrees/parked";
+    let row = serde_json::from_value(json!({"cwd":scan,"checkedAt":"2027-01-15T08:00:00.000Z","slashCommands":[{"name":"project-command","description":"Project command"}],"skills":[]})).unwrap();
+    instance.value.lock().await.workspace_snapshots = Some(vec![row]);
+    service.register(instance).await;
+    let input = serde_json::from_value(
+        json!({"instanceId":"work","cwd":requested,"workspaceSnapshotsOnDemand":true}),
+    )
+    .unwrap();
+    let result = service
+        .refresh_providers_at(input, Some(scan))
+        .await
+        .unwrap();
+    assert_eq!(events.recv().await.as_deref(), Some("snapshot:/project"));
+    let scoped = &result.providers.0[0].workspace_snapshots.as_ref().unwrap()[0];
+    assert_eq!(scoped.cwd.0, requested);
+    assert_eq!(scoped.slash_commands[0].name.0, "project-command");
+    assert!(
+        service.get_providers().await.0[0]
+            .workspace_snapshots
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|s| s.cwd.0 == requested)
+    );
+    let (other, _events) = instance_at("other", true);
+    service.register(other).await;
+    let fresh =
+        serde_json::from_value(json!({"instanceId":"other","cwd":requested,"fresh":true})).unwrap();
+    service
+        .refresh_providers_at(fresh, Some(scan))
+        .await
+        .unwrap();
+    let providers = service.get_providers().await;
+    let previous = providers
+        .0
+        .iter()
+        .find(|p| p.instance_id.0 == "work")
+        .unwrap();
+    assert!(
+        !previous
+            .workspace_snapshots
+            .iter()
+            .flatten()
+            .any(|s| s.cwd.0 == requested),
+        "fresh scans evict the requested cwd from the previous provider"
+    );
+}
+
 #[tokio::test]
 async fn refresh_models_obeys_installation_enablement_and_returns_only_the_requested_catalog_shape()
 {

@@ -11,6 +11,24 @@ use t3_contracts::{
 };
 use tokio::sync::{Mutex, RwLock, watch};
 
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshProvidersError {
+    #[error(transparent)]
+    Service(#[from] ServiceError),
+    #[error("{error}")]
+    Models {
+        instance_id: ProviderInstanceId,
+        error: ServiceError,
+    },
+}
+impl RefreshProvidersError {
+    pub fn service_error(self) -> ServiceError {
+        match self {
+            Self::Service(error) | Self::Models { error, .. } => error,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ProviderInstanceService: Send + Sync {
     fn instance_id(&self) -> &ProviderInstanceId;
@@ -129,6 +147,8 @@ pub struct ProviderService {
     pub auth: Arc<AuthService>,
     instances: RwLock<BTreeMap<ProviderInstanceId, Arc<dyn ProviderInstanceService>>>,
     snapshots: RwLock<BTreeMap<ProviderInstanceId, ServerProvider>>,
+    // The driver scans the project for parked worktrees; clients address the row by worktree.
+    parked: RwLock<BTreeMap<ProviderInstanceId, Vec<ServerProviderWorkspaceSnapshot>>>,
     changes: watch::Sender<u64>,
     refresh_gate: Mutex<()>,
     update_gates: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
@@ -184,6 +204,7 @@ impl ProviderService {
             auth,
             instances: RwLock::new(BTreeMap::new()),
             snapshots: RwLock::new(BTreeMap::new()),
+            parked: Default::default(),
             changes,
             refresh_gate: Mutex::new(()),
             update_gates: Mutex::new(BTreeMap::new()),
@@ -277,6 +298,7 @@ impl ProviderService {
             let mut instances = self.instances.write().await;
             instances.insert(id.clone(), instance);
             self.snapshots.write().await.remove(&id);
+            self.parked.write().await.remove(&id);
         }
         if let Some(mut updates) = subscription {
             let service = self.self_ref.clone();
@@ -352,8 +374,12 @@ impl ProviderService {
     }
     pub async fn unregister(&self, id: &ProviderInstanceId) {
         self.watchers.lock().await.remove(id);
-        self.instances.write().await.remove(id);
-        self.snapshots.write().await.remove(id);
+        {
+            let mut instances = self.instances.write().await;
+            instances.remove(id);
+            self.snapshots.write().await.remove(id);
+            self.parked.write().await.remove(id);
+        }
         self.auth.unregister(id).await;
         self.publish();
     }
@@ -367,7 +393,16 @@ impl ProviderService {
         self.execution_gate.clone()
     }
     pub async fn get_providers(&self) -> ServerProviders {
-        let mut providers: Vec<_> = self.snapshots.read().await.values().cloned().collect();
+        let snapshots = self.snapshots.read().await;
+        let parked = self.parked.read().await;
+        let mut providers: Vec<_> = snapshots.values().cloned().collect();
+        for provider in &mut providers {
+            if let Some(rows) = parked.get(&provider.instance_id) {
+                let scoped = provider.workspace_snapshots.get_or_insert_with(Vec::new);
+                scoped.retain(|s| !rows.iter().any(|r| r.cwd == s.cwd));
+                scoped.extend_from_slice(rows);
+            }
+        }
         crate::status_cache::order(&mut providers);
         ServerCompatibleArray(providers)
     }
@@ -375,6 +410,15 @@ impl ProviderService {
         &self,
         input: WsServerRefreshProvidersPayload,
     ) -> ServiceResult<ServerProviderUpdatedPayload> {
+        self.refresh_providers_at(input, None)
+            .await
+            .map_err(RefreshProvidersError::service_error)
+    }
+    pub async fn refresh_providers_at(
+        &self,
+        input: WsServerRefreshProvidersPayload,
+        scan_cwd: Option<&str>,
+    ) -> Result<ServerProviderUpdatedPayload, RefreshProvidersError> {
         if input.model_catalog_only.flatten() == Some(true) {
             self.catalog.refresh().await?;
             return Ok(ServerProviderUpdatedPayload {
@@ -386,6 +430,22 @@ impl ProviderService {
         let cwd = id
             .and(input.cwd.as_ref().and_then(Option::as_ref))
             .map(|s| s.0.as_str());
+        if let (Some(id), Some(cwd), Some(true)) = (id, cwd, input.fresh.flatten()) {
+            let mut snapshots = self.snapshots.write().await;
+            let mut parked = self.parked.write().await;
+            for provider in snapshots.values_mut().filter(|p| &p.instance_id != id) {
+                if let Some(rows) = provider.workspace_snapshots.as_mut() {
+                    rows.retain(|row| row.cwd.0 != cwd);
+                }
+            }
+            parked.retain(|owner, rows| {
+                if owner != id {
+                    rows.retain(|row| row.cwd.0 != cwd);
+                }
+                !rows.is_empty()
+            });
+            self.publish();
+        }
         let sources = self.sources.read().await.clone();
         if id.is_none()
             && let Some(sources) = sources.as_ref()
@@ -413,13 +473,50 @@ impl ProviderService {
                     .await?;
             }
             let mut snapshot = instance
-                .snapshot(cwd, input.fresh.flatten() == Some(true))
+                .snapshot(scan_cwd.or(cwd), input.fresh.flatten() == Some(true))
                 .await?;
+            if let Some(cwd) = cwd {
+                let current = self.instances.read().await;
+                if current
+                    .get(instance.instance_id())
+                    .is_some_and(|registered| Arc::ptr_eq(registered, &instance))
+                {
+                    let mut parked = self.parked.write().await;
+                    let id = instance.instance_id();
+                    if let Some(rows) = parked.get_mut(id) {
+                        rows.retain(|row| row.cwd.0 != cwd);
+                        if rows.is_empty() {
+                            parked.remove(id);
+                        }
+                    }
+                    if let Some(scan) = scan_cwd.filter(|scan| *scan != cwd)
+                        && let Some(mut row) = snapshot
+                            .workspace_snapshots
+                            .iter()
+                            .flatten()
+                            .find(|s| s.cwd.0 == scan)
+                            .cloned()
+                    {
+                        row.cwd = cwd.to_owned().into();
+                        let rows = parked.entry(id.clone()).or_default();
+                        rows.push(row);
+                        if rows.len() > 16 {
+                            rows.remove(0);
+                        }
+                    }
+                }
+            }
             if input.refresh_models.flatten() == Some(true)
                 && snapshot.enabled
                 && snapshot.installed
             {
-                instance.refresh_models().await?;
+                instance
+                    .refresh_models()
+                    .await
+                    .map_err(|error| RefreshProvidersError::Models {
+                        instance_id: instance.instance_id().clone(),
+                        error,
+                    })?;
                 snapshot = instance.snapshot(None, false).await?;
             }
             self.store_snapshot(&instance, snapshot).await;
