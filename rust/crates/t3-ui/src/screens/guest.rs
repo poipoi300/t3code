@@ -171,10 +171,7 @@ fn live_page(
     let owner = TaskOwner::here();
     let boot_client = client.clone();
     watch(async move {
-        boot_client.start().await;
-        if boot_client.snapshot(|state| state.phase == GuestPhase::Connecting) {
-            boot_client.run().await;
-        }
+        boot_client.resume().await;
     });
     dynamic(move || match phase.get() {
         GuestPhase::Checking | GuestPhase::Joining | GuestPhase::Connecting => {

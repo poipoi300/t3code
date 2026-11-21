@@ -142,6 +142,12 @@ struct Page {
 fn page(credential: bool) -> Page {
     let wire = Rc::new(Wire::default());
     let phases = Rc::new(RefCell::new(Vec::new()));
+    if credential {
+        // The cookie check that precedes the name form: no cookie yet.
+        wire.session
+            .borrow_mut()
+            .push_back(Err(rejected(403, GuestFailure::Invalid)));
+    }
     let seen = phases.clone();
     let client = GuestClient::new(
         Rc::new(Fake(wire.clone())),
@@ -182,7 +188,7 @@ fn an_invite_asks_for_a_name_then_redeems_once_and_goes_live() {
     assert_eq!(phase(&page), GuestPhase::Live);
     assert_eq!(
         page.wire.calls.borrow().as_slice(),
-        ["redeem Sam", "stream share_1"]
+        ["session share_1", "redeem Sam", "stream share_1"]
     );
     assert_eq!(
         page.client.snapshot(|s| s.thread_id().cloned()).unwrap().0,
@@ -207,7 +213,15 @@ fn a_bad_name_is_refused_before_the_invite_is_spent() {
             );
         }
     });
-    assert!(page.wire.calls.borrow().is_empty());
+    assert!(
+        page.wire
+            .calls
+            .borrow()
+            .iter()
+            .all(|call| !call.starts_with("redeem")),
+        "{:?}",
+        page.wire.calls.borrow()
+    );
 }
 
 #[test]
@@ -229,7 +243,102 @@ fn a_network_failure_keeps_the_invite_and_a_used_invite_ends_the_page() {
         // The credential is spent for good: another attempt sends nothing.
         page.client.join("Sam").await;
     });
-    assert_eq!(page.wire.calls.borrow().len(), 2);
+    let redeems = page
+        .wire
+        .calls
+        .borrow()
+        .iter()
+        .filter(|call| call.starts_with("redeem"))
+        .count();
+    assert_eq!(redeems, 2);
+}
+
+#[test]
+fn a_spent_link_in_a_browser_that_already_joined_goes_straight_back_in() {
+    let page = page(true);
+    page.wire.session.borrow_mut().clear();
+    page.wire.streams.borrow_mut().push_back(Ok(open_stream(0)));
+    block_on(async {
+        page.client.start().await;
+        assert_eq!(phase(&page), GuestPhase::Connecting);
+        // The cookie is good, so the spent invite is dropped and never sent.
+        page.client.join("Sam").await;
+        assert!(page.client.run().now_or_never().is_none());
+    });
+    assert_eq!(phase(&page), GuestPhase::Live);
+    assert_eq!(
+        page.wire.calls.borrow().as_slice(),
+        ["session share_1", "stream share_1"]
+    );
+}
+
+#[test]
+fn an_invite_with_no_usable_cookie_shows_the_name_form_even_when_the_probe_fails() {
+    for answer in [
+        rejected(403, GuestFailure::Invalid),
+        GuestError::Network("offline".into()),
+    ] {
+        let page = page(true);
+        page.wire.session.borrow_mut().clear();
+        page.wire.session.borrow_mut().push_back(Err(answer));
+        block_on(page.client.start());
+        assert_eq!(phase(&page), GuestPhase::NeedsName { error: None });
+    }
+}
+
+#[test]
+fn a_proxy_refusal_without_the_server_reason_keeps_the_invite_and_the_form() {
+    for status in [408, 413, 429] {
+        let page = page(true);
+        page.wire
+            .redeem
+            .borrow_mut()
+            .push_back(Err(rejected(status, GuestFailure::Unknown)));
+        page.wire.streams.borrow_mut().push_back(Ok(open_stream(0)));
+        block_on(async {
+            page.client.start().await;
+            page.client.join("Sam").await;
+            assert!(
+                matches!(phase(&page), GuestPhase::NeedsName { error: Some(_) }),
+                "{status}"
+            );
+            page.client.join("Sam").await;
+            assert_eq!(phase(&page), GuestPhase::Connecting, "{status}");
+        });
+    }
+}
+
+#[test]
+fn an_offline_start_retries_until_the_network_returns() {
+    let page = page(false);
+    page.wire
+        .session
+        .borrow_mut()
+        .push_back(Err(GuestError::Network("offline".into())));
+    page.wire.streams.borrow_mut().extend([
+        Err(GuestError::Network("offline".into())),
+        Ok(open_stream(0)),
+    ]);
+    block_on(async {
+        assert!(page.client.resume().now_or_never().is_none());
+    });
+    assert_eq!(phase(&page), GuestPhase::Live);
+    assert_eq!(page.wire.sleeps.borrow().as_slice(), [1_000]);
+}
+
+#[test]
+fn a_server_refusal_after_an_offline_start_still_ends_the_page() {
+    let page = page(false);
+    page.wire
+        .session
+        .borrow_mut()
+        .push_back(Err(GuestError::Network("offline".into())));
+    page.wire
+        .streams
+        .borrow_mut()
+        .push_back(Err(rejected(403, GuestFailure::Inactive)));
+    block_on(page.client.resume());
+    assert_eq!(phase(&page), GuestPhase::Ended(GuestEnd::Inactive));
 }
 
 #[test]

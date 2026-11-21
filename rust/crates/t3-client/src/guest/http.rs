@@ -50,6 +50,8 @@ pub trait GuestChunks {
 
 pub struct GuestStreamResponse {
     pub status: u16,
+    /// The response's `content-type`, if it sent one.
+    pub content_type: Option<String>,
     pub chunks: Box<dyn GuestChunks>,
 }
 
@@ -140,7 +142,8 @@ pub mod requests {
 /// Maps a non-2xx answer: 4xx is terminal with the server's `{reason, message}` (the TS fallback
 /// copy when the body is not that); 5xx and anything else means try again.
 pub fn rejection(status: u16, body: &[u8]) -> GuestError {
-    if !(400..500).contains(&status) {
+    // 408, 425 and 429 are a proxy or server saying "later", not "never".
+    if !(400..500).contains(&status) || matches!(status, 408 | 425 | 429) {
         return GuestError::Network(format!("HTTP {status}"));
     }
     let parsed: Option<Value> = serde_json::from_slice(body).ok();
@@ -197,6 +200,8 @@ impl SseDecoder {
         loop {
             let rest = &self.pending[consumed..];
             let Some(offset) = rest[from..].iter().position(|b| matches!(b, b'\n' | b'\r')) else {
+                // Nothing here ends a line; the next push starts after these bytes.
+                from = rest.len();
                 break;
             };
             let end = from + offset;
@@ -333,6 +338,19 @@ impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
                     }
                 }
                 return Err(rejection(response.status, &body));
+            }
+            // A 200 that is not an event stream (an SPA fallback, a captive portal) never becomes one.
+            let is_stream = response.content_type.as_deref().is_some_and(|kind| {
+                kind.trim()
+                    .to_ascii_lowercase()
+                    .starts_with("text/event-stream")
+            });
+            if !is_stream {
+                return Err(GuestError::Rejected {
+                    status: 200,
+                    reason: GuestFailure::Invalid,
+                    message: "This guest link is not valid.".into(),
+                });
             }
             Ok(Box::new(SseStream {
                 chunks: response.chunks,

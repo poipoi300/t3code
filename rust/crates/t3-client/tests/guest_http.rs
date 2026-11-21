@@ -63,6 +63,13 @@ fn rejections_follow_the_server_body_and_five_hundreds_retry() {
         GuestError::Network(_)
     ));
     assert!(matches!(rejection(500, body), GuestError::Network(_)));
+    // Proxy answers that say "later", not "never".
+    for status in [408, 425, 429] {
+        assert!(
+            matches!(rejection(status, b""), GuestError::Network(_)),
+            "{status}"
+        );
+    }
 }
 
 fn decode(chunks: &[&[u8]]) -> Vec<Value> {
@@ -104,6 +111,8 @@ fn sse_ignores_unparseable_frames_and_a_byte_order_mark_and_unterminated_tail() 
 }
 
 enum Reply {
+    /// A 200 with a page, as an SPA fallback or a captive portal answers.
+    Html,
     Plain(u16, &'static str),
     Stream(u16, Vec<Result<Vec<u8>, GuestError>>),
 }
@@ -151,8 +160,17 @@ impl GuestHttp for Backend {
         let dropped = self.dropped.clone();
         Box::pin(async move {
             match reply {
+                Some(Reply::Html) => Ok(GuestStreamResponse {
+                    status: 200,
+                    content_type: Some("text/html".into()),
+                    chunks: Box::new(Chunks {
+                        chunks: VecDeque::from([Ok(b"<html>".to_vec())]),
+                        dropped,
+                    }),
+                }),
                 Some(Reply::Stream(status, chunks)) => Ok(GuestStreamResponse {
                     status,
+                    content_type: Some("text/event-stream".into()),
                     chunks: Box::new(Chunks {
                         chunks: chunks.into(),
                         dropped,
@@ -160,6 +178,7 @@ impl GuestHttp for Backend {
                 }),
                 Some(Reply::Plain(status, body)) => Ok(GuestStreamResponse {
                     status,
+                    content_type: Some("application/json".into()),
                     chunks: Box::new(Chunks {
                         chunks: VecDeque::from([Ok(body.as_bytes().to_vec())]),
                         dropped,
@@ -289,4 +308,38 @@ fn the_decoder_refuses_unbounded_lines_and_events() {
     let frame = format!("data: {{\"text\":\"{body}\"}}\n\n");
     let got = decoder.push(frame.as_bytes()).expect("within limits");
     assert_eq!(got.len(), 1);
+}
+
+#[test]
+fn an_unterminated_line_is_scanned_once_so_dripping_bytes_cannot_stall_the_tab() {
+    let mut decoder = SseDecoder::default();
+    let started = std::time::Instant::now();
+    let mut failed_at = None;
+    for at in 0..(1024 * 1024 + 8) {
+        if decoder.push(b"x").is_err() {
+            failed_at = Some(at);
+            break;
+        }
+    }
+    assert!(failed_at.is_some(), "the cap trips");
+    // Linear work takes milliseconds; the quadratic rescan took tens of seconds.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_ok_response_that_is_not_an_event_stream_ends_the_page_instead_of_retrying() {
+    let (transport, _) = transport(vec![Reply::Html]);
+    block_on(async {
+        assert!(matches!(
+            transport.open_stream("s1").await,
+            Err(GuestError::Rejected {
+                reason: GuestFailure::Invalid,
+                ..
+            })
+        ));
+    });
 }

@@ -46,6 +46,9 @@ impl GuestChunks for BodyReader {
     }
 }
 
+/// The most a non-streaming guest reply may hold.
+const RESPONSE_LIMIT: usize = 1024 * 1024;
+
 struct NoBody;
 impl GuestChunks for NoBody {
     fn next(&mut self) -> GuestFuture<'_, Option<Vec<u8>>> {
@@ -128,12 +131,12 @@ impl GuestHttp for BrowserGuestHttp {
                     reader,
                     _abort: abort,
                 };
-                // Replies are small JSON bodies; cap what a misbehaving origin can make us hold.
-                while body.len() < 1024 * 1024 {
-                    match chunks.next().await? {
-                        Some(chunk) => body.extend(chunk),
-                        None => break,
+                // Replies are small JSON bodies; a larger one is a broken or hostile origin.
+                while let Some(chunk) = chunks.next().await? {
+                    if body.len() + chunk.len() > RESPONSE_LIMIT {
+                        return Err(GuestError::Network("the response is too large".into()));
                     }
+                    body.extend(chunk);
                 }
             }
             Ok(GuestResponse { status, body })
@@ -144,6 +147,7 @@ impl GuestHttp for BrowserGuestHttp {
         Box::pin(async move {
             let (response, abort) = self.fetch(request).await?;
             let status = response.status();
+            let content_type = response.headers().get("content-type").ok().flatten();
             // A rejection without a body (a bare 403 from a proxy) is still a rejection; only an
             // accepted stream must have a body to read.
             let chunks: Box<dyn GuestChunks> = match (reader(&response), status) {
@@ -156,7 +160,11 @@ impl GuestHttp for BrowserGuestHttp {
                 }
                 (Err(_), _) => Box::new(NoBody),
             };
-            Ok(GuestStreamResponse { status, chunks })
+            Ok(GuestStreamResponse {
+                status,
+                content_type,
+                chunks,
+            })
         })
     }
 
@@ -201,6 +209,9 @@ mod tests {
                 });
                 init.signal.addEventListener('abort', () => { aborted += 1; });
                 const path = url.split('?')[0];
+                if (url.includes('share=html')) {
+                    return new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html' } });
+                }
                 if (path === '/api/guest/stream' && !url.includes('share=bodiless')) {
                     // Stays open until the page lets go of it.
                     return new Response(new ReadableStream({
@@ -208,7 +219,7 @@ mod tests {
                             controller.enqueue(bytes(': ping\\n\\ndata: {\"type\":\"view\"}\\n'));
                             controller.enqueue(bytes('\\ndata: {\"type\":\"ended\"}\\n\\n'));
                         },
-                    }), { status: 200 });
+                    }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
                 }
                 if (url.includes('share=bodiless')) {
                     return new Response(null, { status: 403 });
@@ -323,6 +334,20 @@ mod tests {
             Err(GuestError::Rejected {
                 status: 403,
                 reason: GuestFailure::Unknown,
+                ..
+            })
+        ));
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_page_answered_with_200_is_not_an_event_stream() {
+        install_fetch();
+        let _restore = RestoreFetch;
+        let guest = transport();
+        assert!(matches!(
+            guest.open_stream("html").await,
+            Err(GuestError::Rejected {
+                reason: GuestFailure::Invalid,
                 ..
             })
         ));

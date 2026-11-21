@@ -18,6 +18,11 @@ pub struct NativeGuestHttp {
 
 impl NativeGuestHttp {
     pub fn new(builder: reqwest::ClientBuilder, origin: url::Url) -> Result<Self, GuestError> {
+        if !origin.username().is_empty() || origin.password().is_some() {
+            return Err(GuestError::Network(
+                "guest origins cannot carry credentials".into(),
+            ));
+        }
         if origin.scheme() != "https" && !loopback(&origin) {
             return Err(GuestError::Network(
                 "guest requests need an https origin".into(),
@@ -75,11 +80,12 @@ impl NativeGuestHttp {
     }
 }
 
+/// Literal loopback addresses and exactly `localhost`. Names under `.localhost` are not trusted:
+/// outside a browser's own resolver they go to DNS.
 fn loopback(origin: &url::Url) -> bool {
     match origin.host() {
         Some(url::Host::Domain(name)) => {
-            let name = name.trim_end_matches('.').to_ascii_lowercase();
-            name == "localhost" || name.ends_with(".localhost")
+            name.trim_end_matches('.').eq_ignore_ascii_case("localhost")
         }
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
@@ -101,12 +107,18 @@ fn remember(jar: &mut BTreeMap<String, String>, header: &str) {
         })
     });
     let (name, value) = (name.trim(), value.trim());
-    if expired || value.is_empty() {
+    // A cookie that cannot be sent back would fail every later request; never store one.
+    let sendable = !name.is_empty()
+        && reqwest::header::HeaderValue::from_str(&format!("{name}={value}")).is_ok();
+    if expired || value.is_empty() || !sendable {
         jar.remove(name);
     } else {
         jar.insert(name.to_owned(), value.to_owned());
     }
 }
+
+/// The most a non-streaming guest reply may hold.
+const RESPONSE_LIMIT: usize = 1024 * 1024;
 
 struct Body(reqwest::Response);
 
@@ -129,11 +141,11 @@ impl GuestHttp for NativeGuestHttp {
             let status = response.status().as_u16();
             let mut body = Body(response);
             let mut bytes = Vec::new();
-            while bytes.len() < 1024 * 1024 {
-                match body.next().await? {
-                    Some(chunk) => bytes.extend(chunk),
-                    None => break,
+            while let Some(chunk) = body.next().await? {
+                if bytes.len() + chunk.len() > RESPONSE_LIMIT {
+                    return Err(GuestError::Network("the response is too large".into()));
                 }
+                bytes.extend(chunk);
             }
             Ok(GuestResponse {
                 status,
@@ -145,8 +157,14 @@ impl GuestHttp for NativeGuestHttp {
     fn open(&self, request: GuestRequest) -> GuestFuture<'_, GuestStreamResponse> {
         Box::pin(async move {
             let response = self.dispatch(request).await?;
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             Ok(GuestStreamResponse {
                 status: response.status().as_u16(),
+                content_type,
                 chunks: Box::new(Body(response)),
             })
         })
@@ -184,7 +202,16 @@ mod tests {
                 "{allowed}"
             );
         }
-        for refused in ["http://box.example", "http://192.168.1.20:3773"] {
+        for refused in [
+            "http://box.example",
+            "http://192.168.1.20:3773",
+            // Resolved by DNS outside a browser, so not trusted by name.
+            "http://evil.localhost:3773",
+            "http://[::ffff:127.0.0.1]:3773",
+            // Would be sent as an Authorization header on every request.
+            "https://user:secret@box.example",
+            "http://user@127.0.0.1:3773",
+        ] {
             assert!(
                 matches!(
                     NativeGuestHttp::new(builder(), origin(refused)),
@@ -208,7 +235,111 @@ mod tests {
         remember(&mut jar, "t3_guest_s2=other");
         remember(&mut jar, "t3_guest_s1=next; Max-Age=0");
         assert!(!jar.contains_key("t3_guest_s1"), "Max-Age=0 expires it");
+        remember(&mut jar, "bad=va\u{1}lue");
+        assert!(
+            !jar.contains_key("bad"),
+            "an unsendable cookie is never stored"
+        );
         remember(&mut jar, "t3_guest_s2=");
         assert!(jar.is_empty(), "an empty value clears it");
+    }
+
+    use std::sync::{Arc, Mutex};
+    use t3_client::guest::http::{GuestHttp, GuestMethod, GuestRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A one-answer-fits-all HTTP/1.1 server on loopback; records each request head.
+    async fn serve(answer: Vec<u8>) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|_| unreachable!("bind loopback"));
+        let port = listener.local_addr().map_or(0, |address| address.port());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let (log, answer) = (log.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(count) => head.extend_from_slice(&buffer[..count]),
+                        }
+                    }
+                    if let Ok(mut log) = log.lock() {
+                        log.push(String::from_utf8_lossy(&head).into_owned());
+                    }
+                    let _ = socket.write_all(&answer).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    fn redeem() -> GuestRequest {
+        GuestRequest {
+            method: GuestMethod::Post,
+            path: "/api/guest/redeem".into(),
+            json: Some(r#"{"credential":"share_1.secret","name":"Alex"}"#.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_returned_and_never_followed_so_the_invite_stays_home() {
+        let (other, other_seen) =
+            serve(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec()).await;
+        let redirect = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{other}/api/guest/redeem\r\ncontent-length: 0\r\n\r\n"
+        );
+        let (port, seen) = serve(redirect.into_bytes()).await;
+        let host = NativeGuestHttp::new(builder(), origin(&format!("http://127.0.0.1:{port}")))
+            .unwrap_or_else(|_| unreachable!("loopback origin"));
+        let reply = host.send(redeem()).await.ok();
+        assert_eq!(reply.map(|reply| reply.status), Some(307));
+        assert_eq!(seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+        // The redirect target saw nothing: not the body, not a cookie.
+        assert_eq!(other_seen.lock().map(|seen| seen.len()).unwrap_or(99), 0);
+    }
+
+    #[tokio::test]
+    async fn the_cookie_goes_back_to_the_origin_only() {
+        let (port, seen) = serve(
+            b"HTTP/1.1 204 No Content\r\nset-cookie: t3_guest_s1=token; Path=/api/guest; HttpOnly; Secure\r\n\r\n".to_vec(),
+        )
+        .await;
+        let host = NativeGuestHttp::new(builder(), origin(&format!("http://localhost:{port}")))
+            .unwrap_or_else(|_| unreachable!("loopback origin"));
+        let _ = host.send(redeem()).await;
+        let _ = host
+            .send(GuestRequest {
+                method: GuestMethod::Get,
+                path: "/api/guest/session?share=s1".into(),
+                json: None,
+            })
+            .await;
+        let seen = seen.lock().map(|seen| seen.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[0].to_ascii_lowercase().contains("cookie:"));
+        assert!(seen[1].contains("t3_guest_s1=token"), "{}", seen[1]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_larger_than_the_limit_is_a_network_error() {
+        let mut answer = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+            2 * RESPONSE_LIMIT
+        )
+        .into_bytes();
+        answer.extend(vec![b'x'; 2 * RESPONSE_LIMIT]);
+        let (port, _) = serve(answer).await;
+        let host = NativeGuestHttp::new(builder(), origin(&format!("http://127.0.0.1:{port}")))
+            .unwrap_or_else(|_| unreachable!("loopback origin"));
+        assert!(matches!(
+            host.send(redeem()).await,
+            Err(GuestError::Network(_))
+        ));
     }
 }

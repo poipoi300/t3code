@@ -165,7 +165,8 @@ fn stream_open(app: &mut nsh_testing::Headless, probe: &Probe) {
 }
 
 fn join_and_read(window: (f32, f32), share: &str) {
-    let probe = install(share, true);
+    // No cookie yet: the check that precedes the form is refused.
+    let probe = install(share, false);
     let mut app = start_on_web(
         window,
         &format!("https://guest.example/guest#{share}.signature"),
@@ -180,7 +181,10 @@ fn join_and_read(window: (f32, f32), share: &str) {
     app.type_text("label:Your name", "Sam").expect("name");
     app.press("role:button[Join]").expect("join");
     stream_open(&mut app, &probe);
-    assert_eq!(probe.calls()[0], "redeem Sam");
+    assert_eq!(
+        probe.calls()[..2],
+        ["session ".to_owned() + share, "redeem Sam".into()]
+    );
     probe.push(view_frame(&[]));
     probe.push(snapshot("thread:shared", "The plan has three steps."));
     app.wait_for("The plan has three steps.")
@@ -203,6 +207,27 @@ fn join_and_read(window: (f32, f32), share: &str) {
     probe.push(json!({"type":"ended"}));
     app.wait_for("This link has ended").expect("revoked");
     assert!(!app.screen().shows("The plan has three steps."));
+}
+
+/// A browser that already joined opens its spent link and goes straight back in.
+fn spent_link(window: (f32, f32), share: &str) {
+    let probe = install(share, true);
+    let mut app = start_on_web(
+        window,
+        &format!("https://guest.example/guest#{share}.signature"),
+    );
+    stream_open(&mut app, &probe);
+    probe.push(view_frame(&[]));
+    probe.push(snapshot("thread:shared", "Still here."));
+    app.wait_for("Still here.").expect("back in the thread");
+    assert!(!app.screen().shows("Join a shared thread"));
+    assert!(probe.calls().iter().all(|call| !call.starts_with("redeem")));
+}
+
+#[test]
+fn a_spent_link_goes_straight_back_in_at_both_widths() {
+    spent_link(DESKTOP, "guest_spent_desktop");
+    spent_link(PHONE, "guest_spent_phone");
 }
 
 #[test]

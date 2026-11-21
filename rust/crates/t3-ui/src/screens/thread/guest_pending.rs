@@ -103,6 +103,10 @@ pub fn guest_pending_messages(key: ThreadKey, can_operate: Memo<bool>) -> AnyEle
                         let Some(resolver) = resolver.clone() else {
                             return;
                         };
+                        // A second press before the list redraws must not send a second command.
+                        if busy.with_untracked(|ids| ids.contains(&id.0)) {
+                            return;
+                        }
                         busy.update(|ids| {
                             ids.insert(id.0.clone());
                         });

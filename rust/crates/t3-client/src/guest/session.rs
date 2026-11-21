@@ -286,20 +286,38 @@ impl GuestClient {
         (self.listener)(&self.state.borrow());
     }
 
-    /// With an unspent invite the page asks for a name; otherwise it checks the browser's cookie.
+    /// Checks the browser's cookie first, as the TS page does: a browser that already joined goes
+    /// straight back in, even from a spent invite, and the invite is dropped. Without a usable
+    /// cookie an unspent invite asks for a name; a failed check does not hide the form.
     pub async fn start(&self) {
-        if self.credential.borrow().is_some() {
-            self.update(|state| state.phase = GuestPhase::NeedsName { error: None });
-            return;
-        }
         match self.transport.session(&self.share).await {
-            Ok(()) => self.update(|state| state.phase = GuestPhase::Connecting),
+            Ok(()) => {
+                *self.credential.borrow_mut() = None;
+                self.update(|state| state.phase = GuestPhase::Connecting);
+            }
+            Err(_) if self.credential.borrow().is_some() => {
+                self.update(|state| state.phase = GuestPhase::NeedsName { error: None });
+            }
             Err(GuestError::Rejected { reason, .. }) => {
                 self.update(|state| state.phase = GuestPhase::Ended(end_for(reason)));
             }
             Err(GuestError::Network(_)) => {
                 self.update(|state| state.phase = GuestPhase::Reconnecting);
             }
+        }
+    }
+
+    /// `start`, then hold the stream when the page can already read: a transient failure of the
+    /// check goes on to the reconnect loop, which retries with backoff.
+    pub async fn resume(&self) {
+        self.start().await;
+        if self.snapshot(|state| {
+            matches!(
+                state.phase,
+                GuestPhase::Connecting | GuestPhase::Reconnecting
+            )
+        }) {
+            self.run().await;
         }
     }
 
@@ -323,7 +341,12 @@ impl GuestClient {
             Err(GuestError::Rejected {
                 reason, message, ..
             }) => {
-                if matches!(reason, GuestFailure::Busy | GuestFailure::Rejected) {
+                // Only the server's explicit verdicts end the page; anything else (a proxy's bodiless
+                // 413, an unknown reason) keeps the invite and the form for another try.
+                if !matches!(
+                    reason,
+                    GuestFailure::Used | GuestFailure::Inactive | GuestFailure::Invalid
+                ) {
                     *self.credential.borrow_mut() = Some(credential);
                     self.update(|state| {
                         state.phase = GuestPhase::NeedsName {
