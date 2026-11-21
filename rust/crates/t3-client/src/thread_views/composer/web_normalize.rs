@@ -1,11 +1,15 @@
+use super::super::outbox::uploaded_reference;
 use serde_json::{Value, json};
 fn strings(value: &Value, fields: &[&str]) -> bool {
     value.is_object() && fields.iter().all(|field| value[*field].is_string())
 }
 pub(super) fn image(value: &Value) -> bool {
-    strings(value, &["id", "name", "mimeType", "dataUrl"])
+    strings(value, &["id", "name", "mimeType"])
         && value["id"] != ""
-        && value["dataUrl"] != ""
+        && (uploaded_reference(value).is_some()
+            || value["dataUrl"]
+                .as_str()
+                .is_some_and(|data| !data.is_empty()))
         && value["sizeBytes"].is_number()
 }
 pub(super) fn file(value: &Value) -> bool {

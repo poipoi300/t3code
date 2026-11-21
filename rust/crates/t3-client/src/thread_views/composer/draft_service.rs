@@ -81,7 +81,8 @@ fn retain_picked_file_bytes(hydrated: &mut Value, live: &Value) {
                 .collect::<BTreeMap<_, _>>();
             if let Some(files) = draft["files"].as_array_mut() {
                 for file in files {
-                    if !file["dataUrl"].is_string()
+                    if file["restoredFromRewind"] != true
+                        && !file["dataUrl"].is_string()
                         && let Some(bytes) = file["id"].as_str().and_then(|id| live_files.get(id))
                     {
                         file["dataUrl"] = Value::from(*bytes);

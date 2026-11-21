@@ -7,6 +7,7 @@ use crate::{
     platform::{HostResource, Platform},
     rpc::{RpcEndpoint, SessionEndpoint},
     services::assets::{self, AttachmentUploadResult},
+    thread_views::outbox::{has_local_bytes, uploaded_reference},
     types::{EnvironmentId, ThreadId},
 };
 use base64::Engine;
@@ -266,7 +267,24 @@ pub async fn serialize_composer_images(
 ) -> Vec<Value> {
     futures::future::join_all(images.iter().map(|image| async {
         let cached = persisted.iter().find(|old| old["id"] == image["id"]);
-        let data = if let Some(data) = cached.and_then(|old| old["dataUrl"].as_str()).or_else(|| image["dataUrl"].as_str()) {
+        let data = cached.and_then(|old| old["dataUrl"].as_str()).or_else(|| image["dataUrl"].as_str());
+        let mut result = json!({"id":image["id"],"name":image["name"],"mimeType":image["mimeType"],"sizeBytes":image["sizeBytes"]});
+        for field in ["source", "restoredFromRewind"] {
+            if let Some(value) = image.get(field) {
+                result[field] = value.clone();
+            }
+        }
+        if let Some((environment, receipt)) = uploaded_reference(image)
+            && (image["restoredFromRewind"] == true || data.is_none())
+        {
+            result["uploadEnvironmentId"] = json!(environment);
+            result["uploadedAttachmentId"] = json!(receipt);
+            if let Some(uri) = image["fileUri"].as_str().filter(|uri| !uri.is_empty()) {
+                result["fileUri"] = json!(uri);
+            }
+            return Some(result);
+        }
+        let data = if let Some(data) = data {
             data.to_owned()
         } else {
             let handle = image["fileUri"].as_str()?;
@@ -276,8 +294,7 @@ pub async fn serialize_composer_images(
                 Err(_) => return cached.cloned(),
             }
         };
-        let mut result = json!({"id":image["id"],"name":image["name"],"mimeType":image["mimeType"],"sizeBytes":image["sizeBytes"],"dataUrl":data});
-        if let Some(source) = image.get("source") { result["source"] = source.clone(); }
+        result["dataUrl"] = json!(data);
         Some(result)
     })).await.into_iter().flatten().collect()
 }
@@ -437,7 +454,8 @@ impl RewindReservation {
             base64::engine::general_purpose::STANDARD.encode(file.bytes)
         );
         let mut draft = json!({
-            "id": id, "name": file.name, "mimeType": mime, "sizeBytes": size, "dataUrl": data_url,
+            "id": id, "name": file.name, "mimeType": mime, "sizeBytes": size,
+            "dataUrl": data_url, "restoredFromRewind": true,
         });
         if image {
             draft["type"] = json!("image");
@@ -446,7 +464,6 @@ impl RewindReservation {
         } else {
             draft["type"] = json!("file");
             draft["fileUri"] = json!("");
-            draft["restoredFromRewind"] = json!(true);
             self.files.push(draft);
         }
         Ok(())
@@ -537,6 +554,9 @@ impl AttachmentSession {
                 .and_then(Value::as_array_mut)
             {
                 for image in images {
+                    if !has_local_bytes(image) && uploaded_reference(image).is_some() {
+                        continue;
+                    }
                     let id = image["id"].as_str().unwrap_or_default().to_owned();
                     if let Some(uploaded) = self.0.uploaded.borrow_mut().remove(&id) {
                         self.0.cleanup.schedule(&[json!({"uploadedAttachmentId":uploaded,"uploadEnvironmentId":self.0.environment})]);
@@ -1100,19 +1120,14 @@ impl AttachmentSession {
         let generation = self.0.generation.get();
         let id = attachment["id"].as_str().ok_or(ClientError::Cancelled)?;
         let image = attachment["type"] == "image";
-        if !image
-            && attachment["uploadEnvironmentId"] == self.0.environment.0
-            && let Some(persisted) = attachment["uploadedAttachmentId"].as_str()
+        if let Some((environment, persisted)) = uploaded_reference(attachment)
+            && environment == self.0.environment.0
         {
             let verification =
                 assets::verify_persisted_attachment(&connection.endpoint, persisted.into()).await;
             if self.0.generation.get() != generation || !self.0.writable() || !self.contains(id) {
                 return Err(ClientError::Cancelled);
             }
-            let has_bytes = attachment["fileUri"]
-                .as_str()
-                .is_some_and(|uri| !uri.is_empty())
-                || attachment["dataUrl"].is_string();
             match verification {
                 assets::AttachmentVerification::Verified => {
                     self.0
@@ -1121,14 +1136,16 @@ impl AttachmentSession {
                         .insert(id.into(), persisted.into());
                     return Ok(());
                 }
-                assets::AttachmentVerification::Missing if !has_bytes => {
-                    web_content::mark_file_upload_missing(
-                        &mut self.0.drafts.borrow_mut(),
-                        &self.0.key,
-                        id,
-                        &self.0.environment.0,
-                        persisted,
-                    );
+                assets::AttachmentVerification::Missing if !has_local_bytes(attachment) => {
+                    if !image {
+                        web_content::mark_file_upload_missing(
+                            &mut self.0.drafts.borrow_mut(),
+                            &self.0.key,
+                            id,
+                            &self.0.environment.0,
+                            persisted,
+                        );
+                    }
                     return Err(ClientError::InvalidPayload(
                         "Uploaded file expired. Remove it and attach it again.".into(),
                     ));
@@ -1163,7 +1180,13 @@ impl AttachmentSession {
                 .read_resource(
                     attachment["fileUri"]
                         .as_str()
-                        .ok_or(ClientError::Cancelled)?
+                        .filter(|uri| !uri.is_empty())
+                        .ok_or_else(|| {
+                            ClientError::InvalidPayload(format!(
+                                "Reattach {} before sending.",
+                                attachment["name"].as_str().unwrap_or_default()
+                            ))
+                        })?
                         .into(),
                     limit as usize,
                 )
@@ -1531,6 +1554,26 @@ mod tests {
             files.last().unwrap()["dataUrl"].is_string(),
             "rewind bytes survive reload"
         );
+        let id = files.last().unwrap()["id"].as_str().unwrap().to_owned();
+        let mut uploaded = document.clone();
+        assert!(web_content::set_file_upload(
+            &mut uploaded,
+            "env:thread",
+            &id,
+            "env",
+            "upload"
+        ));
+        let saved = web_drafts::partialize_state(&uploaded, &Default::default());
+        let file = saved["draftsByThreadKey"]["env:thread"]["files"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(file["attachmentId"], "upload");
+        assert!(
+            file.get("dataUrl").is_none(),
+            "uploaded rewind files keep the receipt"
+        );
         let legacy = document["draftsByThreadKey"]["env:thread"]["files"]
             .as_array_mut()
             .unwrap()
@@ -1544,10 +1587,10 @@ mod tests {
             .last()
             .unwrap();
         assert!(
-            legacy["dataUrl"].is_string(),
-            "older rewind bytes survive reload"
+            legacy.get("dataUrl").is_none(),
+            "only explicitly marked rewinds keep bytes"
         );
-        assert_eq!(legacy["restoredFromRewind"], true);
+        assert!(legacy.get("restoredFromRewind").is_none());
     }
 
     #[test]

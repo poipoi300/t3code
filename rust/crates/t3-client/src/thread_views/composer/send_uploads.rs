@@ -57,12 +57,15 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                     ))
                 })?
         } else {
-            let uri = value["fileUri"].as_str().ok_or_else(|| {
-                ClientError::InvalidPayload(format!(
-                    "Reattach {} before sending.",
-                    attachment.name()
-                ))
-            })?;
+            let uri = value["fileUri"]
+                .as_str()
+                .filter(|uri| !uri.is_empty())
+                .ok_or_else(|| {
+                    ClientError::InvalidPayload(format!(
+                        "Reattach {} before sending.",
+                        attachment.name()
+                    ))
+                })?;
             self.inner
                 .platform
                 .read_resource(uri.into(), limit as usize)
@@ -147,7 +150,8 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             value["uploadedAttachmentId"] = json!(crate::operations::attachment_id(uploaded));
             *original = DraftAttachment::decode(value)?;
         }
-        if next.attachments == message.attachments {
+        next.compact_uploaded_attachments();
+        if &next == message {
             return Ok(false);
         }
         let matches = self

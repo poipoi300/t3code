@@ -1,5 +1,8 @@
 //! Web draft migrations keep unrecognized data alongside the normalized editable fields.
-use super::super::drafts::web_has_user_content;
+use super::super::{
+    drafts::web_has_user_content,
+    outbox::{strip_inline_attachment_bytes, uploaded_reference},
+};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use t3_contracts::{
@@ -686,10 +689,14 @@ pub fn hydrate_draft(value: &Value) -> Value {
     draft.insert("nonPersistedImageIds".into(), json!([]));
     let images: Vec<_> = array(value, "attachments")
         .into_iter()
-        .filter(|attachment| hydrate_image(attachment).is_some())
+        .filter(|attachment| {
+            uploaded_reference(attachment).is_some() || hydrate_image(attachment).is_some()
+        })
         .map(|mut attachment| {
             attachment["type"] = json!("image");
-            attachment["previewUrl"] = attachment["dataUrl"].clone();
+            if let Some(data) = attachment.get("dataUrl").cloned() {
+                attachment["previewUrl"] = data;
+            }
             attachment
         })
         .collect();
@@ -699,7 +706,10 @@ pub fn hydrate_draft(value: &Value) -> Value {
         .map(|mut file| {
             file["type"] = json!("file");
             file["file"] = Value::Null;
-            if file["attachmentId"].is_string() && file["environmentId"].is_string() {
+            if uploaded_reference(&file).is_none()
+                && file["attachmentId"].is_string()
+                && file["environmentId"].is_string()
+            {
                 file["uploadedAttachmentId"] = file["attachmentId"].clone();
                 file["uploadEnvironmentId"] = file["environmentId"].clone();
             }
@@ -868,33 +878,27 @@ pub fn partialize_state(state: &Value, open_previews: &BTreeSet<String>) -> Valu
         if let Some(persisted) = value.get("persistedAttachments").cloned() {
             value["attachments"] = persisted;
         }
+        if let Some(images) = value.get_mut("attachments").and_then(Value::as_array_mut) {
+            for image in images {
+                if image["restoredFromRewind"] == true && uploaded_reference(image).is_some() {
+                    strip_inline_attachment_bytes(image);
+                }
+            }
+        }
         let files: Vec<_> = array(value, "files")
             .into_iter()
             .map(|mut file| {
-                if file["uploadedAttachmentId"].is_string()
-                    && file["uploadEnvironmentId"].is_string()
-                {
+                let uploaded = uploaded_reference(&file).is_some();
+                if uploaded {
                     file["attachmentId"] = file["uploadedAttachmentId"].clone();
                     file["environmentId"] = file["uploadEnvironmentId"].clone();
                 }
+                // Rewind restores bytes from the timeline. A saved rewind keeps
+                // them until its receipt is available. Ordinary picks save metadata.
+                if file["restoredFromRewind"] != true || uploaded {
+                    strip_inline_attachment_bytes(&mut file);
+                }
                 if let Some(object) = file.as_object_mut() {
-                    // Restored files must survive the accepted rewind. Ordinary picks
-                    // keep their bytes in the live draft and persist metadata only.
-                    // Earlier rewinds used UUIDs. Earlier picks used undashed IDs.
-                    let restored = object
-                        .get("restoredFromRewind")
-                        .and_then(Value::as_bool)
-                        .unwrap_or_else(|| {
-                            object.get("fileUri").and_then(Value::as_str) == Some("")
-                                && object.get("id").and_then(Value::as_str).is_some_and(|id| {
-                                    id.split('-').map(str::len).eq([8, 4, 4, 4, 12])
-                                })
-                        });
-                    if !restored {
-                        object.remove("dataUrl");
-                    } else if object.contains_key("dataUrl") {
-                        object.insert("restoredFromRewind".into(), Value::Bool(true));
-                    }
                     for key in [
                         "file",
                         "previewUrl",

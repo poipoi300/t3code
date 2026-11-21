@@ -49,11 +49,14 @@ fn thread() -> Value {
     json!({"id":"thread","projectId":"project","title":"Thread","providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"activeProviderThreadId":null,"lineage":{"rootThreadId":"thread","parentThreadId":null,"relationshipToParent":null},"forkedFrom":null,"createdBy":"user","creationSource":"web","createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null})
 }
 fn store() -> (ClientStore, Generation) {
+    store_for(&key().environment)
+}
+fn store_for(environment: &EnvironmentId) -> (ClientStore, Generation) {
     let store = ClientStore::default();
-    let generation = store.begin_session(key().environment);
+    let generation = store.begin_session(environment.clone());
     let mut shell_thread = thread();
     shell_thread.as_object_mut().expect("thread").extend(json!({"latestRunId":null,"activeRunId":null,"status":"idle","pendingRuntimeRequest":null,"latestVisibleMessage":null,"latestUserMessageAt":null,"hasActionableProposedPlan":false,"itemCount":0,"visibleItemCount":0}).as_object().expect("fields").clone());
-    store.apply_shell(&key().environment,generation,vec![serde_json::from_value(json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":[shell_thread],"archivedThreads":[],"projects":[{"id":"project","title":"Project","workspaceRoot":"/workspace","repositoryIdentity":null,"defaultModelSelection":null,"scripts":[],"createdAt":NOW,"updatedAt":NOW}]}})).expect("snapshot"),serde_json::from_value(json!({"kind":"synchronized"})).expect("synchronized")]);
+    store.apply_shell(environment,generation,vec![serde_json::from_value(json!({"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"threads":[shell_thread],"archivedThreads":[],"projects":[{"id":"project","title":"Project","workspaceRoot":"/workspace","repositoryIdentity":null,"defaultModelSelection":null,"scripts":[],"createdAt":NOW,"updatedAt":NOW}]}})).expect("snapshot"),serde_json::from_value(json!({"kind":"synchronized"})).expect("synchronized")]);
     (store, generation)
 }
 fn seen(
@@ -344,6 +347,20 @@ fn local_outbox_edit_and_discard_are_durable_and_do_not_dispatch() {
 
 #[test]
 fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restart() {
+    signed_upload_round_trip("image", "x.png", "image/png", 1);
+}
+
+#[test]
+fn a_queued_two_megabyte_file_keeps_its_bytes_until_upload() {
+    signed_upload_round_trip("file", "report.pdf", "application/pdf", 2 * 1024 * 1024);
+}
+
+fn signed_upload_round_trip(kind: &str, name: &str, mime: &str, size: usize) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use t3_client::{
+        platform::StorageKey, thread_views::composer::draft_service::ComposerDraftService,
+    };
+
     block_on(async {
         let platform = Rc::new(FakePlatform::default());
         platform.push_http(Ok(t3_client::platform::HttpResponse {
@@ -362,19 +379,34 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
             store.clone(),
             OrchestrationV2CreationSource::Web,
         );
-        service
-            .connect_with_upload_base(
-                generation,
-                endpoint.clone(),
-                config(),
-                "https://remote.example/",
-            )
-            .expect("connect");
-        let attachment=DraftAttachment::decode(json!({"type":"image","id":"image","name":"x.png","mimeType":"image/png","sizeBytes":1,"previewUri":"data:image/png;base64,AA==","dataUrl":"data:image/png;base64,AA=="})).expect("attachment");
+        let bytes = vec![42; size];
+        let data_url = format!("data:{mime};base64,{}", STANDARD.encode(&bytes));
+        let draft_row = json!({"type":kind,"id":"local","name":name,"mimeType":mime,"sizeBytes":size,
+            "fileUri":"","dataUrl":data_url,"previewUrl":data_url});
+        let mut queued_row = draft_row.clone();
+        if kind == "image" {
+            queued_row.as_object_mut().expect("row").remove("fileUri");
+            queued_row["previewUri"] = json!(data_url);
+        }
+        let attachment = DraftAttachment::decode(queued_row).expect("attachment");
+        let drafts = Rc::new(ComposerDraftService::new(platform.clone()));
+        drafts.load().await.expect("load draft document");
+        drafts
+            .update(|document| {
+                let mut draft = json!({"prompt":"with attachment"});
+                draft[if kind == "image" { "images" } else { "files" }] = json!([draft_row]);
+                if kind == "image" {
+                    draft["persistedAttachments"] = draft["images"].clone();
+                }
+                document["draftsByThreadKey"]["env:thread"] = draft;
+                Ok(())
+            })
+            .expect("seed the recovery snapshot");
+        service.attach_web_drafts(drafts);
         let id = service
             .submit(
                 &key(),
-                "image".into(),
+                "with attachment".into(),
                 SendOptions {
                     attachments: vec![attachment],
                     ..Default::default()
@@ -382,11 +414,52 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
             )
             .await
             .expect("submit");
+        let read_record = || async {
+            let raw = platform
+                .get(
+                    StorageArea::Ordinary,
+                    StorageKey::new("outbox", Some(key().environment), id.0.clone()),
+                )
+                .await
+                .expect("read outbox")
+                .expect("durable row");
+            serde_json::from_slice::<Value>(&raw).expect("disk record")
+        };
+        let offline = read_record().await;
+        assert_eq!(offline["payload"]["attachments"][0]["dataUrl"], data_url);
+        assert_eq!(
+            offline["payload"]["composerDraft"]["prompt"],
+            "with attachment"
+        );
+        drop(service);
+        let service = Service::new(
+            key().environment,
+            platform.clone(),
+            store.clone(),
+            OrchestrationV2CreationSource::Web,
+        );
+        let mut config = config();
+        Rc::make_mut(&mut config)
+            .environment
+            .capabilities
+            .file_attachments = Some(
+            t3_contracts::environment::ExecutionEnvironmentCapabilitiesFileAttachments {
+                max_upload_bytes: 4 * 1024 * 1024,
+            },
+        );
+        service
+            .connect_with_upload_base(
+                generation,
+                endpoint.clone(),
+                config.clone(),
+                "https://remote.example/",
+            )
+            .expect("connect after restart");
         let scenario = async {
             let response = async {
                 let mint = request(requests.next().await.expect("mint"));
                 assert_eq!(mint.tag, "attachments.createUploadUrl");
-                assert_eq!(mint.payload["sizeBytes"], 1);
+                assert_eq!(mint.payload["sizeBytes"], size);
                 peer.send(Ok(codec::encode(&ServerMessage::<Value>::Exit {request_id:mint.id,exit:Exit::success(json!({"attachmentId":"uploaded","relativeUrl":"/api/upload/signed","expiresAt":10000}))}).expect("encode"))).await.expect("reply");
             };
             let (result, ()) = futures::join!(service.step(), response);
@@ -400,8 +473,21 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
             // The upload route is POST only, on both servers.
             assert_eq!(http[0].method, "POST");
             assert_eq!(http[0].url, "https://remote.example/api/upload/signed");
-            assert_eq!(http[0].body, vec![0]);
+            assert_eq!(http[0].body, bytes);
             assert_eq!(http[0].credentials, t3_client::platform::Credentials::Omit);
+            let saved = read_record().await;
+            assert_eq!(
+                saved["payload"]["attachments"][0]["uploadedAttachmentId"],
+                "uploaded"
+            );
+            assert!(
+                saved["payload"]["attachments"][0].get("dataUrl").is_none(),
+                "uploaded outbox rows keep the reference"
+            );
+            assert!(
+                !saved.to_string().contains(&data_url),
+                "the recovery snapshot and preview must release the bytes too"
+            );
             let rows = t3_client::thread_views::outbox::load(platform.as_ref())
                 .await
                 .expect("load");
@@ -409,6 +495,19 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
                 rows.messages[0].attachments[0].value()["uploadedAttachmentId"],
                 "uploaded"
             );
+            if kind == "image" {
+                let drafts = ComposerDraftService::new(platform.clone());
+                let draft_key = drafts
+                    .recover_message(&rows.messages[0])
+                    .await
+                    .expect("recover a receipt-only image to the editor");
+                let reloaded = ComposerDraftService::new(platform.clone());
+                reloaded.load().await.expect("reload recovered draft");
+                assert_eq!(
+                    reloaded.document().borrow()["draftsByThreadKey"][&draft_key]["images"][0]["uploadedAttachmentId"],
+                    "uploaded"
+                );
+            }
             drop(service);
             let restored = Service::new(
                 key().environment,
@@ -420,7 +519,7 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
                 .connect_with_upload_base(
                     generation,
                     endpoint.clone(),
-                    config(),
+                    config,
                     "https://remote.example/",
                 )
                 .expect("reconnect");
@@ -458,6 +557,123 @@ fn signed_upload_persists_reference_before_dispatch_and_verifies_it_after_restar
         };
         futures::join!(driver.run(futures::stream::pending(), || 0), scenario);
     });
+}
+
+#[test]
+fn retrying_a_receipt_only_image_in_another_environment_asks_for_reattachment() {
+    block_on(async {
+        let destination = ThreadKey {
+            environment: EnvironmentId("other-env".into()),
+            ..key()
+        };
+        let platform = Rc::new(FakePlatform::default());
+        let (store, generation) = store_for(&destination.environment);
+        let (wire, mut requests) = mpsc::unbounded::<Frame>();
+        let (_peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+        let (endpoint, driver) =
+            rpc::session(wire, incoming, destination.environment.clone(), grants(), 0);
+        let endpoint = Rc::new(endpoint);
+        let service = Service::new(
+            destination.environment.clone(),
+            platform.clone(),
+            store,
+            OrchestrationV2CreationSource::Web,
+        );
+        let mut config = config();
+        Rc::make_mut(&mut config).environment.environment_id = destination.environment.clone();
+        service
+            .connect_with_upload_base(
+                generation,
+                endpoint.clone(),
+                config,
+                "https://other.example/",
+            )
+            .expect("connect");
+        let attachment = DraftAttachment::decode(json!({
+            "type":"image", "id":"local", "name":"photo.png", "mimeType":"image/png", "sizeBytes":10,
+            "uploadEnvironmentId":"env", "uploadedAttachmentId":"receipt"
+        })).expect("decode the uploaded image after its bytes were released");
+        let id = service
+            .submit(
+                &destination,
+                "moving the draft".into(),
+                SendOptions {
+                    attachments: vec![attachment.retarget(&destination.environment)],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("queue the retry");
+        let loaded = t3_client::thread_views::outbox::load(platform.as_ref())
+            .await
+            .expect("read the retargeted outbox");
+        assert!(loaded.errors.is_empty());
+        assert_eq!(loaded.messages.len(), 1);
+        let scenario = async {
+            futures::select_biased! {
+                result = service.step().fuse() => {
+                    assert_eq!(result.expect("recover the draft"), Some(DeliveryResult::Restored));
+                }
+                _ = requests.next().fuse() => panic!("the destination must receive neither the source receipt nor an upload"),
+            }
+            assert!(
+                matches!(service.state(&id), Some(SendState::Restored { reason, .. })
+                if reason.contains("Reattach photo.png before sending."))
+            );
+            endpoint.invalidate();
+        };
+        futures::join!(driver.run(futures::stream::pending(), || 0), scenario);
+    });
+}
+
+#[test]
+fn only_marked_unuploaded_rewind_documents_keep_bytes_in_saved_drafts() {
+    use t3_client::thread_views::composer::{
+        attachment_intake::serialize_composer_images,
+        web_drafts::{hydrate_draft, partialize_state},
+    };
+
+    let local = json!({"id":"00010203-0405-4607-8809-0a0b0c0d0e0f","name":"note.txt",
+        "sizeBytes":1,"mimeType":"text/plain","type":"file","fileUri":"","dataUrl":"data:text/plain;base64,eA=="});
+    let mut restored = local.clone();
+    restored["id"] = json!("restored");
+    restored["restoredFromRewind"] = json!(true);
+    let mut uploaded = restored.clone();
+    uploaded["id"] = json!("uploaded");
+    uploaded["uploadedAttachmentId"] = json!("receipt");
+    uploaded["uploadEnvironmentId"] = json!("env");
+    let document = json!({"draftsByThreadKey":{"env:thread":{"files":[local,restored,uploaded]}}});
+    let saved = partialize_state(&document, &Default::default());
+    let rows = &saved["draftsByThreadKey"]["env:thread"]["files"];
+    assert!(
+        rows[0].get("dataUrl").is_none(),
+        "a UUID-shaped ID is only metadata"
+    );
+    assert!(rows[1]["dataUrl"].is_string());
+    assert!(
+        rows[2].get("dataUrl").is_none(),
+        "the receipt replaces uploaded rewind bytes"
+    );
+    assert_eq!(rows[2]["attachmentId"], "receipt");
+
+    let mut image = json!({"id":"photo","name":"photo.png","mimeType":"image/png",
+        "sizeBytes":1,"restoredFromRewind":true,"dataUrl":"data:image/png;base64,eA=="});
+    let platform = FakePlatform::default();
+    let unuploaded = block_on(serialize_composer_images(
+        &platform,
+        std::slice::from_ref(&image),
+        &[],
+    ));
+    assert_eq!(unuploaded[0]["dataUrl"], image["dataUrl"]);
+    image["uploadEnvironmentId"] = json!("env");
+    image["uploadedAttachmentId"] = json!("image-receipt");
+    let uploaded = block_on(serialize_composer_images(&platform, &[image], &unuploaded));
+    assert!(uploaded[0].get("dataUrl").is_none());
+    let reloaded = hydrate_draft(&json!({"attachments":uploaded}));
+    assert_eq!(
+        reloaded["images"][0]["uploadedAttachmentId"],
+        "image-receipt"
+    );
 }
 
 #[test]

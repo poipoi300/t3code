@@ -19,6 +19,70 @@ const NAMESPACE: &str = "outbox";
 fn invalid(message: &str) -> ClientError {
     ClientError::InvalidPayload(message.into())
 }
+
+pub(crate) fn uploaded_reference(attachment: &Value) -> Option<(&str, &str)> {
+    let environment = attachment["uploadEnvironmentId"].as_str()?;
+    let id = attachment["uploadedAttachmentId"].as_str()?;
+    (!environment.is_empty() && !id.is_empty()).then_some((environment, id))
+}
+
+pub(crate) fn strip_inline_attachment_bytes(attachment: &mut Value) {
+    if let Some(fields) = attachment.as_object_mut() {
+        fields.remove("dataUrl");
+        for key in ["previewUri", "previewUrl"] {
+            if fields
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|url| url.starts_with("data:"))
+            {
+                fields.remove(key);
+            }
+        }
+    }
+}
+
+pub(crate) fn has_local_bytes(attachment: &Value) -> bool {
+    ["fileUri", "dataUrl"]
+        .into_iter()
+        .any(|key| attachment[key].as_str().is_some_and(|uri| !uri.is_empty()))
+}
+
+fn compact_attachments<'a>(
+    attachments: impl IntoIterator<Item = &'a mut Value>,
+    draft: Option<&mut Value>,
+    destination: &EnvironmentId,
+) {
+    let mut references = BTreeMap::new();
+    for attachment in attachments {
+        if let (Some(id), Some((environment, receipt))) =
+            (attachment["id"].as_str(), uploaded_reference(attachment))
+            && environment == destination.0
+        {
+            references.insert(id.to_owned(), (environment.to_owned(), receipt.to_owned()));
+            strip_inline_attachment_bytes(attachment);
+        }
+    }
+    if let Some(draft) = draft.and_then(Value::as_object_mut) {
+        // The recovery snapshot can include the same bytes in several draft fields.
+        for field in ["images", "files", "persistedAttachments", "attachments"] {
+            for attachment in draft
+                .get_mut(field)
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if let Some((environment, id)) =
+                    attachment["id"].as_str().and_then(|id| references.get(id))
+                {
+                    attachment["uploadEnvironmentId"] = Value::from(environment.as_str());
+                    attachment["uploadedAttachmentId"] = Value::from(id.as_str());
+                    strip_inline_attachment_bytes(attachment);
+                }
+            }
+        }
+    }
+}
+
 /// Local attachment metadata includes durable host resource references, never host File handles.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -44,10 +108,8 @@ impl DraftAttachment {
         let string = |key: &str| object.get(key).and_then(Value::as_str);
         match string("type") {
             Some("image") => {
-                if string("previewUri").is_none()
-                    || !(["fileUri", "dataUrl"]
-                        .iter()
-                        .any(|key| string(key).is_some_and(|v| !v.is_empty())))
+                if uploaded_reference(&value).is_none()
+                    && (string("previewUri").is_none() || !has_local_bytes(&value))
                 {
                     return Err(invalid("image attachment has no durable bytes"));
                 }
@@ -89,8 +151,11 @@ impl DraftAttachment {
     pub fn retarget(&self, environment: &EnvironmentId) -> Self {
         let mut value = self.0.clone();
         if value.get("uploadEnvironmentId").and_then(Value::as_str) != Some(environment.0.as_str())
+            && has_local_bytes(&value)
             && let Some(object) = value.as_object_mut()
         {
+            // A reference-only attachment keeps its original owner. Delivery in
+            // another environment requires local bytes, so it asks for reattachment.
             object.remove("uploadedAttachmentId");
             object.remove("uploadEnvironmentId");
         }
@@ -208,6 +273,16 @@ pub struct QueuedMessage {
     pub extra: Map<String, Value>,
 }
 impl QueuedMessage {
+    pub(crate) fn compact_uploaded_attachments(&mut self) {
+        compact_attachments(
+            self.attachments
+                .iter_mut()
+                .map(|attachment| &mut attachment.0),
+            self.extra.get_mut("composerDraft"),
+            &self.environment_id,
+        );
+    }
+
     pub fn thread_key(&self) -> ThreadKey {
         ThreadKey {
             environment: self.environment_id.clone(),
@@ -240,6 +315,16 @@ pub fn decode_message(mut value: Value) -> Result<QueuedMessage, ClientError> {
 }
 pub fn encode_message(message: &QueuedMessage) -> Result<Value, ClientError> {
     let mut value = serde_json::to_value(message)?;
+    if let Some(fields) = value.as_object_mut()
+        && let Some(mut attachments) = fields.remove("attachments")
+    {
+        compact_attachments(
+            attachments.as_array_mut().into_iter().flatten(),
+            fields.get_mut("composerDraft"),
+            &message.environment_id,
+        );
+        fields.insert("attachments".into(), attachments);
+    }
     value["schemaVersion"] = WRITE_VERSION.into();
     Ok(value)
 }
@@ -511,8 +596,9 @@ impl<S: Storage> Outbox<S> {
     }
     pub fn enqueue(
         &self,
-        message: QueuedMessage,
+        mut message: QueuedMessage,
     ) -> LocalBoxFuture<'_, Result<Rc<QueuedMessage>, ClientError>> {
+        message.compact_uploaded_attachments();
         let message = Rc::new(message);
         {
             let mut state = self.state.borrow_mut();
@@ -556,9 +642,10 @@ impl<S: Storage> Outbox<S> {
     }
     pub async fn update(
         &self,
-        message: QueuedMessage,
+        mut message: QueuedMessage,
         expected: Option<u64>,
     ) -> Result<bool, ClientError> {
+        message.compact_uploaded_attachments();
         let _guard = self.mutations.lock().await;
         let stale = || {
             let state = self.state.borrow();
