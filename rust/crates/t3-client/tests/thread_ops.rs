@@ -688,51 +688,6 @@ fn thread_link_lookup_keeps_the_query_alive_and_surfaces_unsupported() {
     );
 }
 
-struct RewindIntake;
-struct PreparedIntake(Vec<t3_contracts::chat_attachment::ChatAttachment>);
-impl t3_client::thread_views::thread_ops::rewind::PreparedRewindAttachments for PreparedIntake {
-    fn commit(&self, document: &mut serde_json::Value, key: &str) -> Result<(), ClientError> {
-        let files = self
-            .0
-            .iter()
-            .enumerate()
-            .map(|(index, attachment)| {
-                let mut file = serde_json::to_value(attachment).unwrap();
-                file["id"] = json!(format!("restored-{index}"));
-                file["fileUri"] = json!("data:text/plain;base64,bm90ZQ==");
-                file
-            })
-            .collect::<Vec<_>>();
-        let ids = t3_client::thread_views::composer::web_content::add_files(
-            document, key, &files, true, false,
-        );
-        assert_eq!(ids.len(), self.0.len());
-        Ok(())
-    }
-}
-impl t3_client::thread_views::thread_ops::rewind::RewindAttachments for RewindIntake {
-    fn ready(&self, _: &ThreadKey) -> bool {
-        true
-    }
-    fn prepare(
-        &self,
-        _: ThreadKey,
-        attachments: Vec<t3_contracts::chat_attachment::ChatAttachment>,
-    ) -> futures::future::LocalBoxFuture<
-        'static,
-        Result<
-            Box<dyn t3_client::thread_views::thread_ops::rewind::PreparedRewindAttachments>,
-            ClientError,
-        >,
-    > {
-        Box::pin(async move {
-            Ok(Box::new(PreparedIntake(attachments))
-                as Box<
-                    dyn t3_client::thread_views::thread_ops::rewind::PreparedRewindAttachments,
-                >)
-        })
-    }
-}
 fn rewind_snapshot() -> serde_json::Value {
     let mut snapshot = thread_snapshot("t1");
     let p = &mut snapshot["projection"];
@@ -763,6 +718,108 @@ fn rewind_snapshot() -> serde_json::Value {
     p["checkpoints"] = json!([{"id":"checkpoint","threadId":"t1","scopeId":"scope","runId":null,"nodeId":"node","parentCheckpointId":null,"ordinalWithinScope":0,"appRunOrdinal":null,"ref":"root","status":"ready","files":[],"capturedAt":NOW}]);
     snapshot
 }
+fn fork_response(source: &str, visibility: &str) -> serde_json::Value {
+    let row = json!({
+        "id":"response","type":"assistant_message","threadId":source,"runId":"run",
+        "nodeId":null,"providerThreadId":"response-thread","providerTurnId":null,
+        "nativeItemRef":null,"parentItemId":null,"ordinal":2,"status":"completed",
+        "title":null,"startedAt":NOW,"completedAt":NOW,"updatedAt":NOW,
+        "messageId":"answer","text":"Response","streaming":false,
+    });
+    json!({"position":0,"visibility":visibility,"sourceThreadId":source,"sourceItemId":"response","item":row})
+}
+
+#[test]
+fn an_inherited_fork_can_dispatch_with_its_source_projection_unloaded() {
+    let mut h = Harness::new("env");
+    let mut snapshot = thread_snapshot("t1");
+    snapshot["projection"]["visibleTurnItems"] = json!([fork_response("parent", "inherited")]);
+    h.server()
+        .state
+        .borrow_mut()
+        .thread_snapshots
+        .insert("t1".into(), snapshot);
+    let c = paired(&mut h);
+    let source = ThreadKey {
+        thread: thread("parent"),
+        ..key()
+    };
+    assert!(c.store().shared_thread(&source).is_none());
+    let _ = h.run(c.timeline_rewind().fork_from_response(
+        key(),
+        source.thread,
+        t3_contracts::base_schemas::TurnItemId("response".into()),
+        t3_contracts::base_schemas::RunId("run".into()),
+    ));
+    assert!(
+        h.server()
+            .state
+            .borrow()
+            .rpc_calls
+            .iter()
+            .any(|(tag, command)| {
+                tag == "orchestration.dispatchCommand"
+                    && command["type"] == "thread.fork"
+                    && command["sourceThreadId"] == "parent"
+                    && command["sourcePoint"]["runId"] == "run"
+            })
+    );
+}
+
+#[test]
+fn fork_preflight_uses_the_completed_responses_session() {
+    for response_supports_fork in [true, false] {
+        let mut h = Harness::new("env");
+        let mut snapshot = rewind_snapshot();
+        let p = &mut snapshot["projection"];
+        let mut response_thread = p["providerThreads"][0].clone();
+        response_thread["id"] = json!("response-thread");
+        response_thread["providerSessionId"] = json!("response-session");
+        p["providerThreads"]
+            .as_array_mut()
+            .unwrap()
+            .push(response_thread);
+        let mut response_session = p["providerSessions"][0].clone();
+        response_session["id"] = json!("response-session");
+        for (session, supports) in [
+            (&mut p["providerSessions"][0], !response_supports_fork),
+            (&mut response_session, response_supports_fork),
+        ] {
+            session["capabilities"]["threads"]["canForkThread"] = json!(false);
+            session["capabilities"]["context"]["supportsFullThreadHandoff"] = json!(supports);
+        }
+        p["providerSessions"]
+            .as_array_mut()
+            .unwrap()
+            .push(response_session);
+        p["visibleTurnItems"] = json!([fork_response("t1", "local")]);
+        h.server()
+            .state
+            .borrow_mut()
+            .thread_snapshots
+            .insert("t1".into(), snapshot);
+        let c = paired(&mut h);
+        assert!(c.store().shared_thread(&key()).is_some());
+        let _ = h.run(c.timeline_rewind().fork_from_response(
+            key(),
+            key().thread,
+            t3_contracts::base_schemas::TurnItemId("response".into()),
+            t3_contracts::base_schemas::RunId("run".into()),
+        ));
+        assert_eq!(
+            h.server()
+                .state
+                .borrow()
+                .rpc_calls
+                .iter()
+                .any(|(tag, command)| {
+                    tag == "orchestration.dispatchCommand" && command["type"] == "thread.fork"
+                }),
+            response_supports_fork
+        );
+    }
+}
+
 #[test]
 fn accepted_rewind_survives_observer_disposal_and_restores_duplicates_beside_new_edits() {
     use futures::{
@@ -777,9 +834,27 @@ fn accepted_rewind_survives_observer_disposal_and_restores_duplicates_beside_new
         .borrow_mut()
         .thread_snapshots
         .insert("t1".into(), rewind_snapshot());
+    h.server()
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push(("assets.createUrl", t3_rpc::CallKind::Unary));
+    h.server().state.borrow_mut().permissions = Some(vec![
+        "orchestration:read".into(),
+        "orchestration:operate".into(),
+        "assets:read".into(),
+    ]);
     let c = paired(&mut h);
     let service = c.timeline_rewind();
-    service.bind_rewind_attachments(Rc::new(RewindIntake));
+    for _ in 0..2 {
+        script(
+            &h,
+            "assets.createUrl",
+            Ok(json!({
+                "relativeUrl":"/test-assets/rewind-note","expiresAt":4102444800000_u64,
+            })),
+        );
+    }
     let target = t3_client::thread_views::thread_ops::rewind::RewindTarget {
         message_id: t3_contracts::base_schemas::MessageId("message".into()),
         turn_count: 0,
@@ -837,8 +912,31 @@ fn accepted_rewind_survives_observer_disposal_and_restores_duplicates_beside_new
             h.platform.clone(),
         )),
     );
+    let platform = Rc::new(h.platform.clone());
     let persisted = h.run(async move {
         drafts.load().await.unwrap();
+        let session = t3_client::thread_views::composer::attachment_intake::AttachmentSession::new(
+            platform,
+            drafts.document(),
+            "env:t1".into(),
+            key().environment,
+        );
+        session.set_connection(
+            t3_client::thread_views::composer::attachment_intake::Capabilities {
+                known: true,
+                uploads: true,
+                max_file_bytes: Some(1024),
+            },
+            None,
+        );
+        assert!(session.items().iter().all(|item| !item.needs_reattach));
+        assert!(
+            session
+                .draft_attachments()
+                .unwrap()
+                .iter()
+                .all(|file| { file.value()["dataUrl"] == "data:text/plain;base64,bm90ZQ==" })
+        );
         (
             drafts.view(&key()).prompt.clone(),
             drafts.document().borrow()["draftsByThreadKey"]["env:t1"]["files"]

@@ -37,6 +37,7 @@ pub mod preferences;
 pub mod questions_service;
 pub mod reply;
 pub mod resolvers;
+pub(crate) mod resume;
 pub mod send;
 mod send_commands;
 mod send_policy;

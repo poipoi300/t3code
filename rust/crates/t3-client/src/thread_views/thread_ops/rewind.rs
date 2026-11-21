@@ -12,7 +12,7 @@ use std::{
     rc::Rc,
 };
 use t3_contracts::{
-    base_schemas::{CheckpointId, CheckpointScopeId, MessageId, RunId},
+    base_schemas::{CheckpointId, CheckpointScopeId, MessageId, RunId, TurnItemId},
     orchestration_v2::*,
     orchestration_v2_id_table::IdOrIndex,
     rpc::WsOrchestrationV2DispatchCommandRpc,
@@ -478,29 +478,51 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
         }
         .boxed_local()
     }
-    pub fn fork(
+    pub fn fork_from_response(
         &self,
-        key: ThreadKey,
+        viewed: ThreadKey,
+        source: crate::types::ThreadId,
+        response: TurnItemId,
         run: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, ClientError>> {
         let service = self.clone();
         async move {
-            // forkThreadFromRun dispatches without a provider-capability gate (the button already
-            // follows the item's session); only the operate permission is checked here.
-            if !service.can_operate(&key) {
+            if !service.can_operate(&viewed) {
                 return Err(ClientError::PermissionDenied { method: "orchestration.dispatchCommand".into() });
             }
-            let projection=service.projection(&key)?;
-            let capabilities=crate::thread_views::threads::workflows::resolve_thread_provider_session(&projection).map(|s|&s.capabilities);
-            if !projection.visible_turn_items.iter().any(|item|matches!(&item.item, OrchestrationV2TurnItem::AssistantMessage(message) if message.run_id==Some(IdOrIndex::Id(run.clone()))) && crate::thread_views::threads::workflows::can_fork_projected_assistant_item(item,capabilities)) {
+            let projection = service.projection(&viewed)?;
+            let source_id = IdOrIndex::Id(source.clone());
+            let item_id = IdOrIndex::Id(response);
+            let row = projection.visible_turn_items.iter().find(|row| {
+                row.source_thread_id == source_id && row.source_item_id == item_id
+                    && matches!(&row.item, OrchestrationV2TurnItem::AssistantMessage(message)
+                        if message.run_id.as_ref() == Some(&IdOrIndex::Id(run.clone())))
+            }).ok_or_else(|| Self::refused("This response is no longer available to fork."))?;
+            let source_key = ThreadKey { environment: viewed.environment.clone(), thread: source.clone() };
+            let source_projection = if source_key == viewed {
+                Some(projection.clone())
+            } else {
+                service.projection(&source_key).ok()
+            };
+            let capabilities = source_projection.as_deref().and_then(|p| {
+                let item = p.turn_items.iter().find(|item| crate::state::items::id(item) == &item_id)
+                    .or_else(|| p.visible_turn_items.iter().find(|row| row.source_thread_id == source_id && row.source_item_id == item_id).map(|row| &row.item))?;
+                let OrchestrationV2TurnItem::AssistantMessage(item) = item else { return None; };
+                let provider_thread = item.provider_thread_id.as_ref()?;
+                let session = p.provider_threads.iter().find(|thread| &thread.id == provider_thread)?
+                    .provider_session_id.as_ref()?;
+                p.provider_sessions.iter().find(|candidate| &candidate.id == session)
+                    .map(|session| &session.capabilities)
+            });
+            if !crate::thread_views::threads::workflows::can_fork_projected_assistant_item(row, capabilities) {
                 return Err(Self::refused("This response is no longer available to fork."));
             }
-            let source = service.thread_shell(&key).ok_or(ClientError::Disconnected)?;
-            let target = ThreadKey { environment:key.environment.clone(),thread:crate::types::ThreadId(crate::operations::allocate_command_id(&service.platform,None)?.0) };
-            let input: OrchestrationV2Command = serde_json::from_value(serde_json::json!({"type":"thread.fork","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"createdBy":"user","creationSource":"web","sourceThreadId":key.thread,"targetThreadId":target.thread,"sourcePoint":{"type":"run","runId":run},"title":format!("{} fork",source.title)}))?;
+            let active = service.thread_shell(&viewed).ok_or(ClientError::Disconnected)?;
+            let target = ThreadKey { environment:viewed.environment.clone(),thread:crate::types::ThreadId(crate::operations::allocate_command_id(&service.platform,None)?.0) };
+            let input: OrchestrationV2Command = serde_json::from_value(serde_json::json!({"type":"thread.fork","commandId":crate::operations::allocate_command_id(&service.platform,None)?,"createdBy":"user","creationSource":"web","sourceThreadId":source,"targetThreadId":target.thread,"sourcePoint":{"type":"run","runId":run},"title":format!("{} fork",active.title)}))?;
             let mut changes = service.changes(&target);
-            let generation=service.session_generation(&key.environment);
-            service.endpoint(&key.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(input).await.map_err(|error|service.command_failure(&key.environment,"orchestration.dispatchCommand",generation,error))?;
+            let generation=service.session_generation(&viewed.environment);
+            service.endpoint(&viewed.environment)?.command::<WsOrchestrationV2DispatchCommandRpc>(input).await.map_err(|error|service.command_failure(&viewed.environment,"orchestration.dispatchCommand",generation,error))?;
             let timeout = service.platform.sleep(10_000).fuse(); futures::pin_mut!(timeout);
             loop {
                 if service.thread_shell(&target).is_some() { return Ok(target); }

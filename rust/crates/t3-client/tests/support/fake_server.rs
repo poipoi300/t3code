@@ -410,6 +410,11 @@ impl Platform for TestPlatform {
                     200,
                     json!({"access_token":"paired-bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type": if request.headers.keys().any(|name| name.eq_ignore_ascii_case("dpop")) { "DPoP" } else { "Bearer" },"expires_in":3600,"scope":"orchestration:read orchestration:operate"}),
                 ),
+                ("GET", "/test-assets/rewind-note") => HttpResponse {
+                    status: 200,
+                    headers: Default::default(),
+                    body: b"note".to_vec(),
+                },
                 // Snapshots come over the socket; HTTP answers that it cannot serve them.
                 _ => response(503, json!({})),
             })

@@ -119,6 +119,8 @@ impl TimelineRewindClient for Rewind {
     fn fork(
         &self,
         _: ThreadKey,
+        _: ThreadId,
+        _: t3_contracts::base_schemas::TurnItemId,
         _: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
         futures::future::pending().boxed_local()
@@ -333,7 +335,8 @@ fn the_production_context_edits_from_here_through_the_rewind_service() {
                 .expect("edit")
         );
         assert!(app.screen().shows("Edits: 0"));
-        app.press("role:button[Confirm]").expect("confirm");
+        app.press("role:button[Revert and keep changes]")
+            .expect("confirm");
         app.wait_for("Edits: 1").expect("one rewind");
     }
 }

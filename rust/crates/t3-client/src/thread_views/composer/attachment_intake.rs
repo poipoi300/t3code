@@ -383,6 +383,7 @@ struct Session {
     connection: RefCell<Option<AttachmentConnection>>,
     uploads: RefCell<BTreeMap<String, UploadState>>,
     preparing: RefCell<Vec<AttachmentItem>>,
+    rewind_slots: Cell<usize>,
     uploaded: RefCell<BTreeMap<String, String>>,
     generation: Cell<u64>,
     cleanup: Rc<super::cleanup::AttachmentCleanup>,
@@ -402,6 +403,80 @@ impl Session {
             owner.changed();
         }
         self.changes.notify();
+    }
+}
+
+/// Holds room for the restored files until the rollback is projected and the draft commits.
+pub(crate) struct RewindReservation {
+    session: Rc<Session>,
+    count: usize,
+    images: Vec<Value>,
+    files: Vec<Value>,
+}
+
+impl Drop for RewindReservation {
+    fn drop(&mut self) {
+        self.session
+            .rewind_slots
+            .set(self.session.rewind_slots.get() - self.count);
+    }
+}
+
+impl RewindReservation {
+    pub(crate) fn prepare(
+        &mut self,
+        original: &ChatAttachment,
+        file: crate::view_logic::chat_view::RestoredAttachment,
+    ) -> Result<(), ClientError> {
+        let image = matches!(original, ChatAttachment::Image(_));
+        let id = crate::operations::allocate_command_id(self.session.platform.as_ref(), None)?.0;
+        let size = file.bytes.len();
+        let mime = file.mime_type;
+        let data_url = format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(file.bytes)
+        );
+        let mut draft = json!({
+            "id": id, "name": file.name, "mimeType": mime, "sizeBytes": size, "dataUrl": data_url,
+        });
+        if image {
+            draft["type"] = json!("image");
+            draft["previewUrl"] = draft["dataUrl"].clone();
+            self.images.push(draft);
+        } else {
+            draft["type"] = json!("file");
+            draft["fileUri"] = json!("");
+            self.files.push(draft);
+        }
+        Ok(())
+    }
+}
+
+impl crate::thread_views::thread_ops::rewind::PreparedRewindAttachments for RewindReservation {
+    fn commit(&self, document: &mut Value, draft_key: &str) -> Result<(), ClientError> {
+        let images = web_content::add_images(document, draft_key, &self.images, true);
+        // The live and reloaded composer must see the same restored images.
+        if !self.images.is_empty() {
+            let draft = &document["draftsByThreadKey"][draft_key];
+            let mut saved = draft["persistedAttachments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            saved.extend(
+                self.images
+                    .iter()
+                    .filter(|image| images.accepted_ids.iter().any(|id| image["id"] == *id))
+                    .cloned(),
+            );
+            web_content::sync_persisted_attachments(document, draft_key, &saved);
+        }
+        let files = web_content::add_files(document, draft_key, &self.files, true, false);
+        if files.len() + images.accepted_ids.len() != self.count {
+            return Err(ClientError::InvalidPayload(
+                "Make room for this message's attachments in the composer before rewinding.".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -425,6 +500,7 @@ impl AttachmentSession {
             connection: RefCell::new(None),
             uploads: RefCell::new(BTreeMap::new()),
             preparing: RefCell::new(Vec::new()),
+            rewind_slots: Cell::default(),
             uploaded: RefCell::new(BTreeMap::new()),
             generation: Cell::new(0),
             cleanup: Rc::new(super::cleanup::AttachmentCleanup::default()),
@@ -495,7 +571,35 @@ impl AttachmentSession {
             .map(|field| draft[field].as_array().map_or(0, Vec::len))
             .sum::<usize>()
             + self.0.preparing.borrow().len()
+            + self.0.rewind_slots.get()
     }
+    pub fn remaining_slots(&self) -> usize {
+        PROVIDER_SEND_TURN_MAX_ATTACHMENTS.saturating_sub(self.count())
+    }
+
+    pub(crate) fn reserve_rewind(&self, count: usize) -> Result<RewindReservation, ClientError> {
+        if !self.0.writable() {
+            return Err(ClientError::Cancelled);
+        }
+        if !self.0.preparing.borrow().is_empty() {
+            return Err(ClientError::InvalidPayload(
+                "Wait for attachments to finish preparing before rewinding.".into(),
+            ));
+        }
+        if count > self.remaining_slots() {
+            return Err(ClientError::InvalidPayload(
+                "Make room for this message's attachments in the composer before rewinding.".into(),
+            ));
+        }
+        self.0.rewind_slots.set(self.0.rewind_slots.get() + count);
+        Ok(RewindReservation {
+            session: self.0.clone(),
+            count,
+            images: Vec::new(),
+            files: Vec::new(),
+        })
+    }
+
     fn contains(&self, id: &str) -> bool {
         let drafts = self.0.drafts.borrow();
         let draft = &drafts["draftsByThreadKey"][&self.0.key];
@@ -580,13 +684,6 @@ impl AttachmentSession {
         self.0.uploads.borrow_mut().remove(id);
         drop(drafts);
         self.changed();
-    }
-    pub async fn pick(&self) -> Result<(), ClientError> {
-        let files = self.pick_resources().await?;
-        self.intake(files).await
-    }
-    pub async fn pick_resources(&self) -> Result<Vec<HostResource>, ClientError> {
-        Ok(self.0.platform.pick_resources(vec![], true).await?)
     }
     pub async fn intake(&self, files: Vec<HostResource>) -> Result<(), ClientError> {
         self.intake_sources(files.into_iter().map(Source::Resource).collect())
@@ -848,7 +945,9 @@ impl AttachmentSession {
                     } else {
                         let current = self.draft();
                         let files = current["files"].as_array().map_or(&[][..], Vec::as_slice);
-                        let count = files.len() + current["images"].as_array().map_or(0, Vec::len);
+                        let count = files.len()
+                            + current["images"].as_array().map_or(0, Vec::len)
+                            + self.0.rewind_slots.get();
                         if count >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS
                             && !files.iter().any(|marker| {
                                 web_content::needs_reattach(marker)

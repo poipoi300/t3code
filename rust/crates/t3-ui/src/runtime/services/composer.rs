@@ -686,16 +686,14 @@ pub fn thread_model_picker<P: Platform + Clone + 'static>(
         }
     });
     // Picks come from rows the popover rebuilds; their tasks run under the picker's owner.
-    let owner = Owner::current();
+    let tasks = crate::runtime::tasks::TaskOwner::here();
     let report =
         move |operation: futures::future::LocalBoxFuture<'static, Result<(), ClientError>>| {
             failure.set(None);
-            owner.run(move || {
-                watch(async move {
-                    if let Err(error) = operation.await {
-                        failure.set(Some(error.to_string()));
-                    }
-                });
+            tasks.spawn(async move {
+                if let Err(error) = operation.await {
+                    failure.set(Some(error.to_string()));
+                }
             });
         };
     let picking = session.clone();
@@ -728,7 +726,14 @@ pub fn thread_model_picker<P: Platform + Clone + 'static>(
     props.on_option_pick = Some(Rc::new(move |model, selection| {
         report(options.change_model_trait(model.instance_id, model.model, selection))
     }));
-    props.on_refresh = Some(Rc::new(move || report(session.refresh_model_catalog())));
+    props.on_refresh = Some(Rc::new(move || {
+        if current.get_untracked().can_refresh {
+            let refresh = session.refresh_model_catalog();
+            tasks.spawn(async move {
+                let _ = refresh.await;
+            });
+        }
+    }));
     props.handle = Some(handle);
     props
 }

@@ -5,13 +5,9 @@ use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use serde_json::json;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 use t3_client::thread_views::composer::attachment_intake::AttachmentSession;
-use t3_client::{
-    platform::{HostReply, HostResource},
-    testing::FakePlatform,
-    types::EnvironmentId,
-};
+use t3_client::{testing::FakePlatform, types::EnvironmentId};
 use t3_ui::screens::composer::{
     attachments::{ComposerAttachments, composer_attach_button, composer_attachment_strip},
     editor::{
@@ -24,12 +20,6 @@ use t3_ui::screens::composer::{
 fn Harness() -> impl IntoElement {
     t3_ui::theme::install(&t3_ui::theme::ThemeChoice::default());
     let platform = FakePlatform::default();
-    platform.push_host(Ok(HostReply::Resources(vec![HostResource {
-        handle: "picked".into(),
-        name: "notes.txt".into(),
-        mime: "text/plain".into(),
-    }])));
-    platform.push_host(Ok(HostReply::Bytes(b"hello".to_vec())));
     let client = AttachmentSession::new(
         Rc::new(platform),
         Rc::new(RefCell::new(json!({"draftsByThreadKey":{}}))),
@@ -75,9 +65,32 @@ fn Harness() -> impl IntoElement {
         .child(t3_ui::ui::confirm::confirm_dialog_host())
 }
 
+#[derive(Default)]
+struct Picker(std::sync::atomic::AtomicBool);
+
+impl nsh_core::picker::PickerBackend for Picker {
+    fn pick_images(&self, _: nsh_core::picker::PickRequest) -> nsh_core::picker::PickFuture {
+        unreachable!("Attach files uses the file picker");
+    }
+    fn pick_files(&self, _: nsh_core::picker::FilePickRequest) -> nsh_core::picker::PickFuture {
+        let consumed = self.0.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let files = if consumed {
+            Vec::new()
+        } else {
+            vec![nsh_core::picker::PickedFile::new(
+                "notes.txt",
+                "text/plain",
+                nsh_core::ImageData::new(b"hello".to_vec()),
+            )]
+        };
+        Box::pin(std::future::ready(files))
+    }
+}
+
 fn start(window: (f32, f32)) -> Headless {
     let mut app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
+        picker: Some(Arc::new(Picker::default())),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::of::<Harness>())
     })

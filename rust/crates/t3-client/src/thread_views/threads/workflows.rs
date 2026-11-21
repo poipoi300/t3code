@@ -108,6 +108,28 @@ pub struct QueuedThreadRun<'a> {
     pub text: &'a str,
     pub message: Option<&'a OrchestrationV2ConversationMessage>,
 }
+fn queued_message_text(message: &OrchestrationV2ConversationMessage) -> &str {
+    message
+        .context
+        .as_ref()
+        .and_then(Option::as_ref)
+        .and_then(|context| context.guest.as_ref().and_then(Option::as_ref))
+        .map_or(message.text.as_str(), |guest| guest.text.as_str())
+}
+
+/// QueuedRunsControl's text preview, including the labels of composer references.
+pub fn queued_message_preview(message: &OrchestrationV2ConversationMessage) -> String {
+    use crate::thread_views::{composer::stash_presentation::plain_text, user_message};
+    let text = queued_message_text(message);
+    if user_message::is_attachment_only_bootstrap_prompt(text) {
+        return String::new();
+    }
+    plain_text(&user_message::replace_references(text, |reference| {
+        reference.label.clone()
+    }))
+    .trim()
+    .to_owned()
+}
 pub struct ThreadQueueWorkflowState<'a> {
     pub active_run: Option<&'a OrchestrationV2Run>,
     pub queued_runs: Vec<QueuedThreadRun<'a>>,
@@ -150,13 +172,7 @@ pub fn derive_thread_queue_workflow_state(
             .into_iter()
             .map(|run| {
                 let message = p.messages.iter().find(|m| m.id == run.user_message_id);
-                let text = message.map_or("Queued message", |m| {
-                    m.context
-                        .as_ref()
-                        .and_then(Option::as_ref)
-                        .and_then(|c| c.guest.as_ref().and_then(Option::as_ref))
-                        .map_or(m.text.as_str(), |g| g.text.as_str())
-                });
+                let text = message.map_or("Queued message", queued_message_text);
                 QueuedThreadRun { run, text, message }
             })
             .collect(),

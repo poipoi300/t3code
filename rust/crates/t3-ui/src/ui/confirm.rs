@@ -47,6 +47,7 @@ pub struct ConfirmDialogRequest {
     pub message: String,
     pub variant: ConfirmDialogVariant,
     pub initial_focus: Option<ConfirmDialogInitialFocus>,
+    revert_files: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -68,9 +69,23 @@ impl ConfirmDialogState {
 
 pub type Confirmation = LocalBoxFuture<'static, bool>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevertChoice {
+    KeepChanges,
+    RestoreFiles,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AnswerChoice {
+    #[default]
+    Cancel,
+    Confirm,
+    Alternative,
+}
+
 struct PendingConfirmation {
     request: ConfirmDialogRequest,
-    resolve: oneshot::Sender<bool>,
+    resolve: oneshot::Sender<AnswerChoice>,
 }
 
 #[derive(Default)]
@@ -110,20 +125,30 @@ impl ConfirmDialogCoordinator {
         message: impl Into<String>,
         options: Option<ConfirmDialogOptions>,
     ) -> Option<Confirmation> {
+        let options = options.unwrap_or_default();
+        let answer = self.request(ConfirmDialogRequest {
+            message: message.into(),
+            variant: options.variant,
+            initial_focus: options.initial_focus,
+            revert_files: None,
+        })?;
+        Some(
+            answer
+                .map(|answer| answer == AnswerChoice::Confirm)
+                .boxed_local(),
+        )
+    }
+
+    fn request(
+        &self,
+        request: ConfirmDialogRequest,
+    ) -> Option<LocalBoxFuture<'static, AnswerChoice>> {
         let mut inner = self.0.borrow_mut();
         if inner.listeners.is_empty() {
             return None;
         }
-        let options = options.unwrap_or_default();
         let (resolve, answer) = oneshot::channel();
-        let pending = PendingConfirmation {
-            request: ConfirmDialogRequest {
-                message: message.into(),
-                variant: options.variant,
-                initial_focus: options.initial_focus,
-            },
-            resolve,
-        };
+        let pending = PendingConfirmation { request, resolve };
         let queued =
             inner.active.is_some() || matches!(inner.state, ConfirmDialogState::Closing(_));
         if queued {
@@ -136,7 +161,7 @@ impl ConfirmDialogCoordinator {
         if !queued {
             self.publish();
         }
-        Some(answer.map(|answer| answer.unwrap_or(false)).boxed_local())
+        Some(answer.map(Result::unwrap_or_default).boxed_local())
     }
 
     pub fn is_confirm_dialog_active(&self) -> bool {
@@ -147,8 +172,25 @@ impl ConfirmDialogCoordinator {
     }
 
     pub fn respond_to_confirm_dialog(&self, confirmed: bool) {
+        self.respond(if confirmed {
+            AnswerChoice::Confirm
+        } else {
+            AnswerChoice::Cancel
+        });
+    }
+
+    fn respond(&self, choice: AnswerChoice) {
         let mut inner = self.0.borrow_mut();
         if !matches!(inner.state, ConfirmDialogState::Confirming(_)) {
+            return;
+        }
+        if choice == AnswerChoice::Alternative
+            && inner
+                .active
+                .as_ref()
+                .and_then(|request| request.request.revert_files)
+                != Some(true)
+        {
             return;
         }
         let Some(confirmation) = inner.active.take() else {
@@ -156,7 +198,7 @@ impl ConfirmDialogCoordinator {
         };
         inner.state = ConfirmDialogState::Closing(confirmation.request);
         drop(inner);
-        let _ = confirmation.resolve.send(confirmed);
+        let _ = confirmation.resolve.send(choice);
         self.publish();
     }
 
@@ -203,7 +245,7 @@ impl ConfirmDialogHostSubscription {
         inner.state = ConfirmDialogState::Idle;
         drop(inner);
         for pending in active.into_iter().chain(queued) {
-            let _ = pending.resolve.send(false);
+            let _ = pending.resolve.send(AnswerChoice::Cancel);
         }
         self.coordinator.publish();
     }
@@ -228,6 +270,29 @@ pub fn request_confirm_dialog(
     options: Option<ConfirmDialogOptions>,
 ) -> Option<Confirmation> {
     COORDINATOR.with(|coordinator| coordinator.request_confirm_dialog(message, options))
+}
+
+/// Shares the application confirmation host and its FIFO with ordinary confirmations.
+pub fn request_revert_dialog(
+    can_restore_files: bool,
+) -> Option<LocalBoxFuture<'static, Option<RevertChoice>>> {
+    let answer = COORDINATOR.with(|coordinator| {
+        coordinator.request(ConfirmDialogRequest {
+            message: String::new(),
+            variant: ConfirmDialogVariant::Default,
+            initial_focus: Some(ConfirmDialogInitialFocus::Cancel),
+            revert_files: Some(can_restore_files),
+        })
+    })?;
+    Some(
+        answer
+            .map(|answer| match answer {
+                AnswerChoice::Cancel => None,
+                AnswerChoice::Confirm => Some(RevertChoice::KeepChanges),
+                AnswerChoice::Alternative => Some(RevertChoice::RestoreFiles),
+            })
+            .boxed_local(),
+    )
 }
 
 pub fn is_confirm_dialog_active() -> bool {
@@ -307,7 +372,22 @@ pub fn confirm_dialog_host_with(coordinator: ConfirmDialogCoordinator) -> impl I
         alert_dialog_popup(state, AlertPopupOptions::default(), move || {
             let current = snapshot.get_untracked();
             let request = current.request();
-            let copy = resolve_confirm_dialog_copy(request.map_or("", |request| &request.message));
+            let revert_files = request.and_then(|request| request.revert_files);
+            let copy = if revert_files.is_some() {
+                ConfirmationCopy {
+                    title: Text::from("Edit from here?"),
+                    description: Some(Text::from(
+                        "Rewind chat to before this message. Your prompt and attachments return to the composer. “Revert files too” also undoes your own edits.",
+                    )),
+                }
+            } else {
+                resolve_confirm_dialog_copy(request.map_or("", |request| &request.message))
+            };
+            let confirm_label = if revert_files.is_some() {
+                t("Revert and keep changes")
+            } else {
+                t("Confirm")
+            };
             let variant = request.map_or(ConfirmDialogVariant::Default, |request| request.variant);
             let focus_confirm = request.is_some_and(|request| {
                 request.initial_focus == Some(ConfirmDialogInitialFocus::Confirm)
@@ -316,7 +396,7 @@ pub fn confirm_dialog_host_with(coordinator: ConfirmDialogCoordinator) -> impl I
             let action = if focus_confirm && variant == ConfirmDialogVariant::Default {
                 alert_dialog_action(
                     state,
-                    ButtonContent::Label(t("Confirm")),
+                    ButtonContent::Label(confirm_label),
                     ActionVariant::Default,
                     ButtonSize::Default,
                     || false,
@@ -325,7 +405,7 @@ pub fn confirm_dialog_host_with(coordinator: ConfirmDialogCoordinator) -> impl I
                 .into_element()
             } else {
                 button(
-                    ButtonContent::Label(t("Confirm")),
+                    ButtonContent::Label(confirm_label),
                     match variant {
                         ConfirmDialogVariant::Default => ButtonVariant::Default,
                         ConfirmDialogVariant::Destructive => ButtonVariant::Destructive,
@@ -348,24 +428,33 @@ pub fn confirm_dialog_host_with(coordinator: ConfirmDialogCoordinator) -> impl I
                     alert_dialog_description(state, move || description.clone()).into_element(),
                 );
             }
-            vec![
-                alert_dialog_header(state, header).into_element(),
-                alert_dialog_footer(
+            let mut footer = vec![
+                alert_dialog_close(
                     state,
-                    FooterVariant::Default,
-                    vec![
-                        alert_dialog_close(
-                            state,
-                            ButtonContent::Label(t("Cancel")),
-                            ButtonVariant::Outline,
-                            ButtonSize::Default,
-                            || false,
-                        )
-                        .into_element(),
-                        action,
-                    ],
+                    ButtonContent::Label(t("Cancel")),
+                    ButtonVariant::Outline,
+                    ButtonSize::Default,
+                    || false,
                 )
                 .into_element(),
+            ];
+            if let Some(can_restore_files) = revert_files {
+                let coordinator = coordinator.clone();
+                footer.push(
+                    button(
+                        ButtonContent::Label(t("Revert files too")),
+                        ButtonVariant::DestructiveOutline,
+                        ButtonSize::Default,
+                        move || !can_restore_files,
+                        move || coordinator.respond(AnswerChoice::Alternative),
+                    )
+                    .into_element(),
+                );
+            }
+            footer.push(action);
+            vec![
+                alert_dialog_header(state, header).into_element(),
+                alert_dialog_footer(state, FooterVariant::Default, footer).into_element(),
             ]
         })
     })
@@ -384,6 +473,7 @@ mod tests {
             message: message.into(),
             variant: ConfirmDialogVariant::Default,
             initial_focus,
+            revert_files: None,
         }
     }
 

@@ -5,20 +5,18 @@ use std::rc::Rc;
 use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_core::prelude::*;
 use t3_client::thread_views::messages_timeline::{MessagesTimelineRow, MessagesTimelineRowContent};
-use t3_client::types::ThreadKey;
-use t3_contracts::base_schemas::{MessageId, RunId};
+use t3_client::types::{ThreadId, ThreadKey};
+use t3_contracts::base_schemas::{MessageId, RunId, TurnItemId};
 
 use super::rows::assistant::{ForkHandler, ForkRequest};
 use super::rows::user::RevertAction;
-use crate::i18n::{Text, t};
+use crate::i18n::Text;
 use crate::state::nav::{Navigator, Route, navigator};
-use crate::ui::confirm::{
-    ConfirmDialogInitialFocus, ConfirmDialogOptions, ConfirmDialogVariant, request_confirm_dialog,
-};
+use crate::ui::confirm::{RevertChoice, request_revert_dialog};
 use futures::FutureExt;
 use t3_contracts::orchestration_v2_id_table::IdOrIndex;
 
-use crate::runtime::tasks::watch;
+use crate::runtime::tasks::{TaskOwner, watch};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RewindTarget {
@@ -86,7 +84,9 @@ pub trait TimelineRewindClient {
     ) -> LocalBoxFuture<'static, Result<String, RewindError>>;
     fn fork(
         &self,
-        key: ThreadKey,
+        viewed: ThreadKey,
+        source: ThreadId,
+        response: TurnItemId,
         run_id: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>>;
 }
@@ -99,7 +99,7 @@ pub struct RewindService(pub Rc<dyn TimelineRewindClient>);
 pub struct TimelineRewind {
     key: Stored<ThreadKey>,
     client: Stored<Option<Rc<dyn TimelineRewindClient>>>,
-    owner: Owner,
+    owner: TaskOwner,
     nav: Navigator,
     pending: Signal<bool>,
     pub reverting: Memo<bool>,
@@ -143,7 +143,7 @@ impl TimelineRewind {
         Self {
             key: stored(key),
             client: stored(client),
-            owner: Owner::current(),
+            owner: TaskOwner::here(),
             nav: navigator(),
             pending,
             reverting: computed(move || pending.get() || state.get().0),
@@ -162,13 +162,10 @@ impl TimelineRewind {
                         let IdOrIndex::Id(message_id) = &row.message.id else {
                             return;
                         };
-                        self.request_revert(
-                            RewindTarget {
-                                message_id: message_id.clone(),
-                                turn_count: count as u64,
-                            },
-                            false,
-                        );
+                        self.request_revert(RewindTarget {
+                            message_id: message_id.clone(),
+                            turn_count: count as u64,
+                        });
                     },
                 ) as RevertAction
             })
@@ -181,17 +178,14 @@ impl TimelineRewind {
         self.client.with(|client| {
             client.as_ref().map(|_| {
                 Rc::new(move |request: ForkRequest| {
-                    let (IdOrIndex::Id(source), IdOrIndex::Id(run_id)) =
-                        (request.source_thread_id, request.run_id)
-                    else {
+                    let (IdOrIndex::Id(source), IdOrIndex::Id(response), IdOrIndex::Id(run_id)) = (
+                        request.source_thread_id,
+                        request.source_item_id,
+                        request.run_id,
+                    ) else {
                         return futures::future::ready(Ok(())).boxed_local();
                     };
-                    let key = self.key.get();
-                    let source = ThreadKey {
-                        environment: key.environment,
-                        thread: source,
-                    };
-                    self.fork_thread(source, run_id).boxed_local()
+                    self.fork_thread(source, response, run_id).boxed_local()
                 }) as ForkHandler
             })
         })
@@ -207,73 +201,58 @@ impl TimelineRewind {
         })
     }
 
-    pub fn request_revert(self, target: RewindTarget, restore_files: bool) {
+    pub fn request_revert(self, target: RewindTarget) {
         if self.reverting.get_untracked() {
             return;
         }
         let availability = self.availability(&target);
-        if !availability.can_rewind || (restore_files && !availability.can_restore_files) {
+        if !availability.can_rewind {
             self.error.set(availability.reason);
             return;
         }
         let Some(client) = self.client.get() else {
             return;
         };
-        // UI-CONFIRM currently exposes only Confirm/Cancel; the source's three-choice seam is requested.
-        let Some(answer) = request_confirm_dialog(
-            format!(
-                "{}\n{}",
-                t("Edit from here?"),
-                t(
-                    "Rewind chat to before this message. Your prompt and attachments return to the composer. “Revert files too” also undoes your own edits."
-                )
-            ),
-            Some(ConfirmDialogOptions {
-                variant: ConfirmDialogVariant::Destructive,
-                initial_focus: Some(ConfirmDialogInitialFocus::Cancel),
-            }),
-        ) else {
+        let Some(answer) = request_revert_dialog(availability.can_restore_files) else {
             return;
         };
         self.pending.set(true);
-        self.owner.run(|| {
-            watch(async move {
-                let _pending = Pending(self.pending);
-                if !answer.await {
-                    return;
+        self.owner.spawn(async move {
+            let _pending = Pending(self.pending);
+            let Some(choice) = answer.await else {
+                return;
+            };
+            let restore_files = choice == RevertChoice::RestoreFiles;
+            let key = self.key.get();
+            let availability = client.availability(&key, &target);
+            if !availability.can_rewind || (restore_files && !availability.can_restore_files) {
+                self.error.set(availability.reason);
+                return;
+            }
+            self.error.set(None);
+            self.restored_prompt.set(None);
+            match client.rewind(key.clone(), target, restore_files).await {
+                Ok(prompt) if self.nav.top().thread() == Some(&key) => {
+                    self.restored_prompt.set(Some(prompt))
                 }
-                let key = self.key.get();
-                let availability = client.availability(&key, &target);
-                if !availability.can_rewind || (restore_files && !availability.can_restore_files) {
-                    self.error.set(availability.reason);
-                    return;
-                }
-                self.error.set(None);
-                self.restored_prompt.set(None);
-                match client.rewind(key.clone(), target, restore_files).await {
-                    Ok(prompt) if self.nav.top().thread() == Some(&key) => {
-                        self.restored_prompt.set(Some(prompt))
-                    }
-                    Ok(_) => {}
-                    Err(error) => self.error.set(Some(error)),
-                }
-            });
+                Ok(_) => {}
+                Err(error) => self.error.set(Some(error)),
+            }
         });
     }
 
-    pub fn on_fork_from_run(self, run_id: RunId) {
-        let key = self.key.get();
-        let fork = self.fork_thread(key, run_id);
-        self.owner.run(|| {
-            watch(async move {
-                let _ = fork.await;
-            })
+    pub fn on_fork_from_run(self, response: TurnItemId, run_id: RunId) {
+        let source = self.key.get().thread;
+        let fork = self.fork_thread(source, response, run_id);
+        self.owner.spawn(async move {
+            let _ = fork.await;
         });
     }
 
     fn fork_thread(
         self,
-        source: ThreadKey,
+        source: ThreadId,
+        response: TurnItemId,
         run_id: RunId,
     ) -> impl std::future::Future<Output = Result<(), String>> + 'static {
         let client = (!self.reverting.get_untracked())
@@ -282,13 +261,14 @@ impl TimelineRewind {
         if client.is_some() {
             self.pending.set(true);
         }
+        let viewed = self.key.get();
         async move {
             let Some(client) = client else {
                 return Ok(());
             };
             let _pending = Pending(self.pending);
             let _ = self.error.try_set(None);
-            match client.fork(source, run_id).await {
+            match client.fork(viewed, source, response, run_id).await {
                 Ok(target) => {
                     self.nav.open(Route::Thread(target));
                     Ok(())

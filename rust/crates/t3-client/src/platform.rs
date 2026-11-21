@@ -242,10 +242,6 @@ pub enum HostAction {
     /// A remote editor link (desktop: or a local editor file link), already checked by
     /// `external_links::safe_editor_link`; the web host navigates to it as TypeScript does.
     OpenEditorLink(String),
-    PickResources {
-        mime: Vec<String>,
-        multiple: bool,
-    },
     ReadResource {
         handle: String,
         max_bytes: usize,
@@ -302,7 +298,6 @@ pub enum HostReply {
     Text(Option<String>),
     Bytes(Vec<u8>),
     Mime(Vec<MimeData>),
-    Resources(Vec<HostResource>),
     Document(serde_json::Value),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,7 +367,6 @@ impl std::fmt::Debug for HostAction {
             Self::Haptic(_) => "Haptic",
             Self::OpenUrl(_) => "OpenUrl",
             Self::OpenEditorLink(_) => "OpenEditorLink",
-            Self::PickResources { .. } => "PickResources",
             Self::ReadResource { .. } => "ReadResource",
             Self::WriteResource { .. } => "WriteResource",
             Self::Share { .. } => "Share",
@@ -409,7 +403,6 @@ impl std::fmt::Debug for HostReply {
             Self::Document(_) => f.write_str("Document([redacted])"),
             Self::Bytes(v) => f.debug_tuple("Bytes").field(&v.len()).finish(),
             Self::Mime(v) => f.debug_tuple("Mime").field(&v.len()).finish(),
-            Self::Resources(v) => f.debug_tuple("Resources").field(&v.len()).finish(),
         }
     }
 }
@@ -552,27 +545,6 @@ pub trait Platform: Storage {
     /// What the client's auth and config allow (`ClientRuntime` publishes it from its first
     /// restore on). Hosts with app URL history republish it in their snapshots; others ignore it.
     fn set_route_policy(&self, _policy: crate::navigation::RoutePolicy) {}
-    /// Whether this host can open a file picker; the composer hides "Attach files" where it
-    /// cannot. A picker that fails anyway answers `Unsupported`, and a cancel an empty list.
-    fn can_pick_resources(&self) -> bool {
-        false
-    }
-    fn pick_resources(
-        &self,
-        mime: Vec<String>,
-        multiple: bool,
-    ) -> HostFuture<'_, Vec<HostResource>> {
-        async move {
-            match self
-                .host(HostAction::PickResources { mime, multiple })
-                .await?
-            {
-                HostReply::Resources(value) => Ok(value),
-                _ => Err(PlatformError::InvalidData("pick_resources reply".into())),
-            }
-        }
-        .boxed_local()
-    }
     fn read_resource(&self, handle: String, max_bytes: usize) -> HostFuture<'_, Vec<u8>> {
         async move {
             match self

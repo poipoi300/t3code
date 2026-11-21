@@ -85,11 +85,13 @@ impl TimelineRewindClient for Forks {
     }
     fn fork(
         &self,
-        source: ThreadKey,
+        viewed: ThreadKey,
+        source: ThreadId,
+        _: t3_contracts::base_schemas::TurnItemId,
         run: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
-        assert_eq!(source.thread.0, "source-thread");
-        assert_eq!(source.environment.0, "environment");
+        assert_eq!(source.0, "source-thread");
+        assert_eq!(viewed.environment.0, "environment");
         assert_eq!(run.0, "run");
         self.count.update(|count| *count += 1);
         let waiting = self.waiting.with(Option::take);
@@ -568,6 +570,8 @@ fn reply_puts_the_response_in_the_composers_replying_to_banner() {
         let mut app = Headless::start(config).expect("fixture");
         app.wait_for("Here is the plan for the parser.")
             .expect("assistant row");
+        app.wait_for("role:button[Attach files]")
+            .expect("the composer has opened its writable draft");
         assert!(!app.screen().shows("Replying to"));
         app.press("role:button[Reply to this response]")
             .expect("Reply is bound by the row's constructor");

@@ -5,6 +5,73 @@ use crate::thread_views::composer::{
 };
 use serde_json::json;
 
+pub(super) struct RewindIntake<P: Platform + Clone + 'static>(pub(super) std::rc::Weak<Inner<P>>);
+
+impl<P: Platform + Clone + 'static> crate::thread_views::thread_ops::rewind::RewindAttachments
+    for RewindIntake<P>
+{
+    fn ready(&self, _: &ThreadKey) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|inner| inner.composer_drafts.writable())
+    }
+
+    fn prepare(
+        &self,
+        key: ThreadKey,
+        attachments: Vec<t3_contracts::chat_attachment::ChatAttachment>,
+    ) -> LocalBoxFuture<
+        'static,
+        Result<
+            Box<dyn crate::thread_views::thread_ops::rewind::PreparedRewindAttachments>,
+            ClientError,
+        >,
+    > {
+        use crate::view_logic::chat_view::{AttachmentView, prepare_reverted_message_attachments};
+        use t3_contracts::rpc::WsAssetsCreateUrlRpc;
+
+        let inner = self.0.upgrade();
+        async move {
+            let runtime = ClientRuntime {
+                inner: inner.ok_or(ClientError::Cancelled)?,
+            };
+            let session = runtime.composer_attachments(&ComposerTarget::Thread(key.clone()))?;
+            let mut reservation = session.reserve_rewind(attachments.len())?;
+            if !attachments.is_empty() {
+                let client = runtime
+                    .client(&key.environment)
+                    .ok_or(ClientError::Disconnected)?;
+                let endpoint = client.session().ok_or(ClientError::Disconnected)?;
+                let base = client.http_base_url().ok_or(ClientError::Disconnected)?;
+                let attachments = attachments
+                    .into_iter()
+                    .map(|attachment| AttachmentView {
+                        attachment,
+                        preview_url: None,
+                        downloadable: true,
+                        resource: None,
+                    })
+                    .collect::<Vec<_>>();
+                let files = prepare_reverted_message_attachments(
+                    &runtime.inner.platform,
+                    &attachments,
+                    &base,
+                    |input| endpoint.call::<WsAssetsCreateUrlRpc>(input),
+                )
+                .await?;
+                for (attachment, file) in attachments.iter().zip(files) {
+                    reservation.prepare(&attachment.attachment, file)?;
+                }
+            }
+            Ok(Box::new(reservation)
+                as Box<
+                    dyn crate::thread_views::thread_ops::rewind::PreparedRewindAttachments,
+                >)
+        }
+        .boxed_local()
+    }
+}
+
 pub(super) struct AttachmentDriver {
     pub session: AttachmentSession,
     task: AbortHandle,

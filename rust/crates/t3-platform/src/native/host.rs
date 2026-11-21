@@ -35,31 +35,6 @@ pub(super) async fn dispatch(
     platform: &NativePlatform,
     action: HostAction,
 ) -> Result<HostReply, PlatformError> {
-    // Files this host picked itself; otherwise the shell's extension answers, as on mobile.
-    if let HostAction::PickResources { multiple, .. } = &action
-        && let Some(dialog) = &platform.inner.file_dialog
-    {
-        return super::files::pick(
-            dialog.as_ref(),
-            &platform.inner.picked,
-            |length| t3_client::platform::Platform::random_bytes(platform, length),
-            *multiple,
-        )
-        .await;
-    }
-    if let HostAction::ReadResource { handle, max_bytes } = &action
-        && platform.inner.picked.contains(handle)
-    {
-        let max_bytes = *max_bytes;
-        let path = super::files::read(&platform.inner.picked, handle, max_bytes)?;
-        return platform
-            .inner
-            .runtime
-            .spawn_blocking(move || super::files::read_bytes(&path, max_bytes))
-            .await
-            .map_err(|_| PlatformError::Cancelled)?
-            .map(HostReply::Bytes);
-    }
     match action {
         HostAction::DpopThumbprint => {
             let key = load_dpop_key(platform).await?;

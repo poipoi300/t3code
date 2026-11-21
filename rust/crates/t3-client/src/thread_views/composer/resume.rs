@@ -4,7 +4,11 @@
 //! Not ported: `persistThreadSettingsForNextTurn` (runtime mode and branch for the next turn). The
 //! Rust composer offers no runtime-mode control yet, so the thread's own settings are the ones the
 //! web would persist; the branch-mismatch case waits on the worktree lane.
-use t3_contracts::orchestration_v2::{CommandMessageDispatch, OrchestrationV2Command};
+use std::{cell::RefCell, collections::BTreeSet};
+use t3_contracts::orchestration_v2::{
+    CommandMessageDispatch, OrchestrationV2Command, OrchestrationV2CreationSource,
+    OrchestrationV2RunStatus,
+};
 use t3_contracts::rpc::WsOrchestrationV2DispatchCommandRpc;
 
 use crate::operations::{self, CommandOutcome, ComposerDispatchMode, OperationQueue};
@@ -13,7 +17,7 @@ use crate::rpc::SessionEndpoint;
 use crate::thread_views::threads::execution;
 use crate::{ClientError, composition::ClientRuntime, platform::Platform, types::ThreadKey};
 
-pub const RESUME_TEXT: &str = "Continue where you left off.";
+const RESUME_TEXT: &str = "Continue where you left off.";
 
 async fn dispatch<P: Platform>(
     platform: &P,
@@ -59,11 +63,24 @@ async fn dispatch<P: Platform>(
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Resumes(RefCell<BTreeSet<ThreadKey>>);
+
+struct ResumeGuard<'a>(&'a Resumes, &'a ThreadKey);
+
+impl Drop for ResumeGuard<'_> {
+    fn drop(&mut self) {
+        self.0.0.borrow_mut().remove(self.1);
+    }
+}
+
 /// `onResume`. Refuses (Cancelled) when the thread cannot resume or a resume is already running.
-pub async fn resume_thread<P: Platform + Clone + 'static>(
+pub(crate) async fn resume_thread<P: Platform + Clone + 'static>(
     runtime: &ClientRuntime<P>,
     platform: &P,
     key: &ThreadKey,
+    source: OrchestrationV2CreationSource,
+    resumes: &Resumes,
 ) -> Result<(), ClientError> {
     let endpoint = runtime
         .client(&key.environment)
@@ -75,25 +92,29 @@ pub async fn resume_thread<P: Platform + Clone + 'static>(
         .environments
         .get(&key.environment)
         .and_then(|environment| environment.threads.get(&key.thread))
+        .filter(|thread| thread.status == crate::types::SyncStatus::Live && !thread.resync_required)
         .and_then(|thread| thread.projection.clone())
         .ok_or(ClientError::Cancelled)?;
-    let millis = |date: &t3_contracts::wire::WireDateTime| {
-        crate::time::epoch_ms(&date.0).unwrap_or(0)
-    };
+    let millis =
+        |date: &t3_contracts::wire::WireDateTime| crate::time::epoch_ms(&date.0).unwrap_or(0);
     let summary = execution::derive_thread_structure_runtime(&projection, &millis);
     let resumable = execution::derive_resumable_run_id(&projection, summary.as_ref(), &millis);
-    let held = projection
-        .runs
-        .iter()
-        .any(|run| run.queue_held == Some(Some(true)));
-    if !execution::can_resume_thread(&projection.runtime_requests, resumable.as_ref(), held)
+    let held = projection.runs.iter().any(|run| {
+        run.status == OrchestrationV2RunStatus::Queued && run.queue_held == Some(Some(true))
+    });
+    if !execution::can_resume_thread(&projection.runtime_requests, resumable.as_ref(), held) {
+        return Err(ClientError::Cancelled);
+    }
+    if runtime
+        .composer_primary_actions(key)
+        .snapshot()
+        .is_send_busy
+        || runtime.timeline_rewind().rewind_state(key).reverting
+        || !resumes.0.borrow_mut().insert(key.clone())
     {
         return Err(ClientError::Cancelled);
     }
-    let flags = runtime.composer_thread_flags();
-    if !flags.begin_resume(key) {
-        return Err(ClientError::Cancelled);
-    }
+    let _resuming = ResumeGuard(resumes, key);
     let queue_resume = || -> Result<OrchestrationV2Command, ClientError> {
         Ok(serde_json::from_value(serde_json::json!({
             "type": "queue.resume",
@@ -101,37 +122,33 @@ pub async fn resume_thread<P: Platform + Clone + 'static>(
             "threadId": key.thread,
         }))?)
     };
-    let result = async {
-        let Some(run) = resumable else {
-            return dispatch(platform, &endpoint, key, queue_resume()?).await;
-        };
-        // Read before the first await, as the web does: the model the composer shows now.
-        let selection = runtime.composer_models(key).snapshot().selection.clone();
-        let input: CommandMessageDispatch = serde_json::from_value(serde_json::json!({
-            "commandId": operations::allocate_command_id(platform, None)?,
-            "threadId": key.thread,
-            "messageId": operations::allocate_command_id(platform, None)?.0,
-            "text": RESUME_TEXT,
-            "attachments": [],
-            "modelSelection": selection,
-            "createdBy": "user",
-            "creationSource": runtime.creation_source(),
-            "dispatchMode": {"type": "start_immediately"},
-            "manualContinuationOfRunId": run,
-        }))?;
-        dispatch(
-            platform,
-            &endpoint,
-            key,
-            operations::message_command(input, ComposerDispatchMode::Start),
-        )
-        .await?;
-        if held {
-            dispatch(platform, &endpoint, key, queue_resume()?).await?;
-        }
-        Ok(())
+    let Some(run) = resumable else {
+        return dispatch(platform, &endpoint, key, queue_resume()?).await;
+    };
+    // Read before the first await, as the web does: the model the composer shows now.
+    let selection = runtime.composer_models(key).snapshot().selection.clone();
+    let mut input = serde_json::json!({
+        "commandId": operations::allocate_command_id(platform, None)?,
+        "threadId": key.thread,
+        "messageId": operations::allocate_command_id(platform, None)?.0,
+        "text": RESUME_TEXT,
+        "attachments": [],
+        "createdBy": "user",
+        "creationSource": source,
+        "dispatchMode": {"type": "start_immediately"},
+        "manualContinuationOfRunId": run,
+    });
+    input["modelSelection"] = serde_json::to_value(selection)?;
+    let input: CommandMessageDispatch = serde_json::from_value(input)?;
+    dispatch(
+        platform,
+        &endpoint,
+        key,
+        operations::message_command(input, ComposerDispatchMode::Start),
+    )
+    .await?;
+    if held {
+        dispatch(platform, &endpoint, key, queue_resume()?).await?;
     }
-    .await;
-    flags.end_resume(key);
-    result
+    Ok(())
 }

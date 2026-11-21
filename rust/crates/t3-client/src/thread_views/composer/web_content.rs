@@ -26,7 +26,9 @@ pub fn dedup_key(file: &Value) -> String {
     )
 }
 pub fn needs_reattach(file: &Value) -> bool {
-    file.get("file") == Some(&Value::Null) && file.get("uploadedAttachmentId").is_none()
+    file.get("file") == Some(&Value::Null)
+        && file.get("uploadedAttachmentId").is_none()
+        && !file["dataUrl"].as_str().is_some_and(|url| !url.is_empty())
 }
 fn video(file: &Value) -> bool {
     let mime = string(file, "mimeType")

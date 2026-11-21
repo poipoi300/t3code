@@ -79,6 +79,8 @@ impl TimelineRewindClient for Client {
     fn fork(
         &self,
         _: ThreadKey,
+        _: t3_client::types::ThreadId,
+        _: t3_contracts::base_schemas::TurnItemId,
         run: RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, RewindError>> {
         assert_eq!(run.0, "run");
@@ -157,10 +159,13 @@ fn RewindFixture() -> impl IntoElement {
         .child(control("files", move || files.set(true)))
         .child(control("fail", move || fail.set(true)))
         .child(control("restore-files", move || {
-            rewind.request_revert(target.clone(), true)
+            rewind.request_revert(target.clone())
         }))
         .child(control("fork", move || {
-            rewind.on_fork_from_run(RunId("run".into()))
+            rewind.on_fork_from_run(
+                t3_contracts::base_schemas::TurnItemId("response".into()),
+                RunId("run".into()),
+            )
         }))
         .child(text(move || {
             SharedString::from(format!("Calls: {}", calls.get().len()))
@@ -210,10 +215,13 @@ fn MissingServiceFixture() -> impl IntoElement {
         .h_full()
         .child(user_message_row(projection, user))
         .child(control("direct-rewind", move || {
-            rewind.request_revert(target.clone(), true)
+            rewind.request_revert(target.clone())
         }))
         .child(control("fork", move || {
-            rewind.on_fork_from_run(RunId("run".into()))
+            rewind.on_fork_from_run(
+                t3_contracts::base_schemas::TurnItemId("response".into()),
+                RunId("run".into()),
+            )
         }))
         .child(text(move || SharedString::from(nav.top().path())))
         .child(text(move || {
@@ -281,7 +289,8 @@ fn cancel_keeps_the_thread_and_confirm_forwards_the_exact_user_target_once() {
         app.press("role:button[Edit from here]")
             .expect("edit again");
         app.wait_for("Edit from here?").expect("confirm again");
-        app.press("role:button[Confirm]").expect("confirm");
+        app.press("role:button[Revert and keep changes]")
+            .expect("confirm");
         app.wait_for("Calls: 1").expect("client called");
         app.wait_for("Busy: false").expect("completed");
         app.wait_for("Restored: Some(\"Restored prompt from client\")")
@@ -293,9 +302,13 @@ fn cancel_keeps_the_thread_and_confirm_forwards_the_exact_user_target_once() {
 #[test]
 fn client_denials_and_unavailable_file_restoration_never_dispatch() {
     let mut app = fixture(DESKTOP);
-    app.press("id:restore-files").expect("client refuses files");
+    app.press("id:restore-files").expect("open confirmation");
+    app.wait_for("Edit from here?").expect("confirmation");
+    let _ = app.press("role:button[Revert files too]");
     assert!(app.screen().shows("Calls: 0"));
-    assert!(!app.screen().shows("Edit from here?"));
+    app.press("role:button[Cancel]").expect("dismiss");
+    app.wait_for_gone("Edit from here?", std::time::Duration::from_secs(5))
+        .expect("dismissed");
     app.press("id:deny").expect("permission changed");
     app.press("role:button[Edit from here]")
         .expect("guarded action");
@@ -312,14 +325,16 @@ fn confirmation_rechecks_availability_and_failures_release_the_busy_state() {
     app.wait_for("Edit from here?").expect("confirm");
     app.press_key("ctrl+d")
         .expect("revoke client authorization while modal open");
-    app.press("role:button[Confirm]").expect("answer");
+    app.press("role:button[Revert and keep changes]")
+        .expect("answer");
     app.wait_for("Busy: false").expect("guard resolved");
     assert!(app.screen().shows("Calls: 0"));
     let mut app = fixture(DESKTOP);
     app.press("id:fail").expect("client error");
     app.press("role:button[Edit from here]").expect("edit");
     app.wait_for("Edit from here?").expect("confirm");
-    app.press("role:button[Confirm]").expect("answer");
+    app.press("role:button[Revert and keep changes]")
+        .expect("answer");
     app.wait_for("Failed to revert thread state.")
         .expect("error surfaced");
     app.wait_for("Busy: false").expect("error releases state");
@@ -333,12 +348,44 @@ fn a_rewind_result_never_replaces_the_new_threads_visible_prompt() {
     app.wait_for("Edit from here?").expect("confirm");
     app.press_key("ctrl+o")
         .expect("open another thread while deciding");
-    app.press("role:button[Confirm]")
+    app.press("role:button[Revert and keep changes]")
         .expect("confirm original target");
     app.wait_for("Calls: 1").expect("original thread operation");
     assert!(app.screen().shows("/environment/other"));
     assert!(app.screen().shows("Restored: None"));
     assert!(!app.screen().shows("Restored prompt from client"));
+}
+
+#[test]
+fn edit_from_here_offers_worktree_restore_as_a_separate_choice() {
+    for files in [false, true] {
+        let mut app = fixture(DESKTOP);
+        if files {
+            app.press("id:files").expect("isolated ready checkpoint");
+        }
+        app.press("role:button[Edit from here]").expect("edit");
+        app.wait_for("Edit from here?").expect("confirmation");
+        app.wait_for("role:button[Revert files too]")
+            .expect("separate file action");
+        assert_eq!(
+            app.screen()
+                .enabled("role:button[Revert files too]")
+                .expect("file action state"),
+            files,
+        );
+        let choice = if files {
+            "Revert files too"
+        } else {
+            "Revert and keep changes"
+        };
+        app.press(&format!("role:button[{choice}]"))
+            .expect("confirm");
+        app.wait_for("Calls: 1").expect("one rewind");
+        assert!(
+            app.screen()
+                .shows(&format!("Payload: [(\"prompt\", 0, {files})]"))
+        );
+    }
 }
 
 #[test]
@@ -348,7 +395,7 @@ fn isolated_files_are_explicit_and_fork_opens_only_the_clients_ready_target() {
         .expect("client reports isolated ready checkpoint");
     app.press("id:restore-files").expect("request files");
     app.wait_for("Edit from here?").expect("confirm files");
-    app.press("role:button[Confirm]").expect("answer");
+    app.press("role:button[Revert files too]").expect("answer");
     app.wait_for("Calls: 1").expect("dispatch");
     assert!(app.screen().shows("Payload: [(\"prompt\", 0, true)]"));
     app.press("id:fork").expect("fork");
@@ -424,7 +471,18 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
         {"position":0,"visibility":"local","sourceThreadId":"parent","sourceItemId":"user-item","item":prompt},
         {"position":1,"visibility":"local","sourceThreadId":"parent","sourceItemId":"assistant-item","item":answer}
     ]);
-    projection["thread"]["activeProviderThreadId"] = json!("pt");
+    let mut active_session: serde_json::Value = serde_json::from_str(
+        include_str!("../../../../fixtures/samples/OrchestrationV2ProviderSession.jsonl")
+            .lines()
+            .next()
+            .expect("sample"),
+    )
+    .expect("session");
+    active_session["id"] = json!("active-session");
+    active_session["capabilities"]["threads"]["canForkThread"] = json!(false);
+    active_session["capabilities"]["context"]["supportsFullThreadHandoff"] = json!(true);
+    projection["providerSessions"] = json!([active_session]);
+    projection["thread"]["activeProviderThreadId"] = json!("active-pt");
     projection["providerThreads"] = json!([{
         "id": "pt", "driver": "codex", "providerInstanceId": "codex",
         "providerSessionId": "session", "appThreadId": "parent", "ownerNodeId": null,
@@ -432,6 +490,13 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
         "firstRunOrdinal": 1, "lastRunOrdinal": 1, "handoffIds": [], "forkedFrom": null,
         "createdAt": at, "updatedAt": at,
     }]);
+    let mut active_thread = projection["providerThreads"][0].clone();
+    active_thread["id"] = json!("active-pt");
+    active_thread["providerSessionId"] = json!("active-session");
+    projection["providerThreads"]
+        .as_array_mut()
+        .expect("provider threads")
+        .push(active_thread);
     projection["checkpoints"] = json!([{
         "id": "root", "threadId": "parent", "scopeId": "scope", "runId": null,
         "nodeId": "root", "parentCheckpointId": null, "ordinalWithinScope": 0,

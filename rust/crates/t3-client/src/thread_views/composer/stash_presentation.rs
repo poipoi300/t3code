@@ -22,7 +22,7 @@ fn js_space(c: char) -> bool {
 }
 
 /// packages/shared/src/assistantCitations.ts assistantCitationsToPlainText.
-fn plain_text(prompt: &str) -> String {
+pub(crate) fn plain_text(prompt: &str) -> String {
     let source: Vec<_> = prompt.encode_utf16().collect();
     let mut result = String::new();
     let mut cursor = 0;

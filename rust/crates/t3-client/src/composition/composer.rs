@@ -195,6 +195,25 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         ComposerActionsSession::new(self.clone(), key.clone())
     }
 
+    pub fn resume_thread(
+        &self,
+        key: &ThreadKey,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let runtime = self.clone();
+        let key = key.clone();
+        async move {
+            crate::thread_views::composer::resume::resume_thread(
+                &runtime,
+                &runtime.inner.platform,
+                &key,
+                runtime.inner.source.clone(),
+                &runtime.inner.composer_resumes,
+            )
+            .await
+        }
+        .boxed_local()
+    }
+
     pub fn interrupt_thread(
         &self,
         key: &ThreadKey,

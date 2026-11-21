@@ -323,12 +323,14 @@ impl<P: Platform + Clone + 'static> crate::screens::thread::rewind::TimelineRewi
     }
     fn fork(
         &self,
-        key: ThreadKey,
+        viewed: ThreadKey,
+        source: t3_client::types::ThreadId,
+        response: t3_contracts::base_schemas::TurnItemId,
         run_id: t3_contracts::base_schemas::RunId,
     ) -> LocalBoxFuture<'static, Result<ThreadKey, crate::screens::thread::rewind::RewindError>>
     {
         self.0
-            .fork(key, run_id)
+            .fork_from_response(viewed, source, response, run_id)
             .map(|r| r.map_err(rewind_error))
             .boxed_local()
     }
@@ -413,13 +415,13 @@ pub fn secret_requests<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
 ) -> crate::screens::thread::rows::secret_request::SecretRequestService {
     crate::screens::thread::rows::secret_request::SecretRequestService(Rc::new(
-        SecretRequestBinding(t3_client::thread_views::secret_request::SecretRequests::new(
-            client.clone(),
-        )),
+        SecretRequestBinding(
+            t3_client::thread_views::secret_request::SecretRequests::new(client.clone()),
+        ),
     ))
 }
-impl<P: Platform + Clone + 'static> crate::screens::thread::rows::secret_request::SecretRequestClient
-    for SecretRequestBinding<P>
+impl<P: Platform + Clone + 'static>
+    crate::screens::thread::rows::secret_request::SecretRequestClient for SecretRequestBinding<P>
 {
     fn answer(
         &self,

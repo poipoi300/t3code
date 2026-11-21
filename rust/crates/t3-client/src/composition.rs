@@ -146,6 +146,7 @@ struct Inner<P: Platform + Clone + 'static> {
     composer_drafts: Rc<crate::thread_views::composer::draft_service::ComposerDraftService<P>>,
     composer_preferences: Rc<crate::thread_views::composer::preferences::ComposerPreferences<P>>,
     composer_models: Rc<crate::thread_views::composer::model_service::ComposerModelState>,
+    composer_resumes: crate::thread_views::composer::resume::Resumes,
     composer_updates: crate::services::updates::ServerUpdateService,
     composer_update_dismissals: crate::thread_views::composer::banners::UpdateDismissals,
     composer_stash: Rc<crate::thread_views::composer::stash_service::PromptStashState>,
@@ -272,7 +273,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .map(|_| ())
             .boxed_local(),
         );
-        Self {
+        let runtime = Self {
             inner: Rc::new(Inner {
                 navigation: crate::navigation::UrlClient::new(platform.clone()),
                 new_threads: Rc::default(),
@@ -280,6 +281,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 composer_preferences,
                 composer_task,
                 composer_models: Rc::default(),
+                composer_resumes: Default::default(),
                 composer_updates: Default::default(),
                 composer_update_dismissals: Rc::default(),
                 composer_stash: Rc::default(),
@@ -307,7 +309,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 storage_notice: RefCell::default(),
                 restored: std::cell::Cell::default(),
             }),
-        }
+        };
+        runtime.timeline_rewind().bind_rewind_attachments(Rc::new(
+            composer_attachments::RewindIntake(Rc::downgrade(&runtime.inner)),
+        ));
+        runtime
     }
 
     /// The agent sign-in consent of the environment that serves the page at `origin`

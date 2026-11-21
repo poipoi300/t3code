@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 use futures::StreamExt;
 use nsh_base::rich_editor::view::RichEditorPastedFiles;
+use nsh_core::picker::{FilePickRequest, PickedStatus};
 use nsh_core::prelude::*;
 use t3_client::ClientError;
 use t3_client::platform::HostResource;
-use t3_client::services::assets::format_attachment_size;
+use t3_client::services::assets::{file_attachment_too_large_message, format_attachment_size};
 use t3_client::thread_views::composer::attachment_intake::{
     AttachmentItem, AttachmentSession, IncomingFile, UploadState, resource_from_uri,
     should_handle_paste,
@@ -21,7 +22,7 @@ use crate::ui::dialog::{PopupOptions, dialog, dialog_popup};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
-use crate::runtime::tasks::watch;
+use crate::runtime::tasks::{TaskOwner, watch};
 
 /// The thread host shares this handle with the footer, strip and editor's file-paste callback.
 #[derive(Clone, Copy)]
@@ -33,11 +34,8 @@ pub struct ComposerAttachments {
     error: Signal<Option<UiText>>,
     preview: Signal<Option<AttachmentItem>>,
     preview_open: Signal<bool>,
-    /// False once the host reported it has no file picker; the control is then hidden, as the
-    /// web hides it when attaching is unavailable.
-    picker: Signal<bool>,
-    /// Tasks started from presses run under the composer's owner, not a row a change disposes.
-    owner: Owner,
+    picking: Signal<bool>,
+    owner: TaskOwner,
 }
 
 /// One handle per session: equal when they are the same handle (its signals are).
@@ -67,20 +65,13 @@ impl ComposerAttachments {
             error: signal(None),
             preview: signal(None),
             preview_open: signal(false),
-            picker: signal(true),
-            owner: Owner::current(),
+            picking: signal(false),
+            owner: TaskOwner::here(),
         }
     }
 
-    /// Whether this host can pick files (false after it answered that it cannot).
     pub fn picker_available(self) -> bool {
-        self.picker.get()
-    }
-
-    fn spawn(self, task: impl std::future::Future<Output = ()> + 'static) {
-        self.owner.run(move || {
-            watch(task);
-        });
+        crate::host::file_picker_granted()
     }
 
     pub fn items(self) -> Rc<Vec<AttachmentItem>> {
@@ -112,32 +103,70 @@ impl ComposerAttachments {
     }
 
     pub fn pick(self, focus: Rc<dyn Fn()>) {
-        if self.disabled.get_untracked() {
+        if self.disabled.get_untracked() || self.picking.get_untracked() || !self.picker_available()
+        {
             return;
         }
         let client = self.client.get();
         self.error.set(None);
-        self.spawn(async move {
-            let files = match client.pick_resources().await {
-                Ok(files) => files,
-                // No native picker on this host: hide the control rather than show the host's
-                // error text.
-                Err(ClientError::Platform(t3_client::platform::PlatformError::Unsupported(_))) => {
-                    self.picker.set(false);
-                    return;
-                }
-                Err(error) => {
-                    self.report(Err(error));
-                    return;
-                }
-            };
-            if self.disabled.get_untracked() {
+        let Some(limit) = client.capabilities().staging_limit() else {
+            self.error.set(Some(UiText::from(
+                "This server does not support file attachments.",
+            )));
+            return;
+        };
+        let slots = client.remaining_slots();
+        if slots == 0 {
+            self.error.set(Some(UiText::content(tr(
+                "You can attach up to {count} files per message.",
+                &[(
+                    "count",
+                    Value::Int(
+                        t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS as i64,
+                    ),
+                )],
+            ))));
+            return;
+        }
+        self.picking.set(true);
+        let answer = pick_files(FilePickRequest::new(true, slots as u32).max_size(limit));
+        self.owner.spawn(async move {
+            let picked = answer.await;
+            self.picking.set(false);
+            if picked.is_empty() || self.disabled.get_untracked() {
                 return;
             }
+            let mut files = Vec::new();
+            let mut size_error = None;
+            for file in picked {
+                match file.status {
+                    PickedStatus::Read => files.push(IncomingFile {
+                        name: file.name,
+                        mime: file.mime,
+                        bytes: file.data.bytes().to_vec(),
+                        source: None,
+                        insertion: None,
+                    }),
+                    PickedStatus::TooLarge => {
+                        size_error.get_or_insert_with(|| {
+                            file_attachment_too_large_message(&file.name, limit)
+                        });
+                    }
+                    _ => {}
+                }
+            }
             let before = client.draft()["prompt"].clone();
-            self.report(client.intake(files).await);
+            let intake = client.intake_bytes(files).await;
+            let has_picker_error = size_error.is_some() || intake.is_err();
+            self.report(intake);
+            if let Some(error) = size_error {
+                self.error.set(Some(UiText::content(error)));
+            }
             client.save_images().await;
-            self.report(client.upload_pending().await);
+            let upload = client.upload_pending().await;
+            if !has_picker_error {
+                self.report(upload);
+            }
             if client.draft()["prompt"] == before {
                 focus();
             }
@@ -236,7 +265,7 @@ impl ComposerAttachments {
     fn intake(self, files: Vec<IncomingFile>, resources: Vec<HostResource>) {
         let client = self.client.get();
         self.error.set(None);
-        self.spawn(async move {
+        self.owner.spawn(async move {
             self.report(client.intake_bytes(files).await);
             self.report(client.intake(resources).await);
             client.save_images().await;
@@ -261,7 +290,7 @@ impl ComposerAttachments {
             tr("Remove {name} from the message?\nIt is referenced in your text; removing it also removes every reference.", &[("name", Value::Text(name))]),
             Some(ConfirmDialogOptions { variant: ConfirmDialogVariant::Destructive, ..Default::default() }),
         ));
-        self.spawn(async move {
+        self.owner.spawn(async move {
             if let Some(confirmation) = confirmation {
                 // The native confirm host treats an unmounted host as cancellation.
                 if !match confirmation {
@@ -289,7 +318,7 @@ impl ComposerAttachments {
             return;
         }
         let client = self.client.get();
-        self.spawn(async move {
+        self.owner.spawn(async move {
             self.report(client.upload(&id).await);
         });
     }
@@ -320,7 +349,7 @@ pub fn composer_attach_button(
             },
             ButtonVariant::Ghost,
             ButtonSize::IconSm,
-            move || state.disabled.get(),
+            move || state.disabled.get() || state.picking.get(),
             move || state.pick(focus.clone()),
         ),
         UiText::from("Attach files"),

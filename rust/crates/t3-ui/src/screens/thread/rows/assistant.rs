@@ -157,6 +157,7 @@ pub type ReplyHandler = Rc<dyn Fn(ReplyRequest) -> Result<(), String>>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForkRequest {
     pub source_thread_id: IdOrIndex<ThreadId>,
+    pub source_item_id: IdOrIndex<t3_contracts::base_schemas::TurnItemId>,
     pub run_id: IdOrIndex<RunId>,
 }
 
@@ -1127,6 +1128,7 @@ pub fn assistant_fork_button(
                         }
                         let future = on_fork(ForkRequest {
                             source_thread_id: projected.source_thread_id.clone(),
+                            source_item_id: projected.source_item_id.clone(),
                             run_id,
                         });
                         let id = id.clone();

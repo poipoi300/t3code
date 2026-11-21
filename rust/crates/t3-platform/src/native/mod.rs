@@ -4,12 +4,10 @@
 //! current-thread runtime driving them, or any executor while a multi-thread runtime runs).
 //! Network work runs as runtime tasks and storage on its blocking pool; dropping a returned
 //! future cancels the request, and a dropped storage call still commits or rolls back whole.
-mod files;
 mod history;
-pub use files::FileDialog;
+mod host;
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod proxy;
-mod host;
 mod http;
 mod secret;
 mod socket;
@@ -75,9 +73,6 @@ pub struct NativeConfig {
     /// DER certificates trusted in addition to the OS trust store on desktop (or the Mozilla
     /// roots on mobile): a deployment's own CA, or a test's.
     pub extra_roots: Vec<Vec<u8>>,
-    /// The file picker for attachments: the OS dialog on desktop; on mobile the shell's
-    /// extension answers instead, until a native picker lands.
-    pub file_dialog: Option<Box<dyn FileDialog>>,
 }
 impl NativeConfig {
     pub fn new(data_dir: impl Into<PathBuf>, secrets: Box<dyn SecretKeyStore>) -> Self {
@@ -90,16 +85,12 @@ impl NativeConfig {
             launch_url: None,
             extra_roots: Vec::new(),
             timeouts: Timeouts::default(),
-            file_dialog: None,
         }
     }
     /// Desktop default: the storage key lives in the OS credential store.
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     pub fn desktop(data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            file_dialog: Some(Box::new(files::SystemFileDialog)),
-            ..Self::new(data_dir, <dyn SecretKeyStore>::os_default())
-        }
+        Self::new(data_dir, <dyn SecretKeyStore>::os_default())
     }
     /// Mobile default: on Android the storage key is wrapped by an Android Keystore key (call
     /// `set_android_vm` first); on iOS it is a keychain item.
@@ -132,8 +123,6 @@ struct Inner {
     report: OpenReport,
     launch_url: Option<String>,
     history: std::cell::RefCell<history::MemoryHistory>,
-    file_dialog: Option<Box<dyn FileDialog>>,
-    picked: files::PickedFiles,
 }
 
 #[derive(Clone)]
@@ -209,7 +198,6 @@ impl NativePlatform {
             timeouts,
             launch_url,
             extra_roots,
-            file_dialog,
         } = config;
         // A plain thread: OS key stores may block, and some start their own async runtime.
         let (tx, rx) = oneshot::channel();
@@ -240,8 +228,6 @@ impl NativePlatform {
                         .and_then(t3_client::navigation::app_path),
                 )),
                 launch_url,
-                file_dialog,
-                picked: files::PickedFiles::default(),
             }),
         })
     }
@@ -383,9 +369,6 @@ impl Platform for NativePlatform {
 
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
         self.inner.events.subscribe()
-    }
-    fn can_pick_resources(&self) -> bool {
-        self.inner.file_dialog.is_some()
     }
     fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
         self.inner.history.borrow_mut().set_policy(policy);

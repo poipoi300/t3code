@@ -2,7 +2,6 @@
 //!
 //! Storage is the IndexedDB database `t3code:client`; the TypeScript client's databases are
 //! read-only legacy sources (see the README for the mapping).
-mod files;
 mod history;
 mod host;
 mod http;
@@ -72,7 +71,6 @@ struct Inner {
     extension: Option<Rc<dyn HostExtension>>,
     dpop: futures::lock::Mutex<Option<host::BrowserDpopKey>>,
     history: history::BrowserHistory,
-    picked: files::PickedFiles,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -156,7 +154,6 @@ impl WebPlatform {
                 presentation: config.presentation,
                 extension: config.extension,
                 dpop: futures::lock::Mutex::new(None),
-                picked: files::PickedFiles::default(),
             }),
         })
     }
@@ -392,9 +389,6 @@ impl Platform for WebPlatform {
 
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
         self.inner.events.subscribe()
-    }
-    fn can_pick_resources(&self) -> bool {
-        true
     }
     fn set_route_policy(&self, policy: t3_client::navigation::RoutePolicy) {
         self.inner.history.set_policy(policy);

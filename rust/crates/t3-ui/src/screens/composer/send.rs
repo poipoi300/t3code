@@ -15,6 +15,9 @@ use t3_client::thread_views::composer::submission::{
     PromptLengthValidation, get_composer_prompt_length_validation_message,
 };
 use t3_client::thread_views::outbox::DispatchMode;
+use t3_client::thread_views::threads::workflows::{
+    derive_thread_queue_workflow_state, queued_message_preview,
+};
 use t3_client::types::ThreadKey;
 use t3_contracts::base_schemas::MessageId;
 
@@ -812,14 +815,126 @@ pub fn pending_message(
             .app_class(tw("text-sm text-destructive")))))
 }
 
+/// QueuedRunsControl's projected queue at the end of the shared timeline, after the turn rows.
+fn queued_runs(key: ThreadKey) -> impl IntoElement {
+    use t3_contracts::{chat_attachment::ChatAttachment, orchestration_v2_id_table::IdOrIndex};
+
+    let projection = crate::runtime::rt().store.thread(key);
+    let queued = computed(move || {
+        let Some(view) = projection.get() else {
+            return Vec::new();
+        };
+        derive_thread_queue_workflow_state(&view.source())
+            .queued_runs
+            .into_iter()
+            .map(|row| {
+                let message = view
+                    .messages
+                    .iter()
+                    .find(|message| message.id == row.run.user_message_id);
+                (
+                    row.run.id.clone(),
+                    message.cloned().map(crate::runtime::Shared),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let rows = computed(move || {
+        queued.with(|rows| {
+            rows.iter()
+                .map(|(run, message)| {
+                    let prompt = message.as_ref().map_or_else(
+                        || Text::from("Queued message"),
+                        |message| Text::content(queued_message_preview(message)),
+                    );
+                    let attachments = message
+                        .iter()
+                        .flat_map(|message| &message.attachments)
+                        .filter_map(|attachment| match attachment {
+                            ChatAttachment::Image(image) => Some(image.name.clone()),
+                            ChatAttachment::File(file) => Some(file.name.clone()),
+                            ChatAttachment::Unknown(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    (run.clone(), prompt, attachments)
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let expanded = signal(false);
+    let count = computed(move || rows.with(Vec::len));
+    let list = view().role(AccessibilityRole::List)
+        .label(move || SharedString::from(tr("{count} queued", &[("count", Value::Int(count.get() as i64))])))
+        .app_class(tw("flex flex-col items-end gap-3"))
+        .child(each(
+            move || {
+                let mut rows = rows.get();
+                if rows.len() > 3 && !expanded.get() {
+                    rows.truncate(2);
+                }
+                rows
+            },
+            |(run, ..)| match run {
+                IdOrIndex::Id(id) => (Some(id.0.clone()), None),
+                IdOrIndex::Index(index) => (None, Some(*index)),
+            },
+            move |row, index| {
+                view().role(AccessibilityRole::Group)
+                    .label(move || SharedString::from(tr("Queued message {position} of {count}, not sent", &[
+                        ("position", Value::Int(index.get() as i64 + 1)),
+                        ("count", Value::Int(count.get() as i64)),
+                    ])))
+                    .app_class(tw("group/queued flex w-full flex-col items-end gap-1"))
+                    .child(view().app_class(tw("flex min-w-0 max-w-[80%] flex-col rounded-2xl border border-dashed text-sm border-muted-foreground/40 text-muted-foreground px-3 py-2"))
+                        .child(view().app_class(tw("flex flex-col gap-2"))
+                            .child(dynamic(move || row.with(|(_, _, attachments)| {
+                                view().children(attachments.iter().cloned().map(|name| text(SharedString::from(name))))
+                            })))
+                            .child(text(move || row.with(|(_, prompt, _)| prompt.resolve())).select_text())))
+            },
+        ));
+    let toggle = dynamic(move || {
+        (count.get() > 3).then(|| {
+            untracked(|| {
+                view().app_class(tw("self-end pe-1 text-xs")).child(
+                    nsh_base::button()
+                        .on_press(move || expanded.update(|value| *value = !*value))
+                        .child(text(move || {
+                            if expanded.get() {
+                                t("Show fewer")
+                            } else {
+                                tr(
+                                    "Show all {count} queued",
+                                    &[("count", Value::Int(count.get() as i64))],
+                                )
+                            }
+                        })),
+                )
+            })
+        })
+    });
+    view()
+        .app_class(move || {
+            tw(if count.get() == 0 {
+                "hidden"
+            } else {
+                "relative mx-auto flex w-full max-w-(--chat-content-max-width) flex-col gap-2 pb-4"
+            })
+        })
+        .child(list)
+        .child(toggle)
+}
+
 /// Mount below the projected rows, inside their existing scroller; U2 already removes acknowledged ids.
 pub fn pending_messages(
     client: Rc<dyn ComposerSendClient>,
     key: ThreadKey,
     pending: PendingMessages,
 ) -> impl IntoElement {
+    let queue = queued_runs(key.clone());
     view()
         .app_class(tw("flex flex-col"))
+        .child(queue)
         .child(dynamic(move || {
             let messages = pending.messages.get();
             let client = client.clone();

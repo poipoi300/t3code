@@ -4,6 +4,7 @@
 //! web's disconnected behaviour is the subject.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{FutureExt, StreamExt};
@@ -20,6 +21,7 @@ use t3_contracts::orchestration_v2::{
 };
 use t3_ui::keys::bindings::{Keybindings, keyboard_events};
 use t3_ui::runtime::{Rt, backend::Unavailable, host::Choice};
+use t3_ui::screens::composer::send::{PendingMessages, pending_messages};
 use t3_ui::screens::thread::composer::thread_composer;
 use t3_ui::state::nav::{Navigator, Route};
 
@@ -94,6 +96,7 @@ fn seed(store: &ClientStore, question: bool) {
 struct FixtureProps {
     connected: bool,
     question: bool,
+    run_status: Option<String>,
 }
 
 /// The production composer under a client runtime, with what a test can observe: mounting
@@ -118,8 +121,46 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
         });
     });
     let server = FakeEnvironment::new("env", spawner.clone());
-    server.set_shell(shell());
-    server.set_thread("thread-a", projection(props.question));
+    let replay = props.run_status.as_deref() == Some("replay");
+    let mut thread_shell = shell();
+    let mut detail = projection(props.question);
+    if replay {
+        for row in thread_shell["threads"].as_array_mut().expect("threads") {
+            row["providerInstanceId"] = json!("devReplay");
+            row["modelSelection"] = json!({"instanceId":"devReplay","model":"showcase"});
+        }
+        detail["thread"]["providerInstanceId"] = json!("devReplay");
+        detail["thread"]["modelSelection"] = json!({"instanceId":"devReplay","model":"showcase"});
+    } else if let Some(status) = props.run_status.as_deref() {
+        let at = environment::NOW;
+        detail["runs"] = json!([{"id":"run-1","threadId":"thread-a","ordinal":1,
+            "providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"gpt-5.4"},
+            "providerThreadId":null,"userMessageId":"message-1","rootNodeId":null,
+            "activeAttemptId":null,"status":status,"requestedAt":at,"startedAt":at,
+            "completedAt":(status == "interrupted").then_some(at),"checkpointId":null,"contextHandoffId":null}]);
+        if status == "queued" {
+            detail["messages"] = json!([{"id":"message-1","threadId":"thread-a","runId":"run-1",
+                "nodeId":null,"role":"user","text":"Follow up after the running turn","attachments":[],
+                "streaming":false,"createdBy":"user","creationSource":"web","createdAt":at,"updatedAt":at}]);
+        }
+    }
+    server.set_shell(thread_shell);
+    server.set_thread("thread-a", detail);
+    server.edit_config(|config| {
+        config["environment"]["capabilities"]["fileAttachments"] = json!({"maxUploadBytes":1024});
+        if replay {
+            config["settings"]["providerInstances"]["devReplay"] =
+                json!({"driver":"acpRegistry","displayName":"Replay (dev)"});
+            config["environment"]["capabilities"].as_object_mut().expect("capabilities").remove("modelCatalogRefresh");
+            config["providers"] = json!([{
+                "instanceId":"devReplay","driver":"acpRegistry","displayName":"Replay (dev)",
+                "enabled":true,"installed":true,"version":null,"status":"ready",
+                "auth":{"status":"unknown"},"checkedAt":environment::NOW,
+                "models":[{"slug":"showcase","name":"Showcase","isCustom":false,"capabilities":null}],
+                "slashCommands":[],"skills":[]
+            }]);
+        }
+    });
     let client = ClientRuntime::new(
         server.platform(),
         store.clone(),
@@ -193,6 +234,13 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
     let dispatches = signal(Vec::<Value>::new());
     let searches = signal(0_usize);
     let mounted = signal(true);
+    let sender: Rc<dyn t3_ui::screens::composer::send::ComposerSendClient> =
+        Rc::new(client.clone());
+    let tail = pending_messages(
+        sender.clone(),
+        key(),
+        PendingMessages::attach(sender, key()),
+    );
     let content = view()
         .w_full()
         .h_full()
@@ -239,6 +287,7 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
         .child(text(move || {
             format!("Timeline derivations {}", timeline_runs.get())
         }))
+        .child(tail)
         .child(dynamic(move || {
             mounted.get().then(|| {
                 let client = client.clone();
@@ -252,12 +301,24 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
 }
 
 fn start(window: (f32, f32), connected: bool, question: bool) -> Headless {
+    start_with(window, connected, question, None, None)
+}
+
+fn start_with(
+    window: (f32, f32),
+    connected: bool,
+    question: bool,
+    run_status: Option<&'static str>,
+    picker: Option<Arc<dyn nsh_core::picker::PickerBackend>>,
+) -> Headless {
     let mut config = EngineConfig {
+        picker,
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::new::<ComposerFixture>(move || FixtureProps {
             connected,
             question,
+            run_status: run_status.map(str::to_owned),
         }))
     };
     if question {
@@ -303,6 +364,8 @@ fn wait_for_dispatch(app: &mut Headless, pattern: &str) {
 fn a_draft_survives_leaving_and_returning_to_the_thread() {
     for window in [DESKTOP, PHONE] {
         let mut app = start(window, false, false);
+        app.wait_for("role:button[Attach files]")
+            .expect("the composer has opened its writable draft");
         app.type_text("id:composer-editor", "keep this draft")
             .expect("type into the editor");
         app.wait_for("Client draft \"keep this draft\"")
@@ -491,18 +554,102 @@ fn the_send_button_sends_once_and_the_composer_settles() {
     }
 }
 
-/// A host without a file picker (the fake platform answers Unsupported) hides Attach files and
-/// never shows the host's error text.
 #[test]
-fn attach_on_a_host_without_a_picker_hides_the_control_without_an_error() {
-    for window in [DESKTOP, PHONE] {
-        let mut app = start(window, true, false);
-        app.press("role:button[Attach files]").expect("attach");
-        app.wait_for_gone("role:button[Attach files]", Duration::from_secs(5))
-            .expect("the control is hidden");
-        assert!(
-            !app.screen().shows("unsupported host capability"),
-            "no raw host error"
-        );
+fn resume_continues_the_interrupted_run_through_the_client() {
+    let mut app = start_with(DESKTOP, true, false, Some("interrupted"), None);
+    app.press("role:button[Resume thread]").expect("resume");
+    wait_for_dispatch(&mut app, r#""manualContinuationOfRunId":"run-1""#);
+    app.wait_for("text:/Last dispatch .*Continue where you left off/")
+        .expect("the web's continuation text");
+}
+
+#[test]
+fn a_queued_follow_up_is_visible_after_the_server_projects_it() {
+    let mut app = start_with(DESKTOP, true, false, Some("queued"), None);
+    app.wait_for("Follow up after the running turn")
+        .expect("queued prompt");
+}
+
+#[test]
+fn submitting_with_an_at_trigger_open_closes_the_menu_and_allows_a_new_trigger() {
+    let mut app = start(DESKTOP, true, false);
+    app.type_text("id:composer-editor", "Send with @Parser")
+        .expect("type");
+    app.wait_for("Parser rewrite").expect("suggestion menu");
+    app.press("role:button[Submit message]")
+        .expect("send by button");
+    app.wait_for("Client draft \"\"").expect("sent");
+    app.wait_for_gone("role:option", Duration::from_secs(5))
+        .expect("closed");
+    app.type_text("id:composer-editor", "@Parser")
+        .expect("new trigger");
+    app.wait_for("Parser rewrite")
+        .expect("suggestions for the new draft");
+}
+
+struct TestPicker(Vec<nsh_core::picker::PickedFile>);
+
+impl nsh_core::picker::PickerBackend for TestPicker {
+    fn pick_images(&self, _: nsh_core::picker::PickRequest) -> nsh_core::picker::PickFuture {
+        unreachable!("Attach files uses the multi-file picker")
     }
+
+    fn pick_files(
+        &self,
+        request: nsh_core::picker::FilePickRequest,
+    ) -> nsh_core::picker::PickFuture {
+        assert_eq!(request.size_limit(), 1024);
+        Box::pin(std::future::ready(self.0.clone()))
+    }
+}
+
+#[test]
+fn native_picker_attaches_readable_files_and_shows_the_size_error() {
+    use nsh_core::picker::PickedFile;
+
+    let picker = Arc::new(TestPicker(vec![
+        PickedFile::new(
+            "note.txt",
+            "text/plain",
+            nsh_core::ImageData::new(b"note".to_vec()),
+        ),
+        PickedFile::too_large("large.txt", "text/plain", 2048),
+    ]));
+    let mut app = start_with(DESKTOP, true, false, None, Some(picker));
+    app.press("role:button[Attach files]").expect("attach");
+    app.wait_for("note.txt").expect("picked file on the strip");
+    app.wait_for("'large.txt' exceeds the 1 KB attachment limit.")
+        .expect("size rejection is visible");
+}
+
+#[test]
+fn cancelling_the_picker_keeps_attach_available_and_shows_no_error() {
+    let picker = Arc::new(TestPicker(Vec::new()));
+    let mut app = start_with(PHONE, true, false, None, Some(picker));
+    app.press("role:button[Attach files]").expect("attach");
+    app.wait_until(
+        "the attachment picker is usable again",
+        Duration::from_secs(5),
+        |screen| screen.enabled("role:button[Attach files]").unwrap_or(false),
+    )
+    .expect("the picker returned");
+    assert!(
+        !app.screen()
+            .matches("role:alert")
+            .expect("no attachment message")
+    );
+}
+
+#[test]
+fn the_model_picker_suppresses_unsupported_refresh_errors() {
+    let mut app = start_with(DESKTOP, true, false, Some("replay"), None);
+    app.wait_for("role:button[Showcase]")
+        .expect("the seeded selection names the model");
+    app.press("role:button[Showcase]").expect("open the picker");
+    app.settle();
+    assert!(
+        !app.screen()
+            .matches("text:/unsupported client operation/")
+            .expect("selector")
+    );
 }
