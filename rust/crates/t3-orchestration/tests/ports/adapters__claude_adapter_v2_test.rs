@@ -59,8 +59,9 @@ fn attachment_message_reserves_images_before_pdfs_and_keeps_paths_when_full() {
     assert_eq!(content["message"]["content"][1]["type"], "image");
     assert_eq!(prepared.usage.pages_used, 1);
     let paths = content["message"]["content"][2]["text"].as_str().unwrap();
-    assert!(paths.contains(pdf.to_str().unwrap()));
-    assert!(paths.contains(image.to_str().unwrap()));
+    assert!(paths.contains("report.pdf"));
+    assert!(paths.contains("picture.png"));
+    assert!(!paths.contains(directory.path().to_str().unwrap()));
     let nearly_full = ClaudeAttachmentUsage {
         pages_used: 99,
         bytes_used: CLAUDE_ATTACHMENT_MAX_BYTES - paths.len() as u64 - 400,
@@ -534,6 +535,16 @@ fn native_fork_publishes_in_original_project_and_rejects_overwrite() {
     );
     let path = project.join(format!("{source}.jsonl"));
     std::fs::write(&path, &transcript).unwrap();
+    let aliases = tempfile::tempdir().unwrap();
+    let alias = aliases.path().join("projects");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(directory.path(), &alias).unwrap();
+    assert!(
+        fork_claude_session_file(&alias, source, target, Some("answer"), FIXTURE_DATE).is_err()
+    );
+    assert!(!project.join(format!("{target}.jsonl")).exists());
     let fork = fork_claude_session_file(
         directory.path(),
         source,
@@ -1656,4 +1667,45 @@ mod composed_claude {
     async fn composed_recording_turn_interrupt_restart() -> Result<()> {
         run_recording("turn_interrupt_restart").await
     }
+}
+#[test]
+fn claude_refuses_a_link_in_place_of_a_claimed_image() {
+    use t3_orchestration::{
+        adapters::claude::{
+            ClaudeAttachmentUsage, DirectoryClaudeAttachments, prepare_claude_message,
+        },
+        api::{MessageId, OrchestrationV2Actor},
+        provider::TurnMessage,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    let path = root.path().join("claimed.png");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(outside.path(), &path).unwrap();
+    let message = TurnMessage { message_id: MessageId("fixture".into()), text: String::new(), attachments: serde_json::from_value(json!([{"type":"image","id":"claimed","name":"claimed.png","mimeType":"image/png","sizeBytes":1}])).unwrap(), created_by: OrchestrationV2Actor::User, creation_source:None, scheduled_task_id:None, sender_thread_id:None };
+    let source = DirectoryClaudeAttachments::new(root.path().into());
+    assert!(
+        prepare_claude_message(&message, None, &source, ClaudeAttachmentUsage::default()).is_err(),
+        "linked image accepted"
+    );
+}
+
+#[test]
+fn claude_sessions_receive_separate_attachment_directories() {
+    let sources = tempfile::tempdir().unwrap();
+    let base = DirectoryClaudeAttachments::new(sources.path().into());
+    let (first, first_dir) = base.for_session().unwrap();
+    let (_second_session, second_dir) = base.for_session().unwrap();
+    let first_dir = first_dir.unwrap();
+    let second_dir = second_dir.unwrap();
+    assert_ne!(first_dir, second_dir);
+    assert!(!first_dir.starts_with(sources.path()));
+    let original = sources.path().join("only.png");
+    std::fs::write(&original, b"image").unwrap();
+    let snapshot = first.reference(&original).unwrap();
+    assert!(snapshot.starts_with(&first_dir));
+    assert!(!snapshot.starts_with(&second_dir));
+    assert_eq!(std::fs::read_dir(second_dir).unwrap().count(), 0);
 }

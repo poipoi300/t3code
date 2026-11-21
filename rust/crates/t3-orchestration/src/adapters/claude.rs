@@ -60,24 +60,48 @@ pub const CLAUDE_ATTACHMENT_MAX_BYTES: u64 = 28 * 1024 * 1024;
 const CLAUDE_ATTACHMENT_MAX_PAGES: u64 = 100;
 
 pub trait ClaudeAttachments: Send + Sync {
+    fn for_session(&self) -> ProviderResult<(Arc<dyn ClaudeAttachments>, Option<PathBuf>)>;
     fn path(&self, attachment: &t3_contracts::chat_attachment::ChatAttachment) -> Option<PathBuf>;
+    fn reference(&self, path: &std::path::Path) -> Option<PathBuf>;
+    fn read_reference(&self, path: &std::path::Path, limit: u64) -> Option<Vec<u8>>;
     fn extracted_text_path(&self, _path: &std::path::Path) -> Option<PathBuf> {
         None
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DirectoryClaudeAttachments {
-    pub directory: Option<PathBuf>,
+    directory: Option<PathBuf>,
+    delivery: Option<Arc<t3_workspace::attachment_delivery::AttachmentDelivery>>,
 }
 impl DirectoryClaudeAttachments {
     pub fn new(directory: PathBuf) -> Self {
         Self {
+            delivery: Some(Arc::new(
+                t3_workspace::attachment_delivery::AttachmentDelivery::new(directory.clone()),
+            )),
             directory: Some(directory),
         }
     }
 }
 impl ClaudeAttachments for DirectoryClaudeAttachments {
+    fn for_session(&self) -> ProviderResult<(Arc<dyn ClaudeAttachments>, Option<PathBuf>)> {
+        let Some(directory) = &self.directory else {
+            return Ok((Arc::new(Self::default()), None));
+        };
+        let session = Self::new(directory.clone());
+        let cache = session
+            .delivery
+            .as_ref()
+            .and_then(|delivery| delivery.reference_directory().ok())
+            .ok_or_else(|| {
+                operation(
+                    ProviderOperation::Open,
+                    "Could not create a private attachment directory",
+                )
+            })?;
+        Ok((Arc::new(session), Some(cache)))
+    }
     fn path(&self, attachment: &t3_contracts::chat_attachment::ChatAttachment) -> Option<PathBuf> {
         use t3_contracts::chat_attachment::ChatAttachment;
         let (id, name, mime, image) = match attachment {
@@ -140,6 +164,12 @@ impl ClaudeAttachments for DirectoryClaudeAttachments {
         };
         Some(self.directory.as_ref()?.join(format!("{id}.{extension}")))
     }
+    fn reference(&self, path: &std::path::Path) -> Option<PathBuf> {
+        self.delivery.as_ref()?.reference(path).ok()
+    }
+    fn read_reference(&self, path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+        self.delivery.as_ref()?.read_reference(path, limit).ok()
+    }
     fn extracted_text_path(&self, path: &std::path::Path) -> Option<PathBuf> {
         if !matches!(
             path.extension()?.to_str()?,
@@ -150,7 +180,7 @@ impl ClaudeAttachments for DirectoryClaudeAttachments {
         let mut name = path.as_os_str().to_owned();
         name.push(".txt");
         let path = PathBuf::from(name);
-        path.is_file().then_some(path)
+        self.reference(&path)
     }
 }
 
@@ -209,7 +239,6 @@ pub fn prepare_claude_message(
     source: &dyn ClaudeAttachments,
     mut usage: ClaudeAttachmentUsage,
 ) -> ProviderResult<PreparedClaudeMessage> {
-    use std::io::Read;
     use t3_contracts::chat_attachment::ChatAttachment;
     let mut result = make_user_message(message, priority);
     if message.attachments.is_empty() {
@@ -224,8 +253,12 @@ pub fn prepare_claude_message(
         });
     }
     let mut text = message.text.clone();
-    let paths: Vec<_> = message.attachments.iter().map(|a| source.path(a)).collect();
-    for (attachment, path) in message.attachments.iter().zip(&paths) {
+    let originals: Vec<_> = message.attachments.iter().map(|a| source.path(a)).collect();
+    let paths: Vec<_> = originals
+        .iter()
+        .map(|p| p.as_deref().and_then(|p| source.reference(p)))
+        .collect();
+    for ((attachment, path), original) in message.attachments.iter().zip(&paths).zip(&originals) {
         let (kind, name, id) = match attachment {
             ChatAttachment::Image(a) => ("image", &a.name, &a.id),
             ChatAttachment::File(a) => ("file", &a.name, &a.id),
@@ -233,8 +266,9 @@ pub fn prepare_claude_message(
         };
         let context = match path {
             Some(path) => {
-                let extracted = source
-                    .extracted_text_path(path)
+                let extracted = original
+                    .as_deref()
+                    .and_then(|p| source.extracted_text_path(p))
                     .map(|p| format!(" (text extracted to: {})", p.display()))
                     .unwrap_or_default();
                 format!(
@@ -286,17 +320,16 @@ pub fn prepare_claude_message(
                 payload: None,
             });
         }
-        let path = paths[index].as_ref().ok_or_else(|| {
-            operation(
-                ProviderOperation::Start,
-                format!("Invalid attachment id '{}'", image.id),
-            )
-        })?;
-        let bytes = std::fs::read(path).map_err(|_| ProviderError::Protocol {
-            reason: Some(ProtocolReason::AttachmentUnreadable),
-            detail: format!("Failed to read attachment '{}'", image.id),
-            payload: None,
-        })?;
+        let bytes = paths[index]
+            .as_deref()
+            .and_then(|path| {
+                source.read_reference(path, t3_workspace::attachments::IMAGE_MAX_BYTES)
+            })
+            .ok_or_else(|| ProviderError::Protocol {
+                reason: Some(ProtocolReason::AttachmentUnreadable),
+                detail: format!("Failed to read attachment '{}'", image.id),
+                payload: None,
+            })?;
         let retained = 4 * (bytes.len() as u64).div_ceil(3) + 128;
         if retained > CLAUDE_ATTACHMENT_MAX_BYTES.saturating_sub(usage.bytes_used) {
             continue;
@@ -334,19 +367,9 @@ pub fn prepare_claude_message(
             .saturating_mul(3)
             / 4;
         let limit = remaining.min(20 * 1024 * 1024);
-        let Ok(file) = std::fs::File::open(path) else {
+        let Some(bytes) = source.read_reference(path, limit) else {
             continue;
         };
-        let Ok(metadata) = file.metadata() else {
-            continue;
-        };
-        if !metadata.is_file() || metadata.len() > limit || limit == 0 {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        if file.take(limit + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > limit {
-            continue;
-        }
         let Some(pages) = estimate_claude_pdf_pages(&bytes) else {
             continue;
         };
@@ -505,31 +528,16 @@ pub fn fork_claude_session_file(
             "Native fork requires distinct UUID session ids",
         ));
     }
-    let root = root.canonicalize().map_err(|_| {
-        operation(
-            ProviderOperation::Fork,
-            "Claude transcript directory is unavailable",
-        )
-    })?;
+    let sources = t3_workspace::attachment_delivery::PinnedFiles::new(root.to_owned());
+    let children = sources
+        .child_directories()
+        .map_err(|_| operation(ProviderOperation::Fork, "Could not open Claude projects"))?;
     let filename = format!("{source}.jsonl");
-    let mut candidates = Vec::new();
-    if root.join(&filename).is_file() {
-        candidates.push(root.join(&filename));
-    }
-    for entry in std::fs::read_dir(&root)
-        .map_err(|_| operation(ProviderOperation::Fork, "Could not list Claude projects"))?
-    {
-        let entry = entry
-            .map_err(|_| operation(ProviderOperation::Fork, "Could not list Claude projects"))?;
-        if entry
-            .file_type()
-            .map_err(|_| operation(ProviderOperation::Fork, "Could not inspect Claude project"))?
-            .is_dir()
-            && entry.path().join(&filename).is_file()
-        {
-            candidates.push(entry.path().join(&filename));
-        }
-    }
+    let mut candidates = std::iter::once(root.to_owned())
+        .chain(children)
+        .map(|directory| directory.join(&filename))
+        .filter(|path| sources.open(path).is_ok())
+        .collect::<Vec<_>>();
     candidates.sort();
     let [path] = candidates.as_slice() else {
         return Err(operation(
@@ -537,20 +545,11 @@ pub fn fork_claude_session_file(
             "Claude source session was absent or ambiguous",
         ));
     };
-    let path = path.canonicalize().map_err(|_| {
-        operation(
-            ProviderOperation::Fork,
-            "Could not locate Claude transcript",
-        )
-    })?;
-    if !path.starts_with(&root) {
-        return Err(operation(
-            ProviderOperation::Fork,
-            "Claude transcript leaves the injected root",
-        ));
-    }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| operation(ProviderOperation::Fork, "Could not read Claude transcript"))?;
+    let content = sources
+        .read(path, u64::MAX)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| operation(ProviderOperation::Fork, "Could not read Claude transcript"))?;
     let rows = content
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -659,6 +658,7 @@ impl ClaudeConnector for ProcessConnector {
     }
 }
 
+#[derive(Clone)]
 pub struct ClaudeAdapterOptions {
     pub instance_id: ProviderInstanceId,
     pub launch: LaunchOptions,
@@ -707,7 +707,7 @@ pub trait ClaudeMcpServerFactory: Send + Sync {
     ) -> ProviderResult<BTreeMap<String, Arc<dyn McpServer>>>;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ClaudeHostOptions {
     pub home_directory: Option<PathBuf>,
     pub settings_directory: Option<PathBuf>,
@@ -1425,6 +1425,13 @@ impl ProviderAdapter for ClaudeAdapterV2 {
             "status":"ready","cwd":input.runtime_policy.cwd.as_deref().unwrap_or(std::path::Path::new(".")).to_string_lossy(),
             "model":input.model_selection.model,"capabilities":claude_capabilities()?,"createdAt":now,"updatedAt":now,"lastError":null}),
         )?;
+        let mut options = (*self.options).clone();
+        let files = options.attachments.clone();
+        let (files, directory) = tokio::task::spawn_blocking(move || files.for_session())
+            .await
+            .map_err(|e| operation(ProviderOperation::Open, e.to_string()))??;
+        options.attachments = files;
+        options.host.attachment_directory = directory;
         let runtime = Arc::new(ClaudeSessionRuntime {
             session,
             inner: Arc::new(RuntimeInner {
@@ -1443,7 +1450,7 @@ impl ProviderAdapter for ClaudeAdapterV2 {
                 clock: self.options.clock.clone(),
                 cancellation: session_cancellation,
             }),
-            options: self.options.clone(),
+            options: Arc::new(options),
             mcp_servers,
             open: input,
             query: AsyncMutex::new(None),
