@@ -970,6 +970,16 @@ impl OrchestrationRuntime {
         &self,
         input: OrchestrationV2ThreadLaunchInput,
     ) -> Result<OrchestrationV2ThreadLaunchResult> {
+        self.launch_client_thread_with_intake(input, &self.intake)
+            .await
+    }
+
+    /// Launch through the intake bound to the authenticated caller.
+    pub async fn launch_client_thread_with_intake(
+        &self,
+        input: OrchestrationV2ThreadLaunchInput,
+        intake: &ThreadMessageIntake,
+    ) -> Result<OrchestrationV2ThreadLaunchResult> {
         let launches = self
             .launches
             .as_ref()
@@ -991,7 +1001,7 @@ impl OrchestrationRuntime {
                 context: message.context.flatten(),
             }
         });
-        let launched = self
+        let launched = intake
             .launch_thread(LaunchInput {
                 command_id: input.command_id,
                 thread_id: input.thread_id.flatten(),
