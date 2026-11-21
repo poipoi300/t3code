@@ -178,7 +178,18 @@ pub struct SocketRequest {
     pub url: String,
     pub protocols: Vec<String>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocketClose {
+    pub code: u16,
+    pub reason: String,
+}
+
 pub trait WebSocket {
+    /// The peer's close status, available after receive returns EOF.
+    fn close_info(&self) -> Option<&SocketClose> {
+        None
+    }
+
     fn send(&mut self, frame: t3_rpc::Frame) -> HostFuture<'_, ()>;
     /// The next frame, or `None` once the socket closed. Must be cancel-safe: the session
     /// races it against outgoing frames and timers, and a dropped `receive` future must not

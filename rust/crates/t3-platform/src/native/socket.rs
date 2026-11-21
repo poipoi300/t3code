@@ -1,9 +1,10 @@
 //! A reader task owns the receive half and buffers frames, so `receive` is cancel-safe: the RPC
 //! driver drops a pending receive whenever it has a command to send.
 use super::Timeouts;
+use crate::socket_ingress::Limits;
 use futures::{FutureExt, SinkExt, StreamExt, stream::SplitSink};
 use std::{sync::Arc, time::Duration};
-use t3_client::platform::{HostFuture, PlatformError, SocketRequest, WebSocket};
+use t3_client::platform::{HostFuture, PlatformError, SocketClose, SocketRequest, WebSocket};
 use t3_rpc::Frame;
 use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
 use tokio_tungstenite::{
@@ -17,17 +18,21 @@ use tokio_tungstenite::{
 };
 
 type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
-/// The server's `ws` default incoming limit; the RPC transport uses the same bound.
-const MAX_MESSAGE_BYTES: usize = t3_rpc::transport::MAX_INCOMING_FRAME_BYTES;
 const RECEIVE_BUFFER: usize = 64;
+
+enum Incoming {
+    Frame(Frame),
+    Close(SocketClose),
+}
 
 pub(crate) struct NativeSocket {
     sink: SplitSink<Stream, Message>,
-    incoming: mpsc::Receiver<Result<Frame, PlatformError>>,
+    incoming: mpsc::Receiver<Result<Incoming, PlatformError>>,
     reader: JoinHandle<()>,
     close_timeout: Duration,
     runtime: tokio::runtime::Handle,
     closed: bool,
+    peer_close: Option<SocketClose>,
 }
 
 fn socket_error(error: tungstenite::Error) -> PlatformError {
@@ -75,9 +80,10 @@ pub(crate) async fn connect(
                 .map_err(|_| PlatformError::InvalidData("WebSocket protocol".into()))?,
         );
     }
+    let limits = Limits::for_url(&url);
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_MESSAGE_BYTES));
+        .max_message_size(Some(limits.binary))
+        .max_frame_size(Some(limits.binary));
     let (stream, response) = tokio::time::timeout(
         timeouts.connect,
         tokio_tungstenite::connect_async_tls_with_config(
@@ -100,18 +106,29 @@ pub(crate) async fn connect(
         }
     }
     let (sink, mut source) = stream.split();
-    let (tx, incoming) = mpsc::channel(RECEIVE_BUFFER);
+    let (tx, incoming) = mpsc::channel(limits.queue.unwrap_or(RECEIVE_BUFFER));
     let reader = tokio::spawn(async move {
         while let Some(message) = source.next().await {
             let frame = match message {
-                Ok(Message::Text(text)) => Ok(Frame::Text(text.as_str().to_owned())),
-                Ok(Message::Binary(bytes)) => Ok(Frame::Binary(bytes.to_vec())),
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Text(text)) => limits
+                    .check(text.len(), false)
+                    .map(|()| Incoming::Frame(Frame::Text(text.as_str().to_owned()))),
+                Ok(Message::Binary(bytes)) => Ok(Incoming::Frame(Frame::Binary(bytes.to_vec()))),
+                Ok(Message::Close(close)) => Ok(Incoming::Close(close.map_or(
+                    SocketClose {
+                        code: 1005,
+                        reason: String::new(),
+                    },
+                    |close| SocketClose {
+                        code: close.code.into(),
+                        reason: close.reason.to_string(),
+                    },
+                ))),
                 Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
                 Err(error) => Err(socket_error(error)),
             };
-            let failed = frame.is_err();
-            if tx.send(frame).await.is_err() || failed {
+            let terminal = !matches!(frame, Ok(Incoming::Frame(_)));
+            if tx.send(frame).await.is_err() || terminal {
                 break;
             }
         }
@@ -124,10 +141,15 @@ pub(crate) async fn connect(
         // `connect` runs as a runtime task, so this is the platform's runtime.
         runtime: tokio::runtime::Handle::current(),
         closed: false,
+        peer_close: None,
     })
 }
 
 impl WebSocket for NativeSocket {
+    fn close_info(&self) -> Option<&SocketClose> {
+        self.peer_close.as_ref()
+    }
+
     fn send(&mut self, frame: Frame) -> HostFuture<'_, ()> {
         async move {
             if self.closed {
@@ -147,7 +169,14 @@ impl WebSocket for NativeSocket {
             if self.closed {
                 return Ok(None);
             }
-            self.incoming.recv().await.transpose()
+            match self.incoming.recv().await.transpose()? {
+                Some(Incoming::Frame(frame)) => Ok(Some(frame)),
+                Some(Incoming::Close(close)) => {
+                    self.peer_close = Some(close);
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
         }
         .boxed_local()
     }

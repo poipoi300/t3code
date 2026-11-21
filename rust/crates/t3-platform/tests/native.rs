@@ -16,6 +16,13 @@ use tokio_tungstenite::tungstenite::{
     Message,
     handshake::server::{Request as Upgrade, Response as UpgradeResponse},
     http::HeaderValue,
+    protocol::{
+        CloseFrame,
+        frame::{
+            Frame as WireFrame,
+            coding::{CloseCode, Data, OpCode},
+        },
+    },
 };
 
 struct SharedSecrets(Arc<EphemeralSecretStore>);
@@ -572,7 +579,13 @@ async fn a_dropped_receive_loses_no_frame_and_peer_close_ends_the_stream() {
         start.await.unwrap();
         socket.send(Message::text("one")).await.unwrap();
         socket.send(Message::binary(vec![2_u8])).await.unwrap();
-        socket.close(None).await.unwrap();
+        socket
+            .close(Some(CloseFrame {
+                code: CloseCode::Policy,
+                reason: "viewer denied".into(),
+            }))
+            .await
+            .unwrap();
     };
     let client = async {
         let mut socket = platform
@@ -590,6 +603,9 @@ async fn a_dropped_receive_loses_no_frame_and_peer_close_ends_the_stream() {
         tokio::time::timeout(Duration::from_secs(5), drain)
             .await
             .expect("peer close did not end the stream");
+        let close = socket.close_info().expect("peer close status");
+        assert_eq!((close.code, close.reason.as_str()), (1008, "viewer denied"));
+        assert_eq!(socket.receive().await.unwrap(), None);
         frames
     };
     let (frames, ()) = tokio::join!(client, server);
@@ -1702,4 +1718,78 @@ async fn https_trusts_a_deployment_ca_only_when_it_is_configured() {
     assert_eq!(response.status, 200);
     assert_eq!(response.body, b"trusted");
     serve.abort();
+}
+
+#[tokio::test]
+async fn preview_socket_ingress_rejects_oversized_control_messages() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let mut socket = accept(&listener, None).await;
+        socket
+            .send(Message::text("é".repeat(128 * 1024)))
+            .await
+            .unwrap();
+        socket
+            .send(Message::text("é".repeat(128 * 1024 + 1)))
+            .await
+            .unwrap();
+    };
+    let client = async {
+        let mut request = socket_request(&address, &[]);
+        request.url = format!("ws://{address}/api/preview-stream/ws?threadId=thread");
+        let mut socket = platform.websocket(request).await.unwrap();
+        assert!(matches!(
+            socket.receive().await,
+            Ok(Some(t3_rpc::Frame::Text(_)))
+        ));
+        assert!(matches!(
+            socket.receive().await,
+            Err(PlatformError::TooLarge)
+        ));
+        assert_eq!(socket.receive().await.unwrap(), None);
+    };
+    tokio::join!(client, server);
+}
+
+#[tokio::test]
+async fn preview_socket_rejects_oversized_frames_and_fragmented_messages() {
+    let (platform, _dir, _) = platform().await;
+    const MAX: usize = 12 * 1024 * 1024;
+    for messages in [
+        vec![Message::binary(vec![0; MAX + 1])],
+        vec![
+            Message::Frame(WireFrame::message(
+                vec![0; MAX / 2],
+                OpCode::Data(Data::Binary),
+                false,
+            )),
+            Message::Frame(WireFrame::message(
+                vec![0; MAX / 2 + 1],
+                OpCode::Data(Data::Continue),
+                true,
+            )),
+        ],
+    ] {
+        let (listener, address) = bind().await;
+        let server = async {
+            let mut socket = accept(&listener, None).await;
+            for message in messages {
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let client = async {
+            let mut request = socket_request(&address, &[]);
+            request.url = format!("ws://{address}/api/preview-stream/ws");
+            let mut socket = platform.websocket(request).await.unwrap();
+            assert!(matches!(
+                socket.receive().await,
+                Err(PlatformError::TooLarge)
+            ));
+            assert_eq!(socket.receive().await.unwrap(), None);
+        };
+        tokio::join!(client, server);
+    }
 }
