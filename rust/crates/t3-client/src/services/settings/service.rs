@@ -5,6 +5,9 @@
 //!
 //! Client settings live in the one client-settings record (`t3code:client-settings:v1`) that
 //! `ClientRuntime::composer_preferences` already owns; this service never keeps a second copy.
+pub mod project_actions;
+pub mod source_control;
+
 use super::{
     panels::{LAST_ENABLED_PROJECT_GROUPING_MODE_KEY, last_enabled_project_grouping_mode},
     scope::{
