@@ -86,7 +86,7 @@ fn a_project_link_replaces_itself_with_the_project_settings_when_an_environment_
     config.environment.os = nsh_core::platform::Os::Linux;
     config.environment.idiom = nsh_core::platform::Idiom::Desktop;
     let mut app = Headless::start(config).expect("the engine starts");
-    app.wait_for("Settings: projects")
+    app.wait_for("Choose a project to manage its name, icon, checkouts and actions.")
         .expect("the project settings replaced the link");
     app.press("role:button[Read address]").expect("probe");
     app.wait_for("address /settings/projects?project=env%3Arepo")

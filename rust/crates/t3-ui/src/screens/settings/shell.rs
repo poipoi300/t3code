@@ -570,6 +570,9 @@ pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
         if page == SettingsPage::Providers {
             provide_context(super::providers::Services::new(client));
         }
+        if page == SettingsPage::Projects {
+            provide_context(super::projects::Services::new(client));
+        }
         settings_route_layout(page, Some(runtime)).into_element()
     })
 }

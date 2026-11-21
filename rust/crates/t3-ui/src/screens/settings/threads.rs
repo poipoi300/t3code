@@ -926,7 +926,7 @@ pub fn project_defaults_settings(context: SettingsContext) -> impl IntoElement {
                 move || !project_scope(),
                 move || settings_row(fallback_row(context, presentation)),
             ))
-            .child(settings_row(permissions_row))
+            .child((context.page != SettingsPage::Projects).then(|| settings_row(permissions_row)))
             .child(settings_row(workspace_row)),
     )
 }
