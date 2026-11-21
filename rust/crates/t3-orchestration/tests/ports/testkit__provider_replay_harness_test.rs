@@ -410,6 +410,112 @@ fn scenario_services(
     Ok((database, services))
 }
 
+#[tokio::test(start_paused = true)]
+async fn queued_turn_step_waits_for_the_background_dispatch_to_commit()
+-> t3_orchestration::error::Result<()> {
+    use std::sync::Arc;
+    use t3_orchestration::{
+        api::*,
+        error::Error,
+        ports::acp_replay::testkit::orchestrator_scenario::*,
+        projections::write::SqliteProjectionWriter,
+        stores::{event_store::EventStore, receipts::*},
+        testing::TEST_TIME,
+    };
+    use tokio::sync::Semaphore;
+
+    struct Intake {
+        first_entered: Semaphore,
+        allow_first_commit: Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl CommandDispatcher for Intake {
+        async fn dispatch(
+            &self,
+            command: OrchestrationV2ServerCommand,
+        ) -> Result<CommandReceipt, Error> {
+            let command = serde_json::to_value(command)?;
+            let first = command["commandId"] == "first";
+            if first {
+                self.first_entered.add_permits(1);
+                self.allow_first_commit
+                    .acquire()
+                    .await
+                    .expect("open gate")
+                    .forget();
+            } else if !self.allow_first_commit.is_closed() {
+                panic!("queued input reached intake before the first dispatch committed");
+            }
+            if first {
+                self.allow_first_commit.close();
+            }
+            Ok(CommandReceipt {
+                command_id: serde_json::from_value(command["commandId"].clone())?,
+                aggregate: AggregateId::Thread(ThreadId("thread:replay".into())),
+                command_type: "message.dispatch".into(),
+                accepted_at: TEST_TIME.into(),
+                result_sequence: i64::from(!first) + 1,
+                status: ReceiptStatus::Accepted,
+                error: None,
+            })
+        }
+    }
+
+    let (database, mut services) = scenario_services(ReplayGate::default())?;
+    database
+        .stores
+        .transaction(|tx| {
+            for event in EventStore::new().append(
+                tx,
+                None,
+                &[replay_created_event("created", "thread:replay")],
+            )? {
+                SqliteProjectionWriter.apply(tx, &event)?;
+            }
+            Ok(())
+        })
+        .await?;
+    let intake = Arc::new(Intake {
+        first_entered: Semaphore::new(0),
+        allow_first_commit: Semaphore::new(0),
+    });
+    services.dispatcher = intake.clone();
+    let dispatch = |id: &str, mode: &str, wait| -> Result<ScenarioStep, Error> {
+        Ok(ScenarioStep::Dispatch {
+            command: Box::new(serde_json::from_value(json!({
+                "type":"message.dispatch","commandId":id,"threadId":"thread:replay",
+                "messageId":id,"text":id,"attachments":[],"dispatchMode":{"type":mode},
+                "createdBy":"user","creationSource":"web"
+            }))?),
+            wait,
+            key: (!wait).then(|| id.to_owned()),
+        })
+    };
+    let run = run_scenario(
+        Scenario {
+            name: "queued dispatch ordering".into(),
+            commands: vec![],
+            steps: Some(vec![
+                dispatch("first", "start_immediately", false)?,
+                dispatch("queued", "queue_after_active", true)?,
+                ScenarioStep::Await("first".into()),
+            ]),
+            projection_thread_ids: vec![],
+        },
+        &services,
+    );
+    tokio::pin!(run);
+    tokio::select! {
+        biased;
+        result = &mut run => panic!("scenario ended before the first dispatch committed: {:?}", result.err()),
+        entered = intake.first_entered.acquire() => entered.expect("first dispatch reached intake").forget(),
+    }
+    intake.allow_first_commit.add_permits(1);
+    run.await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn cancelled_scenario_releases_gates_before_teardown() -> t3_orchestration::error::Result<()>
 {
