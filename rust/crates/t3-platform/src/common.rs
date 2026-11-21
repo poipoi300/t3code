@@ -6,6 +6,19 @@ use t3_client::platform::{
     HostAction, HostFuture, HostReply, PlatformError, PlatformEvent, StorageKey,
 };
 
+/// For HEAD, Content-Length describes a future GET rather than bytes in this response.
+pub(crate) fn check_http_length(
+    method: &str,
+    length: Option<u64>,
+    cap: usize,
+) -> Result<(), PlatformError> {
+    if !method.eq_ignore_ascii_case("HEAD") && length.is_some_and(|n| n > cap as u64) {
+        Err(PlatformError::TooLarge)
+    } else {
+        Ok(())
+    }
+}
+
 /// Shell lifecycle input (network, foreground, credential changes); `Send` so OS callbacks can
 /// emit from any thread. Every live `events()` stream receives every event in emission order.
 #[derive(Clone, Default)]
@@ -153,6 +166,16 @@ pub(crate) fn dpop_thumbprint(x: &[u8], y: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn head_exposes_the_resource_size_while_get_enforces_the_body_limit() {
+        assert_eq!(check_http_length("HEAD", Some(4096), 16), Ok(()));
+        assert_eq!(
+            check_http_length("GET", Some(4096), 16),
+            Err(PlatformError::TooLarge)
+        );
+        assert_eq!(check_http_length("GET", Some(16), 16), Ok(()));
+    }
 
     #[test]
     fn thumbprint_matches_rfc_7638_example_shape_and_client_derivation() {

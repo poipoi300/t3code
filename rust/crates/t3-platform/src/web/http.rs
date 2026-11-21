@@ -67,13 +67,10 @@ pub(crate) async fn fetch(
             }
         }
     }
-    if response_headers
+    let length = response_headers
         .get("content-length")
-        .and_then(|length| length.parse::<u64>().ok())
-        .is_some_and(|length| length > cap as u64)
-    {
-        return Err(PlatformError::TooLarge);
-    }
+        .and_then(|v| v.parse().ok());
+    crate::common::check_http_length(&request.method, length, cap)?;
     let mut body = Vec::new();
     if let Some(stream) = response.body() {
         let reader: ReadableStreamDefaultReader = stream.get_reader().unchecked_into();
@@ -87,7 +84,7 @@ pub(crate) async fn fetch(
             let bytes: Uint8Array = js::get(&chunk, "value")
                 .dyn_into()
                 .map_err(|_| PlatformError::InvalidData("HTTP body chunk".into()))?;
-            if body.len() + bytes.length() as usize > cap {
+            if bytes.length() as usize > cap - body.len() {
                 let _ = reader.cancel();
                 return Err(PlatformError::TooLarge);
             }

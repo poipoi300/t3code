@@ -263,7 +263,7 @@ async fn http_does_not_follow_redirects() {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_request(&mut stream).await;
         stream
-            .write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/elsewhere\r\nContent-Length: 0\r\n\r\n").as_bytes())
+            .write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/elsewhere\r\nContent-Length: 5\r\n\r\nmoved").as_bytes())
             .await
             .unwrap();
         // A followed redirect would arrive as a second request on this listener.
@@ -275,8 +275,69 @@ async fn http_does_not_follow_redirects() {
         platform.http(request(format!("http://{address}/"), 1024)),
         server
     );
-    assert_eq!(response.unwrap().status, 302);
+    let response = response.unwrap();
+    assert_eq!(response.status, 302);
+    assert_eq!(response.body, b"moved");
     assert!(no_second_request);
+}
+
+#[tokio::test]
+async fn manual_redirects_skip_the_intermediate_body_and_cap_the_final_checksum() {
+    let (platform, _dir, _) = platform().await;
+    let location = "https://openvsx.eclipsecontent.org/demo/theme/1/checksum";
+    let get = |address: &str| HttpRequest {
+        method: "GET".into(),
+        body: Vec::new(),
+        ..request(format!("http://{address}/"), 256)
+    };
+    for declared in [300, 12] {
+        let (listener, address) = bind().await;
+        let (release, held) = oneshot::channel::<()>();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await;
+            stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: {declared}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            // The server withholds the advertised HTML until the client has accepted the headers.
+            let _ = held.await;
+        };
+        let client = async {
+            let response = platform.http_without_redirect_body(get(&address)).await;
+            drop(release);
+            response
+        };
+        let (response, ()) = tokio::join!(client, server);
+        let redirect = response.expect("redirect headers before its body");
+        assert_eq!(redirect.status, 302);
+        assert_eq!(redirect.headers["location"], location);
+        assert!(redirect.body.is_empty());
+    }
+
+    for size in [64, 300] {
+        let (listener, address) = bind().await;
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            stream.write_all(&vec![b'a'; size]).await.unwrap();
+        };
+        let (reply, ()) = tokio::join!(platform.http_without_redirect_body(get(&address)), server);
+        if size == 64 {
+            assert_eq!(reply.unwrap().body, vec![b'a'; 64]);
+        } else {
+            assert_eq!(reply, Err(PlatformError::TooLarge));
+        }
+    }
 }
 
 #[tokio::test]

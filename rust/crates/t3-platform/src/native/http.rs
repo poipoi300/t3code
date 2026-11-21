@@ -4,6 +4,12 @@ use super::Timeouts;
 use std::{collections::BTreeMap, sync::Arc};
 use t3_client::platform::{HttpRequest, HttpResponse, PlatformError};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RedirectBody {
+    Read,
+    Skip,
+}
+
 #[derive(Clone)]
 pub(crate) struct HttpClient {
     client: reqwest::Client,
@@ -67,7 +73,11 @@ impl HttpClient {
         Ok(Self { client, direct })
     }
 
-    pub(crate) async fn send(&self, request: HttpRequest) -> Result<HttpResponse, PlatformError> {
+    pub(crate) async fn send(
+        &self,
+        request: HttpRequest,
+        redirect_body: RedirectBody,
+    ) -> Result<HttpResponse, PlatformError> {
         let url = url::Url::parse(&request.url)
             .map_err(|_| PlatformError::InvalidData("HTTP URL".into()))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -97,12 +107,6 @@ impl HttpClient {
             .await
             .map_err(network)?;
         let cap = request.max_response_bytes;
-        if response
-            .content_length()
-            .is_some_and(|length| length > cap as u64)
-        {
-            return Err(PlatformError::TooLarge);
-        }
         let status = response.status().as_u16();
         let mut response_headers = BTreeMap::<String, String>::new();
         for (name, value) in response.headers() {
@@ -115,18 +119,22 @@ impl HttpClient {
                 })
                 .or_insert(value);
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(network)? {
-            if body.len() + chunk.len() > cap {
-                return Err(PlatformError::TooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(HttpResponse {
+        let mut reply = HttpResponse {
             status,
             headers: response_headers,
-            body,
-        })
+            body: Vec::new(),
+        };
+        if redirect_body == RedirectBody::Skip && matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(reply);
+        }
+        crate::common::check_http_length(&request.method, response.content_length(), cap)?;
+        while let Some(chunk) = response.chunk().await.map_err(network)? {
+            if chunk.len() > cap - reply.body.len() {
+                return Err(PlatformError::TooLarge);
+            }
+            reply.body.extend_from_slice(&chunk);
+        }
+        Ok(reply)
     }
 }
 

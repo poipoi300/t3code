@@ -213,6 +213,18 @@ fn validated_launch(link: &str) -> Option<(String, String)> {
 }
 
 impl NativePlatform {
+    fn http_request(
+        &self,
+        request: HttpRequest,
+        redirect_body: http::RedirectBody,
+    ) -> HostFuture<'_, HttpResponse> {
+        let client = self.inner.http.clone();
+        spawn_abortable(&self.inner.runtime, async move {
+            client.send(request, redirect_body).await
+        })
+        .boxed_local()
+    }
+
     pub async fn open(config: NativeConfig) -> Result<Self, OpenError> {
         let runtime = Handle::try_current().map_err(|_| OpenError::NoRuntime)?;
         let NativeConfig {
@@ -442,12 +454,10 @@ impl Platform for NativePlatform {
     }
 
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
-        let client = self.inner.http.clone();
-        spawn_abortable(
-            &self.inner.runtime,
-            async move { client.send(request).await },
-        )
-        .boxed_local()
+        self.http_request(request, http::RedirectBody::Read)
+    }
+    fn http_without_redirect_body(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
+        self.http_request(request, http::RedirectBody::Skip)
     }
 
     fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {

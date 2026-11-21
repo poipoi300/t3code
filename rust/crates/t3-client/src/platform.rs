@@ -414,6 +414,12 @@ pub trait Platform: Storage {
     fn yield_to_host(&self) -> LocalBoxFuture<'_, ()>;
     fn events(&self) -> LocalBoxStream<'static, PlatformEvent>;
     fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse>;
+    /// Requests a single hop. Hosts that expose redirect headers can discard that hop's
+    /// body before applying the normal limit to the eventual resource. The caller validates
+    /// Location before issuing another request. Other hosts retain their normal HTTP policy.
+    fn http_without_redirect_body(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
+        self.http(request)
+    }
     fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>>;
     fn host(&self, action: HostAction) -> HostFuture<'_, HostReply>;
     /// The raw launch address; claimed native schemes and HTTP origins are validated by the host.
