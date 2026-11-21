@@ -188,6 +188,14 @@ pub struct HttpError(pub String);
 /// The network seam. Implementations enforce timeouts and may stop reading a body
 /// once it is clearly over the caller's limit (the caller re-checks the length).
 pub trait OpenVsxHttp {
+    /// One budget spans a candidate's detail request and both of its file probes.
+    fn with_detail_timeout<T>(
+        &self,
+        work: impl Future<Output = Result<T, OpenVsxError>>,
+    ) -> impl Future<Output = Result<T, OpenVsxError>> {
+        work
+    }
+
     fn request(
         &self,
         method: HttpMethod,
@@ -249,13 +257,21 @@ fn open_vsx_collection_id(extension_id: &str) -> String {
     }
 }
 
-fn trusted_open_vsx_url(value: Option<&Value>) -> Option<String> {
-    let url = Url::parse(value?.as_str()?).ok()?;
+/// Only the public registry and its file CDN may receive theme requests.
+pub fn open_vsx_url(raw: &str) -> Option<Url> {
+    let url = Url::parse(raw).ok()?;
     (url.scheme() == "https"
-        && url
-            .host_str()
-            .is_some_and(|h| h.eq_ignore_ascii_case("open-vsx.org")))
-    .then(|| url.to_string())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(
+            url.host_str(),
+            Some("open-vsx.org" | "openvsx.eclipsecontent.org")
+        ))
+    .then_some(url)
+}
+
+fn trusted_open_vsx_url(value: Option<&Value>) -> Option<String> {
+    open_vsx_url(value?.as_str()?).map(Into::into)
 }
 
 fn public_source_url(value: Option<&Value>) -> Option<String> {
@@ -568,34 +584,25 @@ impl<H: OpenVsxHttp> OpenVsxClient<H> {
         let Some(extensions) = value.get("extensions").and_then(Value::as_array) else {
             return fail("Open VSX returned an unreadable search response.");
         };
-        let identities: Vec<(String, String)> = extensions
+        let candidates = extensions
             .iter()
             .filter_map(|candidate| {
-                let object = candidate.as_object()?;
-                let namespace = object
-                    .get("namespace")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let name = object
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                (!namespace.is_empty() && !name.is_empty())
-                    .then(|| (namespace.to_owned(), name.to_owned()))
+                let namespace = candidate.get("namespace")?.as_str()?;
+                let name = candidate.get("name")?.as_str()?;
+                (!namespace.is_empty() && !name.is_empty()).then_some((namespace, name))
             })
-            .collect();
-        let mut completed = 0;
-        let mut results = Vec::new();
-        for (namespace, name) in identities.iter().take(SEARCH_DETAIL_LOOKUPS) {
-            if let Ok(found) = self.detail(namespace, name).await {
-                completed += 1;
-                results.extend(found);
-            }
-        }
+            .take(SEARCH_DETAIL_LOOKUPS)
+            .map(|(namespace, name)| self.http.with_detail_timeout(self.detail(namespace, name)));
+        let settled = futures_util::future::join_all(candidates).await;
         throw_if_cancelled(cancel)?;
-        if !identities.is_empty() && completed == 0 {
+        if !settled.is_empty() && settled.iter().all(Result::is_err) {
             return fail("Open VSX theme details are unavailable right now.");
         }
+        let mut results: Vec<_> = settled
+            .into_iter()
+            .filter_map(Result::ok)
+            .flatten()
+            .collect();
         results.truncate(SEARCH_RESULT_LIMIT);
         Ok(results)
     }
@@ -633,15 +640,11 @@ impl<H: OpenVsxHttp> OpenVsxClient<H> {
         let Some(extension) = extension_from_detail(&value).map_err(|_| unreadable())? else {
             return Ok(None);
         };
-        let manifest_response = self
-            .get(&extension.manifest_url)
-            .await
-            .map_err(|_| unreadable())?;
-        let package_response = self
-            .http
-            .request(HttpMethod::Head, &extension.vsix_url)
-            .await
-            .map_err(|_| unreadable())?;
+        let (manifest_response, package_response) = futures_util::try_join!(
+            self.get(&extension.manifest_url),
+            self.http.request(HttpMethod::Head, &extension.vsix_url),
+        )
+        .map_err(|_| unreadable())?;
         if !manifest_response.ok() {
             return Err(unreadable());
         }

@@ -365,6 +365,48 @@ fn route(
 }
 
 #[test]
+fn search_starts_independent_candidates_and_both_file_probes_before_waiting() {
+    struct PendingDetail<'a>(&'a RefCell<Vec<(HttpMethod, String)>>);
+    impl OpenVsxHttp for PendingDetail<'_> {
+        async fn request(&self, method: HttpMethod, url: &str) -> Result<HttpResponse, HttpError> {
+            self.0.borrow_mut().push((method, url.to_owned()));
+            if url.contains("/-/search?") {
+                return Ok(body(
+                    200,
+                    r#"{"extensions":[{"namespace":"slow","name":"theme"},{"namespace":"demo","name":"theme"}]}"#,
+                ));
+            }
+            if url.ends_with("/api/demo/theme") {
+                return Ok(body(200, &extension_detail("demo", "MIT").to_string()));
+            }
+            std::future::pending().await
+        }
+    }
+    let seen = RefCell::default();
+    let client = OpenVsxClient::new(PendingDetail(&seen));
+    let mut search = pin!(client.search("demo", OpenVsxThemeSort::DownloadCount, &NoCancel));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(search.as_mut().poll(&mut cx).is_pending());
+    let calls = seen.borrow();
+    assert!(
+        calls
+            .iter()
+            .any(|(_, url)| url.ends_with("/api/slow/theme"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(_, url)| url.ends_with("/api/demo/theme"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(method, url)| *method == HttpMethod::Get && url.ends_with("package.json"))
+    );
+    assert!(calls.iter().any(|(method, _)| *method == HttpMethod::Head));
+}
+
+#[test]
 fn search_keeps_only_supported_open_source_licences() {
     let theme_manifest =
         json!({ "license": "MIT", "contributes": { "themes": [{ "path": "./theme.json" }] } })

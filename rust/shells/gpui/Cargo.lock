@@ -6935,6 +6935,7 @@ dependencies = [
 name = "t3-theme"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
