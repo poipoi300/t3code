@@ -1,5 +1,6 @@
 //! Destination-session checks shared by UI availability and execution.
 pub mod connect_device;
+mod preview_socket;
 use crate::{
     ClientError,
     types::{EnvironmentId, Generation},
