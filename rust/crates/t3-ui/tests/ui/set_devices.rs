@@ -102,14 +102,12 @@ fn Fixture(props: FixtureProps) -> impl IntoElement {
         if let Some(pools) = calls
             .last()
             .and_then(|c| c["patch"]["simlockDeviceHosts"].as_array())
+            && pools.len() == 2
+            && pools[0]["id"] == "pool"
+            && pools[1]["gatewayUrl"] == "https://second.example.test"
+            && pools[1]["agentToken"] == "fixture-token"
         {
-            if pools.len() == 2
-                && pools[0]["id"] == "pool"
-                && pools[1]["gatewayUrl"] == "https://second.example.test"
-                && pools[1]["agentToken"] == "fixture-token"
-            {
-                observed.set("Added pool and preserved existing source".into());
-            }
+            observed.set("Added pool and preserved existing source".into());
         }
     });
     on_key("ctrl+shift+u", move |_| {
