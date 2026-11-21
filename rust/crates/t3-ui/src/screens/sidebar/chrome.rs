@@ -704,6 +704,45 @@ pub struct ChromeFooterSlots {
     pub update: Option<AnyElement>,
 }
 
+/// Compact sidebar entry for the existing update review. Desktop has a
+/// check action even before a provider offer arrives; other hosts need an offer.
+pub(super) fn sidebar_provider_update(client: Rc<dyn super::row::RowThreadActions>) -> AnyElement {
+    use crate::runtime::tasks::watch;
+    use crate::ui::dialog::{PopupOptions, dialog, dialog_popup, dialog_title};
+    use futures::StreamExt;
+
+    let offered = signal(false);
+    let mut offers = client.update_offers();
+    watch(async move {
+        while let Some(next) = offers.next().await {
+            offered.set(next);
+        }
+    });
+    let open = signal(false);
+    view()
+        .child(when(
+            move || os().is_desktop() || offered.get() || open.get(),
+            move || {
+                let client = client.clone();
+                view()
+                    .test_id("sidebar-provider-update")
+                    .child(sidebar_utility_item(
+                        t("Review available updates"),
+                        move || open.set(true),
+                        icon(Icon::CloudDownload, 16.0, move || palette().sidebar_icon),
+                    ))
+                    .child(dialog(open, move |state| {
+                        dialog_popup(state, PopupOptions::default(), move || {
+                            view()
+                                .child(dialog_title(state, || t("Updates").into()))
+                                .child(client.update_controls())
+                        })
+                    }))
+            },
+        ))
+        .into_element()
+}
+
 pub fn sidebar_chrome_footer(
     pull_requests_supported: Prop<bool>,
     main_app_route: Prop<Route>,

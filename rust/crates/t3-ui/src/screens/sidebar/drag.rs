@@ -2,10 +2,9 @@
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, time::Duration};
 
-use nsh_core::{TouchEvent, TouchPhase, prelude::*};
+use nsh_core::{TouchEvent, TouchPhase, element::desktop::current_window, prelude::*};
 
 use crate::{
-    i18n::{Value, tr},
     runtime::tasks::TaskOwner,
     theme::{palette, tw},
     ui::icon::{Icon, icon},
@@ -37,6 +36,7 @@ pub(super) struct Drag {
     candidate: Stored<Option<String>>,
     gesture: Stored<Option<Gesture>>,
     viewport: ElementRef,
+    held: Signal<bool>,
     active: Signal<bool>,
     over: Signal<Option<String>>,
     can_drop: Stored<CanDrop>,
@@ -58,6 +58,7 @@ impl Drag {
             candidate: stored(None),
             gesture: stored(None),
             viewport,
+            held: signal(false),
             active: signal(false),
             over: signal(None),
             can_drop: stored(Rc::new(can_drop) as CanDrop),
@@ -108,6 +109,7 @@ impl Drag {
     }
 
     fn finish(self) -> Option<Gesture> {
+        self.held.set(false);
         self.active.set(false);
         self.over.set(None);
         self.gesture.replace(None)
@@ -178,6 +180,33 @@ impl Drag {
         }
     }
 
+    pub fn cancel_on_interrupt(self) {
+        let previous = stored((window(), lifecycle()));
+        effect(move || {
+            let next = (window(), lifecycle());
+            if previous.replace(next) != next {
+                self.clear();
+            }
+        });
+        current_window().on_focus_change(move |focused| {
+            if !focused {
+                self.clear();
+            }
+        });
+        effect(move || {
+            if self.held.get() {
+                on_key_with(
+                    "escape",
+                    KeyOptions {
+                        when: nsh_core::keymap::When::Always,
+                        ..Default::default()
+                    },
+                    move |_| self.clear(),
+                );
+            }
+        });
+    }
+
     // The grip identifies the row in its touch event. The list claims the same
     // event afterwards, so it keeps the gesture when scrolling recycles the row.
     pub fn listen(self, list: VirtualList) -> VirtualList {
@@ -197,6 +226,7 @@ impl Drag {
             let source = self.candidate.replace(None);
             self.clear();
             if let Some(source) = source {
+                self.held.set(true);
                 self.gesture.replace(Some(Gesture {
                     source,
                     point: event.page,
@@ -215,7 +245,7 @@ impl Drag {
                     return false;
                 };
                 gesture.point = event.page;
-                if gesture.dragging || event.gesture.delta.y.0.abs() < 8.0 {
+                if gesture.dragging || !drag_started(event.gesture.delta) {
                     return false;
                 }
                 gesture.dragging = true;
@@ -252,10 +282,18 @@ impl Drag {
         .on_responder_terminate(move |_: &ResponderEvent| self.clear())
     }
 
-    pub fn grip(self, key: Memo<Option<String>>, label: Memo<String>) -> impl IntoElement {
+    pub fn grip(self, key: Memo<Option<String>>) -> impl IntoElement {
+        let id = format!(
+            "sidebar-drag-grip-{}",
+            key.get_untracked().unwrap_or_default()
+        );
+        // Claiming the whole row would steal touch scrolling and long-press
+        // menus from the virtual list. The handle is pointer-only; row menus
+        // provide the equivalent pin, settle, and wake actions to other inputs.
         view()
-            .test_id("sidebar-drag-grip")
-            .label(move || SharedString::from(tr("Move {thread}", &[("thread", Value::Text(label.get()))])))
+            .test_id(&id)
+            .accessible(false)
+            .hit_slop(EdgeInsets::all(px(6.0)))
             .app_class(tw("flex w-6 shrink-0 cursor-grab items-center justify-center self-stretch text-sidebar-muted-foreground/60 hover:text-sidebar-foreground"))
             .on_touch(move |event: &TouchEvent| {
                 if event.phase == TouchPhase::Start && event.points.len() == 1 {
@@ -264,6 +302,10 @@ impl Drag {
             })
             .child(icon(Icon::GripVertical, 13.0, move || palette().muted_foreground))
     }
+}
+
+fn drag_started(delta: Point<Points>) -> bool {
+    delta.x.0 * delta.x.0 + delta.y.0 * delta.y.0 >= 36.0
 }
 
 fn intersect(item: Bounds<Points>, viewport: Bounds<Points>) -> Option<Bounds<Points>> {
@@ -312,4 +354,16 @@ fn hit(
         .filter(|(key, bounds)| key != source && contains(*bounds, point) && can_drop(source, key))
         .min_by(|(_, a), (_, b)| a.size.height.0.total_cmp(&b.size.height.0))
         .map(|(key, _)| key.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_requires_six_points_of_euclidean_motion() {
+        assert!(!drag_started(point(px(4.0), px(4.0))));
+        assert!(drag_started(point(px(-4.3), px(4.3))));
+        assert!(drag_started(point(px(6.0), px(0.0))));
+    }
 }

@@ -938,11 +938,12 @@ pub fn sidebar() -> impl IntoElement {
                         plan,
                     ),
                     Ok(false) => {}
-                    Err(error) => actions::action_failed("move-thread", error),
+                    Err(failure) => actions::failed(failure.title, failure.error),
                 }
             });
         },
     );
+    drag.cancel_on_interrupt();
     effect(move || {
         if !drag_enabled.get() {
             drag.clear();
@@ -1113,13 +1114,6 @@ pub fn sidebar() -> impl IntoElement {
                 }),
                 None => untracked(|| {
                     // The direct API avoids thread_row's full-shell lookup when a cell is recycled.
-                    let title = computed(move || {
-                        item.with(|item| {
-                            item.as_ref()
-                                .map(|item| item.title.clone())
-                                .unwrap_or_default()
-                        })
-                    });
                     view()
                         .app_class(tw("flex w-full min-w-0 items-stretch pb-px"))
                         .child(
@@ -1139,7 +1133,7 @@ pub fn sidebar() -> impl IntoElement {
                                         })
                                     })
                             },
-                            move || drag.grip(source_key, title),
+                            move || drag.grip(source_key),
                         ))
                         .into_element()
                 }),
@@ -1323,7 +1317,7 @@ pub fn sidebar() -> impl IntoElement {
         .child(snooze_dialog)
         .child(chrome::sidebar_chrome_footer(crate::screens::pull_requests::list::supported(), Route::Home.into(), chrome::ChromeFooterSlots {
             undo_notice,
-            update: Some(view().test_id("sidebar-update-footer").child(crate::screens::updates::footer()).into_element()),
+            provider_update: client.get().map(chrome::sidebar_provider_update),
             ..Default::default()
         }))
 }

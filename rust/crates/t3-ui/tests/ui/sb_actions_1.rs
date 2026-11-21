@@ -323,6 +323,8 @@ enum SidebarScenario {
     RejectedBatch,
     ProjectFolders,
     DraggableShelves,
+    RejectedShelfDrop,
+    ProviderUpdates,
 }
 
 #[component]
@@ -353,6 +355,16 @@ fn ProjectFolderSidebar() -> impl IntoElement {
 #[component]
 fn DraggableSidebar() -> impl IntoElement {
     live_sidebar_fixture().scenario(SidebarScenario::DraggableShelves as usize)
+}
+
+#[component]
+fn RejectedShelfDrop() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::RejectedShelfDrop as usize)
+}
+
+#[component]
+fn ProviderUpdatesSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::ProviderUpdates as usize)
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -393,7 +405,12 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
             thread["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
         }
     }
-    if props.scenario == SidebarScenario::DraggableShelves as usize {
+    if [
+        SidebarScenario::DraggableShelves as usize,
+        SidebarScenario::RejectedShelfDrop as usize,
+    ]
+    .contains(&props.scenario)
+    {
         initial["threads"][1]["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
         initial["threads"][1]["pinOrderKey"] = json!("a0");
     }
@@ -418,6 +435,13 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
             config["environment"]["capabilities"][capability] = json!(true);
         }
     });
+    if props.scenario == SidebarScenario::ProviderUpdates as usize {
+        server.set_permissions(&["orchestration:read", "providers:manage"]);
+        server.edit_config(|c| {
+            c["providers"] = json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"version":"1.0.0","status":"ready","auth":{"status":"authenticated"},"checkedAt":"2026-06-20T00:00:00Z","models":[],"skills":[],"slashCommands":[],"versionAdvisory":{"status":"behind_latest","currentVersion":"1.0.0","latestVersion":"2.0.0","updateCommand":"managed update","canUpdate":true,"checkedAt":null,"message":null}}]);
+        });
+        server.register("server.updateProvider", t3_client::testing::CallKind::Unary);
+    }
     let dispatch = "orchestration.dispatchCommand";
     let first_reply = (props.scenario == SidebarScenario::DeferredBatch as usize)
         .then(|| server.defer_reply(dispatch));
@@ -441,6 +465,11 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
             server.reply(dispatch, Err(json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":"fixture-command","commandType":"thread.delete","message":"Fixture rejected the action"})));
         }
     }
+    if props.scenario == SidebarScenario::RejectedShelfDrop as usize {
+        for _ in 0..2 {
+            server.reply(dispatch, Err(json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":"fixture-command","commandType":"thread.pin","message":"Fixture rejected the pin"})));
+        }
+    }
     for sequence in 2..12 {
         server.reply(
             "orchestration.dispatchCommand",
@@ -450,6 +479,7 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
     let store = ClientStore::default();
     let platform = server.platform();
     let clock = platform.fake.clone();
+    let clipboard = platform.fake.clone();
     on_key_with(
         "f7",
         KeyOptions {
@@ -506,6 +536,21 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
             },
         );
     }
+    let stored_expansion = signal(String::new());
+    let shelves = client.sidebar_shelves();
+    on_key("f10", move |_| {
+        let expansion = shelves.project_expansion();
+        spawn(async move {
+            let saved = expansion.await;
+            stored_expansion.set(if saved.values().any(|open| !open) {
+                "Saved closed folder".into()
+            } else if !saved.is_empty() {
+                "Saved open folder".into()
+            } else {
+                "No folder preference".into()
+            });
+        });
+    });
     let pairing = client.pair(server.pairing());
     let prefs = client.composer_preferences();
     spawner(
@@ -526,6 +571,15 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
         }
         .boxed_local(),
     );
+    let reject_copy = clipboard.clone();
+    on_key("f3", move |_| {
+        clipboard.push_host(Ok(t3_client::platform::HostReply::Unit))
+    });
+    on_key("f2", move |_| {
+        reject_copy.push_host(Err(t3_client::platform::PlatformError::Unsupported(
+            "Clipboard".into(),
+        )))
+    });
     let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
     let commands = signal(String::new());
     on_key_with(
@@ -609,6 +663,7 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
                 })),
         )
         .child(text(move || format!("RPC {}", commands.get())))
+        .child(text(move || stored_expansion.get()))
         .child(text(move || {
             route.get().map_or_else(String::new, |nav| match nav.top() {
                 Route::Draft(_) => "Draft route".into(),
@@ -645,6 +700,8 @@ fn start_sidebar(window: (f32, f32), root: Root) -> Headless {
     fixtures.register::<RejectedBatchSidebar>();
     fixtures.register::<ProjectFolderSidebar>();
     fixtures.register::<DraggableSidebar>();
+    fixtures.register::<RejectedShelfDrop>();
+    fixtures.register::<ProviderUpdatesSidebar>();
     let mut sets = t3_ui::registries();
     sets.push(fixtures);
     let mut config = EngineConfig {
@@ -1026,14 +1083,19 @@ fn followup_updates_footer_phone() {
 }
 
 fn updates_footer(window: (f32, f32)) {
-    let app = start_live_sidebar(window);
-    assert!(
-        app.screen()
-            .layout_nodes()
-            .iter()
-            .any(|node| node.test_id.as_deref() == Some("sidebar-update-footer")),
-        "production update footer slot"
-    );
+    let mut app = start_sidebar(window, Root::of::<ProviderUpdatesSidebar>());
+    app.wait_for("role:button[Review available updates]")
+        .expect("sidebar update pill");
+    app.press("role:button[Review available updates]")
+        .expect("open the live update controls");
+    app.wait_for("role:button[Update all]")
+        .expect("available update action");
+    app.press("role:button[Update all]")
+        .expect("review the update");
+    app.wait_for("Update 1 machine?")
+        .expect("live provider offer is in the dialog");
+    app.wait_for("text:Codex · 2.0.0")
+        .expect("the offered provider is shown");
 }
 
 #[test]
@@ -1083,6 +1145,11 @@ fn project_folder(window: (f32, f32)) {
     let mut app = start_sidebar(window, Root::of::<ProjectFolderSidebar>());
     app.wait_for("role:button[New thread in Project]")
         .expect("mount the folder action");
+    if window == DESKTOP {
+        app.hover("role:button[Project]")
+            .expect("reveal the folder action");
+    }
+    assert_folder_action_overlays_header(&app);
     app.press("role:button[New thread in Project]")
         .expect("start in the folder");
     app.wait_for("Draft route").expect("open a project draft");
@@ -1108,7 +1175,151 @@ fn shelf_drag(window: (f32, f32)) {
         .map(|node| node.bounds.origin.y.0)
         .collect::<Vec<_>>();
     let rise = offset.first().expect("pinned row") - offset.last().expect("active row");
-    app.drag("label:Move Alpha thread", point(px(0.0), px(rise)))
+    app.drag(ALPHA_GRIP, point(px(0.0), px(rise)))
         .expect("drag the active thread to the pinned shelf");
     assert_commands(&mut app, "thread.pin:alpha thread.pin.reorder:beta");
+}
+
+fn open_project_folder_menu(app: &mut Headless, window: (f32, f32)) {
+    let folder = "role:button[Project]";
+    app.wait_for(folder).expect("mounted project folder");
+    if window == PHONE {
+        app.long_press(folder).expect("open touch folder menu");
+    } else {
+        app.right_click(folder).expect("open folder menu");
+    }
+}
+
+#[test]
+fn polish_project_copy_shows_result() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_sidebar(window, Root::of::<ProjectFolderSidebar>());
+        app.press_key("f3").expect("allow the clipboard write");
+        open_project_folder_menu(&mut app, window);
+        app.press("role:menuitem[Copy path]")
+            .expect("copy project path");
+        app.wait_for("Path copied")
+            .expect("successful clipboard feedback");
+        app.wait_for("/workspace/project")
+            .expect("show the copied path");
+        app.press_key("f2").expect("reject the clipboard write");
+        open_project_folder_menu(&mut app, window);
+        app.press("role:menuitem[Copy path]")
+            .expect("attempt clipboard write");
+        app.wait_for("Failed to copy path")
+            .expect("clipboard rejection feedback");
+    }
+}
+
+#[test]
+fn polish_project_folder_persists_both_toggle_states() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_sidebar(window, Root::of::<ProjectFolderSidebar>());
+        let folder = "role:button[Project]";
+        app.wait_for(folder).expect("initial folder");
+        app.press(folder).expect("close folder");
+        app.press_key("f10").expect("read the stored preference");
+        app.wait_for("Saved closed folder")
+            .expect("closing was saved");
+        app.press(folder).expect("reopen folder");
+        app.press_key("f10").expect("read saved preference again");
+        app.wait_for("Saved open folder")
+            .expect("reopening was saved");
+    }
+}
+
+const ALPHA_GRIP: &str = "id:sidebar-drag-grip-14:sidebar-remotealpha";
+
+fn assert_folder_action_overlays_header(app: &Headless) {
+    let nodes = app.screen().layout_nodes();
+    let header = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some("sidebar-project-folder"))
+        .expect("folder header")
+        .bounds;
+    let action = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some("sidebar-folder-new-thread"))
+        .expect("inline folder action")
+        .bounds;
+    let trailing =
+        header.origin.x.0 + header.size.width.0 - action.origin.x.0 - action.size.width.0;
+    assert!(
+        (trailing - 24.0).abs() < 1.0,
+        "action leaves room for the expand arrow"
+    );
+    let label = nodes
+        .iter()
+        .find(|node| node.test_id.as_deref() == Some("sidebar-folder-label"))
+        .expect("folder title")
+        .bounds;
+    assert!(
+        label.origin.x.0 + label.size.width.0 <= action.origin.x.0,
+        "title ends before the new thread button"
+    );
+}
+
+#[test]
+fn polish_pill_requires_an_offer_on_phone() {
+    let app = start_live_sidebar(PHONE);
+    assert_eq!(
+        app.screen()
+            .matches("role:button[Review available updates]"),
+        Ok(false)
+    );
+}
+
+#[test]
+fn polish_grip_is_pointer_only() {
+    let app = start_sidebar(DESKTOP, Root::of::<DraggableSidebar>());
+    assert_eq!(app.screen().matches(ALPHA_GRIP), Ok(true));
+    assert_eq!(app.screen().matches("label:Move Alpha thread"), Ok(false));
+}
+
+fn hold_shelf_drag(app: &mut Headless) {
+    let row_positions = app
+        .screen()
+        .layout_nodes()
+        .iter()
+        .filter(|node| node.test_id.as_deref() == Some("sidebar-row-card"))
+        .map(|node| node.bounds.origin.y.0)
+        .collect::<Vec<_>>();
+    let dy = row_positions[0] - row_positions[1];
+    app.drag_and_hold(ALPHA_GRIP, point(px(0.0), px(dy)))
+        .expect("hold a thread above the pinned row");
+}
+
+#[test]
+fn polish_failed_pin_names_the_step_and_skips_reorder() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_sidebar(window, Root::of::<RejectedShelfDrop>());
+        hold_shelf_drag(&mut app);
+        app.drop_held().expect("drop in Pinned");
+        app.wait_for("Failed to pin thread")
+            .expect("report the failed pin step");
+        assert_commands(&mut app, "thread.pin:alpha");
+    }
+}
+
+#[test]
+fn polish_interruptions_cancel_an_in_flight_drop() {
+    for window in [DESKTOP, PHONE] {
+        for interrupt in ["escape", "resize", "background", "inactive"] {
+            let mut app = start_sidebar(window, Root::of::<DraggableSidebar>());
+            hold_shelf_drag(&mut app);
+            match interrupt {
+                "escape" => app.press_key("escape"),
+                "resize" => app.set_viewport(size(px(window.0), px(window.1 + 25.0))),
+                "background" => app.set_environment("background", |env| {
+                    env.lifecycle = nsh_core::platform::Lifecycle::Background
+                }),
+                _ => app.set_environment("inactive", |env| {
+                    env.lifecycle = nsh_core::platform::Lifecycle::Inactive
+                }),
+            }
+            .expect("interrupt the drag");
+            app.drop_held().expect("release the canceled drag");
+            assert_commands(&mut app, "");
+        }
+    }
 }

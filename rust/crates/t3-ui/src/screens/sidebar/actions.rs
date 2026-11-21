@@ -463,18 +463,20 @@ fn action_icon(name: &str) -> Option<&'static str> {
 const UNDO: &str = r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>"#;
 
 pub(super) fn action_failed(action: &str, error: t3_client::ClientError) {
+    let title = match action {
+        "undo" => "Failed to undo thread action",
+        "archive-draft" => "Thread archived. Failed to open a new draft.",
+        "snooze" => "Failed to snooze thread",
+        action => t3_client::thread_views::thread_ops::header::action_failure_title(action),
+    };
+    failed(title, error);
+}
+
+pub(super) fn failed(title: &'static str, error: t3_client::ClientError) {
     if matches!(error, t3_client::ClientError::Cancelled) {
         return;
     }
     use crate::ui::toast::{ToastOptions, Variant, toast_manager};
-    let title = match action {
-        "undo" => "Failed to undo thread action",
-        "archive-draft" => "Thread archived. Failed to open a new draft.",
-        "project-pin" => "Failed to update project pin",
-        "move-thread" => "Failed to move thread",
-        "snooze" => "Failed to snooze thread",
-        action => t3_client::thread_views::thread_ops::header::action_failure_title(action),
-    };
     toast_manager().add(ToastOptions {
         variant: Variant::Error,
         title: crate::i18n::Text::client_key(title),

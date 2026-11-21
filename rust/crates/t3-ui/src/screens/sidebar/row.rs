@@ -14,7 +14,7 @@ use t3_client::store::Scope as StoreScope;
 use t3_client::thread_views::{
     shelves::SnoozePreset,
     thread_ops::{
-        actions::BatchReport,
+        actions::{BatchReport, SidebarDrop, SidebarDropFailure},
         undo::{UndoNotice, UndoReport},
     },
 };
@@ -42,6 +42,20 @@ use crate::ui::icon::{Icon, icon, icon_with_class, provider_icon};
 use crate::ui::tooltip::{TooltipOptions, tooltip, tooltip_create_handle};
 
 use crate::runtime::tasks::watch;
+
+pub enum ClipboardWrite {
+    Confirmed,
+    Requested,
+}
+
+pub(super) fn local_clipboard_write(
+    path: String,
+) -> LocalBoxFuture<'static, Result<ClipboardWrite, ClientError>> {
+    // The NSH clipboard command preserves local/mobile copy without claiming
+    // that the OS accepted a write when no acknowledgment is available.
+    set_clipboard(path);
+    Box::pin(futures::future::ready(Ok(ClipboardWrite::Requested)))
+}
 
 type Thread = Memo<Option<Shared<OrchestrationV2ThreadShell>>>;
 
@@ -100,18 +114,35 @@ pub trait RowThreadActions {
         false
     }
 
-    fn can_sidebar_drop(
-        &self,
-        _: &t3_client::thread_views::thread_ops::actions::SidebarDrop,
-    ) -> bool {
+    fn can_sidebar_drop(&self, _: &SidebarDrop) -> bool {
         false
     }
 
     fn sidebar_drop(
         &self,
-        _: t3_client::thread_views::thread_ops::actions::SidebarDrop,
-    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
-        Box::pin(async { Err(ClientError::Unsupported("sidebar drag")) })
+        _: SidebarDrop,
+    ) -> LocalBoxFuture<'static, Result<bool, SidebarDropFailure>> {
+        Box::pin(async {
+            Err(SidebarDropFailure {
+                title: "Failed to move thread",
+                error: ClientError::Unsupported("sidebar drag"),
+            })
+        })
+    }
+
+    fn copy_project_path(
+        &self,
+        path: String,
+    ) -> LocalBoxFuture<'static, Result<ClipboardWrite, ClientError>> {
+        local_clipboard_write(path)
+    }
+
+    fn update_offers(&self) -> LocalBoxStream<'static, bool> {
+        Box::pin(futures::stream::empty())
+    }
+
+    fn update_controls(&self) -> AnyElement {
+        view().into_element()
     }
 
     fn sidebar_preferences(
@@ -262,18 +293,35 @@ impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
         self.thread_actions().can_drag_thread(key)
     }
 
-    fn can_sidebar_drop(
-        &self,
-        drop: &t3_client::thread_views::thread_ops::actions::SidebarDrop,
-    ) -> bool {
+    fn can_sidebar_drop(&self, drop: &SidebarDrop) -> bool {
         self.thread_actions().can_sidebar_drop(drop)
     }
 
     fn sidebar_drop(
         &self,
-        drop: t3_client::thread_views::thread_ops::actions::SidebarDrop,
-    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
+        drop: SidebarDrop,
+    ) -> LocalBoxFuture<'static, Result<bool, SidebarDropFailure>> {
         self.thread_actions().perform_sidebar_drop(drop)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn copy_project_path(
+        &self,
+        path: String,
+    ) -> LocalBoxFuture<'static, Result<ClipboardWrite, ClientError>> {
+        let copy = self.thread_actions().copy_project_path(path);
+        Box::pin(async move { copy.await.map(|()| ClipboardWrite::Confirmed) })
+    }
+
+    fn update_offers(&self) -> LocalBoxStream<'static, bool> {
+        let runtime = self.clone();
+        Box::pin(self.changes().map(move |_| {
+            !t3_client::services::updates::providers::candidates(&runtime).is_empty()
+        }))
+    }
+
+    fn update_controls(&self) -> AnyElement {
+        crate::screens::updates::footer_for(self, option_env!("T3_APP_VERSION"))
     }
 
     fn sidebar_preferences(
