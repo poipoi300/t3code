@@ -8,7 +8,7 @@ pub const FIELDS: [&str; 4] = [
     "cacheReadCostPerMillionTokens",
     "cacheWriteCostPerMillionTokens",
 ];
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct PriceEdit {
     pub model: String,
     pub rates: [Option<String>; 4],
@@ -34,13 +34,43 @@ pub fn cells(config: &ServerConfig, model: &str) -> [String; 5] {
         value(1),
         value(2),
         value(3),
-        config
-            .settings
-            .usage_model_aliases
-            .get(&id)
+        (config.environment.capabilities.usage_model_aliases == Some(true))
+            .then(|| config.settings.usage_model_aliases.get(&id))
+            .flatten()
             .map(|s| s.0.clone())
             .unwrap_or_default(),
     ]
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum PriceCell {
+    Value(String),
+    Mixed,
+    Unavailable,
+}
+
+pub fn shared_cells(configs: &[Option<&ServerConfig>], model: &str) -> [PriceCell; 5] {
+    let rows: Vec<_> = configs
+        .iter()
+        .map(|config| config.map(|c| cells(c, model)))
+        .collect();
+    std::array::from_fn(|i| {
+        if rows.iter().any(Option::is_none)
+            || (i == 4
+                && configs
+                    .iter()
+                    .flatten()
+                    .any(|c| c.environment.capabilities.usage_model_aliases != Some(true)))
+        {
+            return PriceCell::Unavailable;
+        }
+        let mut values = rows.iter().flatten().map(|row| &row[i]);
+        let first = values.next().cloned().unwrap_or_default();
+        if values.any(|value| *value != first) {
+            PriceCell::Mixed
+        } else {
+            PriceCell::Value(first)
+        }
+    })
 }
 pub fn patch(config: &ServerConfig, edit: &PriceEdit) -> Result<SettingsPatch, String> {
     let model = edit.model.trim();
@@ -62,11 +92,17 @@ pub fn patch(config: &ServerConfig, edit: &PriceEdit) -> Result<SettingsPatch, S
         return Ok(patch);
     }
     if !alias.is_empty() {
-        if edit.rates.iter().flatten().any(|s| !s.trim().is_empty()) {
-            return Err("Clear the mapping before setting prices.".into());
+        if edit.alias.is_none() && edit.rates.iter().any(Option::is_some) {
+            return Err(format!(
+                "{} maps this model. Remove it from \"Apply to\" or clear its mapping first.",
+                config.environment.label.0
+            ));
         }
         if config.environment.capabilities.usage_model_aliases != Some(true) {
             return Err("Update server to map models".into());
+        }
+        if alias == model {
+            return Err("Map to a different model.".into());
         }
         let mut seen = std::collections::BTreeSet::from([model]);
         let mut next = alias;
@@ -124,6 +160,109 @@ pub fn patch(config: &ServerConfig, edit: &PriceEdit) -> Result<SettingsPatch, S
             .ok_or_else(|| "Use non-negative numbers for prices.".to_owned())?;
         price.insert((*key).into(), json!(value));
     }
-    patch.insert("usagePriceOverrides".into(), json!({model:price}));
+    if FIELDS.iter().enumerate().any(|(i, field)| {
+        current[i].parse::<f64>().ok() != price.get(*field).and_then(Value::as_f64)
+    }) {
+        patch.insert("usagePriceOverrides".into(), json!({model:price}));
+    }
     Ok(patch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config(label: &str, aliases: bool, rate: u32) -> ServerConfig {
+        let sample = include_str!("../../../../../fixtures/samples/ServerConfig.jsonl")
+            .lines()
+            .next()
+            .expect("sample");
+        let mut c: Value = serde_json::from_str(sample).expect("sample json");
+        c["environment"]["label"] = json!(label);
+        c["environment"]["capabilities"]["usageModelAliases"] = json!(aliases);
+        c["settings"]["usagePriceOverrides"] =
+            json!({"one":{"inputCostPerMillionTokens":rate,"outputCostPerMillionTokens":2}});
+        c["settings"]["usageModelAliases"] = json!({"two":"one"});
+        serde_json::from_value(c).expect("test config")
+    }
+    #[test]
+    fn mapping_validation_is_per_destination_and_capability() {
+        let online = config("Laptop", true, 1);
+        let legacy = config("Legacy", false, 2);
+        let mapping = PriceEdit {
+            model: "one".into(),
+            alias: Some("two".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            patch(&online, &mapping),
+            Err("Model mappings cannot form a cycle on Laptop.".into())
+        );
+        assert_eq!(
+            patch(&legacy, &mapping),
+            Err("Update server to map models".into())
+        );
+        let same = PriceEdit {
+            alias: Some("one".into()),
+            ..mapping
+        };
+        assert_eq!(
+            patch(&online, &same),
+            Err("Map to a different model.".into())
+        );
+        assert_eq!(cells(&legacy, "two")[4], "");
+        let remove = PriceEdit {
+            model: "two".into(),
+            removed: true,
+            ..Default::default()
+        };
+        assert!(
+            patch(&legacy, &remove)
+                .expect("nothing to remove")
+                .is_empty()
+        );
+    }
+    #[test]
+    fn shared_cells_distinguish_mixed_rates_and_unavailable_aliases() {
+        let first = config("Home", true, 1);
+        let second = config("Work", false, 3);
+        let cells = shared_cells(&[Some(&first), Some(&second)], "one");
+        assert_eq!(cells[0], PriceCell::Mixed);
+        assert_eq!(cells[1], PriceCell::Value("2".into()));
+        assert_eq!(cells[4], PriceCell::Unavailable);
+        assert_eq!(
+            shared_cells(&[Some(&first), None], "one")[0],
+            PriceCell::Unavailable
+        );
+    }
+    #[test]
+    fn mixed_untouched_fields_keep_each_destinations_rate() {
+        let edit = PriceEdit {
+            model: "one".into(),
+            rates: [None, Some("4".into()), None, None],
+            ..Default::default()
+        };
+        for rate in [1, 3] {
+            let c = config("Work", true, rate);
+            let patch = patch(&c, &edit).expect("valid price");
+            assert_eq!(
+                patch["usagePriceOverrides"]["one"]["inputCostPerMillionTokens"].as_f64(),
+                Some(f64::from(rate))
+            );
+            assert_eq!(
+                patch["usagePriceOverrides"]["one"]["outputCostPerMillionTokens"].as_f64(),
+                Some(4.)
+            );
+            assert!(
+                super::patch(
+                    &c,
+                    &PriceEdit {
+                        model: "one".into(),
+                        ..Default::default()
+                    }
+                )
+                .expect("unchanged")
+                .is_empty()
+            );
+        }
+    }
 }

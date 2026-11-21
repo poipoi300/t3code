@@ -76,3 +76,22 @@ pub(super) fn period_label(key: &str, window: &UsageSummaryInput) -> String {
         key.to_owned()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hourly_window_follows_elapsed_time_across_dst_and_resolves_unknown_zones() {
+        let now = epoch_ms("2026-11-01T07:00:37Z").expect("fall back instant") as u64;
+        let local = input(1, now, "America/Toronto");
+        let slots = periods(&local);
+        assert_eq!(slots.len(), 24);
+        assert_eq!(period_label(&slots[22], &local), "2026-11-01 01:00");
+        assert_eq!(period_label(&slots[23], &local), "2026-11-01 01:00");
+        let late = epoch_ms("2026-11-02T01:00:00Z").expect("before local midnight") as u64;
+        assert_eq!(input(7, late, "America/Toronto").until_day.0, "2026-11-01");
+        let fallback = input(7, late, "Unknown/Zone");
+        assert_eq!(fallback.time_zone.0, "UTC");
+        assert_eq!(fallback.until_day.0, "2026-11-02");
+    }
+}

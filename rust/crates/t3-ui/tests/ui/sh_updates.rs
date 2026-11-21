@@ -37,9 +37,9 @@ fn UpdateFixture() -> impl IntoElement {
     );
     server.register("server.updateProvider", CallKind::Unary);
     let mut settled = provider;
-    settled["version"] = json!("2.0.0");
+    settled["installedVersion"] = json!("2.0.0");
     settled["versionAdvisory"]["status"] = json!("current");
-    settled["updateState"] = json!({"status":"succeeded","startedAt":null,"finishedAt":null,"message":null,"output":null});
+    settled["updateState"] = json!({"status":"succeeded","startedAt":null,"finishedAt":null,"message":"Restart the server","output":null});
     server.reply("server.updateProvider", Ok(json!({"providers":[settled]})));
     let client = ClientRuntime::new(
         server.platform(),
@@ -55,7 +55,35 @@ fn UpdateFixture() -> impl IntoElement {
         .boxed_local(),
     );
     let received = signal("");
+    let store = client.store().clone();
+    on_key("ctrl+shift+r", move |_| {
+        let snapshot = store.snapshot();
+        let (id, env) = snapshot
+            .environments
+            .first_key_value()
+            .expect("paired machine");
+        let mut config = env.config.as_deref().expect("machine config").clone();
+        config.environment.capabilities.usage_model_aliases =
+            Some(config.environment.capabilities.usage_model_aliases != Some(true));
+        assert!(store.set_config(id, env.session, config));
+        received.set("Config refreshed");
+    });
+    let inspected = stored(0);
+    let wire = server.clone();
+    on_key("ctrl+shift+n", move |_| {
+        assert!(
+            wire.calls("server.updateProvider").is_empty(),
+            "installation requires confirmation"
+        );
+        inspected.replace(inspected.get() + 1);
+        received.set(if inspected.get() == 1 {
+            "No install before confirmation"
+        } else {
+            "No install after Cancel"
+        });
+    });
     on_key("ctrl+shift+i", move |_| {
+        assert_eq!(inspected.get(), 2, "both pre-install wire inspections ran");
         assert_eq!(
             server.calls("server.updateProvider"),
             [json!({"provider":"codex","instanceId":"codex"})]
@@ -89,18 +117,45 @@ fn run(window: (f32, f32)) {
         config.environment.os = nsh_core::platform::Os::Linux;
     }
     let mut app = Headless::start(config).expect("headless updates");
-    app.wait_for("Update everything")
+    app.wait_for("Update all")
         .expect("provider update discovered");
     assert!(app.screen().shows("Fake host · 1.0.0 → 1.1.0"));
+    let notice = app
+        .screen()
+        .id("Fake host · 1.0.0 → 1.1.0")
+        .expect("version notice");
+    app.press_key("ctrl+shift+r")
+        .expect("change unrelated setting");
+    app.wait_for("Config refreshed").expect("config delivered");
+    assert_eq!(app.screen().id("Fake host · 1.0.0 → 1.1.0"), Ok(notice));
     app.press("role:button[Check for updates]")
         .expect("refresh provider advisories");
-    app.press("role:button[Update everything]")
+    app.press("role:button[Update all]")
         .expect("review updates");
     app.wait_for("Update 1 machine?").expect("confirmation");
     assert!(app.screen().shows("1 provider update"));
+    app.press_key("ctrl+shift+n")
+        .expect("inspect wire before confirmation");
+    assert_eq!(app.screen().count("role:alertdialog"), Ok(1));
+    if window == PHONE {
+        app.press("role:alertdialog >> role:button[Cancel]")
+            .expect("tap Cancel");
+    } else {
+        app.press_key("enter")
+            .expect("activate initially focused Cancel");
+    }
+    app.wait_for_gone("role:alertdialog", std::time::Duration::from_secs(2))
+        .expect("cancel closed confirmation");
+    app.press_key("ctrl+shift+n")
+        .expect("inspect wire after Cancel");
+    app.wait_for("No install after Cancel")
+        .expect("both inspections delivered");
+    app.press("role:button[Update all]").expect("review again");
     app.press("role:button[Update]").expect("confirm");
     app.wait_for("Provider updated")
         .expect("authoritative result");
+    app.wait_for("Fake host · Codex: Restart the server")
+        .expect("scoped restart instruction");
     app.press_key("ctrl+shift+i").expect("check wire calls");
     app.wait_for("One provider updated")
         .expect("deduplicated driver");

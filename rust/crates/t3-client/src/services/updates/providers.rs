@@ -65,7 +65,6 @@ pub fn candidates<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> V
                 (
                     p.instance_id == default_instance_id_for_driver(&p.driver),
                     &p.checked_at.0,
-                    &p.instance_id.0,
                 )
             }) else {
                 continue;
@@ -74,15 +73,15 @@ pub fn candidates<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> V
                 continue;
             };
             if advisory.update_command.is_none()
+                || p.update_state.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.status,
+                        ServerProviderUpdateStatus::Queued | ServerProviderUpdateStatus::Running
+                    )
+                })
                 || group.iter().any(|p| {
                     p.version_advisory.as_ref().is_none_or(|a| {
                         !a.can_update || a.update_command != advisory.update_command
-                    }) || p.update_state.as_ref().is_some_and(|s| {
-                        matches!(
-                            s.status,
-                            ServerProviderUpdateStatus::Queued
-                                | ServerProviderUpdateStatus::Running
-                        )
                     })
                 })
             {
@@ -176,4 +175,81 @@ pub async fn check<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> 
     }))
     .await;
     results.into_iter().flatten().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClientStore, composition::Spawner, testing::environment::FakeEnvironment};
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
+    use serde_json::{Value, json};
+    use std::rc::Rc;
+    #[test]
+    fn candidates_enforce_grant_compatibility_command_and_representative() {
+        let mut pool = LocalPool::new();
+        let local = pool.spawner();
+        let spawn: Spawner = Rc::new(move |f| local.spawn_local(f).expect("local spawner"));
+        let primary = FakeEnvironment::new("manage", spawn.clone());
+        let read_only = FakeEnvironment::at_origin("reader", "https://other.test", spawn.clone());
+        primary.set_permissions(&["orchestration:read", "providers:manage"]);
+        read_only.set_permissions(&["orchestration:read"]);
+        let base = json!({"instanceId":"codex","driver":"codex","enabled":true,"installed":true,"version":"1.0","status":"ready","auth":{"status":"authenticated"},"checkedAt":"2026-06-20T00:00:00Z","models":[],"skills":[],"slashCommands":[],"versionAdvisory":{"status":"behind_latest","currentVersion":"1","latestVersion":"2","updateCommand":"update","canUpdate":true,"checkedAt":null,"message":null}});
+        for server in [&primary, &read_only] {
+            server.edit_config(|c| c["providers"] = json!([base]));
+        }
+        let client = ClientRuntime::new(
+            primary.platform().with_environment(&read_only),
+            ClientStore::default(),
+            t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+            spawn,
+        );
+        pool.run_until(client.pair(primary.pairing()))
+            .expect("paired manageable");
+        pool.run_until(client.pair(read_only.pairing()))
+            .expect("paired reader");
+        pool.run_until_stalled();
+        let set = |providers: Value| {
+            let snapshot = client.store().snapshot();
+            let id = EnvironmentId("manage".into());
+            let env = &snapshot.environments[&id];
+            let mut config = env.config.as_deref().expect("config").clone();
+            config.providers = serde_json::from_value(providers).expect("valid providers");
+            assert!(client.store().set_config(&id, env.session, config));
+        };
+        assert_eq!(
+            candidates(&client)
+                .iter()
+                .map(|c| c.environment.0.as_str())
+                .collect::<Vec<_>>(),
+            ["manage"]
+        );
+        let mut other = base.clone();
+        other["instanceId"] = json!("extra");
+        let mut incompatible = base.clone();
+        incompatible["compatibilityAdvisory"] = json!({"status":"supported","latestVersionStatus":"broken","message":null,"recommendedVersion":null,"recommendedRange":null});
+        let mut disabled = base.clone();
+        disabled["enabled"] = json!(false);
+        let mut conflict = other.clone();
+        conflict["versionAdvisory"]["updateCommand"] = json!("other update");
+        let mut manual = other.clone();
+        manual["versionAdvisory"]["canUpdate"] = json!(false);
+        for list in [
+            json!([incompatible]),
+            json!([disabled]),
+            json!([base, conflict]),
+            json!([base, manual]),
+        ] {
+            set(list);
+            assert!(candidates(&client).is_empty());
+        }
+        other["updateState"] = json!({"status":"running","startedAt":null,"finishedAt":null,"message":null,"output":null});
+        set(json!([other, base]));
+        assert_eq!(
+            candidates(&client)
+                .iter()
+                .map(|c| c.instance.0.as_str())
+                .collect::<Vec<_>>(),
+            ["codex"]
+        );
+    }
 }

@@ -10,7 +10,7 @@ use t3_client::{
     navigation::SettingsPage,
     services::{
         settings::scope::SettingsScopeSearch,
-        usage::prices::{PriceEdit, cells, patch},
+        usage::prices::{PriceCell, PriceEdit, patch, shared_cells},
     },
 };
 
@@ -87,7 +87,12 @@ fn price_rows<P: Platform + Clone + 'static>(
             c.settings
                 .usage_price_overrides
                 .keys()
-                .chain(c.settings.usage_model_aliases.keys())
+                .chain(
+                    c.settings
+                        .usage_model_aliases
+                        .keys()
+                        .filter(|_| c.environment.capabilities.usage_model_aliases == Some(true)),
+                )
                 .map(|k| k.0.clone())
         })
         .collect();
@@ -170,6 +175,12 @@ fn price_field(
         }
     })
 }
+#[derive(Clone, Copy)]
+enum PriceAction {
+    Save,
+    Remove,
+    Retry,
+}
 fn editor<P: Platform + Clone + 'static>(
     client: ClientRuntime<P>,
     targets: Vec<UsageTarget>,
@@ -185,23 +196,22 @@ fn editor<P: Platform + Clone + 'static>(
     } = state;
     let existing = keys.contains(&initial);
     let name = signal(initial.clone());
-    let current: Vec<_> = targets
+    let configs = targets
         .iter()
-        .filter_map(|t| t.config.as_ref())
-        .map(|c| cells(c, &initial))
-        .collect();
-    let originals: [Option<String>; 5] = std::array::from_fn(|i| {
-        current
-            .first()
-            .map(|row| row[i].clone())
-            .filter(|v| current.iter().all(|row| row[i] == *v))
+        .map(|t| t.config.as_deref())
+        .collect::<Vec<_>>();
+    let originals = shared_cells(&configs, &initial);
+    let fields = originals.clone().map(|cell| {
+        signal(match cell {
+            PriceCell::Value(v) => v,
+            _ => String::new(),
+        })
     });
-    let fields = originals.clone().map(|v| signal(v.unwrap_or_default()));
     let original = stored(originals);
     let keys = stored(keys.clone());
     let retry = signal(BTreeSet::<EnvironmentId>::new());
 
-    let locked = move || busy.get() || retry.with(|r| !r.is_empty());
+    let locked = move || busy.get();
     let mut body = view()
         .app_class(tw("flex flex-col gap-2"))
         .child(text(t("Model ID")));
@@ -225,50 +235,78 @@ fn editor<P: Platform + Clone + 'static>(
         }
         body = body.child(text(t(key))).child(price_field(
             fields[i],
-            if original.with(|o| o[i].is_none()) {
-                t("Mixed")
-            } else {
-                String::new()
-            },
+            original.with(|o| match &o[i] {
+                PriceCell::Mixed => t("Mixed"),
+                PriceCell::Unavailable => t("Unavailable"),
+                PriceCell::Value(_) => String::new(),
+            }),
             t(key),
             locked,
         ));
     }
-    let staged = stored(None::<PriceEdit>);
+    let draft = computed(move || {
+        let original = original.get();
+        let field = |i: usize| {
+            let value = fields[i].get();
+            let previous = match &original[i] {
+                PriceCell::Value(v) => v.as_str(),
+                _ => "",
+            };
+            (previous != value).then_some(value)
+        };
+        PriceEdit {
+            model: name.get().trim().to_owned(),
+            rates: std::array::from_fn(field),
+            alias: field(4),
+            removed: false,
+        }
+    });
+    let attempted = signal(None::<PriceEdit>);
+    let outcomes = stored(BTreeMap::<EnvironmentId, String>::new());
+    effect(move || {
+        let current = draft.get();
+        if attempted.with(|saved| {
+            saved.as_ref().is_some_and(|saved| {
+                current.model != saved.model
+                    || current.rates != saved.rates
+                    || current.alias != saved.alias
+            })
+        }) {
+            attempted.set(None);
+            retry.set(BTreeSet::new());
+            outcomes.replace(BTreeMap::new());
+            messages.set(Vec::new());
+        }
+    });
     let tasks = TaskOwner::here();
-    let submit = Rc::new(move |removed: bool| {
+    let submit = Rc::new(move |action: PriceAction| {
         if busy.get_untracked() {
             return;
         }
-        let original = original.get();
-        let draft = if let Some(saved) = staged.get() {
+        let is_retry = matches!(action, PriceAction::Retry);
+        let mut draft = if is_retry {
+            let Some(saved) = attempted.get_untracked() else {
+                return;
+            };
             saved
         } else {
-            let field = |i: usize| {
-                let v = fields[i].get_untracked();
-                (original[i].as_deref().unwrap_or_default() != v).then_some(v)
-            };
-            let model = name.get_untracked().trim().to_owned();
-            if !existing && keys.with(|keys| keys.contains(&model)) {
-                messages.set(vec![t(
-                    "This model already has a row. Edit its prices there.",
-                )]);
-                return;
-            }
-            PriceEdit {
-                model,
-                rates: std::array::from_fn(field),
-                alias: field(4),
-                removed,
-            }
+            outcomes.replace(BTreeMap::new());
+            draft.get_untracked()
         };
+        draft.removed |= matches!(action, PriceAction::Remove);
+        if !existing && keys.with(|keys| keys.contains(&draft.model)) {
+            messages.set(vec![t(
+                "This model already has a row. Edit its prices there.",
+            )]);
+            return;
+        }
         let failed = retry.get_untracked();
-        let mut writes = Vec::new();
+        let mut writes = futures::stream::FuturesUnordered::new();
         let settings = client.settings();
         let live = client.usage_targets();
         for target in targets
             .iter()
-            .filter(|t| failed.is_empty() || failed.contains(&t.id))
+            .filter(|t| !is_retry || failed.contains(&t.id))
         {
             let here = live.iter().find(|t| t.id == target.id);
             let plan = match here {
@@ -277,13 +315,7 @@ fn editor<P: Platform + Clone + 'static>(
                 Some(target) if !target.settings_write => Err(t("Read-only access")),
                 Some(target) => match &target.config {
                     None => Err(t("Prices not loaded")),
-                    Some(c) => match patch(c, &draft) {
-                        Ok(p) => Ok(p),
-                        Err(msg) => {
-                            messages.set(vec![msg]);
-                            return;
-                        }
-                    },
+                    Some(c) => patch(c, &draft),
                 },
             };
             let id = target.id.clone();
@@ -313,23 +345,31 @@ fn editor<P: Platform + Clone + 'static>(
             });
         }
         busy.set(true);
-        staged.replace(Some(draft));
+        attempted.set(Some(draft));
+        let order = targets.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         tasks.spawn(async move {
-            let results = futures::future::join_all(writes).await;
             let mut failed = BTreeSet::new();
-            let mut status = Vec::new();
-            for (id, label, result) in results {
+            let mut status = outcomes.get();
+            while let Some((id, label, result)) = writes.next().await {
                 match result {
-                    Ok(()) => status.push(format!("{label}: {}", t("Saved"))),
+                    Ok(()) => {
+                        status.insert(id, format!("{label}: {}", t("Saved")));
+                    }
                     Err(error) => {
-                        failed.insert(id);
-                        status.push(format!("{label}: {error}"));
+                        failed.insert(id.clone());
+                        status.insert(id, format!("{label}: {error}"));
                     }
                 }
+                messages.set(
+                    order
+                        .iter()
+                        .filter_map(|id| status.get(id).cloned())
+                        .collect(),
+                );
             }
             let success = failed.is_empty();
             retry.set(failed);
-            messages.set(status);
+            outcomes.replace(status);
             busy.set(false);
             if success {
                 refresh.update(|r| *r += 1);
@@ -344,7 +384,7 @@ fn editor<P: Platform + Clone + 'static>(
             ButtonVariant::GhostDestructive,
             ButtonSize::Sm,
             locked,
-            move || submit(true),
+            move || submit(PriceAction::Remove),
         ));
     }
     body.child(region(
@@ -356,7 +396,13 @@ fn editor<P: Platform + Clone + 'static>(
                 ButtonVariant::Default,
                 ButtonSize::Sm,
                 move || busy.get(),
-                move || submit(false),
+                move || {
+                    submit(if first {
+                        PriceAction::Save
+                    } else {
+                        PriceAction::Retry
+                    })
+                },
             )
         },
     ))

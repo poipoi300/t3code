@@ -5,7 +5,7 @@ mod preferences;
 mod prices;
 mod window;
 use crate::{
-    i18n::t,
+    i18n::{Value, t, tr},
     runtime::{
         rt,
         tasks::{TaskOwner, watch},
@@ -29,7 +29,7 @@ use t3_client::{
     composition::{ClientRuntime, usage::UsageTarget},
     platform::Platform,
     services::usage::{
-        limits::limits,
+        limits::{Limits, limits},
         overview::{PROVIDERS, Report, merge},
     },
     types::{EnvironmentId, QueryState},
@@ -208,7 +208,11 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
         move || {
             (
                 layout_class(),
-                targets.get(),
+                targets.with(|ts| {
+                    ts.iter()
+                        .map(|t| (t.id.clone(), t.label.clone()))
+                        .collect::<Vec<_>>()
+                }),
                 page.metric.get(),
                 page.days.get(),
                 page.selected.get(),
@@ -299,33 +303,96 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
         },
     );
     let runtime = client.clone();
+    let status_targets = computed(move || {
+        selected.with(|all| {
+            reports.with(|reports| {
+                all.iter()
+                    .map(|target| {
+                        let report = reports
+                            .get(&target.id)
+                            .filter(|_| target.connected && target.diagnostics);
+                        ReportTarget {
+                            id: target.id.clone(),
+                            label: target.label.clone(),
+                            connected: target.connected,
+                            diagnostics: target.diagnostics,
+                            value: report.and_then(|r| r.value.clone()),
+                            loading: report.is_none_or(|r| r.loading),
+                            failed: report.is_some_and(|r| r.error.is_some()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    let clock = client.clone();
+    let limit_data = computed(move || {
+        limits_tab
+            .get()
+            .then(|| selected.with(|all| limits(all, &page.hidden.get(), clock.usage_clock_ms())))
+    });
+    let sharing = computed(move || {
+        !limits_tab.get()
+            && !page.hidden.with(|h| h.contains("Codex"))
+            && selected.with(|all| {
+                all.iter()
+                    .filter_map(|t| t.config.as_ref())
+                    .flat_map(|c| &c.providers.0)
+                    .any(|p| {
+                        matches!(
+                            p.auth.status,
+                            t3_contracts::server::ServerProviderAuthStatus::Authenticated
+                        ) && p.auth.subscription_sharing == Some(Some(true))
+                    })
+            })
+    });
     let content = region(
         move || {
-            (
-                selected.get(),
-                reports.get(),
-                page.metric.get(),
-                page.hidden.get(),
-                period.get(),
-                page.by_time.get(),
-            )
+            let metric = page.metric.get();
+            if selected.with(Vec::is_empty) {
+                UsageContent::Empty {
+                    no_connections: targets.with(Vec::is_empty),
+                    limits: metric == "limits",
+                }
+            } else if let Some(data) = limit_data.get() {
+                UsageContent::Limits(data)
+            } else {
+                UsageContent::Reports {
+                    targets: status_targets.get(),
+                    hidden: page.hidden.get(),
+                    period: period.get(),
+                    tokens: metric == "tokens",
+                    by_time: page.by_time.get(),
+                    sharing: sharing.get(),
+                }
+            }
         },
-        move |(all, reports, metric, hidden, period, _)| {
-            if all.is_empty() {
-                let none = targets.with(Vec::is_empty);
-                return text(match (none, metric == "limits") {
-                    (true, true) => t("Connect an environment to see limits."),
-                    (false, true) => t("Select an environment to see limits."),
-                    (true, false) => t("Connect an environment to see usage."),
-                    _ => t("Select an environment to see usage."),
-                })
-                .into_element();
-            }
-            if metric == "limits" {
-                return limit_view(&runtime, &all, &hidden);
-            }
+        move |content| {
+            let (all, hidden, period, tokens, sharing) = match content {
+                UsageContent::Empty {
+                    no_connections,
+                    limits,
+                } => {
+                    return text(match (no_connections, limits) {
+                        (true, true) => t("Connect an environment to see limits."),
+                        (false, true) => t("Select an environment to see limits."),
+                        (true, false) => t("Connect an environment to see usage."),
+                        _ => t("Select an environment to see usage."),
+                    })
+                    .into_element();
+                }
+                UsageContent::Limits(limits) => return limit_view(&runtime, limits),
+                UsageContent::Reports {
+                    targets,
+                    hidden,
+                    period,
+                    tokens,
+                    sharing,
+                    ..
+                } => (targets, hidden, period, tokens, sharing),
+            };
             let mut body = view().app_class(tw("flex flex-col gap-5"));
-            let summaries = answered(&all, &reports);
+            let summaries = answered(&all);
             for target in &all {
                 let status = if !target.connected {
                     Some(t("This environment is not connected."))
@@ -333,12 +400,9 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
                     Some(t(
                         "This connection does not have access to diagnostics and usage.",
                     ))
-                } else if let Some(error) = reports.get(&target.id).and_then(|r| r.error.clone()) {
-                    Some(error)
-                } else if reports
-                    .get(&target.id)
-                    .is_none_or(|r| r.value.is_none() || r.loading)
-                {
+                } else if target.failed {
+                    Some(t("This environment could not report usage."))
+                } else if target.value.is_none() || target.loading {
                     Some(t("Updating…"))
                 } else {
                     None
@@ -353,17 +417,6 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
             }
             if !summaries.is_empty() {
                 let data = merge(&summaries, &hidden, None, metric_hourly(&period));
-                let sharing = !hidden.contains("Codex")
-                    && all
-                        .iter()
-                        .filter_map(|t| t.config.as_ref())
-                        .flat_map(|c| &c.providers.0)
-                        .any(|p| {
-                            matches!(
-                                p.auth.status,
-                                t3_contracts::server::ServerProviderAuthStatus::Authenticated
-                            ) && p.auth.subscription_sharing == Some(Some(true))
-                        });
                 if sharing {
                     let opener = crate::runtime::services::links::link_opener(&runtime);
                     body = body.child(
@@ -379,11 +432,11 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
                             )),
                     );
                 }
-                let dimmed = reports.values().all(|s| s.loading);
+                let dimmed = all.iter().all(|s| s.loading);
                 body = body.child(
                     view()
                         .opacity(if dimmed { 0.5 } else { 1.0 })
-                        .child(overview::overview(page, &data, &period, metric == "tokens")),
+                        .child(overview::overview(page, &data, &period, tokens)),
                 );
             }
             body.into_element()
@@ -393,17 +446,17 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
         move || {
             (
                 page.model.get(),
-                selected.get(),
-                reports.get(),
+                status_targets.get(),
+                page.hidden.get(),
                 period.get(),
                 page.metric.get(),
             )
         },
-        move |(model, all, reports, period, metric)| {
+        move |(model, all, hidden, period, metric)| {
             model.and_then(|(provider, model)| {
                 let data = merge(
-                    &answered(&all, &reports),
-                    &page.hidden.get_untracked(),
+                    &answered(&all),
+                    &hidden,
                     Some((provider, &model)),
                     metric_hourly(&period),
                 );
@@ -441,24 +494,48 @@ pub fn screen_for<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> A
 fn metric_hourly(input: &UsageSummaryInput) -> bool {
     input.since_time.is_some()
 }
-fn answered<'a>(all: &'a [UsageTarget], reports: &'a Reports) -> Vec<Report<'a>> {
+#[derive(Clone, PartialEq)]
+enum UsageContent {
+    Empty {
+        no_connections: bool,
+        limits: bool,
+    },
+    Limits(Limits),
+    Reports {
+        targets: Vec<ReportTarget>,
+        hidden: BTreeSet<String>,
+        period: UsageSummaryInput,
+        tokens: bool,
+        by_time: bool,
+        sharing: bool,
+    },
+}
+#[derive(Clone, PartialEq)]
+struct ReportTarget {
+    id: EnvironmentId,
+    label: String,
+    connected: bool,
+    diagnostics: bool,
+    value: Option<Rc<UsageSummary>>,
+    loading: bool,
+    failed: bool,
+}
+fn answered(all: &[ReportTarget]) -> Vec<Report<'_>> {
     all.iter()
         .filter(|t| t.connected && t.diagnostics)
         .filter_map(|t| {
             Some(Report {
                 id: &t.id.0,
                 label: &t.label,
-                summary: reports.get(&t.id)?.value.as_deref()?,
+                summary: t.value.as_deref()?,
             })
         })
         .collect()
 }
 fn limit_view<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
-    all: &[UsageTarget],
-    hidden: &BTreeSet<String>,
+    data: Limits,
 ) -> AnyElement {
-    let data = limits(all, hidden, client.usage_clock_ms());
     let mut body = view().app_class(tw("flex flex-col gap-3"));
     if data.windows.is_empty() && data.links.is_empty() && data.notices.is_empty() {
         return text(t(
@@ -502,12 +579,47 @@ fn limit_view<P: Platform + Clone + 'static>(
                     open.then(|| {
                         view()
                             .app_class(tw("flex flex-col gap-1 px-2 text-xs text-muted-foreground"))
+                            .child(member.plan.as_ref().map(|plan| {
+                                text(tr("Plan {plan}", &[("plan", Value::Text(plan.clone()))]))
+                            }))
+                            .child(member.source_label.as_ref().map(|source| {
+                                text(tr(
+                                    "Via {source}",
+                                    &[("source", Value::Text(source.clone()))],
+                                ))
+                            }))
+                            .child((!member.environments.is_empty()).then(|| {
+                                text(tr(
+                                    "Signed in {environments}",
+                                    &[(
+                                        "environments",
+                                        Value::Text(member.environments.join(", ")),
+                                    )],
+                                ))
+                            }))
+                            .child((member.credits > 0).then(|| {
+                                text(tr(
+                                    "{count} reset credits banked",
+                                    &[("count", Value::Int(member.credits as i64))],
+                                ))
+                            }))
                             .child(member.reset.clone().map(text))
                             .child(
-                                member
-                                    .time_remaining
-                                    .map(|time| text(format!("{time:.0}% time remaining"))),
+                                (member.reset.is_some() && member.restores_percent > 0.).then(
+                                    || {
+                                        text(tr(
+                                            "+{percent}% of pool",
+                                            &[("percent", Value::Float(member.restores_percent))],
+                                        ))
+                                    },
+                                ),
                             )
+                            .child(member.time_remaining.map(|time| {
+                                text(tr(
+                                    "{percent}% time remaining",
+                                    &[("percent", Value::Float(time))],
+                                ))
+                            }))
                     })
                 },
             );
@@ -527,13 +639,21 @@ fn limit_view<P: Platform + Clone + 'static>(
                 .child(details);
         }
         for name in w.zero_caps {
-            card = card.child(text(format!("{name} · {}", t("$0 cap"))));
+            card = card.child(text(tr("{name} · $0 cap", &[("name", Value::Text(name))])));
         }
         body = body.child(card);
     }
-    for (url, (label, accounts)) in data.links {
-        body = body.child(text(label)).child(text(accounts.join(", ")));
-        if let Some(url) = client.external_link(&url) {
+    for link in data.links {
+        let description = if link.url == "https://chatgpt.com/#settings/Usage" {
+            Some(t("View usage in ChatGPT with your connected account."))
+        } else {
+            link.message
+        };
+        body = body
+            .child(text(link.label))
+            .child(text(link.accounts.join(", ")))
+            .child(description.map(text));
+        if let Some(url) = client.external_link(&link.url) {
             let opener = crate::runtime::services::links::link_opener(client);
             body = body.child(button(
                 ButtonContent::Label(t("Manage usage")),

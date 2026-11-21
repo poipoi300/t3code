@@ -46,20 +46,27 @@ pub(super) fn choice(
         .into_element()
     }
 }
-pub(super) fn filters(targets: &[UsageTarget], state: Page, prices: Signal<bool>) -> AnyElement {
+pub(super) fn filters(
+    targets: &[(EnvironmentId, String)],
+    state: Page,
+    prices: Signal<bool>,
+) -> AnyElement {
     let all = targets
         .iter()
-        .map(|e| e.id.0.clone())
+        .map(|(id, _)| id.0.clone())
         .collect::<BTreeSet<_>>();
     let selected = state.selected.get_untracked();
     let env_label = match selected.as_ref() {
         None => t("All environments"),
         Some(ids) if ids.len() == 1 => targets
             .iter()
-            .find(|e| ids.contains(&e.id.0))
-            .map(|e| e.label.clone())
+            .find(|(id, _)| ids.contains(&id.0))
+            .map(|(_, label)| label.clone())
             .unwrap_or_else(|| t("No environments connected.")),
-        Some(ids) => format!("{} environments", ids.len()),
+        Some(ids) => tr(
+            "{count} environments",
+            &[("count", Value::Int(ids.len() as i64))],
+        ),
     };
     let mut env = view()
         .child(check(
@@ -72,12 +79,12 @@ pub(super) fn filters(targets: &[UsageTarget], state: Page, prices: Signal<bool>
             },
         ))
         .child(menu_separator());
-    for target in targets {
-        let id = target.id.0.clone();
+    for (id, label) in targets {
+        let id = id.0.clone();
         let toggle = id.clone();
         let all = all.clone();
         env = env.child(check(
-            target.label.clone(),
+            label.clone(),
             move || {
                 state
                     .selected
@@ -113,7 +120,7 @@ pub(super) fn filters(targets: &[UsageTarget], state: Page, prices: Signal<bool>
             .unwrap_or_default()
             .into(),
         8 => t("All providers"),
-        n => format!("{n} providers"),
+        n => tr("{count} providers", &[("count", Value::Int(n as i64))]),
     };
     let mut providers = view()
         .child(check(
