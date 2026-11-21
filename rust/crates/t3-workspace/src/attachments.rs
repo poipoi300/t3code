@@ -37,6 +37,8 @@ const ISSUER_QUOTA: u64 = 4 * FILE_MAX_BYTES;
 pub struct UploadOwner {
     pub owner: String,
     pub claimed: bool,
+    #[serde(default)]
+    preparing: bool,
     pub attachment_type: String,
     pub mime_type: String,
     pub size_bytes: u64,
@@ -435,6 +437,13 @@ pub trait DocumentText: Send + Sync {
 }
 #[derive(Default)]
 struct PublicationLocks(std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>);
+/// Authenticated stores expose only issuer-bound issuance and deletion.
+/// ```compile_fail
+/// let _ = t3_workspace::attachments::AttachmentStore::issue_upload;
+/// ```
+/// ```compile_fail
+/// let _ = t3_workspace::attachments::AttachmentStore::delete_pending;
+/// ```
 #[derive(Clone)]
 pub struct AttachmentStore {
     pub base: PathBuf,
@@ -443,6 +452,8 @@ pub struct AttachmentStore {
     pub delivery: Arc<crate::attachment_delivery::AttachmentDelivery>,
     last_sweep: Arc<tokio::sync::Mutex<Option<u64>>>,
     publish: Arc<PublicationLocks>,
+    #[cfg(test)]
+    replay_check: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl AttachmentStore {
     pub fn new(
@@ -459,6 +470,8 @@ impl AttachmentStore {
             documents,
             last_sweep: Default::default(),
             publish: Default::default(),
+            #[cfg(test)]
+            replay_check: None,
         }
     }
     pub fn with_reference_directory(mut self, references: PathBuf) -> Self {
@@ -536,19 +549,12 @@ impl AttachmentStore {
         }
         Ok(PersistChatAttachmentsResult { attachments })
     }
-    pub async fn issue_upload(
-        &self,
-        input: AttachmentCreateUploadUrlInput,
-        now_ms: u64,
-    ) -> Result<AttachmentCreateUploadUrlResult> {
-        self.issue_owned_upload(input, now_ms, None).await
-    }
     /// An upload URL whose upload records `owner` beside the stored file ([`Self::owner`]).
     pub async fn issue_owned_upload(
         &self,
         input: AttachmentCreateUploadUrlInput,
         now_ms: u64,
-        owner: Option<String>,
+        issuer: String,
     ) -> Result<AttachmentCreateUploadUrlResult> {
         let (kind, name, mime, size) = match input {
             AttachmentCreateUploadUrlInput::Image(i) => (
@@ -591,9 +597,15 @@ impl AttachmentStore {
         {
             return Err(Error::Invalid("invalid attachment upload metadata".into()));
         }
-        let mut last = self.last_sweep.lock().await;
-        if last.is_none_or(|last| now_ms.saturating_sub(last) >= 15 * 60_000) {
-            *last = Some(now_ms);
+        let sweep_due = {
+            let mut last = self.last_sweep.lock().await;
+            let due = last.is_none_or(|last| now_ms.saturating_sub(last) >= 15 * 60_000);
+            if due {
+                *last = Some(now_ms);
+            }
+            due
+        };
+        if sweep_due {
             let store = self.clone();
             crate::blocking(move || {
                 sweep_stale(&store.base, now_ms);
@@ -603,7 +615,6 @@ impl AttachmentStore {
             })
             .await?;
         }
-        drop(last);
         let extension = (kind == "file").then(|| file_extension(&name));
         let id = pending_id(extension.as_deref());
         let expires_at = now_ms + UPLOAD_TTL_MS;
@@ -616,23 +627,24 @@ impl AttachmentStore {
             mime_type: mime,
             size_bytes: size,
             expires_at,
-            owner,
+            owner: Some(issuer.clone()),
         };
         let token = self.signer.sign_json(&claims)?;
-        if let Some(issuer) = &claims.owner {
-            tokio::fs::create_dir_all(&self.base)
-                .await
-                .map_err(|e| io_error("make-directory", &self.base, e))?;
-            let admission = self.publication_for(&issuer_key(issuer)).lock_owned().await;
-            let base = self.base.clone();
-            let store = self.clone();
-            let reservation = claims.clone();
-            crate::blocking(move || {
-                let _admission = admission;
-                store.reserve_bytes(&crate::scoped::ScopedDir::open(&base)?, reservation, now_ms)
-            })
-            .await?;
-        }
+        tokio::fs::create_dir_all(&self.base)
+            .await
+            .map_err(|e| io_error("make-directory", &self.base, e))?;
+        let admission = self
+            .publication_for(&issuer_key(&issuer))
+            .lock_owned()
+            .await;
+        let base = self.base.clone();
+        let store = self.clone();
+        let reservation = claims.clone();
+        crate::blocking(move || {
+            let _admission = admission;
+            store.reserve_bytes(&crate::scoped::ScopedDir::open(&base)?, reservation, now_ms)
+        })
+        .await?;
         Ok(AttachmentCreateUploadUrlResult {
             attachment_id: Text(id),
             relative_url: Text(format!("/api/attachments/upload/{token}")),
@@ -658,6 +670,8 @@ impl AttachmentStore {
         let claims = self
             .validate_upload(token, now_ms)
             .ok_or(Error::AssetDenied)?;
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis((claims.expires_at - now_ms).min(UPLOAD_TTL_MS));
         let extension = upload_extension(&claims);
         let relative = format!("{}{extension}", claims.attachment_id);
         let final_path = resolve_relative(&self.base, &relative).ok_or(Error::AssetDenied)?;
@@ -670,17 +684,61 @@ impl AttachmentStore {
             .await
             .map_err(|e| io_error("make-directory", &self.base, e))?;
         let scope = Arc::new(crate::scoped::ScopedDir::open(&self.base)?);
-        let body_slot = self
-            .publication_for(&format!("body:{}", claims.attachment_id))
-            .lock_owned()
-            .await;
-        if claims.owner.as_ref().is_some_and(|issuer| {
-            reservation(&scope, &claims.attachment_id, issuer, &self.signer).is_none()
-        }) {
+        let body_slot = tokio::time::timeout_at(
+            deadline,
+            self.publication_for(&format!("body:{}", claims.attachment_id))
+                .lock_owned(),
+        )
+        .await
+        .map_err(|_| Error::AssetDenied)?;
+        let final_name = PathBuf::from(final_path.file_name().ok_or(Error::AssetDenied)?);
+        if !self.admits_body(&scope, &claims, &final_name) {
+            return Err(Error::AssetDenied);
+        }
+        // A replay has no new bytes to store. Pin the published file before accepting the
+        // body so even a consumed grant uses only bounded hashing buffers.
+        match scope.open_file(&final_name) {
+            Ok(existing) => {
+                let (device, inode, links) = crate::scoped::identity(&existing)?;
+                if let Some(issuer) = &claims.owner {
+                    let name = owner_name(&final_name).ok_or(Error::AssetDenied)?;
+                    let owner = signed_owner(&scope, &name, &claims.attachment_id, &self.signer)
+                        .ok_or(Error::AssetDenied)?;
+                    if owner.owner != *issuer
+                        || owner.device != device
+                        || owner.inode != inode
+                        || links != 1
+                        || owner.size_bytes != claims.size_bytes
+                    {
+                        return Err(Error::AssetDenied);
+                    }
+                }
+                let hash =
+                    receive_upload(&mut body, None, claims.size_bytes, deadline, &final_path)
+                        .await?;
+                let store = self.clone();
+                let pinned = scope.clone();
+                crate::blocking(move || {
+                    store.verify_replay(existing, &final_name, hash)?;
+                    let current = pinned.open_file(&final_name)?;
+                    if (device, inode, 1) != crate::scoped::identity(&current)? {
+                        return Err(Error::AssetDenied);
+                    }
+                    Ok(())
+                })
+                .await?;
+                return self.complete_upload(&scope, final_path).await;
+            }
+            Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+        }
+        // A removed claimed payload cannot re-enter staging without a charged reservation.
+        if let Some(issuer) = &claims.owner
+            && reservation(&scope, &claims.attachment_id, issuer, &self.signer).is_none()
+        {
             return Err(Error::AssetDenied);
         }
         let part_name = PathBuf::from(part_path.file_name().ok_or(Error::AssetDenied)?);
-        let final_name = PathBuf::from(final_path.file_name().ok_or(Error::AssetDenied)?);
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         let file = scope
@@ -694,32 +752,14 @@ impl AttachmentStore {
         };
         scope.check_file(&file, &part_name)?;
         let mut part = tokio::fs::File::from_std(file);
-        let mut received = 0u64;
-        let mut hash = Sha256::new();
-        let mut buf = [0; 64 * 1024];
-        loop {
-            let count = body
-                .read(&mut buf)
-                .await
-                .map_err(|e| io_error("read-upload", &part_path, e))?;
-            if count == 0 {
-                break;
-            }
-            received += count as u64;
-            if received > claims.size_bytes {
-                break;
-            }
-            part.write_all(&buf[..count])
-                .await
-                .map_err(|e| io_error("write-upload", &part_path, e))?;
-            hash.update(&buf[..count]);
-        }
-        if received != claims.size_bytes {
-            return Err(Error::Upload {
-                status: 400,
-                detail: format!("Body was {received} bytes, expected {}.", claims.size_bytes),
-            });
-        }
+        let hash = receive_upload(
+            &mut body,
+            Some(&mut part),
+            claims.size_bytes,
+            deadline,
+            &part_path,
+        )
+        .await?;
         part.sync_all()
             .await
             .map_err(|e| io_error("sync-upload", &part_path, e))?;
@@ -728,30 +768,49 @@ impl AttachmentStore {
             .publication_for(&claims.attachment_id)
             .lock_owned()
             .await;
-        let signer = self.signer.clone();
+        let store = self.clone();
         let pinned = scope.clone();
         crate::blocking(move || {
             // Keep the reservation and staging guard with the worker after RPC cancellation.
             let _body_slot = body_slot;
             let staged_file = staging;
-            if let Some(record) = owner_record(&claims, identity.0, identity.1) {
-                if reservation(&pinned, &record.attachment_id, &record.owner, &signer).is_none() {
-                    return Err(Error::AssetDenied);
-                }
-                ensure_upload_owner(&pinned, &final_name, &record, &signer)?;
+            if !store.admits_body(&pinned, &claims, &final_name) {
+                return Err(Error::AssetDenied);
             }
+            let new_owner = if let Some(record) = owner_record(&claims, identity.0, identity.1) {
+                ensure_upload_owner(&pinned, &final_name, &record, &store.signer)?
+            } else {
+                None
+            };
             match pinned.dir.hard_link(&part_name, &pinned.dir, &final_name) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if let Some(name) = new_owner {
+                        pinned.remove_file(&name)?;
+                        return Err(Error::AssetDenied);
+                    }
                     let existing = pinned.open_file(&final_name)?;
                     drop(publication);
-                    verify_replayed_upload(existing, &final_name, hash)?;
+                    store.verify_replay(existing, &final_name, hash)?;
                 }
-                Err(e) => return Err(io_error("publish-upload", &final_name, e)),
+                Err(e) => {
+                    if let Some(name) = new_owner {
+                        pinned.remove_file(&name)?;
+                    }
+                    return Err(io_error("publish-upload", &final_name, e));
+                }
             }
             staged_file.remove()
         })
         .await?;
+        self.complete_upload(&scope, final_path).await
+    }
+
+    async fn complete_upload(
+        &self,
+        scope: &crate::scoped::ScopedDir,
+        final_path: PathBuf,
+    ) -> Result<PathBuf> {
         if paths::canonicalize(&self.base)
             .map_err(|e| io_error("realpath-attachments", &self.base, e))?
             != scope.root
@@ -761,28 +820,24 @@ impl AttachmentStore {
         self.documents.ensure(&final_path).await;
         Ok(final_path)
     }
-    pub async fn delete_pending(&self, id: &str) -> Result<()> {
-        if !parse_id(id).is_some_and(|p| p.thread_segment == "pending") {
-            return Ok(());
+    fn verify_replay(&self, existing: std::fs::File, name: &Path, hash: Sha256) -> Result<()> {
+        #[cfg(test)]
+        if let Some(pause) = &self.replay_check {
+            pause();
         }
-        let base = self.base.clone();
-        let id = id.to_owned();
-        let publication = self.publication_for(&id).lock_owned().await;
-        crate::blocking(move || {
-            let _publication = publication;
-            if !base.exists() {
-                return Ok(());
-            }
-            let scope = crate::scoped::ScopedDir::open(&base)?;
-            if resolve_by_id(&scope.root, &id)
-                .and_then(|p| owner_name(&p))
-                .is_some_and(|name| scope.dir.symlink_metadata(name).is_ok())
-            {
-                return Ok(());
-            }
-            remove_pending(&scope, &id)
+        verify_replayed_upload(existing, name, hash)
+    }
+    fn admits_body(
+        &self,
+        scope: &crate::scoped::ScopedDir,
+        claims: &UploadClaims,
+        leaf: &Path,
+    ) -> bool {
+        claims.owner.as_deref().is_none_or(|issuer| {
+            reservation(scope, &claims.attachment_id, issuer, &self.signer).is_some()
+                || read_owner_record(scope, leaf, &claims.attachment_id, &self.signer)
+                    .is_some_and(|r| r.claimed && r.owner == issuer)
         })
-        .await
     }
 
     pub async fn discard_owned(&self, id: &str, issuer: &str) -> Result<bool> {
@@ -809,16 +864,27 @@ impl AttachmentStore {
             }
             let scope = crate::scoped::ScopedDir::open(&base)?;
             let allowed = match resolve_by_id(&scope.root, &id) {
-                Some(path) => path
-                    .file_name()
-                    .and_then(|n| read_owner_record(&scope, Path::new(n), &id, &signer))
-                    .is_some_and(|r| r.owner == issuer && !r.claimed),
+                Some(path) => {
+                    let Some(owner) = path
+                        .file_name()
+                        .and_then(|n| read_owner_record(&scope, Path::new(n), &id, &signer))
+                        .filter(|r| r.owner == issuer)
+                    else {
+                        return Ok(false);
+                    };
+                    // A confirmed send already consumed this owner's upload. Acknowledge
+                    // their discard while preserving the claim and its immutable replay source.
+                    if owner.claimed {
+                        return Ok(!owner.preparing);
+                    }
+                    true
+                }
                 None => reservation(&scope, &id, &issuer, &signer)
                     .is_some_and(|r| r.owner.as_deref() == Some(&issuer)),
             };
             if allowed {
                 remove_pending(&scope, &id)?;
-                scope.remove_file(&grant_path(&issuer, &id))?;
+                remove_if_present(&scope, &grant_path(&issuer, &id))?;
             }
             Ok(allowed)
         })
@@ -856,24 +922,69 @@ impl AttachmentStore {
             .flatten()
     }
 
-    /// Marks a stored pending upload claimed or not, rewriting its owner record atomically.
+    /// Reserve the claim while intake prepares and dispatches. The issuer stays charged.
+    pub async fn begin_claim(&self, id: &str) -> Result<()> {
+        self.change_claim(id, true, true).await
+    }
+    /// Finalize an accepted claim or reopen a rejected one.
     pub async fn set_claimed(&self, id: &str, claimed: bool) -> Result<()> {
+        self.change_claim(id, claimed, false).await
+    }
+
+    async fn change_claim(&self, id: &str, claimed: bool, preparing: bool) -> Result<()> {
         let base = self.base.clone();
+        let issuer = self.owner(id).await.ok_or(Error::AssetDenied)?.owner;
+        let admission = self
+            .publication_for(&issuer_key(&issuer))
+            .lock_owned()
+            .await;
         let id = id.to_owned();
         let signer = self.signer.clone();
         let publication = self.publication_for(&id).lock_owned().await;
         crate::blocking(move || {
-            let _publication = publication;
+            let (_admission, _publication) = (admission, publication);
             let scope = crate::scoped::ScopedDir::open(&base)?;
             let path = resolve_by_id(&scope.root, &id).ok_or(Error::AssetDenied)?;
             let upload = Path::new(path.file_name().ok_or(Error::AssetDenied)?);
             let mut record =
                 read_owner_record(&scope, upload, &id, &signer).ok_or(Error::AssetDenied)?;
-            record.claimed = claimed;
+            if record.owner != issuer {
+                return Err(Error::AssetDenied);
+            }
+            let grant = grant_path(&issuer, &id);
             let name = owner_name(upload).ok_or(Error::AssetDenied)?;
-            scope.write_atomic(&name, signer.sign_json(&record)?.as_bytes())
+            if !claimed {
+                // Restore the charge before making a rejected claim available again. The
+                // uploaded payload keeps this reservation live until it is discarded or swept.
+                let restored = UploadClaims {
+                    version: 1,
+                    kind: "attachment-reservation-v1".into(),
+                    attachment_type: record.attachment_type.clone(),
+                    attachment_id: id,
+                    name: upload.to_string_lossy().into_owned(),
+                    mime_type: record.mime_type.clone(),
+                    size_bytes: record.size_bytes,
+                    expires_at: 0,
+                    owner: Some(record.owner.clone()),
+                };
+                scope.write_atomic(&grant, signer.sign_json(&restored)?.as_bytes())?;
+            }
+            record.claimed = claimed;
+            record.preparing = preparing;
+            scope.write_atomic(&name, signer.sign_json(&record)?.as_bytes())?;
+            if claimed && !preparing {
+                // A crash here leaves a signed, already-consumed grant for admission to retire.
+                let _ = remove_if_present(&scope, &grant);
+            }
+            Ok(())
         })
         .await
+    }
+}
+fn remove_if_present(scope: &crate::scoped::ScopedDir, path: &Path) -> Result<()> {
+    match scope.remove_file(path) {
+        Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 fn remove_pending(scope: &crate::scoped::ScopedDir, id: &str) -> Result<()> {
@@ -892,6 +1003,7 @@ fn owner_record(claims: &UploadClaims, device: String, inode: String) -> Option<
         domain: "attachment-owner-v1".into(),
         owner: claims.owner.clone()?,
         claimed: false,
+        preparing: false,
         attachment_id: claims.attachment_id.clone(),
         attachment_type: claims.attachment_type.clone(),
         mime_type: claims.mime_type.clone(),
@@ -957,7 +1069,8 @@ impl AttachmentStore {
         now_ms: u64,
     ) -> Result<(u64, usize)> {
         let directory = Path::new(RESERVATIONS).join(key);
-        let (_, entries) = scope.read_dir(&directory)?;
+        let (held, entries) = scope.read_dir(&directory)?;
+        let parent = held.last().ok_or(Error::AssetDenied)?;
         let mut charged = 0u64;
         let mut pending = 0usize;
         for entry in entries {
@@ -971,20 +1084,30 @@ impl AttachmentStore {
                 continue;
             };
             let path = directory.join(id);
-            let record = read_token(scope, &path)
-                .and_then(|token| self.signer.verify_json::<UploadClaims>(&token));
-            let Some(record) = record.filter(|r| {
-                r.kind == "attachment-reservation-v1"
-                    && r.attachment_id == id
-                    && r.owner.as_ref().is_some_and(|s| issuer_key(s) == key)
-            }) else {
-                // A concurrent discard can remove an entry between enumeration and open.
-                if scope.open_file(&path).is_err_and(
-                    |e| matches!(e,Error::Io {source,..} if source.kind()==io::ErrorKind::NotFound),
-                ) {
-                    continue;
+            let valid_record = || {
+                self.signer
+                    .verify_json::<UploadClaims>(&read_token(scope, &path)?)
+                    .filter(|r| {
+                        r.kind == "attachment-reservation-v1"
+                            && r.attachment_id == id
+                            && r.owner.as_ref().is_some_and(|s| issuer_key(s) == key)
+                    })
+            };
+            let Some(record) = valid_record() else {
+                // Invalid grants confer no upload authority. Keep a recent one beside an
+                // existing payload for the normal sweep, but never charge it to the issuer.
+                let old = parent
+                    .symlink_metadata(&name)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+                    .is_some_and(|time| {
+                        now_ms.saturating_sub(time.as_millis() as u64) >= 24 * 60 * 60_000
+                    });
+                if old || resolve_by_id(&scope.root, id).is_none() {
+                    let _ = remove_if_present(scope, &path);
                 }
-                return Err(Error::AssetDenied);
+                continue;
             };
             if record.expires_at <= now_ms {
                 let lock = self.publication_for(id);
@@ -1001,13 +1124,22 @@ impl AttachmentStore {
                     }
                 }
             }
-            charged = charged.saturating_add(record.size_bytes);
             let filename = format!("{id}{}", upload_extension(&record));
-            if !read_owner_record(scope, Path::new(&filename), id, &self.signer)
-                .is_some_and(|r| r.claimed)
+            let lock = self.publication_for(id);
+            if let Ok(_idle) = lock.try_lock()
+                && read_owner_record(scope, Path::new(&filename), id, &self.signer).is_some_and(
+                    |r| {
+                        r.claimed
+                            && !r.preparing
+                            && r.owner.as_str() == record.owner.as_deref().unwrap_or_default()
+                    },
+                )
             {
-                pending += 1;
+                remove_if_present(scope, &path)?;
+                continue;
             }
+            charged = charged.saturating_add(record.size_bytes);
+            pending += 1;
         }
         Ok((charged, pending))
     }
@@ -1028,7 +1160,7 @@ impl AttachmentStore {
             });
         }
         if charged.saturating_add(claims.size_bytes) > ISSUER_QUOTA {
-            return Err(Error::Invalid("pending upload byte quota exceeded".into()));
+            return Err(Error::PendingUploadByteQuota);
         }
         claims.kind = "attachment-reservation-v1".into();
         scope.write_atomic(
@@ -1036,6 +1168,47 @@ impl AttachmentStore {
             self.signer.sign_json(&claims)?.as_bytes(),
         )
     }
+}
+async fn receive_upload(
+    body: &mut (impl AsyncRead + Unpin),
+    mut part: Option<&mut tokio::fs::File>,
+    size: u64,
+    deadline: tokio::time::Instant,
+    path: &Path,
+) -> Result<Sha256> {
+    let mut received = 0u64;
+    let mut hash = Sha256::new();
+    let mut buf = [0; 64 * 1024];
+    loop {
+        let count = tokio::time::timeout_at(deadline, body.read(&mut buf))
+            .await
+            .map_err(|_| Error::AssetDenied)?
+            .map_err(|e| io_error("read-upload", path, e))?;
+        // A ready read wins over an elapsed timer in timeout_at, including at EOF.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::AssetDenied);
+        }
+        if count == 0 {
+            break;
+        }
+        received += count as u64;
+        if received > size {
+            break;
+        }
+        if let Some(file) = part.as_mut() {
+            file.write_all(&buf[..count])
+                .await
+                .map_err(|e| io_error("write-upload", path, e))?;
+        }
+        hash.update(&buf[..count]);
+    }
+    if received != size {
+        return Err(Error::Upload {
+            status: 400,
+            detail: format!("Body was {received} bytes, expected {}.", size),
+        });
+    }
+    Ok(hash)
 }
 fn verify_replayed_upload(
     mut existing: std::fs::File,
@@ -1074,7 +1247,7 @@ fn ensure_upload_owner(
     upload: &Path,
     record: &UploadOwner,
     signer: &crate::assets::AssetSigner,
-) -> Result<()> {
+) -> Result<Option<PathBuf>> {
     use std::io::ErrorKind;
     let name = owner_name(upload).ok_or(Error::AssetDenied)?;
     match scope.dir.symlink_metadata(upload) {
@@ -1083,9 +1256,14 @@ fn ensure_upload_owner(
             let signed = signer.sign_json(record)?;
             scope.write_atomic(&staging, signed.as_bytes())?;
             let linked = scope.dir.hard_link(&staging, &scope.dir, &name);
-            scope.remove_file(&staging)?;
+            if let Err(error) = scope.remove_file(&staging) {
+                if linked.is_ok() {
+                    let _ = scope.remove_file(&name);
+                }
+                return Err(error);
+            }
             match linked {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(Some(name)),
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(io_error("publish-owner", &name, error)),
             }
@@ -1096,7 +1274,7 @@ fn ensure_upload_owner(
     if read_owner_record(scope, upload, &record.attachment_id, signer)
         .is_some_and(|stored| stored.owner == record.owner)
     {
-        Ok(())
+        Ok(None)
     } else {
         Err(Error::AssetDenied)
     }
@@ -1207,16 +1385,69 @@ mod publication_tests {
             Box::pin(async {})
         }
     }
-    #[test]
-    fn different_ids_can_publish_while_a_replay_is_verified() {
-        let store = AttachmentStore::new(
-            "unused".into(),
-            crate::assets::AssetSigner::new(vec![1; 32]).expect("signer"),
+    #[tokio::test]
+    async fn buffered_body_cannot_finish_after_expiry() {
+        let mut body = &b"x"[..];
+        let result = receive_upload(
+            &mut body,
+            None,
+            1,
+            tokio::time::Instant::now(),
+            Path::new("fixture"),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::AssetDenied)));
+    }
+
+    #[tokio::test]
+    async fn different_ids_can_publish_while_a_replay_is_verified() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let mut store = AttachmentStore::new(
+            root.path().into(),
+            crate::assets::AssetSigner::new(vec![1; 32]).unwrap(),
             Arc::new(NoText),
         );
-        let first = store.publication_for("a");
-        let _verifying = first.try_lock().expect("first publication");
-        assert!(store.publication_for("a").try_lock().is_err());
-        assert!(store.publication_for("b").try_lock().is_ok());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (resume, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let signal = entered.clone();
+        store.replay_check = Some(Arc::new(move || {
+            signal.notify_one();
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(15));
+        }));
+        let image = || {
+            serde_json::from_value(serde_json::json!({"type":"image","name":"a.png","mimeType":"image/png","sizeBytes":1})).unwrap()
+        };
+        let grant = store
+            .issue_owned_upload(image(), 100, "owner".into())
+            .await
+            .unwrap();
+        let first = grant.relative_url.0.rsplit('/').next().unwrap().to_owned();
+        let grant = store
+            .issue_owned_upload(image(), 100, "owner".into())
+            .await
+            .unwrap();
+        let second = grant.relative_url.0.rsplit('/').next().unwrap();
+        store.upload(&first, 101, &b"a"[..]).await.unwrap();
+        let replay = store.clone();
+        let verifying = tokio::spawn(async move { replay.upload(&first, 102, &b"a"[..]).await });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let published =
+            tokio::time::timeout(Duration::from_secs(3), store.upload(second, 102, &b"b"[..]))
+                .await;
+        resume.send(()).unwrap();
+        verifying.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(
+                published
+                    .expect("second publication blocked on replay")
+                    .unwrap()
+            )
+            .unwrap(),
+            b"b"
+        );
     }
 }

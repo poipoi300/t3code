@@ -62,6 +62,8 @@ pub enum Error {
     ScanTimeout,
     #[error("invalid input: {0}")]
     Invalid(String),
+    #[error("pending upload byte quota exceeded")]
+    PendingUploadByteQuota,
     #[error("asset not found or not authorized")]
     AssetDenied,
     #[error("attachment upload failed ({status}): {detail}")]

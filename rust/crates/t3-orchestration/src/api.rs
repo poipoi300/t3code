@@ -1194,6 +1194,10 @@ pub trait AttachmentBackend: Send + Sync {
             "AttachmentBackend.claim_pending",
         ))
     }
+    /// Dispatch confirmed these exact copies in the stored command result.
+    async fn accept_claimed_paths(&self, _paths: Vec<PathBuf>) -> Result<()> {
+        Ok(())
+    }
     async fn release_claimed_paths(&self, _paths: Vec<PathBuf>) -> Result<()> {
         Err(crate::error::Error::Unsupported(
             "AttachmentBackend.release_claimed_paths",

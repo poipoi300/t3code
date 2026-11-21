@@ -105,6 +105,8 @@ mod claims {
     pub enum UploadRefusal {
         #[error("too many uploads are waiting to be sent; send or remove some first")]
         TooMany,
+        #[error("pending upload byte quota exceeded")]
+        ByteQuota,
         #[error(transparent)]
         Store(#[from] t3_workspace::Error),
     }
@@ -165,10 +167,11 @@ mod claims {
             input: AttachmentCreateUploadUrlInput,
         ) -> Result<AttachmentCreateUploadUrlResult, UploadRefusal> {
             self.store
-                .issue_owned_upload(input, self.now(), Some(issuer.record()))
+                .issue_owned_upload(input, self.now(), issuer.record())
                 .await
                 .map_err(|error| match error {
                     t3_workspace::Error::Upload { status: 429, .. } => UploadRefusal::TooMany,
+                    t3_workspace::Error::PendingUploadByteQuota => UploadRefusal::ByteQuota,
                     error => error.into(),
                 })
         }
@@ -185,7 +188,8 @@ mod claims {
                 .map(|_| ())
         }
 
-        /// Reports whether the caller owned an unclaimed upload and discarded it under the claim lock.
+        /// With the per-upload body and publication locks held, remove an owned pending upload
+        /// or acknowledge the verified owner of an already accepted claim.
         pub(crate) async fn discard_pending(
             &self,
             issuer: &Principal,
@@ -239,9 +243,18 @@ mod claims {
         /// already written are put back and the claim is refused.
         async fn set_claimed(&self, ids: &[String], claimed: bool) -> RuntimeResult<()> {
             for (done, id) in ids.iter().enumerate() {
-                if self.store.set_claimed(id, claimed).await.is_err() {
+                let result = if claimed {
+                    self.store.begin_claim(id).await
+                } else {
+                    self.store.set_claimed(id, false).await
+                };
+                if result.is_err() {
                     for id in &ids[..done] {
-                        let _ = self.store.set_claimed(id, !claimed).await;
+                        if claimed {
+                            let _ = self.store.set_claimed(id, false).await;
+                        } else {
+                            let _ = self.store.begin_claim(id).await;
+                        }
                     }
                     return Err(claim_error("Failed to record the attachment claim."));
                 }
@@ -394,6 +407,20 @@ mod claims {
             delivery.take()
         }
 
+        async fn accept_claimed_paths(&self, paths: Vec<PathBuf>) -> RuntimeResult<()> {
+            let mut copies = self.copies.lock().await;
+            for path in paths {
+                if let Some(id) = copies.get(&path) {
+                    self.store
+                        .set_claimed(id, true)
+                        .await
+                        .map_err(|e| claim_error(e.to_string()))?;
+                    copies.remove(&path);
+                }
+            }
+            Ok(())
+        }
+
         /// A rollback reopens the uploads its copies came from.
         async fn release_claimed_paths(&self, paths: Vec<PathBuf>) -> RuntimeResult<()> {
             {
@@ -499,14 +526,17 @@ mod claims {
         let files = ContainedFiles::new(store.base.clone());
         let source = files.open(&files.realpath(from)?)?;
         let stat = checked_stat(&files, from, &source)?;
-        if let Some(id) = from.file_stem().and_then(|s| s.to_str())
-            && t3_workspace::attachments::parse_id(id)
-                .is_some_and(|p| p.thread_segment == "pending")
-        {
-            store
-                .verify_claimed_source(from, id, &stat)
-                .map_err(std::io::Error::other)?;
-        }
+        let id = from
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|id| {
+                t3_workspace::attachments::parse_id(id)
+                    .is_some_and(|p| p.thread_segment == "pending")
+            })
+            .ok_or_else(|| std::io::Error::other("expected a signed pending payload"))?;
+        store
+            .verify_claimed_source(from, id, &stat)
+            .map_err(std::io::Error::other)?;
         store
             .delivery
             .write_claim(to, |target| {
@@ -541,11 +571,17 @@ mod claims {
 
         #[test]
         fn attachment_review_rejects_unsigned_extracted_text() {
-            let temp=tempfile::tempdir().unwrap();
-            let store=AttachmentStore::new(temp.path().into(),t3_workspace::assets::AssetSigner::new(vec![3;32]).unwrap(),Arc::new(NoDocuments));
-            let side=temp.path().join("pending-00000000-0000-4000-8000-000000000001-pdf.pdf.txt");
-            std::fs::write(&side,b"unauthenticated").unwrap();
-            assert!(copy_contained(&store,&side,&temp.path().join("copy.pdf.txt")).is_err());
+            let temp = tempfile::tempdir().unwrap();
+            let store = AttachmentStore::new(
+                temp.path().into(),
+                t3_workspace::assets::AssetSigner::new(vec![3; 32]).unwrap(),
+                Arc::new(NoDocuments),
+            );
+            let side = temp
+                .path()
+                .join("pending-00000000-0000-4000-8000-000000000001-pdf.pdf.txt");
+            std::fs::write(&side, b"unauthenticated").unwrap();
+            assert!(copy_contained(&store, &side, &temp.path().join("copy.pdf.txt")).is_err());
         }
         #[test]
         fn claim_rechecks_link_count_on_the_opened_handle() {

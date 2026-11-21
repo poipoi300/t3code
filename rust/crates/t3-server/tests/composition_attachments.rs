@@ -532,6 +532,11 @@ async fn an_uploaded_image_reaches_the_provider_the_thread_and_a_signed_preview(
 
     let pending = server.upload(&mut socket, &mut client, "pixel.png").await;
     assert!(pending.starts_with("pending-"), "{pending}");
+    let reservation = std::fs::read_dir(server.attachments.join(".upload-grants"))
+        .expect("issuer buckets")
+        .map(|entry| entry.expect("issuer bucket").path().join(&pending))
+        .find(|path| path.is_file())
+        .expect("charged before sending");
     ok(send(
         &mut socket,
         &mut client,
@@ -540,6 +545,11 @@ async fn an_uploaded_image_reaches_the_provider_the_thread_and_a_signed_preview(
         vec![image(&pending)],
     )
     .await);
+
+    assert!(
+        !reservation.exists(),
+        "accepted send still occupies upload quota"
+    );
 
     // The provider is handed the claimed copy: a thread-owned id whose bytes are the upload's.
     let got = handed.recv().await.unwrap();

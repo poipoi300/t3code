@@ -180,7 +180,11 @@ async fn signed_uploads_replay_immutably_and_cleanup_on_size_errors() {
         docs.clone(),
     );
     let upload = store
-        .issue_upload(input(false, "image.png", "image/png", 4), 100)
+        .issue_owned_upload(
+            input(false, "image.png", "image/png", 4),
+            100,
+            "fixture".into(),
+        )
         .await
         .expect("test fixture");
     let tok = token(&upload.relative_url.0);
@@ -222,10 +226,13 @@ async fn signed_uploads_replay_immutably_and_cleanup_on_size_errors() {
     );
     let owned = create_id("thread", None).expect("test fixture");
     fs::write(root.join(format!("{owned}.png")), b"image").expect("test fixture");
-    store.delete_pending(&owned).await.expect("test fixture");
+    store
+        .discard_owned(&owned, "fixture")
+        .await
+        .expect("test fixture");
     assert!(root.join(format!("{owned}.png")).exists());
     store
-        .delete_pending(&upload.attachment_id.0)
+        .discard_owned(&upload.attachment_id.0, "fixture")
         .await
         .expect("test fixture");
     assert!(!path.exists());
@@ -261,7 +268,7 @@ async fn legacy_tokens_generic_files_svg_names_and_input_limits() {
         ("upload.part", "application/octet-stream", "bin"),
     ] {
         let upload = store
-            .issue_upload(input(true, name, mime, 3), 100)
+            .issue_owned_upload(input(true, name, mime, 3), 100, "fixture".into())
             .await
             .expect("test fixture");
         let tok = token(&upload.relative_url.0);
@@ -281,19 +288,27 @@ async fn legacy_tokens_generic_files_svg_names_and_input_limits() {
     }
     assert!(
         store
-            .issue_upload(input(true, "x", "text/plain", FILE_MAX_BYTES + 1), 100)
+            .issue_owned_upload(
+                input(true, "x", "text/plain", FILE_MAX_BYTES + 1),
+                100,
+                "fixture".into()
+            )
             .await
             .is_err()
     );
     assert!(
         store
-            .issue_upload(input(false, "x", "image/png", IMAGE_MAX_BYTES + 1), 100)
+            .issue_owned_upload(
+                input(false, "x", "image/png", IMAGE_MAX_BYTES + 1),
+                100,
+                "fixture".into()
+            )
             .await
             .is_err()
     );
     assert!(
         store
-            .issue_upload(input(true, "x", "text/plain", 0), 100)
+            .issue_owned_upload(input(true, "x", "text/plain", 0), 100, "fixture".into())
             .await
             .is_err()
     );
@@ -309,7 +324,11 @@ async fn incomplete_stream_removes_its_partial_file() {
         Arc::new(Documents(AtomicUsize::new(0))),
     );
     let issued = store
-        .issue_upload(input(true, "file.txt", "text/plain", 10), 100)
+        .issue_owned_upload(
+            input(true, "file.txt", "text/plain", 10),
+            100,
+            "fixture".into(),
+        )
         .await
         .expect("test fixture");
     let (reader, mut writer) = tokio::io::duplex(16);
@@ -324,7 +343,11 @@ async fn incomplete_stream_removes_its_partial_file() {
         upload.await.expect("test fixture"),
         Err(Error::Upload { status: 400, .. })
     ));
-    assert_eq!(fs::read_dir(root).expect("test fixture").count(), 0);
+    assert!(
+        fs::read_dir(root)
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == ".upload-grants")
+    );
 }
 
 #[tokio::test]
@@ -347,7 +370,11 @@ async fn cancelling_an_upload_removes_its_partial_file() {
         Arc::new(Documents(AtomicUsize::new(0))),
     );
     let issued = store
-        .issue_upload(input(true, "file.txt", "text/plain", 10), 100)
+        .issue_owned_upload(
+            input(true, "file.txt", "text/plain", 10),
+            100,
+            "fixture".into(),
+        )
         .await
         .expect("issue");
     let tok = token(&issued.relative_url.0).to_owned();
@@ -363,7 +390,11 @@ async fn cancelling_an_upload_removes_its_partial_file() {
     }));
     upload.abort();
     assert!(upload.await.expect_err("cancelled").is_cancelled());
-    assert_eq!(fs::read_dir(temp.path()).expect("cleaned").count(), 0);
+    assert!(
+        fs::read_dir(temp.path())
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == ".upload-grants")
+    );
 }
 
 #[test]
@@ -495,7 +526,11 @@ async fn swapping_an_upload_directory_cannot_publish_outside_it() {
         Arc::new(Documents(AtomicUsize::new(0))),
     );
     let issued = store
-        .issue_upload(input(true, "file.txt", "text/plain", 4), 100)
+        .issue_owned_upload(
+            input(true, "file.txt", "text/plain", 4),
+            100,
+            "fixture".into(),
+        )
         .await
         .expect("issue");
     let _ = store
@@ -528,7 +563,7 @@ async fn replay_cannot_recreate_missing_claim_authority() {
         .issue_owned_upload(
             input(false, "a.png", "image/png", 1),
             100,
-            Some("session:a".into()),
+            "session:a".into(),
         )
         .await
         .expect("issue");
@@ -569,7 +604,7 @@ async fn owner_authority_is_signed_and_bound_to_its_payload() {
         store.issue_owned_upload(
             input(false, "a.png", "image/png", 1),
             100,
-            Some("session:a".into()),
+            "session:a".into(),
         )
     };
     let a = issue().await.expect("issue a");
@@ -615,7 +650,7 @@ async fn deleting_before_upload_revokes_the_signed_grant_across_restart() {
     };
     let store = restart();
     let grant = store
-        .issue_owned_upload(input(false, "a.png", "image/png", 1), 100, Some("a".into()))
+        .issue_owned_upload(input(false, "a.png", "image/png", 1), 100, "a".into())
         .await
         .unwrap();
     assert!(
@@ -654,28 +689,28 @@ async fn owned_grants_reserve_bytes_per_issuer_across_restart() {
             .issue_owned_upload(
                 input(true, "a.bin", "application/octet-stream", FILE_MAX_BYTES),
                 100,
-                Some("a".into()),
+                "a".into(),
             )
             .await
             .unwrap();
     }
     let store = restart();
-    assert!(
+    assert!(matches!(
         store
             .issue_owned_upload(
                 input(true, "a.bin", "application/octet-stream", 1),
                 101,
-                Some("a".into())
+                "a".into()
             )
-            .await
-            .is_err()
-    );
+            .await,
+        Err(Error::PendingUploadByteQuota)
+    ));
     assert!(
         store
             .issue_owned_upload(
                 input(true, "a.bin", "application/octet-stream", 1),
                 101,
-                Some("b".into())
+                "b".into()
             )
             .await
             .is_ok()
@@ -695,22 +730,14 @@ async fn unspent_count_survives_restart_and_expired_grants_release_it() {
     let store = restart();
     for _ in 0..t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
         store
-            .issue_owned_upload(
-                input(false, "pixel.png", "image/png", 1),
-                100,
-                Some("a".into()),
-            )
+            .issue_owned_upload(input(false, "pixel.png", "image/png", 1), 100, "a".into())
             .await
             .unwrap();
     }
     let store = restart();
     assert!(
         store
-            .issue_owned_upload(
-                input(false, "more.png", "image/png", 1),
-                101,
-                Some("a".into())
-            )
+            .issue_owned_upload(input(false, "more.png", "image/png", 1), 101, "a".into())
             .await
             .is_err()
     );
@@ -719,7 +746,7 @@ async fn unspent_count_survives_restart_and_expired_grants_release_it() {
             .issue_owned_upload(
                 input(false, "fresh.png", "image/png", 1),
                 101 + UPLOAD_TTL_MS,
-                Some("a".into())
+                "a".into()
             )
             .await
             .is_ok()
@@ -765,4 +792,252 @@ fn question_snapshot_rejects_a_public_directory_on_every_attempt() {
     let delivery = AttachmentDelivery::with_reference_directory(sources, refs);
     assert!(delivery.reference(&path).is_err());
     assert!(delivery.reference(&path).is_err());
+}
+
+fn quota_store(path: &Path) -> AttachmentStore {
+    AttachmentStore::new(
+        path.into(),
+        AssetSigner::new(vec![7; 32]).expect("fixture signing key"),
+        Arc::new(Documents(AtomicUsize::new(0))),
+    )
+}
+
+async fn reserve(
+    store: &AttachmentStore,
+    size: u64,
+) -> t3_contracts::assets::AttachmentCreateUploadUrlResult {
+    store
+        .issue_owned_upload(
+            input(true, "a.bin", "application/octet-stream", size),
+            100,
+            "a".into(),
+        )
+        .await
+        .expect("admit fixture upload")
+}
+
+fn reservation_file(base: &Path, id: &str) -> std::path::PathBuf {
+    let issuer = fs::read_dir(base.join(".upload-grants"))
+        .expect("read grant buckets")
+        .next()
+        .expect("issuer bucket")
+        .expect("read issuer bucket")
+        .path();
+    issuer.join(id)
+}
+
+#[tokio::test]
+async fn accepted_claim_releases_bytes_and_rollback_restores_the_charge() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = quota_store(temp.path());
+    let one = reserve(&store, 1).await;
+    store
+        .upload(token(&one.relative_url.0), 101, &b"x"[..])
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        reserve(&store, FILE_MAX_BYTES).await;
+    }
+    reserve(&store, FILE_MAX_BYTES - 1).await;
+    store.set_claimed(&one.attachment_id.0, true).await.unwrap();
+    let extra = reserve(&store, 1).await;
+    store
+        .discard_owned(&extra.attachment_id.0, "a")
+        .await
+        .unwrap();
+    store
+        .set_claimed(&one.attachment_id.0, false)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .issue_owned_upload(
+                input(true, "a.bin", "application/octet-stream", 1),
+                102,
+                "a".into()
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn claimed_upload_leaves_the_issuers_admission_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = quota_store(temp.path());
+    let upload = reserve(&store, 1).await;
+    let id = &upload.attachment_id.0;
+    let active = reservation_file(temp.path(), id);
+    store
+        .upload(token(&upload.relative_url.0), 101, &b"x"[..])
+        .await
+        .unwrap();
+    store.set_claimed(id, true).await.unwrap();
+    assert!(
+        !active.exists(),
+        "claimed reservation still in admission directory"
+    );
+    assert!(!store.discard_owned(id, "different issuer").await.unwrap());
+    assert!(store.discard_owned(id, "a").await.unwrap());
+    assert!(store.owner(id).await.unwrap().claimed);
+    quota_store(temp.path())
+        .set_claimed(id, false)
+        .await
+        .unwrap();
+    assert!(active.exists());
+}
+
+#[tokio::test]
+async fn corrupt_reservation_expires_without_blocking_other_uploads() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = quota_store(temp.path());
+    let upload = reserve(&store, 1).await;
+    let path = reservation_file(temp.path(), &upload.attachment_id.0);
+    fs::write(&path, b"obsolete").unwrap();
+    reserve(&quota_store(temp.path()), 1).await;
+    assert!(!path.exists());
+    assert!(
+        store
+            .upload(token(&upload.relative_url.0), 101, &b"x"[..])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn expired_stream_releases_staging_and_the_discard_waiter() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = quota_store(temp.path());
+    let grant = reserve(&store, 1).await;
+    let (_writer, reader) = tokio::io::duplex(8);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.upload(token(&grant.relative_url.0), 99 + UPLOAD_TTL_MS, reader),
+    )
+    .await;
+    assert!(result.is_ok_and(|r| r.is_err()), "body outlived grant");
+    assert!(
+        store
+            .discard_owned(&grant.attachment_id.0, "a")
+            .await
+            .unwrap()
+    );
+}
+#[tokio::test]
+async fn failed_publication_releases_new_owner_and_allows_retry() {
+    use tokio::io::AsyncWriteExt;
+    let temp = tempfile::tempdir().unwrap();
+    let store = quota_store(temp.path());
+    let grant = reserve(&store, 1).await;
+    let (mut writer, reader) = tokio::io::duplex(8);
+    let s = store.clone();
+    let url = grant.relative_url.0.clone();
+    let upload = tokio::spawn(async move { s.upload(token(&url), 101, reader).await });
+    let part = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(path) = fs::read_dir(temp.path())
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|e| e == "part"))
+            {
+                break path;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    fs::remove_file(part).unwrap();
+    writer.write_all(b"x").await.unwrap();
+    drop(writer);
+    assert!(upload.await.unwrap().is_err());
+    assert!(
+        !temp
+            .path()
+            .join(format!("{}.bin.owner", grant.attachment_id.0))
+            .exists(),
+        "orphan owner"
+    );
+    store
+        .upload(token(&grant.relative_url.0), 102, &b"x"[..])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn preparing_claim_holds_quota_until_dispatch_accepts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = quota_store(tmp.path());
+    let one = reserve(&store, 1).await;
+    store
+        .upload(token(&one.relative_url.0), 101, &b"x"[..])
+        .await
+        .unwrap();
+    for size in [
+        FILE_MAX_BYTES,
+        FILE_MAX_BYTES,
+        FILE_MAX_BYTES,
+        FILE_MAX_BYTES - 1,
+    ] {
+        reserve(&store, size).await;
+    }
+    store.begin_claim(&one.attachment_id.0).await.unwrap();
+    let competing = || {
+        store.issue_owned_upload(
+            input(true, "a.bin", "application/octet-stream", 1),
+            102,
+            "a".into(),
+        )
+    };
+    assert!(competing().await.is_err());
+    store
+        .set_claimed(&one.attachment_id.0, false)
+        .await
+        .unwrap();
+    assert!(competing().await.is_err());
+    store.begin_claim(&one.attachment_id.0).await.unwrap();
+    store.set_claimed(&one.attachment_id.0, true).await.unwrap();
+    assert!(competing().await.is_ok());
+}
+
+#[tokio::test]
+async fn claimed_replay_stream_never_creates_staging() {
+    use tokio::io::AsyncWriteExt;
+    struct Observed(tokio::io::DuplexStream, Arc<tokio::sync::Notify>);
+    impl tokio::io::AsyncRead for Observed {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.1.notify_one();
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let store = quota_store(tmp.path());
+    let grant = reserve(&store, 1).await;
+    let token = token(&grant.relative_url.0).to_owned();
+    store.upload(&token, 101, &b"x"[..]).await.unwrap();
+    store
+        .set_claimed(&grant.attachment_id.0, true)
+        .await
+        .unwrap();
+    let (mut send, reader) = tokio::io::duplex(1);
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let body = Observed(reader, ready.clone());
+    let retry = tokio::spawn(async move { store.upload(&token, 102, body).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), ready.notified())
+        .await
+        .unwrap();
+    assert!(
+        !fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .any(|p| p.path().extension().is_some_and(|e| e == "part"))
+    );
+    send.write_all(b"x").await.unwrap();
+    drop(send);
+    retry.await.unwrap().unwrap();
 }

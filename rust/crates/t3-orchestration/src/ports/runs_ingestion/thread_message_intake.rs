@@ -231,7 +231,7 @@ impl ThreadMessageIntake {
                         _ => vec![],
                     })
                     .collect::<Vec<_>>();
-                intake.release_unused(paths, &accepted).await;
+                intake.release_unused(paths, &accepted).await?;
             } else if result.as_ref().err().is_some_and(not_accepted) {
                 intake.release(paths).await;
             }
@@ -374,7 +374,7 @@ impl ThreadMessageIntake {
                     }
                 }
                 if resolved {
-                    intake.release_unused(paths, &accepted).await;
+                    intake.release_unused(paths, &accepted).await?;
                 }
             } else if result.as_ref().err().is_some_and(not_accepted) {
                 intake.release(paths).await;
@@ -400,7 +400,7 @@ impl ThreadMessageIntake {
             if let Ok(result) = &result {
                 intake
                     .release_unused(claimed.claimed_paths, &result.message.attachments)
-                    .await;
+                    .await?;
             } else if result.as_ref().err().is_some_and(not_accepted) {
                 intake.release(claimed.claimed_paths).await;
             }
@@ -452,7 +452,7 @@ impl ThreadMessageIntake {
                             .flat_map(|message| message.attachments.clone())
                             .collect::<Vec<_>>(),
                     )
-                    .await;
+                    .await?;
             } else if result.as_ref().err().is_some_and(not_accepted) {
                 intake.release(paths).await;
             }
@@ -466,22 +466,22 @@ impl ThreadMessageIntake {
             let _ = tokio::spawn(async move { backend.release_claimed_paths(paths).await }).await;
         }
     }
-    async fn release_unused(&self, paths: Vec<PathBuf>, accepted: &[ChatAttachment]) {
+    async fn release_unused(&self, paths: Vec<PathBuf>, accepted: &[ChatAttachment]) -> Result<()> {
         let Some(directory) = paths.first().and_then(|path| path.parent()) else {
-            return;
+            return Ok(());
         };
         let keep = accepted
             .iter()
             .filter_map(|attachment| attachment_path(directory, attachment))
             .flat_map(|path| [PathBuf::from(format!("{}.txt", path.display())), path])
             .collect::<HashSet<_>>();
-        self.release(
-            paths
-                .into_iter()
-                .filter(|path| !keep.contains(path))
-                .collect(),
-        )
-        .await;
+        let (accepted, unused): (Vec<_>, Vec<_>) =
+            paths.into_iter().partition(|path| keep.contains(path));
+        self.release(unused).await;
+        if !accepted.is_empty() {
+            self.attachments.accept_claimed_paths(accepted).await?;
+        }
+        Ok(())
     }
     async fn with_guest_attachments(&self, value: &mut Value) -> Result<()> {
         let Some(guest) = value["guestMessageId"].as_str() else {

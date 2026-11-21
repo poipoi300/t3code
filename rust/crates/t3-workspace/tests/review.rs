@@ -610,7 +610,7 @@ async fn containment_matrix_covers_every_workspace_and_attachment_entry_point() 
             })
             .await;
         store
-            .delete_pending(&candidate)
+            .discard_owned(&candidate, "fixture")
             .await
             .expect("delete invalid id");
         assert_eq!(
