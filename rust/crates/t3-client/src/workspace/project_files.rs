@@ -1,6 +1,7 @@
 //! The workspace Files panel's client services: the lazy file tree (useDirectoryEntries.ts and
 //! FileBrowserPanel.tsx's model), file access (state/filesystem.ts), the panel's workspace target
 //! (RightPanelSurfaceContent.tsx's `files`) and file reads (projectFilesQueryState.ts).
+pub mod assets;
 pub mod formats;
 pub mod preview;
 pub mod read;
@@ -144,21 +145,12 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
         environment: &EnvironmentId,
         resource: t3_contracts::assets::AssetResource,
     ) -> LocalBoxFuture<'static, Result<String, Problem>> {
-        let endpoint = self.endpoint(environment);
-        let base = self
+        let connection = self
             .runtime
-            .environments()
-            .into_iter()
-            .find(|entry| &entry.id == environment)
-            .and_then(|entry| {
-                entry
-                    .routes
-                    .into_iter()
-                    .map(|route| route.http_base)
-                    .find(|base| !base.is_empty())
-            });
+            .client(environment)
+            .and_then(|client| Some((client.session()?, client.http_base_url()?)));
         async move {
-            let endpoint = endpoint.ok_or_else(|| Problem::client(NOT_CONNECTED))?;
+            let (endpoint, base) = connection.ok_or_else(|| Problem::client(NOT_CONNECTED))?;
             let asset = endpoint
                 .call::<t3_contracts::rpc::WsAssetsCreateUrlRpc>(
                     t3_contracts::assets::AssetCreateUrlInput { resource },
@@ -168,9 +160,17 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
                     ClientError::Rejected { message, .. } => Problem::server(message),
                     error => Problem::server(error.to_string()),
                 })?;
-            let base = base.ok_or_else(|| Problem::client(NOT_CONNECTED))?;
-            crate::services::assets::resolve_asset_url(&base, &asset.relative_url.0)
-                .ok_or_else(|| Problem::server(asset.relative_url.0.clone()))
+            let invalid = || Problem::client("The environment returned an invalid asset URL.");
+            let base = url::Url::parse(&base).map_err(|_| invalid())?;
+            let url = base.join(&asset.relative_url.0).map_err(|_| invalid())?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.origin() != base.origin()
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                return Err(invalid());
+            }
+            Ok(url.into())
         }
         .boxed_local()
     }

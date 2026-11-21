@@ -20,7 +20,7 @@ use t3_rpc::{Exit, HandlerOutput};
 type Calls = Rc<RefCell<Vec<(String, Value)>>>;
 
 fn methods() -> Vec<(&'static str, t3_rpc::CallKind)> {
-    ["projects.listEntries", "projects.searchEntries", "projects.readFile"]
+    ["projects.listEntries", "projects.searchEntries", "projects.readFile", "assets.createUrl"]
         .into_iter()
         .map(|tag| (tag, t3_rpc::CallKind::Unary))
         .collect()
@@ -371,3 +371,50 @@ fn unserved_methods_surface_as_errors_not_success() {
     assert!(view.error.is_some() && view.data.is_none() && !view.pending);
 }
 
+#[test]
+fn preview_assets_stay_on_the_minting_environment_and_obey_the_byte_cap() {
+    use t3_client::workspace::project_files::assets::AssetReadError;
+    use t3_contracts::{assets::AssetResource, base_schemas::TrimmedNonEmptyString};
+
+    let mut h = Harness::new("env");
+    let runtime = setup(&mut h);
+    let relative_url = Rc::new(RefCell::new("/test-assets/rewind-note"));
+    {
+        let relative_url = relative_url.clone();
+        let mut state = h.server().state.borrow_mut();
+        state.extra_rpc =
+            Some(Rc::new(move |request| {
+                assert_eq!(request.tag, "assets.createUrl");
+                assert_eq!(
+                    request.payload["resource"],
+                    json!({"_tag":"workspace-file","threadId":"thread","path":"/repo/note"})
+                );
+                let url = *relative_url.borrow();
+                Some(HandlerOutput::Unary(
+                    async move {
+                        Exit::success(json!({"relativeUrl":url,"expiresAt":4102444800000_i64}))
+                    }
+                    .boxed_local(),
+                ))
+            }));
+    }
+    let resource = AssetResource::WorkspaceFile {
+        thread_id: t3_client::types::ThreadId("thread".into()),
+        path: TrimmedNonEmptyString("/repo/note".into()),
+    };
+    let read = |limit| {
+        runtime.project_files().asset_bytes(
+            &environment("env"),
+            resource.clone(),
+            limit,
+            Some("r &=".into()),
+        )
+    };
+    assert_eq!(h.run(read(4)), Ok(b"note".to_vec()));
+    assert_eq!(h.run(read(3)), Err(AssetReadError::TooLarge));
+
+    let http_before = h.server().state.borrow().http.len();
+    *relative_url.borrow_mut() = "https://unrelated.test/test-assets/rewind-note";
+    assert_eq!(h.run(read(4)), Err(AssetReadError::Unavailable));
+    assert_eq!(h.server().state.borrow().http.len(), http_before);
+}
