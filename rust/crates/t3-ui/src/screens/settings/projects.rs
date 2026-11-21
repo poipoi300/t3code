@@ -398,6 +398,22 @@ fn project_organization(
     detail: Stored<ProjectSettingsDetail>,
 ) -> impl IntoElement {
     let (pinned, archived) = detail.with(|detail| (detail.pinned, detail.archived));
+    let pending = signal(false);
+    let update_organization = move |failure, patch| {
+        if pending.get_untracked() {
+            return;
+        }
+        let members = detail.with(|detail| detail.group.members.iter().map(member_key).collect());
+        pending.set(true);
+        settings.write(failure, |services| {
+            let save = (services.update)(members, patch);
+            Box::pin(async move {
+                let result = save.await;
+                let _ = pending.try_set(false);
+                result
+            })
+        });
+    };
     view()
         .child(settings_row(
             SettingsRowProps::titled("", Text::from("Pin"))
@@ -407,20 +423,18 @@ fn project_organization(
                         "Pin project",
                         ControlState {
                             checked: pinned.into(),
+                            disabled: Prop::bind(move || pending.get()),
                             ..Default::default()
                         },
                         SwitchSize::Default,
                         move |checked| {
-                            let members = detail.with(|detail| {
-                                detail.group.members.iter().map(member_key).collect()
-                            });
-                            settings.write(
+                            update_organization(
                                 if checked {
                                     "Failed to pin project"
                                 } else {
                                     "Failed to unpin project"
                                 },
-                                |services| (services.update)(members, json!({"pinned":checked})),
+                                json!({"pinned":checked}),
                             );
                         },
                     )
@@ -444,20 +458,15 @@ fn project_organization(
                         }),
                         ButtonVariant::Outline,
                         ButtonSize::Sm,
-                        || false,
+                        move || pending.get(),
                         move || {
-                            let members = detail.with(|detail| {
-                                detail.group.members.iter().map(member_key).collect()
-                            });
-                            settings.write(
+                            update_organization(
                                 if archived {
                                     "Failed to unarchive project"
                                 } else {
                                     "Failed to archive project"
                                 },
-                                |services| {
-                                    (services.update)(members, json!({"archived":!archived}))
-                                },
+                                json!({"archived":!archived}),
                             );
                         },
                     )

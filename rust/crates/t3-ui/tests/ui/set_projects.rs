@@ -23,6 +23,8 @@ use t3_ui::{
 #[derive(Clone, PartialEq, Props)]
 struct ProjectsFixtureProps {
     imports_script: bool,
+    read_only: bool,
+    hold_mutation: bool,
 }
 
 #[component]
@@ -36,12 +38,16 @@ fn ProjectsFixture(props: ProjectsFixtureProps) -> impl IntoElement {
         });
     });
     let server = FakeEnvironment::new("machine", spawner.clone());
-    server.set_permissions(&[
-        "orchestration:read",
-        "orchestration:operate",
-        "settings:write",
-        "filesystem:read",
-    ]);
+    server.set_permissions(if props.read_only {
+        &["orchestration:read", "filesystem:read"]
+    } else {
+        &[
+            "orchestration:read",
+            "orchestration:operate",
+            "settings:write",
+            "filesystem:read",
+        ]
+    });
     server.edit_config(|config| {
         config["environment"]["capabilities"]["projectSettingsOverrides"] = json!(true);
         config["environment"]["capabilities"]["projectOrganization"] = json!(true);
@@ -71,7 +77,12 @@ fn ProjectsFixture(props: ProjectsFixtureProps) -> impl IntoElement {
     renamed["title"] = json!("Project renamed");
     renamed["deletedAt"] = json!(null);
     server.register("projects.mutate", t3_client::testing::CallKind::Unary);
-    server.reply("projects.mutate", Ok(renamed));
+    let held_mutation = if props.hold_mutation {
+        Some(server.defer_reply("projects.mutate"))
+    } else {
+        server.reply("projects.mutate", Ok(renamed));
+        None
+    };
     server.register("projects.readFile", t3_client::testing::CallKind::Unary);
     let manifest = r#"{"scripts":[{"name":"Lint","command":"bun lint"}]}"#;
     server.reply("projects.readFile", Ok(json!({
@@ -108,6 +119,21 @@ fn ProjectsFixture(props: ProjectsFixtureProps) -> impl IntoElement {
 
     let recorded = signal("");
     on_key("ctrl+shift+u", move |_| {
+        let _hold_reply = &held_mutation;
+        if props.hold_mutation {
+            let calls = server.calls("projects.mutate");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["pinned"], true);
+            recorded.set("One project organization write sent");
+            return;
+        }
+        if props.read_only {
+            assert!(server.calls("projects.mutate").is_empty());
+            assert!(server.calls("server.updateSettings").is_empty());
+            assert!(server.calls("server.upsertKeybinding").is_empty());
+            recorded.set("No project write sent");
+            return;
+        }
         if server
             .calls("server.upsertKeybinding")
             .iter()
@@ -182,12 +208,25 @@ fn start_project(window: (f32, f32)) -> Headless {
 }
 
 fn start_project_with_reply(window: (f32, f32), imports_script: bool) -> Headless {
+    start_project_fixture(window, imports_script, false)
+}
+
+fn start_project_fixture(window: (f32, f32), imports_script: bool, read_only: bool) -> Headless {
+    start_configured_project_fixture(
+        window,
+        ProjectsFixtureProps {
+            imports_script,
+            read_only,
+            hold_mutation: false,
+        },
+    )
+}
+
+fn start_configured_project_fixture(window: (f32, f32), props: ProjectsFixtureProps) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::new::<ProjectsFixture>(move || ProjectsFixtureProps {
-            imports_script,
-        }))
+        ..EngineConfig::new(Root::new::<ProjectsFixture>(move || props.clone()))
     };
     if window == DESKTOP {
         config.environment.os = nsh_core::platform::Os::Linux;
@@ -221,6 +260,67 @@ fn scoped_project_rename_reaches_the_environment_on_desktop() {
 #[test]
 fn scoped_project_rename_reaches_the_environment_on_phone() {
     rename_project(PHONE);
+}
+
+#[test]
+fn read_only_projects_cannot_send_writes() {
+    let mut app = start_project_fixture(DESKTOP, false, true);
+    for control in [
+        "label:Project name",
+        "role:button[Add action]",
+        "role:button[Remove project]",
+    ] {
+        assert!(
+            !app.screen()
+                .enabled(control)
+                .expect("read-only project control is mounted"),
+            "{control} is enabled"
+        );
+        let _ = app.press(control);
+    }
+    let _ = app.type_text("label:Project name", " renamed");
+    let _ = app.press_key("enter");
+    app.press_key("ctrl+shift+u").expect("check project RPCs");
+    app.wait_for("No project write sent")
+        .expect("no writes reached the server");
+}
+
+#[test]
+fn inherited_project_actions_have_no_reset_button() {
+    let mut app = start_project(DESKTOP);
+    app.wait_for("role:button[Add action]")
+        .expect("actions loaded");
+    assert!(
+        !app.screen()
+            .matches("label:Reset Actions to default")
+            .expect("reset selector")
+    );
+}
+
+#[test]
+fn project_pin_and_archive_are_disabled_while_a_write_is_pending() {
+    let mut app = start_configured_project_fixture(
+        DESKTOP,
+        ProjectsFixtureProps {
+            imports_script: false,
+            read_only: false,
+            hold_mutation: true,
+        },
+    );
+    let pin = "role:switch[Pin project]";
+    let archive = "id:project-overview >> role:button[Archive]";
+    app.press(pin).expect("pin the project");
+    assert!(!app.screen().enabled(pin).expect("pin switch is mounted"));
+    assert!(
+        !app.screen()
+            .enabled(archive)
+            .expect("archive button is mounted")
+    );
+    let _ = app.press(archive);
+    app.press_key("ctrl+shift+u")
+        .expect("check the pending mutation");
+    app.wait_for("One project organization write sent")
+        .expect("the attempted archive sent no RPC");
 }
 
 #[test]

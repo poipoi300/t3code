@@ -22,7 +22,7 @@ use t3_contracts::{
 };
 
 use super::super::shell::{
-    RowReset, SettingsRowProps, region, settings_row, settings_section, settings_select,
+    SettingsRowProps, region, settings_row, settings_section, settings_select,
 };
 use super::ProjectSettings;
 use crate::{
@@ -87,13 +87,11 @@ pub(super) fn project_actions_settings(settings: ProjectSettings) -> impl IntoEl
         context.write_access() == SettingsWriteAccess::Writable
             && context.view().is_some_and(|view| !view.targets.is_empty())
     };
-
     settings_section("project-actions", Text::from("Actions"), view()
         .child(settings_row(SettingsRowProps::titled("", Text::from("Actions"))
             .first()
             .description(|| Text::from("Commands that run in this project's checkout or its worktree, with optional shortcuts."))
             .server(&[KEY])
-            .reset(RowReset::new("project actions", || true, move || context.update(json!({ KEY: null }))))
             .control(move || {
                 view().app_class(tw("flex flex-row flex-wrap items-center gap-1.5"))
                     .child(region(move || match imports.get() {
