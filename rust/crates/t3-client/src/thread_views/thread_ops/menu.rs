@@ -180,79 +180,6 @@ pub fn build(state: &MenuState) -> Vec<Item> {
     items
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn source_both_lifecycle_directions_without_permission() {
-        for reversed in [false, true] {
-            let items = build(&MenuState {
-                pinned: reversed,
-                settled: reversed,
-                snoozed: reversed,
-                auto_settle: true,
-                can_snooze: true,
-                settlement: true,
-                auto_settle_opt_out: true,
-                snooze: true,
-                pinning: true,
-                title_regeneration: true,
-                ..Default::default()
-            });
-            let disabled: Vec<_> = items
-                .iter()
-                .filter(|i| i.disabled == Some(true))
-                .map(|i| i.id.as_str())
-                .collect();
-            assert_eq!(
-                disabled,
-                if reversed {
-                    vec![
-                        "unpin",
-                        "unsettle",
-                        "unsnooze",
-                        "rename",
-                        "regenerate-title",
-                        "auto-settle",
-                        "archive",
-                        "delete",
-                    ]
-                } else {
-                    vec![
-                        "pin",
-                        "settle",
-                        "snooze",
-                        "rename",
-                        "regenerate-title",
-                        "auto-settle",
-                        "archive",
-                        "delete",
-                    ]
-                }
-            );
-            assert!(
-                items
-                    .iter()
-                    .find(|i| i.id == "snooze")
-                    .and_then(|i| i.children.as_ref())
-                    .is_none_or(|children| children.iter().all(|c| c.disabled == Some(true)))
-            );
-        }
-    }
-    #[test]
-    fn source_running_archive_and_promote_are_disabled() {
-        let items = build(&MenuState {
-            can_operate: true,
-            running: true,
-            can_promote: true,
-            ..Default::default()
-        });
-        for id in ["archive", "turn-into-project"] {
-            assert!(items.iter().any(|i| i.id == id && i.disabled == Some(true)));
-        }
-    }
-}
-
 fn batch_item<'a>(menu: &'a super::actions::ThreadActionMenu, id: &str) -> Option<&'a Item> {
     menu.items.iter().find(|item| item.id == id)
 }
@@ -323,5 +250,78 @@ pub(super) fn build_batch(
     super::actions::ThreadActionMenu {
         items,
         unavailable_reason: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn source_both_lifecycle_directions_without_permission() {
+        for reversed in [false, true] {
+            let items = build(&MenuState {
+                pinned: reversed,
+                settled: reversed,
+                snoozed: reversed,
+                auto_settle: true,
+                can_snooze: true,
+                settlement: true,
+                auto_settle_opt_out: true,
+                snooze: true,
+                pinning: true,
+                title_regeneration: true,
+                ..Default::default()
+            });
+            let disabled: Vec<_> = items
+                .iter()
+                .filter(|i| i.disabled == Some(true))
+                .map(|i| i.id.as_str())
+                .collect();
+            assert_eq!(
+                disabled,
+                if reversed {
+                    vec![
+                        "unpin",
+                        "unsettle",
+                        "unsnooze",
+                        "rename",
+                        "regenerate-title",
+                        "auto-settle",
+                        "archive",
+                        "delete",
+                    ]
+                } else {
+                    vec![
+                        "pin",
+                        "settle",
+                        "snooze",
+                        "rename",
+                        "regenerate-title",
+                        "auto-settle",
+                        "archive",
+                        "delete",
+                    ]
+                }
+            );
+            assert!(
+                items
+                    .iter()
+                    .find(|i| i.id == "snooze")
+                    .and_then(|i| i.children.as_ref())
+                    .is_none_or(|children| children.iter().all(|c| c.disabled == Some(true)))
+            );
+        }
+    }
+    #[test]
+    fn source_running_archive_and_promote_are_disabled() {
+        let items = build(&MenuState {
+            can_operate: true,
+            running: true,
+            can_promote: true,
+            ..Default::default()
+        });
+        for id in ["archive", "turn-into-project"] {
+            assert!(items.iter().any(|i| i.id == id && i.disabled == Some(true)));
+        }
     }
 }
