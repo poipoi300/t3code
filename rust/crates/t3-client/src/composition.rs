@@ -625,6 +625,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .boxed_local()
     }
 
+    pub fn can_provision_ssh(&self) -> bool {
+        self.inner.platform.can_provision_ssh()
+    }
+
     /// Launches T3 Code on an SSH host through the desktop (`Platform::ssh_provision`), saves it
     /// with the token it returns, then connects in the background through the tunnel the
     /// desktop keeps (`Platform::ssh_prepare`). Ports TypeScript's `registerSsh`.

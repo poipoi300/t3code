@@ -33,7 +33,11 @@ use t3_contracts::{
 type LinkCall = LocalBoxFuture<'static, Result<(), PeerLinkFailure>>;
 
 type Call = LocalBoxFuture<'static, Result<(), ClientError>>;
+type SshCall =
+    LocalBoxFuture<'static, Result<EnvironmentId, t3_client::connection::ConnectionFailure>>;
 pub trait ConnectionSettings {
+    fn can_provision_ssh(&self) -> bool;
+    fn add_ssh(&self, input: t3_client::composition::SshPairingInput) -> SshCall;
     fn forget_peer(&self, source: EnvironmentId, target: EnvironmentId) -> LinkCall;
     fn refresh_relay(&self) -> LocalBoxFuture<'static, ()>;
     fn access_manager(
@@ -62,6 +66,12 @@ pub trait ConnectionSettings {
 }
 
 impl<P: Platform + Clone + 'static> ConnectionSettings for ClientRuntime<P> {
+    fn can_provision_ssh(&self) -> bool {
+        ClientRuntime::can_provision_ssh(self)
+    }
+    fn add_ssh(&self, input: t3_client::composition::SshPairingInput) -> SshCall {
+        self.pair_ssh(input)
+    }
     fn forget_peer(&self, source: EnvironmentId, target: EnvironmentId) -> LinkCall {
         self.forget_settings_peer(source, target)
     }
@@ -669,6 +679,45 @@ fn add_environment(
     let title = stored(title);
     let is_route = target.is_some();
     let target = stored(target);
+    let ssh_mode = signal(false);
+    let ssh_host = signal(String::new());
+    let ssh_user = signal(String::new());
+    let ssh_port = signal(String::new());
+    let submit_ssh = move || {
+        let Some(service) = services else { return };
+        if busy.get_untracked() {
+            return;
+        }
+        let parsed = t3_client::connection::pairing_link::manual_ssh_target(
+            &ssh_host.get_untracked(),
+            &ssh_user.get_untracked(),
+            &ssh_port.get_untracked(),
+        );
+        let parsed = match parsed {
+            Ok(target) => target,
+            Err(message) => {
+                error.set(Some(t(message)));
+                return;
+            }
+        };
+        let work = service
+            .get()
+            .add_ssh(t3_client::composition::SshPairingInput {
+                target: parsed,
+                label: None,
+                expected_environment: target.get().map(|(id, _)| id),
+            });
+        busy.set(true);
+        error.set(None);
+        owner.spawn(async move {
+            if work.await.is_ok() {
+                form.set(None);
+            } else {
+                busy.set(false);
+                error.set(Some(t("Could not connect to the SSH host.")));
+            }
+        });
+    };
     let submit = move || {
         if busy.get_untracked() {
             return;
@@ -702,6 +751,81 @@ fn add_environment(
             }
         });
     };
+    let choose_mode = move |ssh: bool, label: &'static str, selected: bool| {
+        button(
+            ButtonContent::Label(t(label)),
+            if selected {
+                ButtonVariant::Secondary
+            } else {
+                ButtonVariant::Outline
+            },
+            ButtonSize::Sm,
+            move || busy.get(),
+            move || {
+                ssh_mode.set(ssh);
+                error.set(None);
+            },
+        )
+    };
+    let fields = move |ssh: bool| {
+        if ssh {
+            let field = |label: &'static str, hint: &'static str, value: Signal<String>| {
+                view().child(text(t(label))).child(
+                    nsh_base::input()
+                        .label(t(label))
+                        .placeholder(t(hint))
+                        .disabled(move || busy.get())
+                        .value(move || value.get())
+                        .on_change(move |raw: &str| value.set(raw.to_owned()))
+                        .on_submit(move |_: &str| submit_ssh()),
+                )
+            };
+            return view()
+                .app_class(tw("space-y-3"))
+                .child(field("SSH host or alias", "devbox", ssh_host))
+                .child(field("Username", "root", ssh_user))
+                .child(field("Port", "22", ssh_port))
+                .into_element();
+        }
+        view()
+            .app_class(tw("space-y-3"))
+            .child(text(t("Host")))
+            .child(
+                nsh_base::input()
+                    .label(t("Host"))
+                    .placeholder(t("backend.example.com"))
+                    .disabled(move || busy.get())
+                    .value(move || host.get())
+                    .on_change(move |raw: &str| {
+                        if let Some(fields) = parse_pairing_url_fields(raw, None) {
+                            host.set(fields.host);
+                            code.set(fields.pairing_code.into_inner());
+                        } else {
+                            host.set(raw.to_owned());
+                        }
+                    })
+                    .on_submit(move |_: &str| submit()),
+            )
+            .child(text(t("Pairing code")))
+            .child(masked_text_field(
+                code,
+                "PAIRCODE".into(),
+                t("Pairing code"),
+                move || busy.get(),
+                submit,
+            ))
+            .child(text(t(
+                "Paste a full pairing URL here to fill both fields automatically.",
+            )))
+            .into_element()
+    };
+    let submit_selected = move || {
+        if ssh_mode.get_untracked() {
+            submit_ssh()
+        } else {
+            submit()
+        }
+    };
     dialog(signal(true), move |state|{
         state.on_open_change(move |next|{if !next {form.set(None);}});
         dialog_popup(state,PopupOptions::default(),move ||{
@@ -722,16 +846,16 @@ fn add_environment(
                             owner.spawn(async move{ if work.await.is_ok(){form.set(None);}else{busy.set(false);error.set(Some(t("Could not add the route.")));} });
                         }))
                     })))
-                    .child(text(t("Host")))
-                    .child(nsh_base::input().label(t("Host")).placeholder(t("backend.example.com")).disabled(move ||busy.get())
-                        .value(move ||host.get()).on_change(move |raw:&str|{ if let Some(fields)=parse_pairing_url_fields(raw,None) {
-                            host.set(fields.host);code.set(fields.pairing_code.into_inner());
-                        } else {host.set(raw.to_owned());} }).on_submit(move |_:&str|submit()))
-                    .child(text(t("Pairing code")))
-                    .child(masked_text_field(code,"PAIRCODE".into(),t("Pairing code"),move ||busy.get(),submit))
-                    .child(text(t("Paste a full pairing URL here to fill both fields automatically.")))
+                    .child((crate::host::native_desktop() && services.is_some_and(|s| s.get().can_provision_ssh())).then(|| {
+                        region(move || ssh_mode.get(), move |ssh| {
+                            view().app_class(tw("flex-row gap-2"))
+                                .child(choose_mode(false, "Remote link", !ssh))
+                                .child(choose_mode(true, "SSH", ssh))
+                        })
+                    }))
+                    .child(region(move || ssh_mode.get(), fields))
                     .child(region(move ||error.get(),|error|error.map(text)))
-                    .child(button(ButtonContent::Label(if is_route {t("Add route")} else {t("Add environment")}),ButtonVariant::Outline,ButtonSize::Sm,move ||busy.get(),submit))))
+                    .child(button(ButtonContent::Label(if is_route {t("Add route")} else {t("Add environment")}),ButtonVariant::Outline,ButtonSize::Sm,move ||busy.get(),submit_selected))))
         })
     }).into_element()
 }

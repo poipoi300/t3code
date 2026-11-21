@@ -436,6 +436,11 @@ impl std::fmt::Debug for HostReply {
     }
 }
 pub trait Platform: Storage {
+    /// Whether this host can provision an SSH environment and handle its authentication.
+    fn can_provision_ssh(&self) -> bool {
+        false
+    }
+
     fn now_epoch_ms(&self) -> u64;
     fn monotonic_ms(&self) -> u64;
     fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError>;

@@ -57,6 +57,7 @@ use t3_ui::{
 struct ManagedProps {
     write: bool,
     refuse_unlink: bool,
+    ssh_provisioning: bool,
 }
 
 #[component]
@@ -114,7 +115,8 @@ fn Managed(props: ManagedProps) -> impl IntoElement {
             )
         }));
     });
-    let platform = server.platform();
+    let mut platform = server.platform();
+    platform.ssh_provisioning = props.ssh_provisioning;
     let network = platform.fake.clone();
     on_key("ctrl+shift+o", move |_| {
         network.emit(PlatformEvent::Network(NetworkStatus::Offline))
@@ -179,12 +181,23 @@ fn managed_with_grant(window: (f32, f32), write: bool) -> Headless {
     managed_fixture(window, write, false)
 }
 fn managed_fixture(window: (f32, f32), write: bool, refuse_unlink: bool) -> Headless {
+    managed_fixture_on(window, write, refuse_unlink, Default::default(), false)
+}
+
+fn managed_fixture_on(
+    window: (f32, f32),
+    write: bool,
+    refuse_unlink: bool,
+    os: nsh_core::platform::Os,
+    ssh_provisioning: bool,
+) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::new::<Managed>(move || ManagedProps {
             write,
             refuse_unlink,
+            ssh_provisioning,
         }))
     };
     config.environment.idiom = if window == PHONE {
@@ -192,6 +205,7 @@ fn managed_fixture(window: (f32, f32), write: bool, refuse_unlink: bool) -> Head
     } else {
         nsh_core::platform::Idiom::Desktop
     };
+    config.environment.os = os;
     Headless::start(config).expect("headless connections")
 }
 
@@ -525,4 +539,40 @@ fn scrubbed_diagnosis_desktop() {
 #[test]
 fn scrubbed_diagnosis_phone() {
     scrubbed_diagnosis(PHONE)
+}
+
+#[test]
+fn ssh_route_rejects_invalid_port_in_the_desktop_dialog() {
+    let mut app = managed_fixture_on(DESKTOP, true, false, nsh_core::platform::Os::Linux, true);
+    app.wait_for("role:button[Routes]").expect("paired machine");
+    app.press("role:button[Routes]").expect("show routes");
+    app.press("role:button[Add route]").expect("add route");
+    app.press("role:button[SSH]").expect("use SSH");
+    app.type_text("label:SSH host or alias", "builder@devbox")
+        .expect("SSH host");
+    app.type_text("label:Port", "65536").expect("invalid port");
+    app.press("role:dialog[Add a route to Fake host] >> role:button[Add route]")
+        .expect("submit target");
+    app.wait_for("SSH port must be between 1 and 65535.")
+        .expect("correct the port in place");
+}
+
+#[test]
+fn phone_pairing_uses_the_remote_fields() {
+    let mut app = managed_app(PHONE);
+    app.wait_for("role:button[Routes]").expect("paired machine");
+    app.press("role:button[Routes]").expect("show routes");
+    app.press("role:button[Add route]").expect("add route");
+    app.wait_for("label:Pairing code").expect("remote pairing");
+    assert_eq!(app.screen().count("role:button[SSH]").unwrap(), 0);
+}
+
+#[test]
+fn desktop_without_ssh_provisioning_offers_remote_pairing() {
+    let mut app = managed_fixture_on(DESKTOP, true, false, nsh_core::platform::Os::Linux, false);
+    app.wait_for("role:button[Routes]").expect("paired machine");
+    app.press("role:button[Routes]").expect("show routes");
+    app.press("role:button[Add route]").expect("add route");
+    app.wait_for("label:Pairing code").expect("remote pairing");
+    assert_eq!(app.screen().count("role:button[SSH]").unwrap(), 0);
 }

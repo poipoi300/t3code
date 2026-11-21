@@ -29,6 +29,11 @@ pub fn desktop_title_bar_for(platform: Os) -> TitleBarOptions {
     options
 }
 
+/// Whether this window has a native desktop host for SSH setup.
+pub fn native_desktop() -> bool {
+    os().is_desktop()
+}
+
 /// Whether NSH will show its file picker (`pick_files`). NSH answers a pick it may not show
 /// with no files, exactly like a cancel, so where `shells/nsh.json` does not grant `picker` the
 /// composer hides "Attach files" instead of offering a control that does nothing. Logged once.

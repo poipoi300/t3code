@@ -131,6 +131,7 @@ impl FakeEnvironment {
             fake: self.fake.clone(),
             server: self.server.clone(),
             additional: BTreeMap::new(),
+            ssh_provisioning: false,
         }
     }
 
@@ -405,6 +406,8 @@ fn response(status: u16, body: Value) -> HttpResponse {
 
 #[derive(Clone)]
 pub struct EnvironmentPlatform {
+    /// Tests may script SSH host replies through the fake platform.
+    pub ssh_provisioning: bool,
     pub fake: FakePlatform,
     server: Rc<Server>,
     additional: BTreeMap<String, Rc<Server>>,
@@ -451,6 +454,9 @@ impl Storage for EnvironmentPlatform {
 }
 
 impl Platform for EnvironmentPlatform {
+    fn can_provision_ssh(&self) -> bool {
+        self.ssh_provisioning
+    }
     fn now_epoch_ms(&self) -> u64 {
         self.fake.now_epoch_ms()
     }

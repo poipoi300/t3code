@@ -384,12 +384,90 @@ pub fn extract_pairing_url_from_qr_payload(
     Ok(Sensitive(trimmed.to_owned()))
 }
 
+/// Parses the manual fields in the desktop Connections dialog. Explicit fields
+/// take precedence over the user and port embedded in the host.
+pub fn manual_ssh_target(
+    address: &str,
+    user: &str,
+    port: &str,
+) -> Result<t3_contracts::ipc::DesktopSshEnvironmentTargetSchema, &'static str> {
+    use t3_contracts::{ipc::DesktopSshEnvironmentTargetSchema, settings::WireNumber};
+    let (inline_user, address) = address
+        .trim()
+        .rsplit_once('@')
+        .filter(|(user, _)| !user.is_empty())
+        .map_or(("", address.trim()), |(user, host)| {
+            (user.trim(), host.trim())
+        });
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit());
+    let bracketed = address.strip_prefix('[').and_then(|s| s.split_once(']'));
+    let (host, inline_port) = match bracketed {
+        Some((host, "")) if !host.is_empty() => (host, ""),
+        Some((host, suffix))
+            if !host.is_empty() && suffix.strip_prefix(':').is_some_and(digits) =>
+        {
+            (host, &suffix[1..])
+        }
+        _ => address
+            .split_once(':')
+            .filter(|(_, suffix)| digits(suffix))
+            .unwrap_or((address, "")),
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("SSH host or alias is required.");
+    }
+    let user = if user.trim().is_empty() {
+        inline_user
+    } else {
+        user.trim()
+    };
+    let port = if port.trim().is_empty() {
+        inline_port
+    } else {
+        port.trim()
+    };
+    let port = if port.is_empty() {
+        None
+    } else {
+        // The TS form uses Number.parseInt(rawPort, 10).
+        let unsigned = port.strip_prefix('+').unwrap_or(port);
+        let end = unsigned.bytes().take_while(u8::is_ascii_digit).count();
+        let n = unsigned[..end]
+            .parse::<u16>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or("SSH port must be between 1 and 65535.")?;
+        Some(WireNumber::Finite(n.into()))
+    };
+    Ok(DesktopSshEnvironmentTargetSchema {
+        alias: host.to_owned(),
+        hostname: host.to_owned(),
+        username: (!user.is_empty()).then(|| user.to_owned()),
+        port,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn url(value: &str) -> Url {
         Url::parse(value).expect("valid test URL")
+    }
+
+    #[test]
+    fn manual_ssh_fields_override_inline_credentials_and_preserve_ipv6() {
+        let target =
+            super::manual_ssh_target("first@[2001:db8::1]:2222", " build ", "2022").unwrap();
+        assert_eq!(target.hostname, "2001:db8::1");
+        assert_eq!(target.alias, target.hostname);
+        assert_eq!(target.username.as_deref(), Some("build"));
+        assert_eq!(serde_json::to_value(target.port).unwrap(), 2022);
+        let target = super::manual_ssh_target("2001:db8::1", "", "").unwrap();
+        assert_eq!(target.hostname, "2001:db8::1");
+        assert!(target.username.is_none() && target.port.is_none());
+        assert!(super::manual_ssh_target("builder@", "", "").is_err());
     }
 
     #[test]
