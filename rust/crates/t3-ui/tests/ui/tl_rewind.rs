@@ -361,3 +361,187 @@ fn isolated_files_are_explicit_and_fork_opens_only_the_clients_ready_target() {
         .expect("error");
     assert!(app.screen().shows("/environment/parent"));
 }
+
+/// ChatView's row actions over a connected client. The item has no recorded provider
+/// session, for which the web permits a completed response to be forked.
+#[component]
+fn ConnectedTimelineFixture() -> impl IntoElement {
+    use t3_client::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        testing::environment,
+    };
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::runtime::{Rt, host::Choice, services::thread_ops};
+
+    t3_ui::theme::install(&Default::default());
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        })
+    });
+    let parent = key("parent");
+    let server = environment::FakeEnvironment::new("environment", spawner.clone());
+    server.set_shell(environment::shell(&[("parent", "Timeline actions")]));
+    server.edit_config(|config| {
+        let mut provider: serde_json::Value = serde_json::from_str(
+            include_str!("../../../../fixtures/samples/ServerProvider.jsonl")
+                .lines()
+                .next()
+                .expect("sample"),
+        )
+        .expect("provider");
+        provider["instanceId"] = json!("codex");
+        provider["supportsConversationRollback"] = json!(true);
+        config["providers"] = json!([provider]);
+    });
+    let at = "2026-11-13T12:00:00Z";
+    let prompt = json!({
+        "id": "user-item", "type": "user_message", "threadId": "parent", "runId": "run",
+        "nodeId": null, "providerThreadId": "pt", "providerTurnId": null,
+        "nativeItemRef": null, "parentItemId": null, "ordinal": 1,
+        "status": "completed", "title": null, "startedAt": at, "completedAt": at,
+        "updatedAt": at, "messageId": "prompt", "text": "Original prompt",
+        "inputIntent": "turn_start", "attachments": [], "createdBy": "user",
+        "creationSource": "web",
+    });
+    let answer = json!({
+        "id": "assistant-item", "type": "assistant_message", "threadId": "parent",
+        "runId": "run", "nodeId": null, "providerThreadId": "pt",
+        "providerTurnId": null, "nativeItemRef": null, "parentItemId": null,
+        "ordinal": 2, "status": "completed", "title": null, "startedAt": at,
+        "completedAt": at, "updatedAt": at, "messageId": "answer",
+        "text": "A finished response", "streaming": false,
+    });
+    let mut projection = environment::projection(
+        "parent",
+        "Timeline actions",
+        json!([]),
+        json!([prompt, answer]),
+    );
+    projection["visibleTurnItems"] = json!([
+        {"position":0,"visibility":"local","sourceThreadId":"parent","sourceItemId":"user-item","item":prompt},
+        {"position":1,"visibility":"local","sourceThreadId":"parent","sourceItemId":"assistant-item","item":answer}
+    ]);
+    projection["thread"]["activeProviderThreadId"] = json!("pt");
+    projection["providerThreads"] = json!([{
+        "id": "pt", "driver": "codex", "providerInstanceId": "codex",
+        "providerSessionId": "session", "appThreadId": "parent", "ownerNodeId": null,
+        "nativeThreadRef": null, "nativeConversationHeadRef": null, "status": "idle",
+        "firstRunOrdinal": 1, "lastRunOrdinal": 1, "handoffIds": [], "forkedFrom": null,
+        "createdAt": at, "updatedAt": at,
+    }]);
+    projection["checkpoints"] = json!([{
+        "id": "root", "threadId": "parent", "scopeId": "scope", "runId": null,
+        "nodeId": "root", "parentCheckpointId": null, "ordinalWithinScope": 0,
+        "appRunOrdinal": null, "ref": "root", "status": "ready", "files": [],
+        "capturedAt": at,
+    }]);
+    server.set_thread("parent", projection);
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    provide_context(Rt::new(
+        store.clone(),
+        Rc::new(client.clone()),
+        Choice::Demo,
+    ));
+    provide_context(Navigator::new(Route::Thread(parent.clone())));
+    provide_context(thread_ops::timeline_rewind(&client));
+    provide_context(thread_ops::approval_services(&client));
+    let pair = client.pair(server.pairing());
+    let open = parent.clone();
+    spawner(
+        async move {
+            pair.await.expect("paired");
+            client.open_thread(&open);
+        }
+        .boxed_local(),
+    );
+    let receipts = signal(String::new());
+    let scope = parent.clone();
+    let session_store = store.clone();
+    let session_thread = parent.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(control("receipts", move || {
+            let calls = server.calls("orchestration.dispatchCommand");
+            receipts.set(serde_json::to_string(&calls).expect("dispatch receipts"));
+        }))
+        .child(text(move || receipts.get()))
+        .child(control("record-session", move || {
+            let mut s: serde_json::Value = serde_json::from_str(
+                include_str!("../../../../fixtures/samples/OrchestrationV2ProviderSession.jsonl")
+                    .lines()
+                    .next()
+                    .expect("sample"),
+            )
+            .expect("session");
+            s["id"] = json!("session");
+            s["capabilities"]["threads"]["canForkThread"] = json!(false);
+            s["capabilities"]["context"]["supportsFullThreadHandoff"] = json!(false);
+            let generation =
+                session_store.snapshot().environments[&session_thread.environment].session;
+            session_store.update_thread(&session_thread, generation, |thread| {
+                let p = Rc::make_mut(thread.projection.as_mut().expect("loaded thread"));
+                p.provider_sessions
+                    .push(serde_json::from_value(s).expect("configured session"));
+                true
+            });
+        }))
+        .child(control("page-history", move || {
+            let generation = store.snapshot().environments[&scope.environment].session;
+            store.update_thread(&scope, generation, |thread| {
+                thread.history.has_more = true;
+                true
+            });
+        }))
+        .child(t3_ui::screens::thread::timeline::timeline(parent))
+}
+
+#[test]
+fn completed_response_without_item_session_dispatches_a_fork_for_its_run() {
+    let mut app = start(Root::of::<ConnectedTimelineFixture>(), DESKTOP);
+    app.press("role:button[Fork from this response]")
+        .expect("fork control");
+    app.press("id:receipts").expect("read fake server");
+    let screen = app.screen();
+    let calls: Vec<serde_json::Value> = screen
+        .texts()
+        .iter()
+        .find_map(|text| serde_json::from_str(text).ok())
+        .expect("server receipts");
+    assert_eq!(calls.len(), 1, "one dispatch reaches the server");
+    let command = &calls[0];
+    assert_eq!(command["type"], "thread.fork");
+    assert_eq!(command["sourceThreadId"], "parent");
+    assert_eq!(command["sourcePoint"], json!({"type":"run","runId":"run"}));
+}
+
+#[test]
+fn edit_from_here_requires_a_checkpoint_at_the_real_start_of_history() {
+    let mut app = start(Root::of::<ConnectedTimelineFixture>(), DESKTOP);
+    let edit = "role:button[Edit from here]";
+    app.wait_for(edit)
+        .expect("first turn has an available root checkpoint");
+    app.press("id:page-history")
+        .expect("first loaded turn is no longer the thread start");
+    assert!(!app.screen().matches(edit).expect("selector"));
+}
+
+#[test]
+fn recorded_item_session_hides_fork_when_it_cannot_fork_or_hand_off() {
+    let mut app = start(Root::of::<ConnectedTimelineFixture>(), DESKTOP);
+    let fork = "role:button[Fork from this response]";
+    app.wait_for(fork)
+        .expect("completed response with unknown capabilities");
+    app.press("id:record-session")
+        .expect("provider capabilities arrive");
+    assert!(!app.screen().matches(fork).expect("selector"));
+}

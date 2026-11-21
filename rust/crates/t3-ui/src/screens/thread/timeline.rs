@@ -23,6 +23,7 @@ use t3_client::types::{EnvironmentId, ThreadKey};
 use t3_contracts::base_schemas::RunId;
 use t3_contracts::orchestration_v2::OrchestrationV2ThreadShell;
 use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+use t3_contracts::provider_instance::ProviderInstanceId;
 use t3_contracts::settings::{
     ClientSettingsSchema, ScreenReaderAnnouncements, TimestampFormat, ToolCallVisibility,
 };
@@ -57,6 +58,7 @@ use crate::runtime::tasks::watch;
 /// `activeTurnStartedAt`), read from the client's presentation of the thread shell.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunState {
+    provider_instance_id: Option<ProviderInstanceId>,
     latest_run: Option<TimelineLatestRun>,
     running_run_id: Option<String>,
     is_working: bool,
@@ -77,6 +79,7 @@ fn run_state(environment: &EnvironmentId, thread: &OrchestrationV2ThreadShell) -
     });
     let runtime = view.runtime.as_ref();
     RunState {
+        provider_instance_id: runtime.map(|runtime| runtime.provider_instance_id.clone()),
         latest_run,
         running_run_id: runtime.and_then(|r| r.active_run_id.as_ref().map(|id| id.0.clone())),
         is_working: thread_runtime_is_active(runtime),
@@ -222,6 +225,68 @@ fn chip_data(key: &ThreadKey) -> Memo<ChipData> {
     computed(move || data.clone())
 }
 
+/// ChatView derives the rewind range from confirmed provider turns and the loaded history window.
+fn rewind_inputs(
+    key: ThreadKey,
+    services: &TimelineServices,
+    approvals: &ApprovalContext,
+) -> Memo<MessagesTimelineRowsInput> {
+    use t3_client::view_logic::{
+        chat_view::derive_available_revert_turn_counts, session::find_revert_checkpoint,
+    };
+
+    let events = services.events.clone();
+    let run = services.run;
+    let permission = approvals
+        .services
+        .as_ref()
+        .map(|services| services.can_operate.clone());
+    rt().store.thread_state(key.clone(), move |state| {
+        let Some(thread) = state else {
+            return Default::default();
+        };
+        let Some(projection) = &thread.projection else {
+            return Default::default();
+        };
+        let Some(config) = events.config(&key.environment) else {
+            return Default::default();
+        };
+        let providers = &config.providers.0;
+        let find_provider =
+            |id: &ProviderInstanceId| providers.iter().find(|p| &p.instance_id == id);
+        let provider = run
+            .with(|run| run.provider_instance_id.as_ref().and_then(find_provider))
+            .or_else(|| find_provider(&projection.thread.model_selection.instance_id));
+        let supported = permission
+            .as_ref()
+            .is_some_and(|can_operate| can_operate(&key))
+            && provider.is_some_and(|p| p.supports_conversation_rollback.flatten() != Some(false));
+        if !supported {
+            return Default::default();
+        }
+        MessagesTimelineRowsInput {
+            supports_conversation_rollback: true,
+            thread_start_checkpoint_available: !thread.history.has_more
+                && find_revert_checkpoint(&projection.checkpoints, 0).is_some(),
+            available_revert_turn_counts: Some(derive_available_revert_turn_counts(Some(
+                projection,
+            ))),
+            turn_diff_summaries: projection
+                .checkpoints
+                .iter()
+                .filter_map(|checkpoint| {
+                    Some(serde_json::json!({
+                        "runId": checkpoint.run_id.as_ref()?,
+                        "checkpointTurnCount": checkpoint.app_run_ordinal?,
+                        "status": checkpoint.status,
+                    }))
+                })
+                .collect(),
+            ..Default::default()
+        }
+    })
+}
+
 pub fn timeline(key: ThreadKey) -> impl IntoElement {
     let runtime = rt();
     let services = TimelineServices::new(key.clone());
@@ -231,6 +296,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
     let groups = services.groups;
     let approvals = ApprovalContext::new(key.clone(), ApprovalRowsState::default());
     let pending_approvals = approvals.pending;
+    let rewind = rewind_inputs(key.clone(), &services, &approvals);
     let run = services.run;
     let visibility = services.tool_call_visibility;
     let rows = computed(move || {
@@ -242,7 +308,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
             is_working: run.is_working,
             active_turn_started_at: run.active_turn_started_at,
             tool_call_visibility: visibility.get(),
-            ..Default::default()
+            ..rewind.get()
         };
         groups.apply_to_input(&mut input);
         // Pending approvals stay outside collapsed work (MessagesTimeline's pendingApprovalRequestIds).

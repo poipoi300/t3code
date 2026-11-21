@@ -102,7 +102,6 @@ pub struct TimelineRewind {
     client: Stored<Option<Rc<dyn TimelineRewindClient>>>,
     owner: Owner,
     nav: Navigator,
-    state: Signal<RewindState>,
     pending: Signal<bool>,
     pub reverting: Memo<bool>,
     pub error: Signal<Option<RewindError>>,
@@ -143,7 +142,6 @@ impl TimelineRewind {
             client: stored(client),
             owner: Owner::current(),
             nav: navigator(),
-            state,
             pending,
             reverting: computed(move || pending.get() || state.get().reverting),
             error: signal(None),
@@ -274,7 +272,7 @@ impl TimelineRewind {
         source: ThreadKey,
         run_id: RunId,
     ) -> impl std::future::Future<Output = Result<(), String>> + 'static {
-        let client = (!self.reverting.get_untracked() && self.state.get_untracked().can_fork)
+        let client = (!self.reverting.get_untracked())
             .then(|| self.client.get())
             .flatten();
         if client.is_some() {

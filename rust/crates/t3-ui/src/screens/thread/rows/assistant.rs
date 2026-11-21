@@ -746,6 +746,54 @@ pub struct AssistantRowContext {
     pub state: AssistantRowsState,
 }
 
+/// The item's provider thread belongs to its source, including rows inherited from a parent.
+/// Keep one session lookup per source so streaming text never requires scanning turn items.
+fn item_capabilities(environment: t3_client::types::EnvironmentId) -> CapabilityLookup {
+    use t3_contracts::orchestration_v2::OrchestrationV2TurnItem;
+    let store = crate::runtime::rt().store;
+    let owner = Owner::current();
+    let sources = stored(BTreeMap::new());
+    Rc::new(move |row| {
+        let IdOrIndex::Id(source) = &row.source_thread_id else {
+            return None;
+        };
+        let OrchestrationV2TurnItem::AssistantMessage(item) = &row.item else {
+            return None;
+        };
+        let IdOrIndex::Id(provider_thread) = item.provider_thread_id.as_ref()? else {
+            return None;
+        };
+        let capabilities = sources.with(|sources| {
+            *sources.entry(source.clone()).or_insert_with(|| {
+                let key = ThreadKey {
+                    environment: environment.clone(),
+                    thread: source.clone(),
+                };
+                owner.run(|| {
+                    store.thread_state(key, |state| {
+                        let Some(p) = state.and_then(|state| state.projection.as_ref()) else {
+                            return BTreeMap::new();
+                        };
+                        p.provider_threads
+                            .iter()
+                            .filter_map(|thread| {
+                                let IdOrIndex::Id(id) = &thread.id else {
+                                    return None;
+                                };
+                                let session_id = thread.provider_session_id.as_ref()?;
+                                let session =
+                                    p.provider_sessions.iter().find(|s| &s.id == session_id)?;
+                                Some((id.clone(), session.capabilities.clone()))
+                            })
+                            .collect()
+                    })
+                })
+            })
+        });
+        capabilities.with(|sessions| sessions.get(provider_thread).cloned())
+    })
+}
+
 impl AssistantRowContext {
     pub fn new(state: AssistantRowsState, services: &TimelineServices) -> Self {
         Self {
@@ -753,7 +801,7 @@ impl AssistantRowContext {
             markdown_cwd: None,
             agent_directories: None,
             timestamp_format: services.timestamp_format,
-            provider_capabilities: None,
+            provider_capabilities: Some(item_capabilities(services.key.environment.clone())),
             on_fork_from_run: services.rewind.fork_action(),
             on_reply_to_response: services.reply.clone(),
             state,
