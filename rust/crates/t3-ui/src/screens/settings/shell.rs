@@ -553,24 +553,25 @@ pub fn section_icon(page: SettingsPage) -> Icon {
 
 /// The settings route: mount with `Route::Settings(page) => settings::shell::screen(*page)`.
 pub fn screen(page: SettingsPage) -> AnyElement {
-    untracked(|| settings_route_layout(page, host_runtime()).into_element())
+    if let Some(client) = crate::runtime::rt().backend().client() {
+        screen_for(page, &client)
+    } else {
+        untracked(|| settings_route_layout(page, None).into_element())
+    }
 }
 
-/// `screen` over a given client runtime (the router passes the host's through `screen`).
+/// `screen` over a given client runtime.
 pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
     page: SettingsPage,
     client: &t3_client::composition::ClientRuntime<P>,
 ) -> AnyElement {
     let runtime = crate::runtime::services::settings::settings(client);
-    untracked(|| settings_route_layout(page, Some(runtime)).into_element())
-}
-
-/// `None` only for the demo backend and an unavailable host, which have no settings store.
-fn host_runtime() -> Option<SettingsRuntime> {
-    crate::runtime::rt()
-        .backend()
-        .client()
-        .map(|client| crate::runtime::services::settings::settings(&client))
+    untracked(|| {
+        if page == SettingsPage::Providers {
+            provide_context(super::providers::Services::new(client));
+        }
+        settings_route_layout(page, Some(runtime)).into_element()
+    })
 }
 
 /// `SettingsRouteLayout` with `SettingsScopeProvider`.
