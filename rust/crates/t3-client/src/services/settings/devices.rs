@@ -429,6 +429,69 @@ impl SourceWriter {
 mod tests {
     use super::*;
     #[test]
+    fn simlock_gateway_requires_an_http_origin() {
+        let mut host = HostKind::Simlock.new_host("pool".into());
+        for url in ["https://pool.test", "http://pool.test:8080/"] {
+            host["gatewayUrl"] = json!(url);
+            assert!(HostKind::Simlock.valid(&host), "{url}");
+        }
+        for url in [
+            "",
+            "pool.test",
+            "ftp://pool.test",
+            "https://",
+            "https:///",
+            "https://two hosts",
+            "https://pool.test/leases",
+        ] {
+            host["gatewayUrl"] = json!(url);
+            assert!(!HostKind::Simlock.valid(&host), "{url}");
+        }
+    }
+
+    #[test]
+    fn ssh_target_and_port_reject_invalid_values_independently() {
+        let mut host = json!({"label":"Mac", "target":"user@mac"});
+        assert!(HostKind::Ssh.valid(&host));
+        for target in ["", "-option", "two hosts", "host\nname"] {
+            host["target"] = json!(target);
+            assert!(!HostKind::Ssh.valid(&host), "{target:?}");
+        }
+        host["target"] = json!("user@mac");
+        for port in [1, 65535] {
+            host["port"] = json!(port);
+            assert!(HostKind::Ssh.valid(&host), "{port}");
+        }
+        for port in [json!(0), json!(65536), json!(-1), json!(2.5), json!("22")] {
+            host["port"] = port;
+            assert!(!HostKind::Ssh.valid(&host), "{}", host["port"]);
+        }
+    }
+
+    #[test]
+    fn device_token_references_validate_provider_and_utf16_path() {
+        let reference = |provider: &str, path: &str| json!({"provider":provider, "reference":path});
+        assert!(valid_device_token(&json!("")));
+        let max_provider = "a".repeat(64);
+        let max_path = "🤖".repeat(512);
+        assert!(valid_device_token(&reference(&max_provider, &max_path)));
+        for invalid in [
+            json!(false),
+            json!({"provider":"vault"}),
+            json!({"reference":"field"}),
+            reference("", "field"),
+            reference("_vault", "field"),
+            reference("bad.id", "field"),
+            reference(&format!("{max_provider}a"), "field"),
+            reference("vault", " "),
+            reference("vault", "line\rbreak"),
+            reference("vault", "line\nbreak"),
+            reference("vault", &format!("{max_path}x")),
+        ] {
+            assert!(!valid_device_token(&invalid), "{invalid}");
+        }
+    }
+    #[test]
     fn denied_source_member_prevents_every_write() {
         use crate::{ClientStore, composition::Spawner, testing::environment::FakeEnvironment};
         use futures::{executor::LocalPool, task::LocalSpawnExt};

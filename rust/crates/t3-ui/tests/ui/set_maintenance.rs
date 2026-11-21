@@ -26,15 +26,23 @@ struct FixtureProps {
     write: bool,
     run: bool,
     rules: bool,
+    database: bool,
+    mixed: bool,
+    peer_cleanup: bool,
+    relay_and_fast_checkout: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
-enum Gate {
+pub(super) enum Gate {
     #[default]
     Normal,
     NoRules,
     ReadOnly,
     RetentionOnly,
+    NoDatabase,
+    MixedRetention,
+    MixedUnsupported,
+    RelayAndFastCheckout,
 }
 
 #[component]
@@ -64,7 +72,9 @@ fn Fixture(props: FixtureProps) -> impl IntoElement {
     server.set_permissions(&scopes);
     let observed = server.clone();
     server.edit_config(|config| {
-        config["environment"]["capabilities"]["databaseStorage"] = json!(true);
+        config["environment"]["capabilities"]["databaseStorage"] = json!(props.database);
+        config["environment"]["capabilities"]["fastWorktreeCheckout"] =
+            json!(props.relay_and_fast_checkout);
         config["environment"]["capabilities"]["storageCleanup"] = json!(props.cleanup);
         config["environment"]["capabilities"]["storageCleanupRun"] =
             json!(props.cleanup && props.run);
@@ -86,14 +96,29 @@ fn Fixture(props: FixtureProps) -> impl IntoElement {
         }
     });
     server.register("server.getDatabaseStorage", CallKind::Stream);
-    server.stream_snapshot(
-        "server.getDatabaseStorage",
-        vec![json!({
-            "databaseBytes":8589934592u64, "reclaimableBytes":2147483648u64,
-            "incrementalVacuumEnabled":false, "canReclaim":true,
+    let database = server.stream_updates("server.getDatabaseStorage");
+    let status = |bytes: u64, direct: bool| {
+        json!({
+            "databaseBytes":8589934592u64, "reclaimableBytes":bytes,
+            "incrementalVacuumEnabled":false, "canReclaim":direct,
             "compactCommand":"t3 doctor --reclaim-database-space"
-        })],
-    );
+        })
+    };
+    database
+        .unbounded_send(status(2 << 30, true))
+        .expect("initial database status");
+    for (key, bytes, direct) in [
+        ("ctrl+shift+d", 3 << 30, true),
+        ("ctrl+shift+h", 0, true),
+        ("ctrl+shift+r", 3 << 30, false),
+    ] {
+        let database = database.clone();
+        on_key(key, move |_| {
+            database
+                .unbounded_send(status(bytes, direct))
+                .expect("refresh database status");
+        });
+    }
     server.register("server.reclaimDatabaseSpace", CallKind::Unary);
     server.reply("server.reclaimDatabaseSpace", Ok(json!(null)));
     server.register("server.getStorageCleanupReport", CallKind::Stream);
@@ -103,24 +128,83 @@ fn Fixture(props: FixtureProps) -> impl IntoElement {
         "trigger":"manual","startedAt":"2026-11-21T12:00:00Z","finishedAt":"2026-11-21T12:01:00Z",
         "entries":[],"counts":{"removed":0,"kept":0,"failed":0},"omittedCount":0
     })));
+    let other = FakeEnvironment::at_origin("other", "https://other.test", spawner.clone());
+    let mut platform = server.platform();
+    if props.mixed {
+        other.set_shell(t3_client::testing::environment::shell(&[]));
+        other.set_permissions(&scopes);
+        other.edit_config(|config| {
+            let caps = &mut config["environment"]["capabilities"];
+            caps["databaseStorage"] = json!(false);
+            caps["storageCleanup"] = json!(props.peer_cleanup);
+            caps["storageCleanupRun"] = json!(false);
+        });
+        for (tag, kind) in [
+            ("server.getDatabaseStorage", CallKind::Stream),
+            ("server.getStorageCleanupReport", CallKind::Stream),
+            ("server.runStorageCleanup", CallKind::Unary),
+        ] {
+            other.register(tag, kind);
+        }
+        platform = platform.with_environment(&other);
+    }
     let store = ClientStore::default();
-    let client = ClientRuntime::new(
-        server.platform(),
-        store.clone(),
-        t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
-        spawner.clone(),
-    );
+    let source = t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web;
+    let client = if props.relay_and_fast_checkout {
+        server.sign_in(false);
+        ClientRuntime::with_relay(
+            platform,
+            store.clone(),
+            source,
+            spawner.clone(),
+            FakeEnvironment::relay_config(),
+        )
+    } else {
+        ClientRuntime::new(platform, store.clone(), source, spawner.clone())
+    };
     let paired = signal(false);
-    let pairing = client.pair(server.pairing());
+    let pairing_client = client.clone();
+    let first = server.pairing();
+    let second = props.mixed.then(|| other.pairing());
     spawner(
         async move {
-            pairing.await.expect("pair fixture");
+            pairing_client.pair(first).await.expect("pair fixture");
+            if let Some(second) = second {
+                pairing_client
+                    .pair(second)
+                    .await
+                    .expect("pair other fixture");
+            }
             paired.set(true);
         }
         .boxed_local(),
     );
     provide_context(Rt::new(store, Rc::new(client.clone()), Choice::Client));
     let calls = signal(String::new());
+    let prefs = client.settings();
+    let subscriptions = server.clone();
+    on_key("ctrl+shift+s", move |_| {
+        let subscriptions_for = |peer: &FakeEnvironment| {
+            format!(
+                "database={} report={} runs={}",
+                !peer.calls("server.getDatabaseStorage").is_empty(),
+                !peer.calls("server.getStorageCleanupReport").is_empty(),
+                peer.calls("server.runStorageCleanup").len()
+            )
+        };
+        calls.set(format!(
+            "first {} other {}",
+            subscriptions_for(&subscriptions),
+            subscriptions_for(&other)
+        ));
+    });
+    on_key("ctrl+shift+b", move |_| {
+        let local = prefs.client_settings();
+        calls.set(format!(
+            "Local sidebar={} multiline={}",
+            local.boring_sidebar_enabled, local.boring_sidebar_multiline_rows
+        ));
+    });
     on_key("ctrl+shift+u", move |_| {
         calls.set(format!(
             "Reclaims {} cleanups {}",
@@ -149,7 +233,10 @@ fn Fixture(props: FixtureProps) -> impl IntoElement {
         .child(text(
             move || if paired.get() { "Paired fixture" } else { "" },
         ))
-        .child(untracked(|| shell::screen_for(page, &client)))
+        .child(when(
+            move || paired.get(),
+            move || untracked(|| shell::screen_for(page, &client)),
+        ))
 }
 
 fn start(window: (f32, f32), maintain: bool, cleanup: bool) -> Headless {
@@ -163,7 +250,7 @@ pub(super) fn start_page(
 ) -> Headless {
     start_gate(window, maintain, cleanup, labs, Gate::Normal)
 }
-fn start_gate(
+pub(super) fn start_gate(
     window: (f32, f32),
     maintain: bool,
     cleanup: bool,
@@ -180,6 +267,10 @@ fn start_gate(
             write: gate != Gate::ReadOnly,
             run: gate != Gate::RetentionOnly,
             rules: gate != Gate::NoRules,
+            database: gate != Gate::NoDatabase,
+            mixed: matches!(gate, Gate::MixedRetention | Gate::MixedUnsupported),
+            peer_cleanup: gate == Gate::MixedRetention,
+            relay_and_fast_checkout: gate == Gate::RelayAndFastCheckout,
         }))
     };
     config.environment.idiom = if window == PHONE {
@@ -191,6 +282,12 @@ fn start_gate(
     app.wait_for("Paired fixture")
         .expect("writable fixture is paired");
     app
+}
+
+pub(super) fn has_control(app: &Headless, selector: &str) -> bool {
+    app.screen()
+        .matches(selector)
+        .expect("valid control selector")
 }
 
 fn reclaim(window: (f32, f32)) {
@@ -216,6 +313,48 @@ fn reclaim(window: (f32, f32)) {
     app.wait_for("Reclaims 1 cleanups 1").expect("one cleanup");
 }
 #[test]
+fn status_update_preserves_the_open_reclaim_confirmation() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, true);
+        app.wait_for("role:button[Reclaim]")
+            .expect("initial storage status");
+        app.press("role:button[Reclaim]")
+            .expect("open confirmation");
+        app.wait_for("role:button[Restart and reclaim]")
+            .expect("confirmation");
+        app.press_key("ctrl+shift+d").expect("update status");
+        app.wait_for("3.0 GiB on Fake host")
+            .expect("updated storage row");
+        assert!(has_control(&app, "role:button[Restart and reclaim]"));
+        app.press("role:button[Cancel]")
+            .expect("cancel updated confirmation");
+        app.press_key("ctrl+shift+u").expect("read calls");
+        app.wait_for("Reclaims 0 cleanups 0")
+            .expect("no reclaim on update");
+    }
+}
+#[test]
+fn reclaim_eligibility_returning_requires_a_new_confirmation() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start(window, true, true);
+        for key in ["ctrl+shift+h", "ctrl+shift+r"] {
+            app.wait_for("role:button[Reclaim]")
+                .expect("reclaim available");
+            app.press("role:button[Reclaim]").expect("open warning");
+            app.wait_for("role:button[Restart and reclaim]")
+                .expect("warning visible");
+            app.press_key(key).expect("withdraw direct reclaim");
+            app.wait_for_gone("role:button[Reclaim]", std::time::Duration::from_secs(5))
+                .expect("reclaim unavailable");
+            app.press_key("ctrl+shift+d")
+                .expect("restore direct reclaim");
+            app.wait_for("role:button[Reclaim]")
+                .expect("reclaim available again");
+            assert!(!has_control(&app, "role:button[Restart and reclaim]"));
+        }
+    }
+}
+#[test]
 fn desktop_reclaim_confirmation_and_cleanup() {
     reclaim(DESKTOP);
 }
@@ -224,13 +363,71 @@ fn phone_reclaim_confirmation_and_cleanup() {
     reclaim(PHONE);
 }
 #[test]
-fn restricted_connection_offers_offline_command_and_hides_unsupported_cleanup() {
+fn maintenance_permission_and_storage_capabilities_are_independent() {
     for window in [DESKTOP, PHONE] {
-        let mut app = start(window, false, false);
-        app.wait_for("role:button[Copy command]")
-            .expect("manual repair for a restricted session");
-        assert!(!app.screen().shows("role:button[Reclaim]"));
-        assert!(!app.screen().shows("role:button[Delete now]"));
+        let mut restricted = start(window, false, true);
+        restricted
+            .wait_for("role:button[Copy command]")
+            .expect("offline command");
+        assert!(!has_control(&restricted, "role:button[Reclaim]"));
+        assert!(has_control(&restricted, "role:button[Delete now]"));
+        observe_storage(
+            &mut restricted,
+            "first database=true report=true runs=0 other database=false report=false runs=0",
+        );
+
+        let mut no_database = start_gate(window, true, true, false, Gate::NoDatabase);
+        no_database
+            .wait_for("role:button[Delete now]")
+            .expect("cleanup advertised");
+        assert!(!has_control(&no_database, "role:button[Reclaim]"));
+        assert!(!has_control(&no_database, "role:button[Copy command]"));
+        observe_storage(
+            &mut no_database,
+            "first database=false report=true runs=0 other database=false report=false runs=0",
+        );
+
+        let mut no_cleanup = start(window, true, false);
+        no_cleanup
+            .wait_for("role:button[Reclaim]")
+            .expect("database advertised");
+        assert!(!has_control(&no_cleanup, "role:button[Delete now]"));
+        observe_storage(
+            &mut no_cleanup,
+            "first database=true report=false runs=0 other database=false report=false runs=0",
+        );
+    }
+}
+
+fn observe_storage(app: &mut Headless, expected: &str) {
+    app.settle();
+    app.press_key("ctrl+shift+s")
+        .expect("observe storage requests");
+    app.wait_for(expected)
+        .expect("per-environment storage requests");
+}
+
+#[test]
+fn mixed_environment_capabilities_limit_subscriptions_and_cleanup_targets() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_gate(window, true, true, false, Gate::MixedRetention);
+        app.wait_for("role:button[Reclaim]")
+            .expect("first database notice");
+        app.press("role:button[Delete now]")
+            .expect("run only on supported environment");
+        observe_storage(
+            &mut app,
+            "first database=true report=true runs=1 other database=false report=false runs=0",
+        );
+
+        let mut app = start_gate(window, true, true, false, Gate::MixedUnsupported);
+        app.wait_for("role:button[Reclaim]")
+            .expect("first database notice");
+        assert!(!has_control(&app, "role:button[Delete now]"));
+        observe_storage(
+            &mut app,
+            "first database=true report=false runs=0 other database=false report=false runs=0",
+        );
     }
 }
 
@@ -276,7 +473,7 @@ fn project_scope_excludes_storage_actions_and_reports() {
         app.press("role:menuitemradio[Project]").unwrap();
         app.wait_for_gone("role:button[Reclaim]", std::time::Duration::from_secs(5))
             .unwrap();
-        assert!(!app.screen().shows("role:button[Delete now]"));
+        assert!(!has_control(&app, "role:button[Delete now]"));
         assert!(!app.screen().shows("Delete old rotated logs"));
         app.press_key("ctrl+shift+u").unwrap();
         app.wait_for("Reclaims 0 cleanups 0").unwrap();
@@ -292,7 +489,7 @@ fn manual_cleanup_requires_run_capability_rules_and_write_access() {
             app.wait_for("role:button[Reclaim]").unwrap();
             let query = "role:button[Delete now]";
             if gate == Gate::RetentionOnly {
-                assert!(!app.screen().shows(query));
+                assert!(!has_control(&app, query));
             } else {
                 assert!(
                     !app.screen()

@@ -82,7 +82,7 @@ fn row(
     };
     let failed = status.reclaim_failure.is_some();
     let command = stored(status.compact_command);
-    let confirming = signal(false);
+    let confirming = live.confirming;
     let service = stored(use_context::<SettingsSessions>());
     let reclaim = move || {
         let session = live.session.get();

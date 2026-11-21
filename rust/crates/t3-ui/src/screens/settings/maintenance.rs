@@ -61,6 +61,7 @@ struct Live {
     database: Signal<Option<DatabaseStorageStatus>>,
     report: Signal<LastRun>,
     requested: Signal<bool>,
+    confirming: Signal<bool>,
 }
 fn observe(machine: Machine, service: &SettingsSessions, read_reports: bool) -> Option<Live> {
     let (serial, generation, endpoint) = service.session(&machine.id)?;
@@ -69,11 +70,19 @@ fn observe(machine: Machine, service: &SettingsSessions, read_reports: bool) -> 
     }
     let session = Rc::new(StorageSession(endpoint));
     let database = signal(None);
+    let confirming = signal(false);
     if machine.database {
         let mut stream = session.database();
         watch(async move {
             while let Some(next) = stream.next().await {
-                database.set(next.ok().flatten());
+                let status = next.ok().flatten();
+                if !status.as_ref().is_some_and(|status| {
+                    status.can_reclaim == Some(true)
+                        && t3_client::services::settings::maintenance::recommend(status)
+                }) {
+                    confirming.set(false);
+                }
+                database.set(status);
             }
         });
     }
@@ -95,6 +104,7 @@ fn observe(machine: Machine, service: &SettingsSessions, read_reports: bool) -> 
         database,
         report,
         requested: signal(false),
+        confirming,
     })
 }
 

@@ -68,6 +68,7 @@ impl TerminalStream {
 
 enum ScriptedReply {
     Stream(Vec<Value>),
+    Updates(mpsc::UnboundedReceiver<Value>),
     Ready(Result<Value, Value>),
     Deferred(oneshot::Receiver<Result<Value, Value>>),
 }
@@ -197,6 +198,19 @@ impl FakeEnvironment {
             .entry(method.into())
             .or_default()
             .push_back(ScriptedReply::Stream(items));
+    }
+
+    /// Send wire values to the next subscription while a mounted test is running.
+    pub fn stream_updates(&self, method: &str) -> mpsc::UnboundedSender<Value> {
+        let (send, receive) = mpsc::unbounded();
+        self.server
+            .state
+            .borrow_mut()
+            .script
+            .entry(method.into())
+            .or_default()
+            .push_back(ScriptedReply::Updates(receive));
+        send
     }
 
     /// Holds the next ordinary storage read of this key until the test supplies a result.
@@ -669,6 +683,9 @@ impl Handler for FakeHandler {
         };
         match scripted {
             Some(ScriptedReply::Stream(items)) => return live(items),
+            Some(ScriptedReply::Updates(frames)) => {
+                return HandlerOutput::Stream(frames.map(|frame| Ok(vec![frame])).boxed_local());
+            }
             Some(ScriptedReply::Ready(answer)) => return unary(answer),
             Some(ScriptedReply::Deferred(reply)) => {
                 return HandlerOutput::Unary(
