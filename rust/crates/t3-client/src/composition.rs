@@ -9,6 +9,7 @@ mod composer_attachments;
 mod composer_updates;
 pub mod first_run;
 mod settings;
+pub mod usage;
 use crate::{
     ClientError, ClientStore,
     authorization::RemoteAuthorization,
