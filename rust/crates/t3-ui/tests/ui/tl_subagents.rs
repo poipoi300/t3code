@@ -30,10 +30,10 @@ fn parent() -> ThreadKey {
     }
 }
 
-fn entries() -> Vec<Rc<TimelineEntry>> {
+fn entries(owner: &str) -> Vec<Rc<TimelineEntry>> {
     ["first", "second"].into_iter().enumerate().map(|(at, id)| Rc::new(serde_json::from_value(json!({
-        "id":id,"kind":"event","createdAt":AT,"projectedItem":{"position":at,"visibility":"local","sourceThreadId":"parent","sourceItemId":id,"item":{
-            "type":"subagent","id":id,"threadId":"parent","runId":null,"nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":at+1,"status":"completed","title":id,"startedAt":AT,"completedAt":AT,"updatedAt":AT,
+        "id":id,"kind":"event","createdAt":AT,"projectedItem":{"position":at,"visibility":if owner == "parent" { "local" } else { "inherited" },"sourceThreadId":owner,"sourceItemId":id,"item":{
+            "type":"subagent","id":id,"threadId":owner,"runId":null,"nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":at+1,"status":"completed","title":id,"startedAt":AT,"completedAt":AT,"updatedAt":AT,
             "subagentId":id,"origin":"app_owned","driver":"codex","providerInstanceId":"codex","childThreadId":format!("child-{id}"),"prompt":"Review","result":"done"
         }}
     })).expect("canonical event"))).collect()
@@ -41,10 +41,40 @@ fn entries() -> Vec<Rc<TimelineEntry>> {
 
 #[component]
 fn SubagentFixture() -> impl IntoElement {
+    subagents("parent", ClientStore::default())
+}
+
+#[component]
+fn InheritedFixture() -> impl IntoElement {
+    let store = ClientStore::default();
+    let key = ThreadKey {
+        thread: ThreadId("source".into()),
+        ..parent()
+    };
+    let generation = store.begin_session(key.environment.clone());
+    let mut projection =
+        t3_client::testing::environment::projection("source", "Original", json!([]), json!([]));
+    projection["subagents"] = json!([{
+        "id":"first","threadId":"source","runId":null,"parentNodeId":"root","origin":"app_owned",
+        "createdBy":"agent","driver":"codex","providerInstanceId":"codex","providerThreadId":null,
+        "childThreadId":"child-first","nativeTaskRef":null,"prompt":"Review","title":"first",
+        "model":"gpt-6.1-sol","status":"completed","result":"done","startedAt":AT,"completedAt":AT,"updatedAt":AT
+    }]);
+    let snapshot = serde_json::from_value(
+        json!({"kind":"snapshot","snapshotSequence":1,"projection":projection}),
+    )
+    .expect("source projection");
+    store
+        .apply_thread(key, generation, vec![snapshot])
+        .expect("source loaded");
+    subagents("source", store)
+}
+
+fn subagents(owner: &str, store: ClientStore) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     t3_ui::i18n::set_language("en", &[]);
     provide_context(Rt::new(
-        ClientStore::default(),
+        store,
         Rc::new(Unavailable("fixture".into())),
         Choice::Demo,
     ));
@@ -53,7 +83,7 @@ fn SubagentFixture() -> impl IntoElement {
     let state = WorkRowState::default();
     let context = EventRowContext::new(parent(), state);
     let rows = derive_messages_timeline_rows(&MessagesTimelineRowsInput {
-        timeline_entries: entries(),
+        timeline_entries: entries(owner),
         ..Default::default()
     });
     let row = rows
@@ -81,6 +111,10 @@ fn SubagentFixture() -> impl IntoElement {
 }
 
 fn fixture(window: (f32, f32)) -> Headless {
+    start(window, Root::of::<SubagentFixture>())
+}
+
+fn start(window: (f32, f32), root: Root) -> Headless {
     let mut sets = t3_ui::registries();
     let mut fixture = Registry::new();
     fixture.register::<SubagentFixture>();
@@ -102,7 +136,7 @@ fn fixture(window: (f32, f32)) -> Headless {
             reduce_motion: true,
             ..Default::default()
         },
-        ..EngineConfig::new(Root::of::<SubagentFixture>())
+        ..EngineConfig::new(root)
     })
     .expect("fixture");
     app.wait_for("2 subagents").expect("C3 group is mounted");
@@ -153,4 +187,14 @@ fn expanded_production_members_mount_their_inspector_without_a_caller_renderer()
         .expect("inspect member");
     app.wait_for("Not reported")
         .expect("fallback inspector resolves its own model metadata");
+}
+
+#[test]
+fn inherited_member_inspects_the_original_threads_agent() {
+    let mut app = start(DESKTOP, Root::of::<InheritedFixture>());
+    app.press("role:button[2 subagents]").expect("expand group");
+    app.hover("role:button[Open first]")
+        .expect("inspect inherited member");
+    app.wait_for("GPT-6.1-Sol")
+        .expect("model from the original thread");
 }

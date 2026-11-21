@@ -162,7 +162,32 @@ impl EventRowContext {
             .with(|configs| configs.get(environment).cloned())
     }
 
+    pub(in crate::screens::thread) fn agent_parent(
+        &self,
+        item: &TurnItemSubagent,
+    ) -> Option<ThreadKey> {
+        let IdOrIndex::Id(thread) = &item.thread_id else {
+            return None;
+        };
+        Some(ThreadKey {
+            environment: self.key.environment.clone(),
+            thread: thread.clone(),
+        })
+    }
+
     fn live_agent(&self, item: &TurnItemSubagent) -> Option<Shared<OrchestrationV2Subagent>> {
+        let parent = self.agent_parent(item)?;
+        if parent != self.key {
+            return self.runtime.store.thread(parent).with(|source| {
+                source
+                    .as_ref()?
+                    .subagents
+                    .iter()
+                    .find(|a| a.id == item.subagent_id)
+                    .cloned()
+                    .map(Shared)
+            });
+        }
         self.agents.with(|agents| {
             agents
                 .0
@@ -231,7 +256,6 @@ pub fn v2_event_timeline_row(row: TimelineRow, context: EventRowContext) -> impl
                 )
             } else {
                 super::super::subagents::v2_lifecycle_projected_row(
-                    context.key.clone(),
                     row.projected_item.clone(),
                     row.resource_summary,
                     &context,
@@ -1088,7 +1112,6 @@ fn v2_subagent_group(row: &EventRow, context: &EventRowContext) -> AnyElement {
             ));
             for member in &members {
                 panel = panel.child(super::super::subagents::v2_lifecycle_projected_row(
-                    context.key.clone(),
                     member.clone(),
                     false,
                     &context,

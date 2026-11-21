@@ -53,13 +53,14 @@ pub fn subagent_timeline_row(row: TimelineRow, context: EventRowContext) -> impl
 
 /// TL-EVENTS passes the canonical projected item so both standalone and grouped links own a hint.
 pub fn v2_lifecycle_projected_row(
-    parent: ThreadKey,
     item: Rc<OrchestrationV2ProjectedTurnItem>,
     resource_summary: bool,
     context: &EventRowContext,
 ) -> AnyElement {
     let body = super::rows::events::v2_lifecycle_row(&item.item, resource_summary, context);
-    if matches!(item.item, OrchestrationV2TurnItem::Subagent(_)) {
+    if let OrchestrationV2TurnItem::Subagent(agent) = &item.item
+        && let Some(parent) = context.agent_parent(agent)
+    {
         with_subagent_tooltip(parent, item, body).into_element()
     } else {
         body
