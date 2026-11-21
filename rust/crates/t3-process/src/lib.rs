@@ -164,8 +164,11 @@ impl SpawnedProcess {
     ///
     /// Use this on a handle that still owns its group or job. [Self::wait] releases
     /// ownership and lets helpers survive. Observation and cleanup occur in one
-    /// operation so the caller never holds a reaped leader while it still owns a
-    /// numeric process-group ID. Cancelling a pending wait leaves ownership intact.
+    /// operation, so no caller keeps a reaped leader's group ID around for later.
+    /// On Unix the leader is reaped just before `killpg`: while any helper lives the
+    /// group ID cannot be reused; if the group is already empty there is a short window
+    /// in which the number is free (the same as [Self::terminate] and `Drop`).
+    /// Cancelling a pending wait leaves ownership intact.
     pub async fn wait_and_kill_group(&mut self) -> Result<LeaderExit, ProcessError> {
         let status = self.wait_for_exit().await?;
         if !self.reaped {
