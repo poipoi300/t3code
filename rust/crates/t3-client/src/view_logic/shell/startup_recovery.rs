@@ -192,6 +192,8 @@ pub enum RecoveryOffer {
     },
     Releases,
     ManagedPolicy,
+    /// Another server owns the T3 home; a newer or older build cannot help, closing it can.
+    HomeOwned,
 }
 
 /// `resolveStartupRecoveryOffer`: prefer a newer build, then the last build that started on this
@@ -260,6 +262,7 @@ pub fn offer_text(offer: &RecoveryOffer) -> String {
             "Version {version} started correctly on this computer. Download it and install it to go back."
         ),
         RecoveryOffer::Releases => "Get a different version from the releases page.".into(),
+        RecoveryOffer::HomeOwned => "T3 Code does not retry while another server owns this home.".into(),
         RecoveryOffer::ManagedPolicy => "Your organization's managed policy stopped T3 Code from starting. Send the details below to your IT administrator.".into(),
     }
 }

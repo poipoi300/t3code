@@ -11,8 +11,9 @@
 //! The envelope travels on stdin (`--bootstrap-fd 0`, the TypeScript desktop's "stdin" delivery)
 //! rather than descriptor 3: `std::process::Command` cannot place a pipe on descriptor 3 without
 //! `unsafe` (`pre_exec` on Unix, the CRT startup block on Windows), and the workspace denies
-//! `unsafe` outside the one approved Windows adapter.
+//! `unsafe` outside the one approved Windows adapter. The pipe stays open for the life of the run.
 
+mod home;
 mod local;
 mod readiness;
 mod tail;
@@ -35,6 +36,11 @@ use tokio::{
 };
 
 pub use local::LocalServer;
+
+/// The directory the server writes its logs to, below an explicit T3 home.
+pub fn logs_dir(home: &std::path::Path) -> PathBuf {
+    home::layout(home).logs()
+}
 pub use readiness::READINESS_PATH;
 pub use tail::is_running_database_migrations;
 use tail::{OutputTail, Stream};
@@ -53,6 +59,10 @@ pub struct StartConfig {
     /// Where the readiness probe connects.
     pub ready_host: String,
     pub ready_port: u16,
+    /// The server's T3 home. With it, a run is ready only once the server's own runtime file names
+    /// this child's pid (a foreign server answering on the port is not this run), and the first
+    /// spawn waits for a previous owner to let go of the home.
+    pub home: Option<PathBuf>,
 }
 
 impl StartConfig {
@@ -71,6 +81,7 @@ impl StartConfig {
             bootstrap_line: serde_json::to_string(bootstrap)?,
             ready_host: ready_host.into(),
             ready_port: bootstrap.port,
+            home: None,
         })
     }
 
@@ -90,7 +101,15 @@ impl StartConfig {
             bootstrap_line,
             ready_host: ready_host.into(),
             ready_port,
+            home: None,
         }
+    }
+
+    /// Ties readiness to the child and the first spawn to the home's ownership lock.
+    #[must_use]
+    pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.home = Some(home.into());
+        self
     }
 }
 
@@ -102,6 +121,7 @@ impl std::fmt::Debug for StartConfig {
             .field("cwd", &self.cwd)
             .field("ready_host", &self.ready_host)
             .field("ready_port", &self.ready_port)
+            .field("home", &self.home)
             .finish_non_exhaustive()
     }
 }
@@ -134,9 +154,14 @@ pub struct Timings {
     pub terminate_grace: Duration,
     /// Wait for the output pipes after the server exits (`DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT`).
     pub output_drain: Duration,
-    /// The delay before restart number `attempt - 1 + 1`, given restarts so far. The policy's
-    /// curve by default; tests pass a zero delay instead of sleeping.
+    /// The delay before restart `n + 1`, given `n` restarts so far. The policy's curve by
+    /// default; tests pass a zero delay instead of sleeping.
     pub restart_delay: fn(u32) -> Duration,
+    /// How long the first spawn waits for another server to release the home
+    /// (`HOME_OWNERSHIP_RELEASE_GRACE`: the quit timeout plus 3 s, 10 s).
+    pub ownership_grace: Duration,
+    /// Between ownership checks (`HOME_OWNERSHIP_RELEASE_POLL_INTERVAL`).
+    pub ownership_poll: Duration,
 }
 
 fn policy_delay(previous_attempts: u32) -> Duration {
@@ -152,6 +177,8 @@ impl Default for Timings {
             terminate_grace: Duration::from_secs(5),
             output_drain: Duration::from_secs(5),
             restart_delay: policy_delay,
+            ownership_grace: Duration::from_secs(10),
+            ownership_poll: Duration::from_millis(250),
         }
     }
 }
@@ -177,9 +204,12 @@ pub enum SupervisorEvent {
     /// Restarts did not help, or the server never answered: the window reports this
     /// (`onStartupFailure`).
     Failing(StartupFailure),
-    /// Another T3 server owns the state directory (exit code 78): not restarted.
-    StateDirOwned,
-    /// The supervisor stopped, after [`Supervisor::stop`] or `StateDirOwned`.
+    /// Another T3 server owns the home: still locked after the grace before the first spawn, or
+    /// the server exited 78. Not restarted; `message` names the owner (`homeOwnedMessage`).
+    HomeOwned {
+        message: String,
+    },
+    /// The supervisor stopped, after [`Supervisor::stop`] or `HomeOwned`.
     Stopped,
 }
 
@@ -267,17 +297,26 @@ fn exit_reason(exit: &t3_process::LeaderExit) -> String {
 /// `waitForHttpReady` plus the migration rule of `onReadinessFailure`: probe until the server
 /// answers; when a window of `readiness_timeout` passes without it, report the failure unless the
 /// server is still migrating its database, then probe again (`repeat while not ready`).
+///
+/// Another server answering on the port is not this run: with a known home the probe only counts
+/// once the server's own runtime file names `pid`, the child this run spawned.
 async fn wait_until_ready(
     config: &StartConfig,
+    pid: u32,
     timings: Timings,
     tail: &SharedTail,
     events: &mpsc::UnboundedSender<SupervisorEvent>,
 ) {
+    let layout = config.home.as_deref().map(home::layout);
     loop {
         let window = tokio::time::timeout(timings.readiness_timeout, async {
-            while !readiness::probe(&config.ready_host, config.ready_port, timings.probe_timeout)
-                .await
-            {
+            loop {
+                if readiness::probe(&config.ready_host, config.ready_port, timings.probe_timeout)
+                    .await
+                    && is_this_child(layout.as_ref(), pid).await
+                {
+                    break;
+                }
                 tokio::time::sleep(timings.readiness_interval).await;
             }
         })
@@ -290,6 +329,66 @@ async fn wait_until_ready(
             let _ = events.send(SupervisorEvent::Failing(StartupFailure::not_ready(&output)));
         }
     }
+}
+
+/// Without a known home there is nothing to compare, and the probe alone decides.
+async fn is_this_child(layout: Option<&t3_config::home::HomeLayout>, pid: u32) -> bool {
+    let Some(layout) = layout else {
+        return true;
+    };
+    let layout = layout.clone();
+    tokio::task::spawn_blocking(move || home::runtime_pid(&layout) == Some(i64::from(pid)))
+        .await
+        .unwrap_or(false)
+}
+
+/// `awaitHomeOwnershipRelease`: true once the ownership lock is free, false if it is still held
+/// after the grace (or the supervisor was stopped meanwhile).
+async fn await_home_release(
+    home_dir: &std::path::Path,
+    timings: Timings,
+    cancel: &CancellationToken,
+) -> bool {
+    let layout = home::layout(home_dir);
+    let wait = async {
+        loop {
+            let probe = layout.clone();
+            let locked = tokio::task::spawn_blocking(move || home::is_locked(&probe))
+                .await
+                .unwrap_or(false);
+            if !locked {
+                return;
+            }
+            tokio::time::sleep(timings.ownership_poll).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => false,
+        waited = tokio::time::timeout(timings.ownership_grace, wait) => waited.is_ok(),
+    }
+}
+
+/// An earlier server's runtime file names a pid that can be reused (quickly, on Windows), so it
+/// cannot be allowed to identify the child about to start. With the ownership lock free no server
+/// runs in this home, and the file is only a leftover.
+async fn clear_stale_runtime(home_dir: &std::path::Path) {
+    let layout = home::layout(home_dir);
+    let _ = tokio::task::spawn_blocking(move || {
+        if !home::is_locked(&layout) {
+            let _ = std::fs::remove_file(layout.runtime_state());
+        }
+    })
+    .await;
+}
+
+async fn owned_message(home_dir: &std::path::Path) -> String {
+    let layout = home::layout(home_dir);
+    let owner = tokio::task::spawn_blocking(move || home::live_owner(&layout))
+        .await
+        .ok()
+        .flatten();
+    home::owned_message(owner.as_ref())
 }
 
 async fn run_once(
@@ -324,16 +423,19 @@ async fn run_once(
         drains.push(tokio::spawn(drain(stderr, Stream::Stderr, tail.clone())));
     }
     // The server reads one line; a server that already exited makes this fail, which the exit
-    // status reports.
-    if let Some(mut stdin) = child.stdin.take() {
+    // status reports. The pipe stays open until the run ends, so a server started with the
+    // exit-on-close switch sees the end of the stream only when this process is gone (killed by
+    // a signal, say) and stops instead of staying behind with its port and home.
+    let mut stdin = child.stdin.take();
+    if let Some(stdin) = stdin.as_mut() {
         let line = format!("{}\n", config.bootstrap_line);
         let _ = stdin.write_all(line.as_bytes()).await;
-        let _ = stdin.shutdown().await;
+        let _ = stdin.flush().await;
     }
     let pid = child.id().unwrap_or_default();
     let _ = events.send(SupervisorEvent::Spawned { pid });
 
-    let mut ready = std::pin::pin!(wait_until_ready(&config, timings, tail, events));
+    let mut ready = std::pin::pin!(wait_until_ready(&config, pid, timings, tail, events));
     let mut was_ready = false;
     let end = loop {
         tokio::select! {
@@ -388,12 +490,34 @@ async fn run_supervisor(
     let tail: SharedTail = Arc::default();
     let mut attempts = 0u32;
     let _ = events.send(SupervisorEvent::Starting);
+    let mut first = true;
     loop {
         if cancel.is_cancelled() {
             break;
         }
+        let mut home_dir = None;
         let end = match source.resolve() {
-            Ok(config) => run_once(config, timings, &events, &cancel, &tail).await,
+            Ok(config) => {
+                home_dir.clone_from(&config.home);
+                // A server of the previous app run can still be shutting down (its quit grace is
+                // 5 s); spawning over it could only exit 78. Waited once, before the first spawn.
+                if let (true, Some(dir)) = (std::mem::take(&mut first), &config.home)
+                    && !await_home_release(dir, timings, &cancel).await
+                {
+                    if !cancel.is_cancelled() {
+                        let message = owned_message(dir).await;
+                        let _ = events.send(SupervisorEvent::HomeOwned { message });
+                    }
+                    break;
+                }
+                if cancel.is_cancelled() {
+                    break;
+                }
+                if let Some(dir) = &config.home {
+                    clear_stale_runtime(dir).await;
+                }
+                run_once(config, timings, &events, &cancel, &tail).await
+            }
             Err(reason) => RunEnd::Exited {
                 reason,
                 code: None,
@@ -412,7 +536,11 @@ async fn run_supervisor(
             attempts = 0;
         }
         if code == Some(SERVER_EXIT_CODE_STATE_DIR_OWNED) {
-            let _ = events.send(SupervisorEvent::StateDirOwned);
+            let message = match &home_dir {
+                Some(dir) => owned_message(dir).await,
+                None => home::owned_message(None),
+            };
+            let _ = events.send(SupervisorEvent::HomeOwned { message });
             break;
         }
         let plan = plan_restart(attempts, code);

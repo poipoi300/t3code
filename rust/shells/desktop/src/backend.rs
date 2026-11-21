@@ -29,37 +29,52 @@ fn server_binary() -> Option<PathBuf> {
     beside.is_file().then_some(beside)
 }
 
-fn log_dir() -> String {
-    let home = std::env::var_os("T3CODE_HOME")
+/// `T3CODE_HOME`, else `~/.t3` (`T3_HOME_DIR` in the TypeScript defaults).
+fn t3_home() -> Option<PathBuf> {
+    std::env::var_os("T3CODE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             let user = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
             Some(PathBuf::from(user).join(".t3"))
-        });
-    home.map(|home| home.join("userdata").join("logs"))
-        .map_or_else(String::new, |dir| dir.display().to_string())
+        })
+}
+
+fn log_dir(home: Option<&PathBuf>) -> String {
+    home.map_or_else(String::new, |home| {
+        t3_desktop_backend::logs_dir(home).display().to_string()
+    })
 }
 
 /// The window's status for a supervisor view. Without an updater the offers are the managed
 /// policy sentence or the releases page.
-fn status(view: BackendView) -> LocalBackendStatus {
+fn status(view: BackendView, home: Option<&PathBuf>) -> LocalBackendStatus {
+    use t3_client::view_logic::shell::startup_recovery::{RecoveryOffer, StartupFailure};
+    let failed = |failure, offer| {
+        LocalBackendStatus::Failed(Box::new(FailedStartup {
+            failure,
+            offer,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            log_dir: log_dir(home),
+        }))
+    };
     match view {
         BackendView::Starting => LocalBackendStatus::Starting,
         BackendView::Restarting { attempt } => LocalBackendStatus::Restarting { attempt },
         BackendView::Ready => LocalBackendStatus::Ready,
         BackendView::Failed(failure) => {
             let offer = if failure.managed_policy {
-                t3_client::view_logic::shell::startup_recovery::RecoveryOffer::ManagedPolicy
+                RecoveryOffer::ManagedPolicy
             } else {
-                t3_client::view_logic::shell::startup_recovery::RecoveryOffer::Releases
+                RecoveryOffer::Releases
             };
-            LocalBackendStatus::Failed(Box::new(FailedStartup {
-                failure,
-                offer,
-                app_version: env!("CARGO_PKG_VERSION").into(),
-                log_dir: log_dir(),
-            }))
+            failed(failure, offer)
         }
+        // `showErrorBox("This T3 home is unavailable", homeOwnedMessage)`; the user closes the
+        // other server and reopens the app, so nothing here retries.
+        BackendView::HomeOwned(message) => failed(
+            StartupFailure::new("This T3 home is unavailable.", false, &message),
+            RecoveryOffer::HomeOwned,
+        ),
     }
 }
 
@@ -88,38 +103,32 @@ impl Drop for ShellBackend {
 /// Call on the thread that runs the UI, before the app starts.
 pub fn start() -> Option<ShellBackend> {
     let program = server_binary()?;
-    let port = std::env::var("T3CODE_PORT")
+    // A configured port is used as given; otherwise the first free one from the default
+    // (`resolveDesktopBackendPort`).
+    let configured: Option<u16> = std::env::var("T3CODE_PORT")
         .ok()
-        .and_then(|port| port.parse().ok())
-        .unwrap_or(DEFAULT_PORT);
+        .and_then(|port| port.parse().ok());
+    let home = t3_home();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .ok()?;
     let supervisor: Arc<Mutex<Option<Supervisor>>> = Arc::default();
-    let quitting = supervisor.clone();
-    let handle = runtime.handle().clone();
-    let publisher: LocalBackendPublisher = install_local_backend(move |action| match action {
-        RecoveryAction::Quit => {
-            // Off the UI thread: stopping can take the server's whole grace period.
-            let supervisor = quitting.lock().ok().and_then(|mut slot| slot.take());
-            let handle = handle.clone();
-            std::thread::spawn(move || {
-                if let Some(supervisor) = supervisor {
-                    handle.block_on(supervisor.stop());
-                }
-                std::process::exit(0);
-            });
+    // Copy, Open releases, Reinstall and Quit are done by the window itself (it opens links through
+    // the app's link policy, writes the clipboard and quits through the app's own shutdown, after
+    // which `ShellBackend` stops the server). Only the updater would be the shell's.
+    let publisher: LocalBackendPublisher = install_local_backend(|action| {
+        if action == RecoveryAction::Update {
+            eprintln!("t3-desktop: updates are not available yet");
         }
-        // The updater, release page and clipboard are not wired into this shell yet.
-        other => eprintln!("t3-desktop: {other:?} is not available yet"),
     });
     let source = LocalServer {
         program,
-        port,
+        port: configured.unwrap_or(DEFAULT_PORT),
+        scan_ports: configured.is_none(),
         host: "127.0.0.1".into(),
-        t3_home: std::env::var("T3CODE_HOME").ok(),
+        t3_home: home.as_ref().map(|home| home.display().to_string()),
     };
     let (started, mut events) =
         runtime.block_on(async { Supervisor::start(source, Timings::default()) });
@@ -134,7 +143,7 @@ pub fn start() -> Option<ShellBackend> {
             }
             // The window is the main window, so it is always visible once the app runs.
             if let Some(view) = tracker.apply(&event, true) {
-                publisher.publish(status(view));
+                publisher.publish(status(view, home.as_ref()));
             }
         }
     });

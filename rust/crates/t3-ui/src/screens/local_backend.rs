@@ -108,12 +108,60 @@ fn installed_handle() -> Option<LocalBackendHandle> {
             status.set(next);
         }
     });
+    let opener = crate::runtime::services::links::link_opener_here();
     let handle = LocalBackendHandle {
         status,
-        act: Rc::new(move |action| act(action)),
+        act: Rc::new(move |action| {
+            // What every shell does the same way happens here; the shell hears every action too.
+            let shown = untracked(|| status.get());
+            match effect(action, &shown) {
+                Some(Effect::Copy(text)) => set_clipboard(text),
+                Some(Effect::Open(url)) => opener.open(url),
+                Some(Effect::Quit) => nsh_core::element::desktop::quit(),
+                None => {}
+            }
+            act(action);
+        }),
     };
     MOUNTED.with(|mounted| *mounted.borrow_mut() = Some(handle.clone()));
     Some(handle)
+}
+
+/// What the window itself does for an action; the rest (the updater) belongs to the shell.
+#[doc(hidden)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// Put the failure's details on the clipboard (`Copy details`).
+    Copy(String),
+    /// Open an address through the app's link policy (`Open releases`, `Download`).
+    Open(String),
+    /// Quit through the app's own shutdown, which also stops the server the shell supervises.
+    Quit,
+}
+
+#[doc(hidden)]
+pub fn effect(action: RecoveryAction, shown: &LocalBackendStatus) -> Option<Effect> {
+    use t3_client::view_logic::shell::startup_recovery::{
+        RELEASES_URL, copy_text, release_tag_url,
+    };
+    let LocalBackendStatus::Failed(failed) = shown else {
+        return (action == RecoveryAction::Quit).then_some(Effect::Quit);
+    };
+    match action {
+        RecoveryAction::Quit => Some(Effect::Quit),
+        RecoveryAction::Copy => Some(Effect::Copy(copy_text(
+            &failed.app_version,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            &failed.failure,
+        ))),
+        RecoveryAction::Releases => Some(Effect::Open(RELEASES_URL.to_owned())),
+        RecoveryAction::Reinstall => match &failed.offer {
+            RecoveryOffer::Reinstall { version } => Some(Effect::Open(release_tag_url(version))),
+            _ => None,
+        },
+        RecoveryAction::Update => None,
+    }
 }
 
 /// The overlay `app::themed_tree` mounts: nothing while ready, a status line while starting or
@@ -178,10 +226,18 @@ pub fn recovery_window(failed: FailedStartup, act: Rc<dyn Fn(RecoveryAction)>) -
     });
     let reason = failure.reason.clone();
     let offer_sentence = localized_offer_text(&offer);
-    let footer = tr(
-        "Version {version}. T3 Code tries again in the background. Logs: {logs}",
-        &[("version", app_version.into()), ("logs", log_dir.into())],
-    );
+    // An owned home is not retried, so the footer must not promise it.
+    let footer = if offer == RecoveryOffer::HomeOwned {
+        tr(
+            "Version {version}. Logs: {logs}",
+            &[("version", app_version.into()), ("logs", log_dir.into())],
+        )
+    } else {
+        tr(
+            "Version {version}. T3 Code tries again in the background. Logs: {logs}",
+            &[("version", app_version.into()), ("logs", log_dir.into())],
+        )
+    };
     let (copy, quit) = (act.clone(), act);
     view()
         .test_id("startup-recovery")
@@ -254,7 +310,8 @@ fn offer_action(offer: &RecoveryOffer) -> Option<(RecoveryAction, String)> {
         RecoveryOffer::Releases => Some((RecoveryAction::Releases, t("Open releases"))),
         RecoveryOffer::Checking
         | RecoveryOffer::Downloading { .. }
-        | RecoveryOffer::ManagedPolicy => None,
+        | RecoveryOffer::ManagedPolicy
+        | RecoveryOffer::HomeOwned => None,
     }
 }
 
@@ -282,6 +339,9 @@ fn localized_offer_text(offer: &RecoveryOffer) -> String {
             &[("version", version.clone().into())],
         ),
         RecoveryOffer::Releases => t("Get a different version from the releases page."),
+        RecoveryOffer::HomeOwned => {
+            t("T3 Code does not retry while another server owns this home.")
+        }
         RecoveryOffer::ManagedPolicy => t(
             "Your organization's managed policy stopped T3 Code from starting. Send the details below to your IT administrator.",
         ),
@@ -348,6 +408,7 @@ mod tests {
             },
             RecoveryOffer::Releases,
             RecoveryOffer::ManagedPolicy,
+            RecoveryOffer::HomeOwned,
         ] {
             assert_eq!(
                 localized_offer_text(&offer),

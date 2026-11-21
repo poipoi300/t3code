@@ -17,6 +17,8 @@ pub enum BackendView {
     Ready,
     /// The recovery window reports this.
     Failed(StartupFailure),
+    /// Another server owns the T3 home; nothing is retried. Carries `homeOwnedMessage`.
+    HomeOwned(String),
 }
 
 /// Folds supervisor events into views with `StartupRecovery`'s rules: the first failure of a run
@@ -54,11 +56,7 @@ impl ViewTracker {
                     .show_window
                     .then(|| BackendView::Failed(failure.clone()))
             }
-            SupervisorEvent::StateDirOwned => Some(BackendView::Failed(StartupFailure::new(
-                "This T3 home is unavailable: another T3 Code server owns it.",
-                false,
-                "",
-            ))),
+            SupervisorEvent::HomeOwned { message } => Some(BackendView::HomeOwned(message.clone())),
         }
     }
 
@@ -135,7 +133,12 @@ mod tests {
     #[test]
     fn an_owned_state_directory_is_shown_as_a_failure() {
         let mut tracker = ViewTracker::default();
-        let view = tracker.apply(&SupervisorEvent::StateDirOwned, false);
-        assert!(matches!(view, Some(BackendView::Failed(f)) if f.reason.contains("T3 home")));
+        let event = SupervisorEvent::HomeOwned {
+            message: "owned by 42".into(),
+        };
+        assert_eq!(
+            tracker.apply(&event, true),
+            Some(BackendView::HomeOwned("owned by 42".into()))
+        );
     }
 }

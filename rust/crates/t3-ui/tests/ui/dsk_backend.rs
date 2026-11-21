@@ -238,3 +238,54 @@ fn a_status_published_by_the_shell_reaches_the_overlay_from_another_thread() {
     app.wait_for("from the supervisor thread")
         .expect("its output");
 }
+
+#[test]
+fn the_window_copies_opens_and_quits_by_itself() {
+    use t3_ui::screens::local_backend::{Effect, effect};
+    let shown = |offer| {
+        LocalBackendStatus::Failed(Box::new(FailedStartup {
+            failure: StartupFailure::exited("code=1", false, "boom"),
+            offer,
+            app_version: "1.2.0".into(),
+            log_dir: "/logs".into(),
+        }))
+    };
+    let reinstall = shown(RecoveryOffer::Reinstall {
+        version: "1.1.0".into(),
+    });
+    assert_eq!(effect(RecoveryAction::Quit, &reinstall), Some(Effect::Quit));
+    assert_eq!(
+        effect(RecoveryAction::Quit, &LocalBackendStatus::Starting),
+        Some(Effect::Quit)
+    );
+    let Some(Effect::Copy(text)) = effect(RecoveryAction::Copy, &reinstall) else {
+        panic!("copy");
+    };
+    assert!(text.starts_with("T3 Code 1.2.0 ("), "{text}");
+    assert!(
+        text.contains("The server could not start (code=1).\n\nboom"),
+        "{text}"
+    );
+    assert_eq!(
+        effect(RecoveryAction::Releases, &reinstall),
+        Some(Effect::Open(
+            "https://github.com/pingdotgg/t3code/releases".into()
+        ))
+    );
+    assert_eq!(
+        effect(RecoveryAction::Reinstall, &reinstall),
+        Some(Effect::Open(
+            "https://github.com/pingdotgg/t3code/releases/tag/v1.1.0".into()
+        ))
+    );
+    // The updater is the shell's; a window with nothing to report copies nothing.
+    assert_eq!(effect(RecoveryAction::Update, &reinstall), None);
+    assert_eq!(
+        effect(RecoveryAction::Copy, &LocalBackendStatus::Ready),
+        None
+    );
+    assert_eq!(
+        effect(RecoveryAction::Reinstall, &shown(RecoveryOffer::Releases)),
+        None
+    );
+}

@@ -5480,8 +5480,10 @@ name = "t3-desktop-backend"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "rusqlite",
  "serde_json",
  "t3-client",
+ "t3-config",
  "t3-contracts",
  "t3-process",
  "tempfile",

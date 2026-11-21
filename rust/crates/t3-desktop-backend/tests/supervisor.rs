@@ -25,11 +25,24 @@ IFS= read -r line
 [ -n "$FAKE_ENVELOPE_FILE" ] && printf '%s\n' "$line" > "$FAKE_ENVELOPE_FILE"
 case "$1" in
 serve) echo "fake backend up"; exec sleep 300 ;;
+serve-owned)
+  mkdir -p "$FAKE_HOME/userdata"
+  printf '{"version":1,"pid":%s,"port":1,"origin":"http://127.0.0.1:1","startedAt":"t"}' $$ > "$FAKE_HOME/userdata/server-runtime.json"
+  exec sleep 300 ;;
 crash) echo "boom" >&2; exit 3 ;;
 policy) echo "blocked by policy" >&2; exit 77 ;;
-owned) exit 78 ;;
+owned)
+  if [ -n "$FAKE_OWNER_JSON" ]; then
+    mkdir -p "$FAKE_HOME/userdata"
+    printf '%s' "$FAKE_OWNER_JSON" > "$FAKE_HOME/userdata/server-runtime.json"
+  fi
+  exit 78 ;;
 hang) exec sleep 300 ;;
 migrate) echo "Running database migrations"; exec sleep 300 ;;
+hold)
+  touch "$FAKE_UP"
+  cat > /dev/null
+  exit 9 ;;
 exit-on-go) until [ -e "$FAKE_GO" ]; do sleep 0.02; done; exit 3 ;;
 esac
 "#;
@@ -50,6 +63,8 @@ fn quick() -> Timings {
         terminate_grace: Duration::from_secs(2),
         output_drain: Duration::from_secs(2),
         restart_delay: instant,
+        ownership_grace: Duration::from_millis(100),
+        ownership_poll: Duration::from_millis(5),
     }
 }
 
@@ -64,6 +79,15 @@ impl Fake {
         let script = dir.path().join("fake-backend.sh");
         std::fs::write(&script, SCRIPT).unwrap();
         Self { dir, script }
+    }
+
+    /// The T3 home the fake server writes its runtime file into.
+    fn home(&self) -> PathBuf {
+        self.dir.path().join("home")
+    }
+
+    fn state_dir(&self) -> PathBuf {
+        self.home().join("userdata")
     }
 
     fn envelope_file(&self) -> PathBuf {
@@ -85,6 +109,12 @@ impl Fake {
         config
             .env
             .insert("FAKE_GO".into(), Some(self.dir.path().join("go").into()));
+        config
+            .env
+            .insert("FAKE_HOME".into(), Some(self.home().into()));
+        config
+            .env
+            .insert("FAKE_UP".into(), Some(self.dir.path().join("up").into()));
         config
     }
 }
@@ -276,7 +306,10 @@ async fn an_owned_state_directory_stops_the_supervisor_without_restarting() {
         next(&mut events).await,
         SupervisorEvent::Spawned { .. }
     ));
-    assert_eq!(next(&mut events).await, SupervisorEvent::StateDirOwned);
+    let SupervisorEvent::HomeOwned { message } = next(&mut events).await else {
+        panic!("exit 78 is reported as an owned home");
+    };
+    assert!(message.contains("Another T3 Code server"), "{message}");
     assert_eq!(next(&mut events).await, SupervisorEvent::Stopped);
     assert!(events.recv().await.is_none());
     supervisor.stop().await;
@@ -434,6 +467,207 @@ fn the_configuration_never_prints_the_envelope() {
 #[allow(dead_code)]
 fn _assert_source_is_object_safe(_: &dyn ConfigSource) {}
 
+/// R1: a foreign server answering 200 on the port must never make a run ready. With the home known,
+/// readiness needs the server's own runtime file to name this child.
+#[tokio::test]
+async fn a_foreign_server_on_the_port_never_makes_a_crashing_child_ready() {
+    let fake = Fake::new();
+    let (port, _requests) = readiness_server(Arc::new(AtomicBool::new(true))).await;
+    let config = fake.config("crash", port).with_home(fake.home());
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    let mut saw_ready = false;
+    let failure = until(&mut events, |event| match event {
+        SupervisorEvent::Ready { .. } => {
+            saw_ready = true;
+            None
+        }
+        SupervisorEvent::Failing(failure) => Some(failure),
+        _ => None,
+    })
+    .await;
+    supervisor.stop().await;
+    assert!(!saw_ready, "a foreign 200 produced Ready");
+    assert_eq!(failure.reason, "The server could not start (code=3).");
+}
+
+#[tokio::test]
+async fn a_runtime_file_naming_another_pid_is_not_this_child() {
+    let fake = Fake::new();
+    std::fs::create_dir_all(fake.state_dir()).unwrap();
+    std::fs::write(
+        fake.state_dir().join("server-runtime.json"),
+        r#"{"version":1,"pid":999999999,"port":1,"origin":"http://127.0.0.1:1","startedAt":"t"}"#,
+    )
+    .unwrap();
+    let (port, _requests) = readiness_server(Arc::new(AtomicBool::new(true))).await;
+    let config = fake.config("hang", port).with_home(fake.home());
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    let mut saw_ready = false;
+    let failure = until(&mut events, |event| match event {
+        SupervisorEvent::Ready { .. } => {
+            saw_ready = true;
+            None
+        }
+        SupervisorEvent::Failing(failure) => Some(failure),
+        _ => None,
+    })
+    .await;
+    supervisor.stop().await;
+    assert!(!saw_ready);
+    assert_eq!(
+        failure.reason,
+        "The server started but did not become ready in time."
+    );
+}
+
+#[tokio::test]
+async fn the_child_that_wrote_the_runtime_file_is_ready() {
+    let fake = Fake::new();
+    let (port, _requests) = readiness_server(Arc::new(AtomicBool::new(true))).await;
+    let config = fake.config("serve-owned", port).with_home(fake.home());
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    let SupervisorEvent::Spawned { pid } = until(&mut events, |event| {
+        matches!(event, SupervisorEvent::Spawned { .. }).then_some(event)
+    })
+    .await
+    else {
+        panic!("expected Spawned");
+    };
+    assert_eq!(next(&mut events).await, SupervisorEvent::Ready { pid });
+    supervisor.stop().await;
+}
+
+/// The envelope is written, but stdin stays open for the life of the run: a server told to exit when
+/// it closes (the orphan guard) must not see the end of the stream while the supervisor lives.
+#[tokio::test]
+async fn stdin_stays_open_after_the_envelope() {
+    let fake = Fake::new();
+    let up = fake.dir.path().join("up");
+    let (port, _requests) = readiness_server_after(Arc::new(AtomicBool::new(true)), Some(up)).await;
+    let config = fake.config("hold", port);
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    let mut seen = Vec::new();
+    until(&mut events, |event| {
+        seen.push(event.clone());
+        matches!(event, SupervisorEvent::Ready { .. }).then_some(())
+    })
+    .await;
+    supervisor.stop().await;
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::Restarting { .. })),
+        "the server saw the end of stdin: {seen:?}"
+    );
+}
+
+/// A runtime file left by an earlier server names a pid that may be reused: it is cleared before
+/// the spawn (the lock is free), so only the child's own file can make the run ready.
+#[tokio::test]
+async fn a_stale_runtime_file_is_cleared_before_the_spawn() {
+    let fake = Fake::new();
+    std::fs::create_dir_all(fake.state_dir()).unwrap();
+    let stale = fake.state_dir().join("server-runtime.json");
+    std::fs::write(
+        &stale,
+        r#"{"version":1,"pid":4242,"port":1,"origin":"http://127.0.0.1:1","startedAt":"t"}"#,
+    )
+    .unwrap();
+    let config = fake
+        .config("hang", closed_port().await)
+        .with_home(fake.home());
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    until(&mut events, |event| {
+        matches!(event, SupervisorEvent::Spawned { .. }).then_some(())
+    })
+    .await;
+    let gone = !stale.exists();
+    supervisor.stop().await;
+    assert!(
+        gone,
+        "the previous server's runtime file survived into the new run"
+    );
+}
+
+/// Holds the ownership lock the way a running server does.
+fn hold_home(fake: &Fake) -> rusqlite::Connection {
+    std::fs::create_dir_all(fake.state_dir()).unwrap();
+    let connection =
+        rusqlite::Connection::open(fake.state_dir().join("server-owner.sqlite")).unwrap();
+    connection.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+    connection
+}
+
+/// R3: the first spawn waits for the previous owner; a home still held after the grace is
+/// reported with the owner message and nothing is spawned.
+#[tokio::test]
+async fn a_home_that_stays_owned_is_reported_and_nothing_is_spawned() {
+    let fake = Fake::new();
+    let _lock = hold_home(&fake);
+    let config = fake
+        .config("serve", closed_port().await)
+        .with_home(fake.home());
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    assert_eq!(next(&mut events).await, SupervisorEvent::Starting);
+    let SupervisorEvent::HomeOwned { message } = next(&mut events).await else {
+        panic!("a held home is reported before any spawn");
+    };
+    assert!(message.contains("using this data directory"), "{message}");
+    assert_eq!(next(&mut events).await, SupervisorEvent::Stopped);
+    supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn the_first_spawn_waits_until_the_previous_owner_lets_go() {
+    let fake = Fake::new();
+    let lock = hold_home(&fake);
+    let (port, _requests) = readiness_server(Arc::new(AtomicBool::new(true))).await;
+    let config = fake.config("serve-owned", port).with_home(fake.home());
+    let timings = Timings {
+        ownership_grace: Duration::from_secs(30),
+        ..quick()
+    };
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), timings);
+    assert_eq!(next(&mut events).await, SupervisorEvent::Starting);
+    drop(lock);
+    assert!(matches!(
+        next(&mut events).await,
+        SupervisorEvent::Spawned { .. }
+    ));
+    supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn exit_78_names_the_live_owner_from_the_runtime_file() {
+    let fake = Fake::new();
+    let me = std::process::id();
+    // The running owner's file, which appears while this server starts and loses the lock race.
+    let owner = format!(
+        r#"{{"version":1,"pid":{me},"port":4242,"origin":"http://127.0.0.1:4242","startedAt":"t","serviceManaged":true,"serverVersion":"9.9.9"}}"#
+    );
+    let mut config = fake
+        .config("owned", closed_port().await)
+        .with_home(fake.home());
+    config
+        .env
+        .insert("FAKE_OWNER_JSON".into(), Some(owner.into()));
+    let (supervisor, mut events) = Supervisor::start(move || Ok(config.clone()), quick());
+    let SupervisorEvent::HomeOwned { message } = until(&mut events, |event| {
+        matches!(event, SupervisorEvent::HomeOwned { .. }).then_some(event)
+    })
+    .await
+    else {
+        panic!("expected HomeOwned");
+    };
+    supervisor.stop().await;
+    assert!(
+        message.starts_with(&format!(
+            "The T3 Code background service is using this T3 home (PID {me}, port 4242, version 9.9.9)."
+        )),
+        "{message}"
+    );
+}
+
 /// The real `t3 serve --bootstrap-fd 0`, built separately (`T3_REAL_SERVER_BIN`): it reads the
 /// envelope the supervisor writes, listens on the envelope's port and answers the readiness probe.
 /// Ignored by default because it needs that binary; run it with `--ignored`.
@@ -446,6 +680,7 @@ async fn the_real_server_reads_the_envelope_and_becomes_ready() {
     let server = t3_desktop_backend::LocalServer {
         program: binary.into(),
         port,
+        scan_ports: false,
         host: "127.0.0.1".into(),
         t3_home: Some(home.path().display().to_string()),
     };
