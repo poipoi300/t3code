@@ -588,6 +588,12 @@ fn verify_region_draft(draft: &serde_json::Value) {
     assert!((1.0..=8.0).contains(&crop_w) && (1.0..=6.0).contains(&crop_h));
     let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
     let number = |name: &str| rect[name].as_f64().expect("rect number");
+    // The drag starts at the picker's centre, which is the centre of the frame, pixel (4, 3) of
+    // 8 x 6, so the region's origin is exactly (4, 3) frame pixels = (400, 300) page px.
+    assert!(
+        close(number("x"), 400.0) && close(number("y"), 300.0),
+        "{rect}"
+    );
     assert!(close(number("width"), crop_w * 100.0));
     assert!(close(number("height"), crop_h * 100.0));
     let (frame_x, frame_y) = (number("x") / 100.0, number("y") / 100.0);
@@ -614,6 +620,20 @@ fn verify_region_draft(draft: &serde_json::Value) {
     );
 }
 
+fn escape_leaves_without_attaching(app: &mut nsh_testing::Headless) {
+    app.press_key("escape").expect("Escape leaves the editor");
+    app.wait_for("role:button[Annotate preview]")
+        .expect("back on the stream");
+    assert!(
+        !app.screen()
+            .matches("id:preview-region-picker")
+            .expect("picker selector")
+    );
+    app.press_key("f2").expect("verify the draft is untouched");
+    app.wait_for("Draft has no annotation")
+        .expect("an escaped editor attaches nothing");
+}
+
 fn highlight_preview_region(width: (f32, f32), live: bool) {
     mark_preview_region(width, live, Finish::Button);
 }
@@ -623,6 +643,7 @@ enum Finish {
     Button,
     EnterInNote,
     EscapeInNote,
+    EscapeAfterDrag,
 }
 
 fn mark_preview_region(width: (f32, f32), live: bool, finish: Finish) {
@@ -656,6 +677,11 @@ fn mark_preview_region(width: (f32, f32), live: bool, finish: Finish) {
         .expect("highlight part of the frame");
     app.wait_for("id:preview-region-mark")
         .expect("show the highlighted region");
+    if matches!(finish, Finish::EscapeAfterDrag) {
+        // Focus is on the picker, not the note: Escape still cancels the whole editor.
+        escape_leaves_without_attaching(&mut app);
+        return;
+    }
     app.type_text("label:Annotation note", "Check this region")
         .expect("type an annotation note");
     match finish {
@@ -665,18 +691,8 @@ fn mark_preview_region(width: (f32, f32), live: bool, finish: Finish) {
         Finish::EnterInNote => app
             .press_key("Enter")
             .expect("Enter attaches from the note"),
-        Finish::EscapeInNote => {
-            app.press_key("escape").expect("Escape leaves the editor");
-            app.wait_for("role:button[Annotate preview]")
-                .expect("back on the stream");
-            assert!(
-                !app.screen()
-                    .matches("id:preview-region-picker")
-                    .expect("picker selector")
-            );
-            app.press_key("f2").expect("verify the draft is untouched");
-            app.wait_for("Draft has no annotation")
-                .expect("an escaped editor attaches nothing");
+        Finish::EscapeInNote | Finish::EscapeAfterDrag => {
+            escape_leaves_without_attaching(&mut app);
             return;
         }
     }
@@ -698,6 +714,12 @@ fn annotation_highlights_the_stream_at_phone_width() {
 #[test]
 fn enter_in_the_note_attaches_like_the_web_editor() {
     mark_preview_region(DESKTOP, false, Finish::EnterInNote);
+}
+
+#[test]
+fn escape_right_after_a_drag_leaves_without_attaching() {
+    mark_preview_region(DESKTOP, false, Finish::EscapeAfterDrag);
+    mark_preview_region(PHONE, false, Finish::EscapeAfterDrag);
 }
 
 #[test]

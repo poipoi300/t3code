@@ -6,11 +6,15 @@
 
 use std::{future::Future, pin::pin, rc::Rc, time::Duration};
 
-use futures::future::{AbortHandle, Either, abortable, select};
+use futures::{
+    FutureExt,
+    future::{AbortHandle, Either, LocalBoxFuture, abortable, select},
+};
 use nsh_core::{
     TouchEvent, TouchPhase, element::ImageSrc, keymap::When, prelude::*, time::unix_ms,
 };
 use t3_client::{
+    ClientError,
     platform::Platform,
     preview::{
         annotation::{AnnotationRegion, AnnotationRequest, NOTE_MAX_UTF16},
@@ -147,8 +151,25 @@ async fn within<T, E>(
     }
 }
 
+type Save = Rc<dyn Fn(AnnotationRequest) -> LocalBoxFuture<'static, Result<(), ClientError>>>;
+
 pub(super) fn editor<P: Platform + Clone + 'static>(
     service: BrowserPreview<P>,
+    annotation: Rc<Annotation>,
+    tasks: TaskOwner,
+    close: impl Fn() + Copy + 'static,
+) -> impl IntoElement {
+    let save: Save = Rc::new(move |request| {
+        let service = service.clone();
+        async move { service.attach_annotation(request).await }.boxed_local()
+    });
+    editor_with(save, annotation, tasks, close)
+}
+
+/// The editor over any save function: production attaches through the client, tests substitute
+/// a save they can hold open.
+fn editor_with(
+    save_with: Save,
     annotation: Rc<Annotation>,
     // The owner of the stream surface, which outlives the editor: a save started here must reach
     // its rollback or its commit even when the editor is closed or rebuilt under it.
@@ -157,7 +178,7 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
 ) -> impl IntoElement {
     let pixels = annotation.capture.pixels;
     let annotation = stored(annotation);
-    let service = stored(service);
+    let save_with = stored(save_with);
     let bounds = signal((0.0_f32, 0.0_f32));
     let picker = signal_with(Picker::default(), SignalEquals::Never);
     let note = signal(String::new());
@@ -195,20 +216,16 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
         }
         close();
     };
-    // NSH's raw key listener is not cross-platform; its focused keymap handles Escape.
-    let note_focused = signal(false);
-    effect(move || {
-        if note_focused.get() {
-            on_key_with(
-                "escape",
-                KeyOptions {
-                    when: When::Always,
-                    ..Default::default()
-                },
-                move |_| cancel(),
-            );
-        }
-    });
+    // The web editor takes Escape for the whole overlay (PickPreload.ts), not only from the note.
+    // NSH's raw key listener is not cross-platform; its keymap handles Escape.
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| cancel(),
+    );
     let attach = move || {
         let Some(region) = selected() else {
             return;
@@ -217,7 +234,7 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
             return;
         }
         let annotation = annotation.get();
-        let service = service.get();
+        let save_with = save_with.get();
         let Some(png) = crop_png(annotation.capture.jpeg.as_ref(), region) else {
             failure.set(Some(SaveFailure::Rejected));
             return;
@@ -235,9 +252,8 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
         };
         saving.set(true);
         failure.set(None);
-        let (work, handle) = abortable(async move {
-            within(service.attach_annotation(request), timer(SAVE_TIMEOUT)).await
-        });
+        let (work, handle) =
+            abortable(async move { within(save_with(request), timer(SAVE_TIMEOUT)).await });
         save.set(Some(handle));
         tasks.spawn(async move {
             match work.await {
@@ -315,10 +331,16 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
                         .on_change(move |value: &str| note.set(value.to_owned()))
                         .submit_behavior(SubmitBehavior::Submit)
                         .on_submit(move |_: &str| attach())
-                        .on_focus(move || note_focused.set(true))
-                        .on_blur(move || note_focused.set(false))
                         .app_class(tw("h-8 rounded-md border border-border px-2 text-sm")),
                 )
+                .child(when(
+                    move || !note_fits(),
+                    || {
+                        text(t("The note is too long to attach."))
+                            .role(AccessibilityRole::Alert)
+                            .app_class(tw("text-sm text-destructive"))
+                    },
+                ))
                 .child(when(
                     move || failure.get().is_some(),
                     move || {
@@ -482,5 +504,119 @@ mod tests {
             block_on(within(async { Err::<(), _>("no") }, pending())),
             Err(SaveFailure::Rejected)
         );
+    }
+
+    mod editor {
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+
+        use super::*;
+
+        /// The editor over a save that never finishes. `dropped` flips when that save is dropped,
+        /// which is what rolls back whatever a real save had staged (see `Staged`).
+        #[component]
+        fn HungSave() -> impl IntoElement {
+            let open = signal(true);
+            let started = signal(false);
+            let dropped = signal(false);
+            let save: Save = Rc::new(move |_| {
+                started.set(true);
+                async move {
+                    let _signal = SignalOnDrop(dropped);
+                    pending::<Result<(), ClientError>>().await
+                }
+                .boxed_local()
+            });
+            let annotation = Rc::new(Annotation {
+                capture: Capture {
+                    source: "data:image/jpeg;base64,".into(),
+                    jpeg: Rc::new(include_bytes!("../../../tests/ui/prv_2.jpg").to_vec()),
+                    pixels: Viewport {
+                        width: 8,
+                        height: 6,
+                    },
+                    page: None,
+                },
+                page: PageIdentity {
+                    thread_id: "thread".into(),
+                    url: "https://example.test/".into(),
+                    title: None,
+                    viewport: Viewport {
+                        width: 800,
+                        height: 600,
+                    },
+                },
+            });
+            let tasks = TaskOwner::here();
+            view()
+                .app_class(tw("flex h-full w-full flex-col"))
+                .child(when(open, move || {
+                    editor_with(save.clone(), annotation.clone(), tasks, move || {
+                        open.set(false)
+                    })
+                    .into_element()
+                }))
+                .child(when(move || !open.get(), || text("Editor closed")))
+                .child(when(started, || text("Save started")))
+                .child(when(dropped, || text("Save dropped")))
+        }
+
+        struct SignalOnDrop(Signal<bool>);
+
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                self.0.try_set(true);
+            }
+        }
+
+        fn start() -> Headless {
+            let mut sets = crate::registries();
+            let mut fixtures = Registry::new();
+            fixtures.register::<HungSave>();
+            sets.push(fixtures);
+            Headless::start(EngineConfig {
+                ui_sets: sets,
+                viewport: size(px(390.0), px(844.0)),
+                ..EngineConfig::new(Root::of::<HungSave>())
+            })
+            .expect("editor probe starts")
+        }
+
+        #[test]
+        fn cancel_during_a_save_aborts_it_and_closes_the_editor() {
+            let mut app = start();
+            app.wait_for("label:Highlight a region on the preview")
+                .expect("editor");
+            app.drag(
+                "label:Highlight a region on the preview",
+                point(px(40.0), px(30.0)),
+            )
+            .expect("mark a region");
+            app.press("role:button[Attach annotation]").expect("attach");
+            app.wait_for("Save started").expect("the save began");
+            assert!(!app.screen().shows("Save dropped"), "it is still held open");
+            app.press("role:button[Cancel]").expect("cancel mid-save");
+            app.wait_for("Save dropped")
+                .expect("cancelling dropped the save, so its staged image is rolled back");
+            app.wait_for("Editor closed").expect("editor closed");
+        }
+
+        #[test]
+        fn an_over_long_note_says_why_attach_is_unavailable() {
+            let mut app = start();
+            app.wait_for("label:Highlight a region on the preview")
+                .expect("editor");
+            app.drag(
+                "label:Highlight a region on the preview",
+                point(px(40.0), px(30.0)),
+            )
+            .expect("mark a region");
+            app.type_text("label:Annotation note", &"x".repeat(NOTE_MAX_UTF16 + 1))
+                .expect("type past the limit");
+            app.wait_for("role:alert[The note is too long to attach.]")
+                .expect("the reason is shown");
+            app.press_key("enter").expect("Enter is refused");
+            assert!(!app.screen().shows("Save started"));
+        }
     }
 }
