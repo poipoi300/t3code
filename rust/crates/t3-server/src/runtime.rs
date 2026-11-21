@@ -138,17 +138,15 @@ pub async fn start_with_global_tracing(
 }
 
 async fn start_configured(
-    inputs: crate::adapters::config::ConfigInputs,
+    mut inputs: crate::adapters::config::ConfigInputs,
     options: StartOptions,
     install_global_tracing: bool,
 ) -> crate::Result<RunningServer> {
+    crate::cli::hydrate_bootstrap(&mut inputs)?;
     let mut config = resolve(&inputs)?;
-    if config.private_network_only
-        || config.bootstrap_fd.is_some()
-        || config.tailscale_serve_enabled
-    {
+    if config.private_network_only || config.tailscale_serve_enabled {
         return Err(crate::Error::Service(
-            "LAN fencing, bootstrap-fd and Tailscale are not yet ported".into(),
+            "LAN fencing and Tailscale are not yet ported".into(),
         ));
     }
     // Before binding (TypeScript `checkServerReachability`): loopback when no host is given, and

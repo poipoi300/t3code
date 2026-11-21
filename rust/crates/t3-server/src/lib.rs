@@ -21,6 +21,9 @@ pub mod ws;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(feature = "local-services")]
+    #[error(transparent)]
+    Bootstrap(#[from] cli::bootstrap::BootstrapError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("service startup or shutdown failed: {0}")]

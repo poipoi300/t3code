@@ -151,6 +151,8 @@ path = "src/bin/t3.rs"
 required-features = ["local-services"]
 
 [target.'cfg(unix)'.dependencies]
+filedescriptor = "0.8.3"
+nix = { version = "0.29", features = ["fs"] }
 rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]

@@ -30,6 +30,18 @@ impl AuthService {
             .await
             .map_err(service_error)?;
         let auth_config = AuthConfig {
+            // A rotating secret supersedes the legacy fixed token (TypeScript `ServerAuth`).
+            desktop_bootstrap_token: config
+                .bootstrap
+                .as_ref()
+                .filter(|b| {
+                    b.desktop_bootstrap_secret.is_none() && !b.desktop_bootstrap_token.is_empty()
+                })
+                .map(|b| b.desktop_bootstrap_token.clone()),
+            desktop_bootstrap_secret: config
+                .bootstrap
+                .as_ref()
+                .and_then(|b| b.desktop_bootstrap_secret.clone()),
             trust_forwarded_host: true,
             desktop: config.mode == super::config::RuntimeMode::Desktop,
             port: config.port,
@@ -39,7 +51,6 @@ impl AuthService {
             dev_url: config.dev_url.as_ref().map(ToString::to_string),
             dev_auth_token: config.dev_auth_token().map(str::to_owned),
             dev_allowed_origins: config.dev_allowed_origins.clone(),
-            ..Default::default()
         };
         let inner = EnvironmentAuth::new(db, secrets, auth_config, policy, SystemClock::new())
             .await

@@ -1,4 +1,5 @@
 //! The `t3` command surface and foreground launcher.
+pub mod bootstrap;
 use crate::adapters::cli as local;
 use crate::adapters::config::{ConfigInputs, RuntimeMode, ServerFlags};
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -634,11 +635,6 @@ pub fn parse(
         }
     }
     let resolved = crate::adapters::config::resolve(&inputs)?;
-    if resolved.bootstrap_fd.is_some() {
-        return Err(CliError::Unavailable(
-            "Desktop bootstrap-fd transport".into(),
-        ));
-    }
     match name {
         "pair" => {
             let mut scopes = leaf
@@ -711,7 +707,16 @@ fn inputs(
         persisted_observability: BTreeMap::new(),
         static_dir: crate::adapters::config::discover_static_dir(),
     };
-    local::select_home(&mut inputs, home_dir.as_deref());
+    if command != "pair" {
+        hydrate_bootstrap(&mut inputs)?;
+    }
+    if inputs.bootstrap.is_some() {
+        if let Some(home) = home_dir.filter(|home| !home.trim().is_empty()) {
+            inputs.flags.base_dir = Some(home);
+        }
+    } else {
+        local::select_home(&mut inputs, home_dir.as_deref());
+    }
     if command == "pair" {
         inputs.flags = ServerFlags {
             base_dir: inputs.flags.base_dir.take(),
@@ -722,6 +727,22 @@ fn inputs(
         local::load_observability(&mut inputs)?;
     }
     Ok(inputs)
+}
+
+/// Consume the descriptor once, before resolving paths or opening a T3 home.
+pub(crate) fn hydrate_bootstrap(inputs: &mut ConfigInputs) -> crate::Result<()> {
+    let fd = inputs
+        .flags
+        .bootstrap_fd
+        .or_else(|| inputs.env.get("T3CODE_BOOTSTRAP_FD")?.parse().ok());
+    if let Some(fd) = fd {
+        if let Some(envelope) = bootstrap::read(fd)? {
+            inputs.bootstrap = Some(envelope);
+        }
+        inputs.flags.bootstrap_fd = None;
+        inputs.env.remove("T3CODE_BOOTSTRAP_FD");
+    }
+    Ok(())
 }
 
 pub async fn run(invocation: Invocation) -> Result<(), CliError> {
@@ -736,6 +757,10 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
                 return Err(CliError::Usage(
                     "Server stopped before becoming ready".into(),
                 ));
+            }
+            if !headless && config.mode == RuntimeMode::Desktop {
+                server.run_until_signal().await?;
+                return Ok(());
             }
             let result = headless_output(
                 config.host.as_deref(),

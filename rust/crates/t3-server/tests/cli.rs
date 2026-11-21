@@ -10,7 +10,11 @@ use tokio::{
 };
 
 fn command(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_t3"));
+    program(root, env!("CARGO_BIN_EXE_t3"))
+}
+
+fn program(root: &Path, executable: &str) -> Command {
+    let mut command = Command::new(executable);
     command.env_clear().current_dir(root).kill_on_drop(true);
     for key in [
         "PATH",
@@ -267,7 +271,6 @@ async fn every_unassembled_command_is_recognized_and_fails_explicitly() {
         &["__ssh-helper", "runtime-port", "runtime"],
         &["__ssh-helper", "update-remaining", "marker"],
         &["--completions", "powershell"],
-        &["serve", "--bootstrap-fd", "0"],
         &["--completions", "pwsh"],
         &["--wizard"],
         &["thread", "list", "--no-json"],
@@ -686,4 +689,96 @@ async fn status_reads_settings_without_opening_a_database() {
     .await;
     assert_eq!(invalid.status.code(), Some(1));
     assert!(invalid.stdout.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn desktop_bootstrap_closed_and_malformed_descriptors() {
+    let root = TempDir::new().unwrap();
+    let ordinary = output(root.path(), &["status"]).await;
+    let closed = output(root.path(), &["--bootstrap-fd", "999999", "status"]).await;
+    assert_eq!(closed.status.code(), ordinary.status.code());
+    assert_eq!(stdout(&closed), stdout(&ordinary));
+    let input = root.path().join("malformed");
+    std::fs::write(&input, b"{\"private-fixture\":\"malformed\"}\n").unwrap();
+    let result = command(root.path())
+        .args(["--bootstrap-fd", "0", "status"])
+        .stdin(std::fs::File::open(input).unwrap())
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        stderr(&result).contains("Failed to decode bootstrap envelope from file descriptor 0.")
+    );
+    assert!(!stderr(&result).contains("private-fixture"));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn desktop_bootstrap_reports_the_unsupported_windows_transport() {
+    let root = TempDir::new().unwrap();
+    let result = output(root.path(), &["--bootstrap-fd", "3", "status"]).await;
+    assert!(!result.status.success());
+    assert!(stderr(&result).contains("bootstrap fd not supported on this platform yet"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn desktop_bootstrap_socket_starts_server_and_authenticates_without_eof() {
+    use std::{
+        io::Write,
+        os::{fd::OwnedFd, unix::net::UnixStream},
+    };
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("desktop");
+    let (mut parent, inherited) = UnixStream::pair().unwrap();
+    let mut cmd = program(root.path(), "/bin/sh");
+    cmd.args([
+        "-c",
+        r#"exec 3<&0; exec 0</dev/null; exec "$@""#,
+        "launcher",
+        env!("CARGO_BIN_EXE_t3"),
+        "--bootstrap-fd",
+        "3",
+        "serve",
+        "--port",
+        "0",
+    ])
+    .stdin(Stdio::from(OwnedFd::from(inherited)));
+    let secret = "desktop-private-fixture";
+    writeln!(
+        parent,
+        "{}",
+        json!({"mode":"desktop","noBrowser":true,"port":3773,"host":"127.0.0.1",
+        "desktopBootstrapToken":"superseded-fixture","desktopBootstrapSecret":secret,"t3Home":home,
+        "tailscaleServeEnabled":false,"tailscaleServePort":443})
+    )
+    .unwrap();
+    let (mut child, origin, announced) = launch(cmd).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    assert!(home.join("userdata/server-runtime.json").is_file());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let token = t3_auth::pairing::current_desktop_token(secret, now).unwrap();
+    let exchange = |value: &str| {
+        client
+            .post(format!("{origin}/api/auth/browser-session"))
+            .json(&json!({"credential":value}))
+            .send()
+    };
+    assert!(exchange(&token).await.unwrap().status().is_success());
+    assert!(
+        !exchange("superseded-fixture")
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert_ne!(announced, token);
+    assert_ne!(announced, secret);
+    assert_ne!(announced, "superseded-fixture");
+    child.kill().await.unwrap();
 }
