@@ -36,6 +36,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(all(feature = "providers", feature = "workspace"))]
+mod http_common;
+
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const NOW: &str = "2026-11-14T12:00:00.000Z";
 const CALLER: &str = "thread:mcp-caller";
@@ -993,6 +996,96 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
                 .contains(&format!("Unable to send to thread {CALLER}:")),
         "{conflicting_send}"
     );
+    #[cfg(feature = "workspace")]
+    {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let upload =
+            json!({"type":"image","name":"pixel.png","mimeType":"image/png","sizeBytes":PNG.len()});
+        let issued = mcp
+            .call(
+                &token,
+                "t3_attachment_prepare_upload",
+                json!({"upload": upload}),
+            )
+            .await;
+        assert!(!is_error(&issued), "{issued}");
+        let issued = &issued["result"]["structuredContent"];
+        let id = issued["attachmentId"].as_str().unwrap();
+        let upload_url = issued["relativeUrl"].as_str().unwrap();
+        let uploaded = mcp
+            .http
+            .post(format!("{origin}{upload_url}"))
+            .header("content-type", "image/png")
+            .body(PNG)
+            .send()
+            .await
+            .unwrap();
+        assert!(uploaded.status().is_success(), "{uploaded:?}");
+
+        let peer_token = sessions
+            .registry()
+            .unwrap()
+            .issue(CredentialRequest::new(
+                ThreadId(PEER.into()),
+                ProviderInstanceId("replay".into()),
+            ))
+            .unwrap()
+            .authorization_header;
+        let discarded = mcp
+            .call(
+                &peer_token,
+                "t3_attachment_discard",
+                json!({"attachmentId": id}),
+            )
+            .await;
+        assert!(is_error(&discarded), "{discarded}");
+        let discard_error: Value =
+            serde_json::from_str(discarded["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(discard_error["code"], "invalid_request", "{discarded}");
+        assert_eq!(
+            discard_error["message"],
+            "Only the caller that prepared a pending upload can discard it.",
+            "{discarded}"
+        );
+        let mut attachment = upload;
+        attachment["id"] = json!(id);
+        let send =
+            json!({"threadId": PEER, "message": "Here is the image.", "attachments": [attachment]});
+        let denied = mcp
+            .call(&peer_token, "t3_thread_send_attachments", send.clone())
+            .await;
+        assert!(
+            is_error(&denied) && denied.to_string().contains("attachment not found"),
+            "{denied}"
+        );
+        let renewed = sessions
+            .registry()
+            .unwrap()
+            .issue(CredentialRequest::new(
+                ThreadId(CALLER.into()),
+                ProviderInstanceId("replay".into()),
+            ))
+            .unwrap()
+            .authorization_header;
+        let accepted = mcp
+            .call(&renewed, "t3_thread_send_attachments", send.clone())
+            .await;
+        assert!(!is_error(&accepted), "{accepted}");
+        assert_eq!(accepted["result"]["structuredContent"]["threadId"], PEER);
+        let repeated = mcp.call(&token, "t3_thread_send_attachments", send).await;
+        assert!(
+            is_error(&repeated) && repeated.to_string().contains("attachment not found"),
+            "{repeated}"
+        );
+    }
+
     let raised_send = mcp
         .call(
             &token,
@@ -1587,6 +1680,12 @@ struct DelegationWorld {
     socket: Socket,
     client: Client,
     token: String,
+    #[cfg(feature = "workspace")]
+    sessions: Arc<McpSessions>,
+    #[cfg(feature = "workspace")]
+    seen: Arc<Seen>,
+    #[cfg(feature = "workspace")]
+    changes: watch::Receiver<u64>,
 }
 
 #[cfg(feature = "providers")]
@@ -1707,7 +1806,93 @@ async fn delegation_world(parent: &str, mode: &str, policy: Option<&str>) -> Del
         socket,
         client,
         token,
+        #[cfg(feature = "workspace")]
+        sessions,
+        #[cfg(feature = "workspace")]
+        seen,
+        #[cfg(feature = "workspace")]
+        changes,
     }
+}
+
+#[cfg(all(feature = "providers", feature = "workspace"))]
+#[tokio::test]
+async fn mcp_client_namespace_cannot_discard_an_upload_owned_by_the_same_text_thread() {
+    let mut world = delegation_world("thread:namespace-test", "approval-required", None).await;
+    let access =
+        http_common::approved_mcp_access(&world.mcp.http, &world.origin, &world.cookie).await;
+    let session: String = t3_persistence::rusqlite::Connection::open(&world.database)
+        .unwrap()
+        .query_row(
+            "SELECT session_id FROM auth_sessions WHERE subject = 'mcp-client'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let owner = format!("client:{session}");
+    command(&mut world.socket, &mut world.client, json!({"type":"thread.create","commandId":"create:namespace-owner","threadId":owner,"projectId":"project:mcp","title":"Namespace owner","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
+    command(&mut world.socket, &mut world.client, json!({"type":"message.dispatch","commandId":"command:namespace-owner","threadId":owner,"messageId":"message:namespace-owner","text":"Own the upload","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await;
+    world
+        .changes
+        .wait_for(|_| {
+            world
+                .seen
+                .turns
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|turn| turn.0 == owner)
+        })
+        .await
+        .unwrap();
+    let token = world
+        .sessions
+        .read(&ThreadId(owner))
+        .unwrap()
+        .authorization_header;
+    let prepared = world.mcp.call(
+        &token,
+        "t3_attachment_prepare_upload",
+        json!({"upload":{"type":"file","name":"notes.txt","mimeType":"text/plain","sizeBytes":5}}),
+    ).await;
+    assert!(!is_error(&prepared), "{prepared}");
+    let upload = &prepared["result"]["structuredContent"];
+    let id = upload["attachmentId"].as_str().unwrap();
+    let upload_url = upload["relativeUrl"].as_str().unwrap();
+    let stored = world
+        .mcp
+        .http
+        .post(format!("{}{upload_url}", world.origin))
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored.status(), 204);
+
+    let input = json!({"attachmentId":id});
+    let wrong_owner = world
+        .mcp
+        .call(
+            &format!("Bearer {access}"),
+            "t3_attachment_discard",
+            input.clone(),
+        )
+        .await;
+    assert!(is_error(&wrong_owner), "{wrong_owner}");
+    let error: Value = serde_json::from_str(
+        wrong_owner["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(error["code"], "invalid_request", "{wrong_owner}");
+    let actual_owner = world.mcp.call(&token, "t3_attachment_discard", input).await;
+    assert_eq!(
+        actual_owner["result"]["structuredContent"],
+        json!({}),
+        "{actual_owner}"
+    );
+    world.runtime.shutdown().await.unwrap();
 }
 
 #[cfg(feature = "providers")]

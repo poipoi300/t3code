@@ -165,3 +165,82 @@ pub fn assert_no_store(response: &Response) {
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["pragma"], "no-cache");
 }
+
+/// A single approved unthreaded OAuth client for MCP behavior tests.
+#[cfg(all(feature = "mcp", feature = "workspace"))]
+pub async fn approved_mcp_access(http: &Client, origin: &str, admin: &str) -> String {
+    let redirect_uri = "http://127.0.0.1:30999/callback";
+    let registered = json(
+        http.post(format!("{origin}/oauth/mcp/register"))
+            .json(&json!({
+                "client_name": "Attachment test agent",
+                "redirect_uris": [redirect_uri],
+                "token_endpoint_auth_method": "none",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap(),
+    )
+    .await;
+    let verifier = "v".repeat(60);
+    let resource = format!("{origin}/mcp");
+    let client_id = registered["client_id"].as_str().unwrap();
+    let authorization = json!({
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": t3_auth::utils::b64(t3_auth::utils::sha256(&verifier)),
+        "code_challenge_method": "S256",
+        "state": "attachment-test",
+        "resource": resource,
+    });
+    let approval = json(
+        http.post(format!("{origin}/oauth/mcp/approval"))
+            .header("cookie", admin)
+            .json(&authorization)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap(),
+    )
+    .await;
+    let accepted = json(http
+        .post(format!("{origin}/oauth/mcp/decision"))
+        .header("cookie", admin)
+        .json(&json!({
+            "authorization": authorization,
+            "decision": {"_tag":"browser-session","access":"approval-required","csrfToken":approval["csrfToken"]},
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()).await;
+    let redirect = reqwest::Url::parse(accepted["redirectTo"].as_str().unwrap()).unwrap();
+    let code = redirect
+        .query_pairs()
+        .find(|(name, _)| name == "code")
+        .unwrap()
+        .1;
+    let token = json(
+        http.post(format!("{origin}/oauth/mcp/token"))
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_ref()),
+                ("redirect_uri", redirect_uri),
+                ("client_id", client_id),
+                ("code_verifier", verifier.as_str()),
+                ("resource", resource.as_str()),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap(),
+    )
+    .await;
+    token["access_token"].as_str().unwrap().to_owned()
+}

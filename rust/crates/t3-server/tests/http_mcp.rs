@@ -675,3 +675,142 @@ async fn oauth_error(response: reqwest::Response) -> String {
     );
     body["error"].as_str().unwrap().to_owned()
 }
+#[cfg(all(feature = "mcp", feature = "workspace"))]
+async fn mcp_attachment_tool(f: &Fixture, access: &str, name: &str, args: Value) -> Value {
+    let response = f
+        .post("/mcp")
+        .bearer_auth(access)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "tools/call")
+        .header("mcp-name", name)
+        .json(&json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":name,"arguments":args,"_meta":{
+                    "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities":{},
+                    "io.modelcontextprotocol/clientInfo":{"name":"attachment-test","version":"1"}
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    let body = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap_or(&text);
+    serde_json::from_str(body).unwrap()
+}
+
+#[cfg(all(feature = "mcp", feature = "workspace"))]
+#[tokio::test]
+async fn mcp_upload_owner_can_discard_after_server_restart() {
+    let mut f = fixture(&[]).await;
+    let admin = f.admin_cookie().await;
+    let access = http_common::approved_mcp_access(&f.http, &f.base, &admin).await;
+    let prepare = mcp_attachment_tool(
+        &f,
+        &access,
+        "t3_attachment_prepare_upload",
+        json!({"upload":{"type":"file","name":"notes.txt","mimeType":"text/plain","sizeBytes":5}}),
+    )
+    .await;
+    let result = &prepare["result"]["structuredContent"];
+    let id = result["attachmentId"].as_str().unwrap();
+    let upload = f
+        .post(result["relativeUrl"].as_str().unwrap())
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upload.status(), 204);
+
+    let server = f.server.take().unwrap();
+    let mut config = inputs(f.temp.path());
+    config.flags.port = Some(server.address.port());
+    server.shutdown().await.unwrap();
+    f.server = Some(t3_server::runtime::start(config).await.unwrap());
+
+    let discard = mcp_attachment_tool(
+        &f,
+        &access,
+        "t3_attachment_discard",
+        json!({"attachmentId":id}),
+    )
+    .await;
+    assert_eq!(
+        discard["result"]["structuredContent"],
+        json!({}),
+        "{discard}"
+    );
+    let removed = mcp_attachment_tool(
+        &f,
+        &access,
+        "t3_attachment_discard",
+        json!({"attachmentId":id}),
+    )
+    .await;
+    assert_eq!(removed["result"]["isError"], true, "{removed}");
+    assert!(
+        removed
+            .to_string()
+            .contains("Only the caller that prepared a pending upload can discard it.")
+    );
+
+    f.stop().await;
+}
+
+#[cfg(all(feature = "mcp", feature = "workspace"))]
+#[tokio::test]
+async fn mcp_prepare_upload_enforces_the_per_issuer_allowance() {
+    let f = fixture(&[]).await;
+    let admin = f.admin_cookie().await;
+    let access = http_common::approved_mcp_access(&f.http, &f.base, &admin).await;
+    let upload_request =
+        json!({"upload":{"type":"file","name":"notes.txt","mimeType":"text/plain","sizeBytes":5}});
+    for _ in 0..t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
+        let pending = mcp_attachment_tool(
+            &f,
+            &access,
+            "t3_attachment_prepare_upload",
+            upload_request.clone(),
+        )
+        .await;
+        assert!(
+            pending["result"]["structuredContent"]["attachmentId"].is_string(),
+            "{pending}"
+        );
+    }
+    let overflow = mcp_attachment_tool(
+        &f,
+        &access,
+        "t3_attachment_prepare_upload",
+        upload_request.clone(),
+    )
+    .await;
+    assert_eq!(overflow["result"]["isError"], true, "{overflow}");
+    let failure: Value =
+        serde_json::from_str(overflow["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(failure["code"], "invalid_request", "{overflow}");
+    assert_eq!(
+        failure["message"],
+        "too many uploads are waiting to be sent; send or remove some first"
+    );
+
+    let other_access = http_common::approved_mcp_access(&f.http, &f.base, &admin).await;
+    let other_issuer = mcp_attachment_tool(
+        &f,
+        &other_access,
+        "t3_attachment_prepare_upload",
+        upload_request,
+    )
+    .await;
+    assert!(
+        other_issuer["result"]["structuredContent"]["attachmentId"].is_string(),
+        "{other_issuer}"
+    );
+    f.stop().await;
+}

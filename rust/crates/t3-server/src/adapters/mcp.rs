@@ -24,10 +24,7 @@ use t3_mcp::{
     AccessStore, Capability, CredentialRequest, McpError, McpServer, ProviderSessionConfig,
     Services, SessionRegistry,
     access::ThreadShell,
-    adapters::{
-        ServiceAdapters, attachments::AttachmentAdapter, orchestration::ProjectionAccess,
-        scheduler::SchedulerAdapter,
-    },
+    adapters::{ServiceAdapters, orchestration::ProjectionAccess, scheduler::SchedulerAdapter},
     provider_sessions::{PreparedCredential, ProviderCredentials},
     transport::HttpState,
 };
@@ -280,6 +277,78 @@ impl Drop for Published {
     }
 }
 
+#[cfg(feature = "workspace")]
+struct McpAttachments {
+    ledger: Arc<crate::adapters::attachments::AttachmentsAdapter>,
+    orchestration: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
+}
+
+#[cfg(feature = "workspace")]
+fn attachment_principal(
+    scope: &t3_mcp::InvocationScope,
+) -> crate::adapters::attachments::Principal {
+    use crate::adapters::attachments::Principal;
+    match &scope.thread {
+        Some(caller) => Principal::McpThread(caller.thread_id.0.clone()),
+        None => Principal::McpNamespace(scope.request_namespace.clone()),
+    }
+}
+
+#[cfg(feature = "workspace")]
+#[async_trait::async_trait]
+impl t3_mcp::services::AttachmentService for McpAttachments {
+    async fn t3_attachment_prepare_upload(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<t3_contracts::assets::AttachmentCreateUploadUrlResult> {
+        let upload = serde_json::from_value(input.into_value()["upload"].take())
+            .map_err(|_| McpError::Internal)?;
+        self.ledger
+            .create_upload_url(attachment_principal(&context.scope), upload)
+            .await
+            .map_err(|error| match error {
+                crate::adapters::attachments::UploadRefusal::TooMany => {
+                    McpError::failure("invalid_request", error.to_string())
+                }
+                crate::adapters::attachments::UploadRefusal::Store(_) => McpError::unavailable(),
+            })
+    }
+
+    async fn t3_attachment_discard(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_contracts::assets::AttachmentDeleteInput,
+    ) -> t3_mcp::Result<serde_json::Value> {
+        let removed = self
+            .ledger
+            .discard_pending(
+                &attachment_principal(&context.scope),
+                &input.attachment_id.0,
+            )
+            .await
+            .map_err(|_| McpError::unavailable())?;
+        if !removed {
+            return Err(McpError::failure(
+                "invalid_request",
+                "Only the caller that prepared a pending upload can discard it.",
+            ));
+        }
+        Ok(serde_json::json!({}))
+    }
+
+    async fn t3_thread_send_attachments(
+        &self,
+        context: t3_mcp::CallContext,
+        input: t3_mcp::DecodedInput,
+    ) -> t3_mcp::Result<serde_json::Value> {
+        let backend = self.ledger.for_caller(attachment_principal(&context.scope));
+        self.orchestration
+            .send_attachments_with_backend(context, input, Some(backend))
+            .await
+    }
+}
+
 /// The served MCP endpoint: `t3-mcp`'s server over the bound services, and the HTTP state its
 /// authentication middleware reads.
 pub struct McpAdapter {
@@ -337,15 +406,15 @@ impl McpAdapter {
                 reader: Some(projections.clone()),
             }));
         }
-        #[cfg(feature = "workspace")]
-        if let Some(workspace) = domains.get::<crate::adapters::workspace::WorkspaceAdapter>() {
-            adapters.attachments = Some(Arc::new(AttachmentAdapter::new(
-                Arc::new(workspace.attachments.clone()),
-                Arc::new(t3_mcp::session::SystemClock::default()),
-            )));
-        }
         let mut services = Services::default();
         Arc::new(adapters).install(&mut services);
+        #[cfg(feature = "workspace")]
+        if let Some(ledger) = domains.get::<crate::adapters::attachments::AttachmentsAdapter>() {
+            services.attachment = Arc::new(McpAttachments {
+                ledger,
+                orchestration: orchestration_adapter.clone(),
+            });
+        }
         {
             services.orchestrator = Arc::new(Orchestrator {
                 reads: Arc::new(t3_mcp::adapters::threads::ThreadReadAdapter {

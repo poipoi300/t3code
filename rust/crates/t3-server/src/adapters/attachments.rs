@@ -228,14 +228,22 @@ mod claims {
             issuer: &Principal,
             attachment_id: &str,
         ) -> Result<(), t3_workspace::Error> {
+            self.discard_pending(issuer, attachment_id)
+                .await
+                .map(|_| ())
+        }
+
+        /// Reports whether the caller owned an unclaimed upload and discarded it under the claim lock.
+        pub(crate) async fn discard_pending(
+            &self,
+            issuer: &Principal,
+            attachment_id: &str,
+        ) -> Result<bool, t3_workspace::Error> {
             let mut ledger = self.ledger.lock().await;
             let recorded = self.store.owner(attachment_id).await;
-            if recorded.as_ref().is_some_and(|record| record.claimed) {
-                return Ok(());
-            }
             if let Some(record) = recorded {
-                if record.owner != issuer.record() {
-                    return Ok(());
+                if record.claimed || record.owner != issuer.record() {
+                    return Ok(false);
                 }
                 self.store.delete_pending(attachment_id).await?;
             } else if !ledger
@@ -243,10 +251,10 @@ mod claims {
                 .get(attachment_id)
                 .is_some_and(|entry| entry.issuer == *issuer && !entry.claimed)
             {
-                return Ok(());
+                return Ok(false);
             }
             ledger.issued.remove(attachment_id);
-            Ok(())
+            Ok(true)
         }
 
         async fn thread_attachments(

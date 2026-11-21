@@ -127,8 +127,20 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
         context: CallContext,
         input: DecodedInput,
     ) -> Result<Value> {
+        self.send_attachments_with_backend(context, input, None)
+            .await
+    }
+}
+
+impl OrchestrationAdapter {
+    pub async fn send_attachments_with_backend(
+        &self,
+        context: CallContext,
+        input: DecodedInput,
+        backend: Option<Arc<dyn AttachmentBackend>>,
+    ) -> Result<Value> {
         use t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_is_pending_upload;
-        let intake = self
+        let mut intake = self
             .commands
             .intake(command_caller(&context)?)
             .ok_or_else(|| {
@@ -137,6 +149,9 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
                     "AttachmentBackend::claim_pending",
                 )
             })?;
+        if let Some(backend) = backend {
+            intake.attachments = backend;
+        }
         let input = input.into_value();
         let thread = target(&context, &input)?;
         let records = self
