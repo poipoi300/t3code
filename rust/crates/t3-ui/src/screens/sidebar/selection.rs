@@ -9,11 +9,16 @@ pub use t3_client::view_logic::shell::sidebar::{
 #[derive(Clone, Copy)]
 pub struct ThreadSelectionStore {
     state: Signal<ThreadSelection>,
+    revision: Signal<SelectionRevision>,
 }
+
+#[derive(Clone, Default)]
+struct SelectionRevision(u64);
 
 pub fn use_thread_selection_store() -> ThreadSelectionStore {
     ThreadSelectionStore {
         state: global::<ThreadSelection>(),
+        revision: global::<SelectionRevision>(),
     }
 }
 
@@ -22,8 +27,14 @@ impl ThreadSelectionStore {
         let mut next = self.state.get_untracked();
         change(&mut next);
         if self.state.with_untracked(|current| current != &next) {
+            self.revision
+                .update(|revision| revision.0 = revision.0.wrapping_add(1));
             self.state.set(next);
         }
+    }
+
+    pub(super) fn revision(self) -> u64 {
+        self.revision.with_untracked(|revision| revision.0)
     }
 
     pub fn state(self) -> ThreadSelection {
@@ -64,6 +75,30 @@ impl ThreadSelectionStore {
         self.update(|state| state.remove(keys));
     }
 
+    pub(super) fn retain_environment(
+        self,
+        environment: &t3_client::types::EnvironmentId,
+        threads: &t3_client::state::sharing::SharedShellSnapshot,
+    ) {
+        let prefix = environment_prefix(environment);
+        let present = threads
+            .threads
+            .iter()
+            .filter(|row| row.archived_at.is_none() && row.deleted_at.is_none())
+            .map(|row| row.id.0.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let retain = |key: &str| {
+            key.strip_prefix(&prefix)
+                .is_none_or(|id| present.contains(id))
+        };
+        self.update(|state| {
+            state.selected.retain(|key| retain(key));
+            if state.anchor.as_deref().is_some_and(|key| !retain(key)) {
+                state.anchor = None;
+            }
+        });
+    }
+
     pub fn set_anchor(self, key: &str) {
         self.update(|state| state.set_anchor(key.into()));
     }
@@ -76,27 +111,27 @@ use crate::{
 };
 use t3_client::{types::ThreadKey, view_logic::shell::sidebar::Section};
 
-pub(super) fn row_key(key: &ThreadKey) -> String {
+fn environment_prefix(environment: &t3_client::types::EnvironmentId) -> String {
     // Length-prefix the environment so ids containing ':' cannot alias another environment.
-    format!(
-        "{}:{}{}",
-        key.environment.0.len(),
-        key.environment.0,
-        key.thread.0
-    )
+    format!("{}:{}", environment.0.len(), environment.0)
+}
+
+pub(super) fn row_key(key: &ThreadKey) -> String {
+    format!("{}{}", environment_prefix(&key.environment), key.thread.0)
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Interactions {
     pub store: ThreadSelectionStore,
-    pub visible_threads: Memo<Vec<(ThreadKey, Section)>>,
-    pub available_threads: Memo<Vec<ThreadKey>>,
+    pub visible_threads: Memo<Vec<ThreadKey>>,
+    pub available_threads: Memo<Vec<(ThreadKey, Section)>>,
     pub tasks: TaskOwner,
 }
 
 pub(super) struct NavigationPlan {
-    requested: Route,
+    pub(super) requested: Route,
     candidates: Vec<ThreadKey>,
+    pub(super) project: Option<t3_client::workspace::ProjectKey>,
 }
 
 impl Interactions {
@@ -110,9 +145,9 @@ impl Interactions {
         if toggle {
             self.store.toggle_thread(&scoped);
         } else if event.modifiers.shift {
-            let ordered = self.visible_threads.with_untracked(|rows| {
-                rows.iter().map(|(key, _)| row_key(key)).collect::<Vec<_>>()
-            });
+            let ordered = self
+                .visible_threads
+                .with_untracked(|rows| rows.iter().map(row_key).collect::<Vec<_>>());
             self.store.range_select_to(&scoped, &ordered);
         } else if event.clicks < 2 {
             self.store.clear_selection();
@@ -126,7 +161,7 @@ impl Interactions {
             return (vec![key.clone()], false);
         }
         let selected = self.store.selected_thread_keys();
-        let threads = self.visible_threads.with(|rows| {
+        let threads = self.available_threads.with(|rows| {
             selected
                 .iter()
                 .filter_map(|selected| {
@@ -134,7 +169,7 @@ impl Interactions {
                         .find(|(key, _)| row_key(key) == *selected)
                         .map(|(key, _)| key.clone())
                 })
-                .collect::<Vec<_>>()
+                .collect()
         });
         (threads, true)
     }
@@ -150,7 +185,7 @@ impl Interactions {
         }
         let requested = nav.top();
         let current = requested.thread().filter(|key| targets.contains(key))?;
-        let candidates = self.visible_threads.with_untracked(|rows| {
+        let candidates = self.available_threads.with_untracked(|rows| {
             let next = rows
                 .iter()
                 .position(|(key, _)| key == current)
@@ -159,8 +194,7 @@ impl Interactions {
                 .iter()
                 .chain(&rows[..next])
                 .filter(|(key, section)| {
-                    !matches!(section, Section::Settled | Section::Snoozed)
-                        && !targets.contains(key)
+                    !matches!(section, Section::Settled | Section::Snoozed) && key != current
                 })
                 .map(|(key, _)| key.clone())
                 .collect()
@@ -168,6 +202,7 @@ impl Interactions {
         Some(NavigationPlan {
             requested,
             candidates,
+            project: None,
         })
     }
 
@@ -189,23 +224,29 @@ impl Interactions {
                     &attempted,
                     &removed,
                     |key| {
-                        present
-                            .iter()
-                            .any(|thread| row_key(thread) == key && client.can_still_show(thread))
+                        present.iter().any(|(thread, _)| {
+                            row_key(thread) == key && client.can_still_show(thread)
+                        })
                     },
                 ));
         }
-        if let Some(plan) = navigation
+        if id != "archive"
+            && let Some(plan) = navigation
             && nav.top() == plan.requested
             && plan
                 .requested
                 .thread()
                 .is_some_and(|key| completed.contains(key) && client.action_moves_thread(key, id))
         {
-            let next = plan
-                .candidates
-                .into_iter()
-                .find(|key| client.can_still_show(key));
+            let project = if id == "delete" { plan.project } else { None };
+            let next = plan.candidates.into_iter().find(|key| {
+                !completed.contains(key)
+                    && client.can_still_show(key)
+                    && (!matches!(id, "settle" | "snooze") || !client.action_moves_thread(key, id))
+                    && project
+                        .as_ref()
+                        .is_none_or(|project| client.project(key).as_ref() == Some(project))
+            });
             nav.open(next.map_or(Route::Home, Route::Thread));
         }
     }
@@ -233,3 +274,7 @@ pub(super) fn install_escape(store: ThreadSelectionStore) {
         });
     }
 }
+
+/// The last archive registered to return to the thread that was open when it started.
+#[derive(Clone, Default)]
+pub(super) struct ArchiveReturn(pub Option<ThreadKey>);

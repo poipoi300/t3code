@@ -29,6 +29,14 @@ use crate::theme::{palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::Icon;
 
+pub(crate) fn snooze_time_zone(name: &str) -> t3_i18n::TimeZone {
+    use t3_i18n::TimeZone;
+    match name {
+        "UTC" | "Etc/UTC" | "GMT" => TimeZone::Utc,
+        name => TimeZone::Iana(name.into()),
+    }
+}
+
 /// The local calendar snooze presets resolve against: the system time zone (DST-aware through
 /// `t3-i18n`), the user's clock format, and `now_ms`.
 pub fn with_snooze_calendar<R>(
@@ -37,14 +45,11 @@ pub fn with_snooze_calendar<R>(
     body: impl FnOnce(&SnoozeCalendar<'_>) -> R,
 ) -> R {
     use t3_client::view_logic::session::timestamps::resolve_hour12;
+    use t3_i18n::DateFormat;
     use t3_i18n::format::civil;
-    use t3_i18n::{DateFormat, TimeZone};
     const DAY_MS: i64 = 86_400_000;
     let settings = locale_settings();
-    let zone = match settings.time_zone.as_str() {
-        "UTC" | "Etc/UTC" | "GMT" => TimeZone::Utc,
-        name => TimeZone::Iana(name.into()),
-    };
+    let zone = snooze_time_zone(settings.time_zone.as_str());
     let hour12 = resolve_hour12(format, settings.hour_cycle.twelve_hour());
     let offset = |ms: i64| i64::from(zone.offset_seconds(ms)) * 1000;
     let today = civil(now_ms, &zone).day;

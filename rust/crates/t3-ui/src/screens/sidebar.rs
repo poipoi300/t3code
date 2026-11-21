@@ -653,11 +653,7 @@ pub fn sidebar() -> impl IntoElement {
     });
     let visible_threads = computed(move || {
         if searching.get() {
-            return results.with(|rows| {
-                rows.iter()
-                    .map(|row| (row.item.key.clone(), row.source.section))
-                    .collect()
-            });
+            return results.with(|rows| rows.iter().map(|row| row.item.key.clone()).collect());
         }
         shelf_items.with(|list| {
             model.with(|model| {
@@ -668,7 +664,7 @@ pub fn sidebar() -> impl IntoElement {
                             return None;
                         };
                         let row = model.rows.get(index)?;
-                        Some((row.item.key.clone(), row.source.section))
+                        Some(row.item.key.clone())
                     })
                     .collect::<Vec<_>>()
             })
@@ -679,9 +675,21 @@ pub fn sidebar() -> impl IntoElement {
             model
                 .rows
                 .iter()
-                .map(|row| row.item.key.clone())
+                .map(|row| (row.item.key.clone(), row.source.section))
                 .collect::<Vec<_>>()
         })
+    });
+    effect(move || {
+        let environments = environments.get();
+        loaded.with(|shells| {
+            for (id, shell) in shells {
+                if environments.iter().any(|entry| {
+                    entry.id == *id && entry.state.phase == t3_client::connection::Phase::Connected
+                }) {
+                    selection_store.retain_environment(id, shell);
+                }
+            }
+        });
     });
     let interactions = selection::Interactions {
         store: selection_store,

@@ -315,8 +315,41 @@ fn the_notice_invokes_client_undo_then_disappears_when_the_resource_clears() {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarScenario {
+    Normal,
+    ConfirmUnpin,
+    DeferredBatch,
+    RejectedBatch,
+}
+
 #[component]
-pub(super) fn LiveSidebar() -> impl IntoElement {
+fn LiveSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::Normal as usize)
+}
+
+#[component]
+fn ConfirmUnpinSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::ConfirmUnpin as usize)
+}
+
+#[component]
+fn DeferredBatchSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::DeferredBatch as usize)
+}
+
+#[component]
+fn RejectedBatchSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::RejectedBatch as usize)
+}
+
+#[derive(Clone, PartialEq, Props)]
+struct LiveSidebarFixtureProps {
+    scenario: usize,
+}
+
+#[component]
+fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
     use std::rc::Rc;
 
     use futures::FutureExt;
@@ -332,7 +365,7 @@ pub(super) fn LiveSidebar() -> impl IntoElement {
         app::{app_tree, provide_client_services},
         runtime::{Rt, host::Choice},
         screens::sidebar::row::RowThreadActionsRuntime,
-        state::nav::Route,
+        state::nav::{Route, navigator},
     };
 
     let owner = Owner::current();
@@ -342,13 +375,42 @@ pub(super) fn LiveSidebar() -> impl IntoElement {
         });
     });
     let server = FakeEnvironment::new("sidebar-remote", spawner.clone());
-    server.set_shell(shell(&[("alpha", "Alpha thread"), ("beta", "Beta thread")]));
+    let mut initial = shell(&[("alpha", "Alpha thread"), ("beta", "Beta thread")]);
+    if props.scenario == SidebarScenario::ConfirmUnpin as usize {
+        for thread in initial["threads"].as_array_mut().expect("thread rows") {
+            thread["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
+        }
+    }
+    server.set_shell(initial);
     server.edit_config(|config| {
         config["settings"]["snoozePresets"] = json!([{ "kind": "after", "minutes": 17 }]);
         for capability in ["threadPinning", "threadSettlement", "threadSnooze"] {
             config["environment"]["capabilities"][capability] = json!(true);
         }
     });
+    let dispatch = "orchestration.dispatchCommand";
+    let first_reply = (props.scenario == SidebarScenario::DeferredBatch as usize)
+        .then(|| server.defer_reply(dispatch));
+    let first_reply = stored(first_reply);
+    on_key_with(
+        "f5",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            if let Some(reply) = first_reply.with(Option::take) {
+                reply
+                    .send(Ok(json!({"sequence":101})))
+                    .expect("complete first mutation");
+            }
+        },
+    );
+    if props.scenario == SidebarScenario::RejectedBatch as usize {
+        for _ in 0..2 {
+            server.reply(dispatch, Err(json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":"fixture-command","commandType":"thread.delete","message":"Fixture rejected the action"})));
+        }
+    }
     for sequence in 2..12 {
         server.reply(
             "orchestration.dispatchCommand",
@@ -356,15 +418,74 @@ pub(super) fn LiveSidebar() -> impl IntoElement {
         );
     }
     let store = ClientStore::default();
+    let platform = server.platform();
+    let clock = platform.fake.clone();
+    on_key_with(
+        "f7",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| clock.advance(5_000),
+    );
+    let remote = store.clone();
+    on_key_with(
+        "f8",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            let id = t3_client::types::EnvironmentId("sidebar-remote".into());
+            let session = remote.snapshot().environments[&id].session;
+            remote.apply_shell(
+                &id,
+                session,
+                vec![
+                    serde_json::from_value(json!({
+                        "kind": "thread.removed", "threadId":"beta", "location":"active", "sequence":100
+                    }))
+                    .expect("server shell delta"),
+                ],
+            );
+        },
+    );
     let client = ClientRuntime::new(
-        server.platform(),
+        platform,
         store.clone(),
         OrchestrationV2CreationSource::Web,
         spawner.clone(),
     );
+    if props.scenario == SidebarScenario::ConfirmUnpin as usize {
+        let client = client.clone();
+        on_key_with(
+            "f4",
+            KeyOptions {
+                when: When::Always,
+                ..Default::default()
+            },
+            move |_| {
+                client
+                    .client(&t3_client::types::EnvironmentId("sidebar-remote".into()))
+                    .and_then(|client| client.session())
+                    .expect("connected fixture")
+                    .update_grants(t3_client::permissions::SessionGrants {
+                        scopes: ["orchestration:read".into()].into(),
+                        valid: true,
+                    });
+            },
+        );
+    }
     let pairing = client.pair(server.pairing());
+    let prefs = client.composer_preferences();
     spawner(
         async move {
+            if props.scenario == SidebarScenario::ConfirmUnpin as usize {
+                prefs
+                    .update(|prefs| prefs.confirm_thread_unpin = true)
+                    .await
+                    .expect("enable unpin confirmation");
+            }
             pairing.await.expect("pair sidebar environment");
         }
         .boxed_local(),
@@ -395,6 +516,35 @@ pub(super) fn LiveSidebar() -> impl IntoElement {
             );
         },
     );
+    let route = stored(None);
+    let panel_state = stored(None::<Memo<t3_client::view_logic::shell::panels::Panel>>);
+    let panel_host = stored(None::<t3_ui::screens::panel::PanelHost>);
+    let alpha = t3_client::types::ThreadKey {
+        environment: t3_client::types::EnvironmentId("sidebar-remote".into()),
+        thread: t3_contracts::base_schemas::ThreadId("alpha".into()),
+    };
+    let terminal_client = client.clone();
+    let test_alpha = alpha.clone();
+    on_key_with(
+        "f6",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            terminal_client.terminals().set_open(&test_alpha, true);
+            panel_host.get().expect("panel host mounted").apply(
+                &test_alpha,
+                t3_client::view_logic::shell::panels::Action::Open("files".into()),
+            );
+        },
+    );
+    let panels_open = move || {
+        panel_state
+            .get()
+            .is_some_and(|panel| panel.with(|panel| !panel.surfaces.is_empty()))
+    };
+    let selection = stored(None);
     view()
         .w_full()
         .h_full()
@@ -405,20 +555,56 @@ pub(super) fn LiveSidebar() -> impl IntoElement {
                 .child(app_tree(runtime, Route::Home, move || {
                     provide_client_services(&client);
                     provide_context(RowThreadActionsRuntime(Rc::new(client)));
+                    route.replace(Some(navigator()));
+                    let host = t3_ui::screens::panel::workspace_panel_host();
+                    panel_host.replace(Some(host));
+                    panel_state.replace(Some(host.panel(alpha)));
+                    selection.replace(Some(
+                        t3_ui::screens::sidebar::selection::use_thread_selection_store(),
+                    ));
                 })),
         )
         .child(text(move || format!("RPC {}", commands.get())))
+        .child(text(move || {
+            route.get().map_or_else(String::new, |nav| match nav.top() {
+                Route::Draft(_) => "Draft route".into(),
+                route => format!("Route {}", route.path()),
+            })
+        }))
+        .child(text(move || {
+            if panels_open() {
+                "Panel open"
+            } else {
+                "Panel closed"
+            }
+        }))
+        .child(text(move || {
+            format!(
+                "Selection {}",
+                selection
+                    .get()
+                    .map_or(0, |s| s.selected_thread_keys().len())
+            )
+        }))
 }
 
 pub(super) fn start_live_sidebar(window: (f32, f32)) -> Headless {
+    start_sidebar(window, Root::of::<LiveSidebar>())
+}
+
+fn start_sidebar(window: (f32, f32), root: Root) -> Headless {
     let mut fixtures = Registry::new();
     fixtures.register::<LiveSidebar>();
+    fixtures.register::<LiveSidebarFixture>();
+    fixtures.register::<ConfirmUnpinSidebar>();
+    fixtures.register::<DeferredBatchSidebar>();
+    fixtures.register::<RejectedBatchSidebar>();
     let mut sets = t3_ui::registries();
     sets.push(fixtures);
     let mut config = EngineConfig {
         ui_sets: sets,
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<LiveSidebar>())
+        ..EngineConfig::new(root)
     };
     config.environment.os = if window == PHONE {
         Os::Android
@@ -525,4 +711,247 @@ fn live_sidebar_undo_shortcut_uses_the_client_notice() {
             .expect("undo with the configured keys");
         assert_commands(&mut app, "thread.archive:alpha thread.unarchive:alpha");
     }
+}
+
+#[test]
+fn live_sidebar_archiving_the_active_thread_opens_a_draft_and_undo_returns() {
+    let mut app = start_live_sidebar(DESKTOP);
+    app.press("role:button[Alpha thread, Project]")
+        .expect("open Alpha");
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Archive thread]")
+        .expect("archive active Alpha");
+    app.wait_for("Draft route")
+        .expect("new draft in the same project");
+    app.press("role:button[Ctrl+Z to undo]")
+        .expect("restore Alpha");
+    app.wait_for("Route /sidebar-remote/alpha")
+        .expect("return to restored Alpha");
+    assert_commands(&mut app, "thread.archive:alpha thread.unarchive:alpha");
+}
+
+#[test]
+fn live_sidebar_cannot_undo_after_five_seconds() {
+    let mut app = start_live_sidebar(DESKTOP);
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Archive thread]")
+        .expect("archive Alpha");
+    app.wait_for("Archived,").expect("undo initially available");
+    app.press_key("f7")
+        .expect("advance the client clock by five seconds");
+    assert!(!app.screen().shows("Ctrl+Z to undo"));
+    app.press_key("ctrl+z").expect("press expired shortcut");
+    assert_commands(&mut app, "thread.archive:alpha");
+}
+
+#[test]
+fn live_sidebar_deleting_the_active_thread_opens_the_survivor_and_forgets_its_panel() {
+    let mut app = start_live_sidebar(DESKTOP);
+    app.press("role:button[Alpha thread, Project]")
+        .expect("open Alpha");
+    app.press_key("f6")
+        .expect("open Alpha's panel and terminal");
+    app.wait_for("Panel open").expect("panel state present");
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Delete]")
+        .expect("delete active Alpha");
+    app.press("role:button[Confirm]").expect("confirm deletion");
+    app.wait_for("Route /sidebar-remote/beta")
+        .expect("open the survivor");
+    app.wait_for("Panel closed")
+        .expect("forget the deleted thread's panel");
+}
+
+#[component]
+fn DesktopThemeLaunch() -> impl IntoElement {
+    use serde_json::json;
+    use std::rc::Rc;
+    use t3_client::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        testing::environment::FakeEnvironment,
+        types::EnvironmentId,
+    };
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::{
+        app::{app_tree, launch_tree, provide_client_services},
+        runtime::{Rt, host::Choice},
+        state::nav::{Route, SettingsPage},
+    };
+
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let host = FakeEnvironment::new("desktop-host", spawner.clone());
+    let primary =
+        FakeEnvironment::at_origin("actual-primary", "https://primary.test", spawner.clone());
+    for (environment, name) in [(&host, "Desktop palette"), (&primary, "Primary palette")] {
+        environment.edit_config(|config| {
+            config["environmentThemes"] = json!([{"id":"dark-test","name":name,"appearance":"dark","canvas":"#222233","accent":"#dd66aa"}]);
+        });
+    }
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        host.platform().with_environment(&primary),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner,
+    );
+    let primary_id = EnvironmentId("actual-primary".into());
+    let route_client = client.clone();
+    on_key("f9", move |_| {
+        route_client.supply_test_primary_route(&primary_id)
+    });
+    let ready = stored(None::<t3_ui::theme::ThemeState>);
+    view()
+        .w_full()
+        .h_full()
+        .child(launch_tree(
+            || async { Some(EnvironmentId("desktop-host".into())) },
+            async move {
+                client
+                    .pair(host.pairing())
+                    .await
+                    .expect("pair desktop host");
+                client
+                    .pair(primary.pairing())
+                    .await
+                    .expect("pair future primary");
+                assert!(client.settings().primary_environment().is_none());
+                move || {
+                    app_tree(
+                        Rt::new(store, Rc::new(client.clone()), Choice::Client),
+                        Route::Settings(SettingsPage::Appearance),
+                        move || {
+                            provide_client_services(&client);
+                            ready.replace(use_context::<t3_ui::theme::ThemeState>());
+                        },
+                    )
+                }
+            },
+        ))
+        .child(text(move || {
+            ready.get().map_or_else(String::new, |theme| {
+                theme.choice.with(|choice| {
+                    choice
+                        .environment
+                        .iter()
+                        .map(|theme| theme.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+            })
+        }))
+}
+
+#[test]
+fn desktop_launch_uses_the_host_theme_without_a_primary_and_prefers_the_primary_when_known() {
+    let mut fixtures = Registry::new();
+    fixtures.register::<DesktopThemeLaunch>();
+    let mut sets = t3_ui::registries();
+    sets.push(fixtures);
+    let mut config = EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::of::<DesktopThemeLaunch>())
+    };
+    config.environment.os = Os::Linux;
+    let mut app = Headless::start(config).expect("start desktop theme launch");
+    app.wait_for("text:Desktop palette")
+        .expect("read and bind host theme without a primary");
+    app.press_key("f9").expect("discover a primary environment");
+    app.wait_for("text:Primary palette")
+        .expect("use the primary palette");
+    assert!(!app.screen().shows("text:Desktop palette"));
+}
+
+#[test]
+fn live_sidebar_preserves_selection_when_batch_unpin_is_cancelled() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_sidebar(window, Root::of::<ConfirmUnpinSidebar>());
+        super::sb_select::select_two(&mut app);
+        open_row_menu(&mut app, window, "Alpha thread");
+        app.press("role:menuitem[Unpin (2)]")
+            .expect("unpin both selected threads");
+        app.wait_for("Unpin 2 threads?")
+            .expect("confirm batch unpin");
+        app.press("role:button[Cancel]").expect("cancel unpin");
+        app.wait_for("Selection 2").expect("keep both selected");
+        assert_commands(&mut app, "");
+    }
+}
+
+#[test]
+fn live_sidebar_rechecks_batch_eligibility_after_the_first_rpc() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_sidebar(window, Root::of::<DeferredBatchSidebar>());
+        super::sb_select::select_two(&mut app);
+        open_row_menu(&mut app, window, "Alpha thread");
+        app.press("role:menuitem[Delete (2)]")
+            .expect("delete selection");
+        app.press("role:button[Confirm]")
+            .expect("approve batch deletion");
+        assert_commands(&mut app, "thread.delete:alpha");
+        app.press_key("f8")
+            .expect("remove Beta on the server while Alpha is in flight");
+        app.wait_for("Selection 1").expect("prune the removed row");
+        app.press_key("f5").expect("finish deleting Alpha");
+        app.wait_for("Selection 0")
+            .expect("clear the accepted selection");
+        assert_commands(&mut app, "thread.delete:alpha");
+    }
+}
+
+#[test]
+fn live_sidebar_reports_the_batch_failure_count() {
+    let mut app = start_sidebar(DESKTOP, Root::of::<RejectedBatchSidebar>());
+    super::sb_select::select_two(&mut app);
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Delete (2)]")
+        .expect("delete selection");
+    app.press("role:button[Confirm]")
+        .expect("approve batch deletion");
+    app.wait_for("Failed to delete 2 threads")
+        .expect("report both failures");
+    app.wait_for("Selection 2")
+        .expect("leave failed rows selected");
+}
+
+#[test]
+fn live_sidebar_keeps_a_new_selection_made_while_a_batch_is_pending() {
+    let mut app = start_sidebar(DESKTOP, Root::of::<DeferredBatchSidebar>());
+    super::sb_select::select_two(&mut app);
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Settle (2)]")
+        .expect("settle both threads");
+    assert_commands(&mut app, "thread.settle:alpha");
+    app.press_key("escape").expect("clear the old selection");
+    app.wait_for("Selection 0").expect("old selection is gone");
+    super::sb_select::select_two(&mut app);
+    app.wait_for("Selection 2")
+        .expect("new selection made during request");
+    app.press_key("f5").expect("finish first RPC");
+    app.wait_for("Settled 2,").expect("both mutations accepted");
+    app.wait_for("Selection 2")
+        .expect("late response leaves the new selection intact");
+}
+
+#[test]
+fn live_sidebar_preserves_selection_if_permission_is_revoked_during_batch_confirmation() {
+    let mut app = start_sidebar(DESKTOP, Root::of::<ConfirmUnpinSidebar>());
+    super::sb_select::select_two(&mut app);
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Unpin (2)]").expect("unpin batch");
+    app.wait_for("Unpin 2 threads?").expect("confirm unpin");
+    app.press_key("f4").expect("revoke operation permission");
+    app.press("role:button[Confirm]")
+        .expect("submit confirmation");
+    app.wait_for("Failed to unpin thread")
+        .expect("report permission failure");
+    app.wait_for("Selection 2")
+        .expect("preserve selection when the operation is denied");
+    assert_commands(&mut app, "");
 }

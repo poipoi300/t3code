@@ -8,11 +8,11 @@ use t3_client::thread_views::shelves::{
 };
 use t3_contracts::settings::TimestampFormat;
 use t3_contracts::wire::WireDateTime;
-use t3_i18n::{TimeZone, format::civil};
+use t3_i18n::format::civil;
 
 use crate::{
     i18n::{Text, t},
-    screens::settings::snooze::with_snooze_calendar,
+    screens::settings::snooze::{snooze_time_zone, with_snooze_calendar},
     theme::tw,
     ui::{
         button::{ButtonContent, ButtonSize, ButtonVariant, button},
@@ -219,7 +219,7 @@ fn now() -> i64 {
 }
 
 fn local_date_time(at: i64) -> (String, String) {
-    let local = civil(at, &TimeZone::Iana(locale_settings().time_zone.to_string()));
+    let local = civil(at, &snooze_time_zone(locale_settings().time_zone.as_str()));
     let day = local.day;
     (
         format!("{:04}-{:02}-{:02}", day.year, day.month, day.day),
@@ -236,7 +236,7 @@ fn local_epoch(date: &str, time: &str, now: i64) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
         return None;
     }
-    let zone = TimeZone::Iana(locale_settings().time_zone.to_string());
+    let zone = snooze_time_zone(locale_settings().time_zone.as_str());
     let target = calendar_day(year, month, day);
     let today = civil(now, &zone).day;
     with_snooze_calendar(now, &TimestampFormat::Locale, |calendar| {

@@ -1,7 +1,9 @@
 //! The root: reads the launch address, builds the runtime and UI state once, then shows the
 //! standalone or workspace layout.
 
-use std::rc::Rc;
+use std::{future::Future, rc::Rc};
+
+use t3_client::types::EnvironmentId;
 
 use nsh_core::prelude::*;
 use t3_client::ClientStore;
@@ -27,52 +29,73 @@ pub fn App() -> impl IntoElement {
     // read or written after its owner was disposed").
     #[cfg(not(target_arch = "wasm32"))]
     crate::runtime::client::prepare_native_links();
+    launch_tree(
+        crate::runtime::client::read_desktop_environment,
+        async move {
+            let (launched, choice) = crate::runtime::client::launch_inputs(app_url().await);
+            let store = ClientStore::default();
+            let started = host::start(store.clone(), choice).await;
+            let history = match started.backend.client() {
+                Some(client) => {
+                    UrlHistory::read(crate::runtime::services::navigation::url_client(&client))
+                        .await
+                }
+                None => Ok(None),
+            };
+            let (history, failure) = match history {
+                Ok(history) => (history, None),
+                Err(error) => (None, Some(error)),
+            };
+            let route = history.as_ref().map_or_else(
+                || {
+                    initial_route(
+                        launched.as_deref(),
+                        started.paired || !started.backend.environments().is_empty(),
+                    )
+                },
+                |history| history.location.route.clone(),
+            );
+            move || {
+                #[cfg(not(target_arch = "wasm32"))]
+                let pair_screen = route == Route::Pair;
+                let tree = booted_with_history(route, store, started, history);
+                if let Some(error) = failure {
+                    navigation_error(error);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::runtime::client::follow_native_links(pair_screen);
+                tree
+            }
+        },
+    )
+}
+
+#[doc(hidden)]
+pub fn launch_tree<Host: Future<Output = Option<EnvironmentId>>>(
+    read_host: impl FnOnce() -> Host + 'static,
+    launch: impl Future<Output = impl FnOnce() -> AnyElement + 'static> + 'static,
+) -> impl IntoElement {
     let ready = signal(false);
     let slot = stored(None);
     watch(async move {
-        let (launched, choice) = crate::runtime::client::launch_inputs(app_url().await);
-        let store = ClientStore::default();
-        let started = host::start(store.clone(), choice).await;
-        let history = match started.backend.client() {
-            Some(client) => {
-                UrlHistory::read(crate::runtime::services::navigation::url_client(&client)).await
-            }
-            None => Ok(None),
-        };
-        let (history, failure) = match history {
-            Ok(history) => (history, None),
-            Err(error) => (None, Some(error)),
-        };
-        let route = history.as_ref().map_or_else(
-            || {
-                initial_route(
-                    launched.as_deref(),
-                    started.paired || !started.backend.environments().is_empty(),
-                )
-            },
-            |history| history.location.route.clone(),
-        );
-        slot.with(|slot| *slot = Some((route, store, started, history, failure)));
+        let (host, mount) = futures::join!(read_host(), launch);
+        slot.with(|slot| *slot = Some((host, mount)));
         ready.set(true);
     });
     view().w_full().h_full().child(dynamic(move || {
         if !ready.get() {
             return None;
         }
-        let (route, store, started, history, failure) = slot.with(Option::take)?;
-        Some(untracked(|| {
-            #[cfg(not(target_arch = "wasm32"))]
-            let pair_screen = route == Route::Pair;
-            let tree = booted_with_history(route, store, started, history);
-            if let Some(error) = failure {
-                navigation_error(error);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            crate::runtime::client::follow_native_links(pair_screen);
-            tree
-        }))
+        let (host, mount) = slot.with(Option::take)?;
+        if let Some(host) = host {
+            provide_context(DesktopEnvironmentId(host));
+        }
+        Some(untracked(mount))
     }))
 }
+
+#[derive(Clone)]
+struct DesktopEnvironmentId(EnvironmentId);
 
 /// The app once its backend has started, opened at `route`: what `App` shows after the launch
 /// address is read. Tests boot the host's client (`runtime::client::start`) and mount this.
@@ -207,7 +230,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
         diff, files, git_panel, navigation, shell, terminal, thread_ops,
     };
     use crate::screens::panel::{self, PanelRegistry};
-    let host = use_context::<crate::runtime::client::DesktopEnvironmentId>().map(|id| id.0);
+    let host = use_context::<DesktopEnvironmentId>().map(|id| id.0);
     theme::bind(client, host);
     provide_context(crate::screens::pull_requests::list::bind(client));
     thread_ops::bind_confirmation(client);
@@ -227,6 +250,29 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     provide_context(crate::screens::notifications::notification_services(client));
     let host = panel::workspace_panel_host();
     provide_context(host);
+    let mut deletions = client.thread_actions().deletion_events();
+    watch(async move {
+        use futures::StreamExt;
+        use t3_client::thread_views::thread_ops::deletion::DeletionEvent;
+        while let Some(event) = deletions.next().await {
+            match event {
+                DeletionEvent::Accepted(keys) => {
+                    for key in keys.iter() {
+                        host.forget_thread(key);
+                    }
+                }
+                DeletionEvent::CleanupFailed { title, message } => {
+                    use crate::ui::toast::{ToastOptions, Variant, toast_manager};
+                    toast_manager().add(ToastOptions {
+                        variant: Variant::Error,
+                        title: crate::i18n::Text::client_key(title),
+                        description: Some(crate::i18n::Text::content(message)),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    });
     // RightPanelSurfaceContent.tsx's surfaces. Browser, Terminal tabs, pull requests, devices and
     // side chats register here when their lanes land (briefs/ui-mounts-notes.md).
     provide_context(PanelRegistry::new(vec![

@@ -370,6 +370,21 @@ impl PanelHost {
         });
     }
 
+    pub(crate) fn forget_thread(self, thread: &ThreadKey) {
+        self.state.update(|store| store.remove(thread));
+        if self
+            .new_surface
+            .with_untracked(|pending| pending.as_ref() == Some(thread))
+        {
+            self.new_surface.set(None);
+        }
+        (self.changed.get())(PanelChange {
+            thread: thread.clone(),
+            state: self.state.get_untracked(),
+            closed: vec![],
+        });
+    }
+
     pub fn panel(self, thread: ThreadKey) -> Memo<Panel> {
         computed(move || {
             self.state

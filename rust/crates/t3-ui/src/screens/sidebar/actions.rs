@@ -446,6 +446,7 @@ pub(super) fn action_failed(action: &str, error: t3_client::ClientError) {
     use crate::ui::toast::{ToastOptions, Variant, toast_manager};
     let title = match action {
         "undo" => "Failed to undo thread action",
+        "archive-draft" => "Thread archived. Failed to open a new draft.",
         "snooze" => "Failed to snooze thread",
         action => t3_client::thread_views::thread_ops::header::action_failure_title(action),
     };
@@ -453,6 +454,40 @@ pub(super) fn action_failed(action: &str, error: t3_client::ClientError) {
         variant: Variant::Error,
         title: crate::i18n::Text::client_key(title),
         description: Some(crate::i18n::Text::content(error.to_string())),
+        ..Default::default()
+    });
+}
+
+pub(super) fn batch_failed(
+    action: &str,
+    failures: Vec<(t3_client::types::ThreadKey, t3_client::ClientError)>,
+) {
+    let mut errors = failures
+        .into_iter()
+        .map(|(_, error)| error)
+        .filter(|error| !matches!(error, t3_client::ClientError::Cancelled));
+    let Some(first) = errors.next() else {
+        return;
+    };
+    let count = 1 + errors.count();
+    if count == 1 {
+        action_failed(action, first);
+        return;
+    }
+    let title = match action {
+        "delete" => "Failed to delete {count} threads",
+        "unpin" => "Failed to unpin {count} threads",
+        "settle" => "Failed to settle {count} threads",
+        "snooze" => "Failed to snooze {count} threads",
+        "regenerate-title" => "Failed to regenerate titles for {count} threads",
+        "mark-unread" => "Failed to mark {count} threads unread",
+        _ => "Failed to update {count} threads",
+    };
+    use crate::ui::toast::{ToastOptions, Variant, toast_manager};
+    toast_manager().add(ToastOptions {
+        variant: Variant::Error,
+        title: crate::i18n::Text::content(tr(title, &[("count", Value::from(count))])),
+        description: Some(crate::i18n::Text::content(first.to_string())),
         ..Default::default()
     });
 }
@@ -480,10 +515,19 @@ pub(super) fn footer_undo(client: Rc<dyn super::row::RowThreadActions>) -> AnyEl
     });
     let tasks = TaskOwner::here();
     let undo_client = client.clone();
+    let nav = crate::state::nav::navigator();
+    let archive_return = global::<super::selection::ArchiveReturn>();
     let undo = Rc::new(move || {
         let undo = undo_client.undo();
         tasks.spawn(async move {
-            if let Err(error) = undo.await {
+            let report = undo.await;
+            if let Some(key) = archive_return.with_untracked(|state| state.0.clone())
+                && report.unarchived.contains(&key)
+            {
+                archive_return.update(|state| state.0 = None);
+                nav.open(crate::state::nav::Route::Thread(key));
+            }
+            if let Some(error) = report.failures.into_iter().next() {
                 action_failed("undo", error);
             }
         });

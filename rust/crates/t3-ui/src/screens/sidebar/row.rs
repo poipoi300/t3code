@@ -13,7 +13,10 @@ use t3_client::services::models::{
 use t3_client::store::Scope as StoreScope;
 use t3_client::thread_views::{
     shelves::SnoozePreset,
-    thread_ops::{actions::BatchReport, undo::UndoNotice},
+    thread_ops::{
+        actions::BatchReport,
+        undo::{UndoNotice, UndoReport},
+    },
 };
 use t3_client::view_logic::session::timestamps::{
     format_relative_elapsed, ms_until_relative_time_change, relative_time_elapsed_ms,
@@ -21,7 +24,7 @@ use t3_client::view_logic::session::timestamps::{
 use t3_client::view_logic::shell::models::entries_for;
 use t3_client::view_logic::shell::sidebar::presentation::ThreadInput;
 use t3_client::view_logic::shell::sidebar::status::{self, Status};
-use t3_client::{ClientError, types::ThreadKey};
+use t3_client::{ClientError, types::ThreadKey, workspace::ProjectKey};
 use t3_contracts::orchestration_project::OrchestrationProjectShell;
 use t3_contracts::orchestration_v2::{
     AppThreadSettledOverride, OrchestrationV2ProviderGoalStatus, OrchestrationV2ThreadShell,
@@ -85,8 +88,16 @@ pub trait RowThreadActions {
         Box::pin(futures::stream::empty())
     }
 
-    fn undo(&self) -> LocalBoxFuture<'static, Result<usize, ClientError>> {
-        Box::pin(async { Ok(0) })
+    fn undo(&self) -> LocalBoxFuture<'static, UndoReport> {
+        Box::pin(async { UndoReport::default() })
+    }
+
+    fn project(&self, _: &ThreadKey) -> Option<ProjectKey> {
+        None
+    }
+
+    fn archive_draft(&self, _: ProjectKey) -> LocalBoxFuture<'static, Result<String, ClientError>> {
+        Box::pin(async { Err(ClientError::Unsupported("project drafts")) })
     }
 
     fn claims_undo_shortcut(&self) -> bool {
@@ -199,8 +210,24 @@ impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
         self.thread_actions().thread_undo_notice_changes()
     }
 
-    fn undo(&self) -> LocalBoxFuture<'static, Result<usize, ClientError>> {
-        self.thread_actions().undo_latest_thread_action()
+    fn undo(&self) -> LocalBoxFuture<'static, UndoReport> {
+        self.thread_actions().undo_latest_thread_actions()
+    }
+
+    fn project(&self, key: &ThreadKey) -> Option<ProjectKey> {
+        let row = self.thread_actions().thread_shell(key)?;
+        Some(ProjectKey {
+            environment: key.environment.clone(),
+            project: row.project_id.clone(),
+        })
+    }
+
+    fn archive_draft(
+        &self,
+        project: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<String, ClientError>> {
+        let new_threads = self.new_threads();
+        Box::pin(async move { new_threads.open_project(project, None, None).await })
     }
 
     fn claims_undo_shortcut(&self) -> bool {
@@ -689,6 +716,7 @@ pub fn sidebar_thread_row(
     ])))
     };
     let action_client = client.clone();
+    let archive_return = global::<super::selection::ArchiveReturn>();
     let on_action = move |id: String| {
         let (Some(client), Some((keys, bulk))) = (action_client.clone(), untracked(targets)) else {
             return;
@@ -725,6 +753,7 @@ pub fn sidebar_thread_row(
             }
             None => None,
         };
+        let selection_revision = interactions.map(|interactions| interactions.store.revision());
         tasks.spawn(async move {
             let (id, until) = if let Some(choice) = choice {
                 let Some(until) = choice.await else {
@@ -734,19 +763,19 @@ pub fn sidebar_thread_row(
             } else {
                 (id, None)
             };
-            let navigation =
+            let mut navigation =
                 interactions.and_then(|interactions| interactions.plan_navigation(nav, &id, &keys));
+            if let Some(plan) = &mut navigation {
+                plan.project = plan.requested.thread().and_then(|key| client.project(key));
+            }
+            let archive = navigation
+                .as_ref()
+                .filter(|_| id == "archive")
+                .and_then(|plan| {
+                    let key = plan.requested.thread()?.clone();
+                    Some((plan.requested.clone(), plan.project.clone()?, key))
+                });
             let result = if bulk {
-                if id != "delete"
-                    && let Some(interactions) = interactions
-                {
-                    interactions.store.remove_from_selection(
-                        &keys
-                            .iter()
-                            .map(super::selection::row_key)
-                            .collect::<Vec<_>>(),
-                    );
-                }
                 client.sidebar_batch(keys.clone(), id.clone(), until).await
             } else {
                 let key = keys[0].clone();
@@ -771,7 +800,49 @@ pub fn sidebar_thread_row(
                             navigation,
                         );
                     }
-                    if let Some((_, error)) = report.failed.into_iter().next() {
+                    if bulk
+                        && !matches!(id.as_str(), "archive" | "delete")
+                        && let Some(interactions) = interactions
+                        && selection_revision == Some(interactions.store.revision())
+                    {
+                        interactions.store.remove_from_selection(
+                            &report
+                                .completed
+                                .iter()
+                                .map(super::selection::row_key)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    if matches!(id.as_str(), "archive" | "unarchive" | "delete") {
+                        archive_return.update(|state| {
+                            if state
+                                .0
+                                .as_ref()
+                                .is_some_and(|key| report.completed.contains(key))
+                            {
+                                state.0 = None;
+                            }
+                        });
+                    }
+                    if let Some((requested, project, key)) = archive
+                        && report.completed.contains(&key)
+                    {
+                        archive_return.update(|state| state.0 = Some(key.clone()));
+                        if nav.top() == requested && !client.can_still_show(&key) {
+                            match client.archive_draft(project).await {
+                                Ok(draft)
+                                    if nav.top() == requested && !client.can_still_show(&key) =>
+                                {
+                                    nav.open(Route::Draft(draft));
+                                }
+                                Err(error) => super::actions::action_failed("archive-draft", error),
+                                _ => {}
+                            }
+                        }
+                    }
+                    if bulk {
+                        super::actions::batch_failed(&id, report.failed);
+                    } else if let Some((_, error)) = report.failed.into_iter().next() {
                         super::actions::action_failed(&id, error);
                     }
                 }

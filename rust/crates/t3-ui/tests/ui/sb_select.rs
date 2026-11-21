@@ -276,7 +276,7 @@ fn selects_a_range_and_batches_settlement(window: (f32, f32)) {
     );
 }
 
-fn select_two(app: &mut Headless) {
+pub(super) fn select_two(app: &mut Headless) {
     app.hold_keys("ctrl", true)
         .expect("hold selection modifier");
     app.press("role:button[Alpha thread, Project]")
@@ -317,4 +317,50 @@ fn confirms_batch_delete(window: (f32, f32)) {
         .expect("selection survives cancellation");
     app.press("role:button[Confirm]").expect("delete both rows");
     assert_commands(&mut app, "thread.delete:alpha thread.delete:beta");
+}
+
+#[test]
+fn live_sidebar_includes_search_hidden_targets_and_prunes_remote_removals() {
+    use super::sb_actions_1::{assert_commands, open_row_menu, start_live_sidebar};
+
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_live_sidebar(window);
+        select_two(&mut app);
+        app.type_text("label:Search threads", "Alpha")
+            .expect("hide the other selection");
+        app.wait_for("Selection 2")
+            .expect("search retains selection");
+        open_row_menu(&mut app, window, "Alpha thread");
+        app.press("role:menuitem[Delete (2)]")
+            .expect("hidden selection counts towards the batch");
+        app.press("role:button[Cancel]")
+            .expect("keep both selected");
+        app.press_key("f8").expect("receive a remote deletion");
+        app.wait_for("Selection 1")
+            .expect("remote deletion prunes the hidden selection");
+        open_row_menu(&mut app, window, "Alpha thread");
+        app.press("role:menuitem[Delete (1)]")
+            .expect("one surviving target");
+        app.press("role:button[Confirm]").expect("delete");
+        assert_commands(&mut app, "thread.delete:alpha");
+        app.wait_for("Selection 0")
+            .expect("successful batch clears its selection");
+    }
+}
+
+#[test]
+fn live_sidebar_deletes_the_hidden_selection_too() {
+    use super::sb_actions_1::{assert_commands, open_row_menu, start_live_sidebar};
+
+    let mut app = start_live_sidebar(DESKTOP);
+    select_two(&mut app);
+    app.type_text("label:Search threads", "Alpha")
+        .expect("hide Beta");
+    open_row_menu(&mut app, DESKTOP, "Alpha thread");
+    app.press("role:menuitem[Delete (2)]")
+        .expect("select batch delete");
+    app.press("role:button[Confirm]").expect("delete both");
+    assert_commands(&mut app, "thread.delete:alpha thread.delete:beta");
+    app.wait_for("Selection 0")
+        .expect("hidden selection also clears");
 }
