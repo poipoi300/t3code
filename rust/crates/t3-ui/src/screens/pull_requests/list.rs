@@ -348,6 +348,12 @@ fn read_pages(
     });
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ListRefresh {
+    pub revision: Signal<u64>,
+    pub owner: crate::runtime::tasks::TaskOwner,
+}
+
 pub fn screen() -> AnyElement {
     let runtime = rt();
     let service = use_context::<ListClient>();
@@ -495,6 +501,10 @@ pub fn screen() -> AnyElement {
     let replies = signal(Replies::new());
     let more = signal(0u64);
     let refresh = signal(0u64);
+    provide_context(ListRefresh {
+        revision: refresh,
+        owner: crate::runtime::tasks::TaskOwner::here(),
+    });
     let reload = move || refresh.update(|r| *r += 1);
     let service = stored(service);
     effect(move || {

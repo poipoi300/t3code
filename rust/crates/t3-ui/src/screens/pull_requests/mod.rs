@@ -6,3 +6,6 @@ pub mod list;
 pub mod review;
 
 mod markdown;
+
+mod actions;
+mod guide;

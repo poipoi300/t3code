@@ -471,6 +471,45 @@ impl PullRequestReviewSession {
             e.grants_scope(t3_contracts::auth::AuthEnvironmentScope::SourceControlWrite)
         }) == Some(true)
     }
+    pub async fn stack(&self) -> Result<Option<PullRequestStack>, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint()?
+            .command::<WsPullRequestsStackRpc>(self.reference.clone())
+            .await
+    }
+    pub async fn guide(
+        &self,
+    ) -> Result<t3_contracts::pull_request_review_guide::PullRequestReviewGuideResult, RpcCallError>
+    {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint()?
+            .command::<WsPullRequestsReviewGuideRpc>(self.reference.clone())
+            .await
+    }
+    pub async fn run_action(
+        &self,
+        action: PullRequestAction,
+        merge_method: Option<PullRequestMergeMethod>,
+    ) -> Result<Option<PullRequestSummary>, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let r = &self.reference;
+        self.endpoint()?
+            .command::<WsPullRequestsRunActionRpc>(PullRequestActionInput {
+                project_id: r.project_id.clone(),
+                repository: r.repository.clone(),
+                number: r.number,
+                host: r.host.clone(),
+                expected_account_id: r.expected_account_id.clone(),
+                allow_stale: r.allow_stale,
+                action,
+                merge_method: merge_method.map(Some),
+                update_method: None,
+                stack_number: None,
+                expected_stack_heads: None,
+                reply_with_summary: Some(Some(PullRequestActionInputReplyWithSummary)),
+            })
+            .await
+    }
     pub async fn activity(&self) -> Result<PullRequestActivity, RpcCallError> {
         use crate::rpc::RpcEndpoint;
         self.endpoint()?
@@ -582,5 +621,55 @@ impl PullRequestReviewSession {
                 })
                 .await
         }
+    }
+}
+
+#[cfg(test)]
+mod review_session_tests {
+    use super::*;
+    use crate::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        testing::{CallKind, environment::FakeEnvironment},
+    };
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+    #[test]
+    fn read_only_review_sessions_can_read_guides_but_cannot_dispatch_lifecycle_writes() {
+        let mut pool = LocalPool::new();
+        let worker = pool.spawner();
+        let spawn: Spawner = Rc::new(move |f| worker.spawn_local(f).expect("spawn"));
+        let server = FakeEnvironment::new("read-only", spawn.clone());
+        server.set_permissions(&["orchestration:read"]);
+        server.register("pullRequests.runAction", CallKind::Unary);
+        server.register("pullRequests.reviewGuide", CallKind::Unary);
+        server.reply(
+            "pullRequests.reviewGuide",
+            Ok(json!({"currentHeadSha":"revision","guide":null,"run":null})),
+        );
+        let runtime = ClientRuntime::new(
+            server.platform(),
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            spawn,
+        );
+        let environment = pool
+            .run_until(runtime.pair(server.pairing()))
+            .expect("pair");
+        pool.run_until_stalled();
+        let reference = json!({"projectId":"project","repository":"team/widget","number":14,"host":"github.com"});
+        let session = runtime.pull_request_review_session(
+            &environment,
+            serde_json::from_value(reference.clone()).expect("PR"),
+        );
+        assert!(pool.run_until(session.guide()).is_ok());
+        assert_eq!(server.calls("pullRequests.reviewGuide"), [reference]);
+        assert!(!session.can_write());
+        assert!(
+            pool.run_until(session.run_action(PullRequestAction::Close, None))
+                .is_err()
+        );
+        assert!(server.calls("pullRequests.runAction").is_empty());
     }
 }

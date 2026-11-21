@@ -145,6 +145,26 @@ fn load(
     let links_env = env.clone();
     let links_ref = reference.clone();
     let config = crate::runtime::rt().store.environment_config(env.clone());
+    let project = reference.project_id.clone();
+    let default_method = computed(move || {
+        config.with(|c| {
+            c.as_ref().and_then(|c| {
+                t3_client::services::settings::scoped::resolve_project_settings(
+                    &Rc::new(c.0.settings.clone()),
+                    Some(&project),
+                )
+                .settings
+                .pull_request_merge_method
+                .clone()
+            })
+        })
+    });
+    let guides = computed(move || {
+        config.with(|c| {
+            c.as_ref()
+                .is_some_and(|c| c.0.settings.review_guides_enabled)
+        })
+    });
     let supports_links = computed(move || config.with(|config| config.is_some()));
     let links_revision = signal(0u64);
     let tab = signal(Tab::Summary);
@@ -185,7 +205,18 @@ fn load(
                 .child(dynamic(move || match detail.get() {
                     Some(Ok(pr)) => {
                         let markdown = reads.media.scope(review_env.clone(), &pr);
-                        detail_tabs(pr, session.clone(), tab, conversation, markdown)
+                        detail_tabs(
+                            pr,
+                            session.clone(),
+                            tab,
+                            conversation,
+                            markdown,
+                            PanelOptions {
+                                revision,
+                                guides,
+                                default_method,
+                            },
+                        )
                     }
                     Some(Err(_)) => view()
                         .child(text(t("Could not load pull request")))
@@ -237,6 +268,13 @@ enum Tab {
     Summary,
     Timeline,
     Code,
+    Guide,
+}
+#[derive(Clone, Copy)]
+struct PanelOptions {
+    revision: Signal<u64>,
+    guides: Memo<bool>,
+    default_method: Memo<Option<PullRequestMergeMethod>>,
 }
 fn detail_tabs(
     pr: Rc<PullRequestDetail>,
@@ -244,7 +282,13 @@ fn detail_tabs(
     tab: Signal<Tab>,
     conversation: super::review::Conversation,
     markdown: super::markdown::PrMarkdown,
+    options: PanelOptions,
 ) -> AnyElement {
+    let armed = signal(None);
+    let select_tab = move |value| {
+        armed.set(None);
+        tab.set(value);
+    };
     let mut tabs = view().app_class(tw("flex flex-row flex-wrap gap-2"));
     for (value, label) in [
         (Tab::Summary, "Summary"),
@@ -252,13 +296,28 @@ fn detail_tabs(
         (Tab::Code, "Code"),
     ] {
         if value != Tab::Code || pr.capabilities.diff {
-            tabs = tabs.child(button(t(label), move || tab.set(value)));
+            tabs = tabs.child(button(t(label), move || select_tab(value)));
         }
     }
+    tabs = tabs.child(dynamic(move || {
+        options
+            .guides
+            .get()
+            .then(|| button(t("Guide"), move || select_tab(Tab::Guide)))
+    }));
+    let controls = super::actions::controls(
+        pr.clone(),
+        session.clone(),
+        conversation.writable,
+        options.revision,
+        options.default_method,
+        armed,
+    );
     let composer = super::review::panel_composer(session.clone(), conversation, &pr);
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
         .child(header(&pr))
+        .child(controls)
         .child(tabs)
         .child(dynamic(move || {
             if tab.get() == Tab::Summary {
@@ -279,6 +338,10 @@ fn detail_tabs(
                         .and_then(Option::as_ref)
                         .is_some(),
                 ),
+                Tab::Guide if options.guides.get() => {
+                    super::guide::guide(session, markdown.clone(), move || tab.set(Tab::Code))
+                }
+                Tab::Guide => description(&pr, &markdown),
                 Tab::Summary => unreachable!(),
             }
         }))

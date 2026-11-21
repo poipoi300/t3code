@@ -29,7 +29,7 @@ use t3_ui::{
 // The shared environment fixture serves pairing and RPCs. Route only the diff HTTP
 // request to its scripted transport so both transports retain their wire assertions.
 #[derive(Clone)]
-struct ReviewPlatform(t3_client::testing::environment::EnvironmentPlatform);
+pub(super) struct ReviewPlatform(pub(super) t3_client::testing::environment::EnvironmentPlatform);
 impl Storage for ReviewPlatform {
     fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
         self.0.get(area, key)

@@ -133,3 +133,108 @@ pub fn excerpt_loaded_files(
         }),
     )
 }
+
+/// Select the same rows as reviewGuideTour.ts, including the other half of a replacement.
+pub fn excerpt_text(
+    file: &crate::view_logic::session::review::FileDiffMetadata,
+    side: &t3_contracts::pull_request_review_guide::PullRequestReviewGuideExcerptSide,
+    start: u64,
+    end: u64,
+) -> Option<String> {
+    use crate::view_logic::session::review::HunkContent;
+    use t3_contracts::pull_request_review_guide::PullRequestReviewGuideExcerptSide;
+    let new_side = *side == PullRequestReviewGuideExcerptSide::New;
+    let mut rows = Vec::new();
+    for (i, hunk) in file.hunks.iter().enumerate() {
+        let (mut old, mut new) = (hunk.deletion_line_index, hunk.addition_line_index);
+        for part in &hunk.hunk_content {
+            let (context, deletions, additions) = match *part {
+                HunkContent::Context { lines } => (lines, 0, 0),
+                HunkContent::Change {
+                    deletions,
+                    additions,
+                } => (0, deletions, additions),
+            };
+            for _ in 0..context {
+                let at = if new_side {
+                    hunk.addition_start
+                        .checked_add(new - hunk.addition_line_index)?
+                } else {
+                    hunk.deletion_start
+                        .checked_add(old - hunk.deletion_line_index)?
+                };
+                rows.push((i, ' ', Some(at as u64), file.addition_lines.get(new)?));
+                old += 1;
+                new += 1;
+            }
+            for _ in 0..deletions {
+                let at = hunk
+                    .deletion_start
+                    .checked_add(old - hunk.deletion_line_index)?;
+                rows.push((
+                    i,
+                    '-',
+                    (!new_side).then_some(at as u64),
+                    file.deletion_lines.get(old)?,
+                ));
+                old += 1;
+            }
+            for _ in 0..additions {
+                let at = hunk
+                    .addition_start
+                    .checked_add(new - hunk.addition_line_index)?;
+                rows.push((
+                    i,
+                    '+',
+                    new_side.then_some(at as u64),
+                    file.addition_lines.get(new)?,
+                ));
+                new += 1;
+            }
+        }
+    }
+    let mut matched = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.2.is_some_and(|n| (start..=end).contains(&n)));
+    let (mut first, _) = matched.next()?;
+    let mut last = matched.next_back().map_or(first, |(i, _)| i);
+    if new_side && rows[first].1 == '+' {
+        while first > 0 && rows[first - 1].0 == rows[first].0 && rows[first - 1].1 == '-' {
+            first -= 1;
+        }
+    } else if !new_side && rows[last].1 == '-' {
+        while last + 1 < rows.len() && rows[last + 1].0 == rows[last].0 && rows[last + 1].1 == '+' {
+            last += 1;
+        }
+    }
+    Some(
+        rows[first..=last]
+            .iter()
+            .map(|(_, prefix, _, line)| format!("{prefix}{}", line.trim_end_matches(['\r', '\n'])))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::diff_panel::comments::file_diff_metadata;
+    use t3_contracts::pull_request_review_guide::PullRequestReviewGuideExcerptSide::{New, Old};
+
+    #[test]
+    fn excerpt_includes_the_replacement_on_either_side_without_unrelated_context() {
+        let file = file_diff_metadata("@@ -3,3 +8,3 @@\n before\n-old\n+new\n after\n");
+        assert_eq!(
+            excerpt_text(&file, &New, 9, 9).as_deref(),
+            Some("-old\n+new")
+        );
+        assert_eq!(
+            excerpt_text(&file, &Old, 4, 4).as_deref(),
+            Some("-old\n+new")
+        );
+        assert_eq!(excerpt_text(&file, &Old, 3, 3).as_deref(), Some(" before"));
+        assert_eq!(excerpt_text(&file, &New, 1, 3), None);
+    }
+}
