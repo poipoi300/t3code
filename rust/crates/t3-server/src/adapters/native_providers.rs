@@ -293,9 +293,7 @@ mod native {
         if config["setupMode"] == "managed" {
             let adapter = ManagedCodexAdapter {
                 options,
-                attachments: Some(Arc::new(CodexAttachments(DirectoryClaudeAttachments::new(
-                    host.attachments.clone(),
-                )))),
+                attachments: Some(Arc::new(CodexAttachments::new(host.attachments.clone()))),
                 domain: Arc::downgrade(domain),
             };
             return Ok(AdapterRegistration {
@@ -308,9 +306,7 @@ mod native {
         t3_provider::homes::materialize_codex_shadow(&layout)
             .map_err(|_| "Failed to materialize the Codex shadow home.")?;
         let mut options = options;
-        options.attachments = Some(Arc::new(CodexAttachments(DirectoryClaudeAttachments::new(
-            host.attachments.clone(),
-        ))));
+        options.attachments = Some(Arc::new(CodexAttachments::new(host.attachments.clone())));
         options.process = codex_process(
             &expand_home_path(text(config, "binaryPath"), &host.home),
             layout
@@ -494,10 +490,21 @@ mod native {
 
     /// Codex reads attachments by saved path; images also travel inline as a data URL
     /// (`CodexAdapterV2` `resolveAttachmentPath` + `readFile`).
-    struct CodexAttachments(DirectoryClaudeAttachments);
+    struct CodexAttachments(Arc<dyn ClaudeAttachments>);
+
+    impl CodexAttachments {
+        fn new(root: PathBuf) -> Self {
+            Self(Arc::new(DirectoryClaudeAttachments::new(root)))
+        }
+    }
 
     #[async_trait]
     impl CodexAttachmentResolver for CodexAttachments {
+        fn session_resolver(&self) -> ProviderResult<Option<Arc<dyn CodexAttachmentResolver>>> {
+            let (files, _) = self.0.for_session()?;
+            Ok(Some(Arc::new(Self(files))))
+        }
+
         async fn resolve(
             &self,
             attachment: &t3_contracts::chat_attachment::ChatAttachment,
@@ -548,16 +555,23 @@ mod native {
         use super::*;
         #[tokio::test]
         async fn codex_session_drop_removes_its_private_copy() {
-            let tmp=tempfile::tempdir().unwrap();
+            let tmp = tempfile::tempdir().unwrap();
             let image=serde_json::from_value(serde_json::json!({"type":"image","id":"thread-00000000-0000-4000-8000-000000000001","mimeType":"image/png","name":"a.png","sizeBytes":1})).unwrap();
-            let files=DirectoryClaudeAttachments::new(tmp.path().into());
-            std::fs::write(files.path(&image).unwrap(),b"x").unwrap();
-            let registration: Arc<dyn CodexAttachmentResolver>=Arc::new(CodexAttachments(files));
-            let session=registration.session_resolver().unwrap_or_else(|| registration.clone());
-            let copy=session.resolve(&image).await.unwrap().unwrap().path;
+            let files = DirectoryClaudeAttachments::new(tmp.path().into());
+            std::fs::write(files.path(&image).unwrap(), b"x").unwrap();
+            let registration: Arc<dyn CodexAttachmentResolver> =
+                Arc::new(CodexAttachments(Arc::new(files)));
+            let session = registration
+                .session_resolver()
+                .unwrap()
+                .unwrap_or_else(|| registration.clone());
+            let copy = session.resolve(&image).await.unwrap().unwrap().path;
             assert!(copy.is_file());
             drop(session);
-            assert!(!copy.exists(), "registration retained a completed session's copy");
+            assert!(
+                !copy.exists(),
+                "registration retained a completed session's copy"
+            );
         }
     }
     /// `CodexInstallation.compatibility` as the adapter's initialize check: the live manifest's

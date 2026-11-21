@@ -40,7 +40,10 @@ pub struct ResolvedCodexAttachment {
 // Local host seam until attachment/document services are wired into runtime composition.
 #[async_trait]
 pub trait CodexAttachmentResolver: Send + Sync {
-    fn session_resolver(&self) -> Option<Arc<dyn CodexAttachmentResolver>> { None }
+    /// Stateful host resolvers supply a fresh owner for each native session.
+    fn session_resolver(&self) -> ProviderResult<Option<Arc<dyn CodexAttachmentResolver>>> {
+        Ok(None)
+    }
 
     async fn resolve(
         &self,
@@ -544,7 +547,7 @@ impl Drop for CodexSessionRuntime {
 
 impl CodexSessionRuntime {
     async fn connect(
-        options: CodexAdapterOptions,
+        mut options: CodexAdapterOptions,
         input: OpenSession,
         client: native::Client,
         events: native::Events,
@@ -558,6 +561,11 @@ impl CodexSessionRuntime {
             return Err(protocol(
                 "Codex selection belongs to another provider instance",
             ));
+        }
+        if let Some(resolver) = &options.attachments
+            && let Some(session) = resolver.session_resolver()?
+        {
+            options.attachments = Some(session);
         }
         let session = mapping::decode(json!({
             "id":input.provider_session_id,"driver":"codex","providerInstanceId":options.instance_id,

@@ -24,6 +24,7 @@ use t3_textgen::{
         resolve_codex_model, run_claude, run_codex,
     },
 };
+use t3_workspace::attachment_delivery::AttachmentDelivery;
 
 /// What every native launch shares (as `native_providers.rs`'s host): the server's environment,
 /// account home and cwd, and the attachments directory.
@@ -66,7 +67,8 @@ pub async fn run(
     gate.execute(id, async {
         match spec.driver.0.as_str() {
             "codex" => {
-                let run = codex(domain, host, &spec, request).await?;
+                let delivery = Arc::new(AttachmentDelivery::new(host.attachments.clone()));
+                let run = codex(domain, host, &spec, request, delivery.clone()).await?;
                 run_codex(&run, request, cancellation).await
             }
             "claudeAgent" => {
@@ -105,7 +107,11 @@ fn boolean_option(options: &[ProviderOptionSelection], id: &str) -> Option<bool>
     }
 }
 
-fn title_image_paths(directory: &Path, attachments: &[t3_contracts::chat_attachment::ChatAttachment]) -> Vec<PathBuf> {
+fn title_image_paths(
+    delivery: &AttachmentDelivery,
+    directory: &Path,
+    attachments: &[t3_contracts::chat_attachment::ChatAttachment],
+) -> Vec<PathBuf> {
     attachments
         .iter()
         .filter(|attachment| {
@@ -116,11 +122,10 @@ fn title_image_paths(directory: &Path, attachments: &[t3_contracts::chat_attachm
         })
         .filter_map(|attachment| {
             t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
-                directory,
-                attachment,
+                directory, attachment,
             )
         })
-        .filter(|path| path.is_absolute() && path.is_file())
+        .filter_map(|path| delivery.reference(&path).ok())
         .collect()
 }
 
@@ -129,14 +134,26 @@ mod attachment_review_tests {
     use super::*;
     #[test]
     fn title_image_uses_a_private_snapshot() {
-        let tmp=tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let image=serde_json::from_value(serde_json::json!({"type":"image","id":"thread-00000000-0000-4000-8000-000000000001","mimeType":"image/png","name":"a.png","sizeBytes":1})).unwrap();
-        let raw=t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(tmp.path(),&image).unwrap();
-        std::fs::write(&raw,b"x").unwrap();
-        let paths=title_image_paths(tmp.path(),&[image]);
-        assert_eq!(paths.len(),1);
-        assert!(!paths[0].starts_with(tmp.path()), "original path passed to title provider");
+        let raw = t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
+            tmp.path(),
+            &image,
+        )
+        .unwrap();
+        std::fs::write(&raw, b"x").unwrap();
+        let delivery = AttachmentDelivery::new(tmp.path().into());
+        let paths = title_image_paths(&delivery, tmp.path(), std::slice::from_ref(&image));
+        assert_eq!(paths.len(), 1);
+        assert!(
+            !paths[0].starts_with(tmp.path()),
+            "original path passed to title provider"
+        );
         assert_eq!(std::fs::read(&paths[0]).unwrap(), b"x");
+        std::fs::hard_link(&raw, tmp.path().join("second.png")).unwrap();
+        assert!(title_image_paths(&delivery, tmp.path(), &[image]).is_empty());
+        drop(delivery);
+        assert!(!paths[0].exists());
     }
 }
 
@@ -146,6 +163,7 @@ async fn codex(
     host: &NativeHost,
     spec: &Arc<InstanceSpec>,
     request: &GenerationRequest,
+    delivery: Arc<AttachmentDelivery>,
 ) -> Result<CodexRun, GenerationError> {
     let config = &spec.config;
     // The managed runtime resolves its own config and environment under its access controller.
@@ -222,7 +240,12 @@ async fn codex(
             })
         })
         .flatten();
-    let image_paths = title_image_paths(&host.attachments, &request.attachments);
+    let directory = host.attachments.clone();
+    let attachments = request.attachments.clone();
+    let image_paths =
+        tokio::task::spawn_blocking(move || title_image_paths(&delivery, &directory, &attachments))
+            .await
+            .map_err(|_| GenerationError::Provider)?;
     let program = match text(config, "binaryPath") {
         "" => "codex".to_owned(),
         configured => expand_home_path(configured, &host.home),
