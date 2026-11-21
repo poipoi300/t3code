@@ -527,6 +527,8 @@ fn digits_typed_in_the_answer_editor_stay_in_the_answer() {
 fn sending_while_disconnected_takes_the_webs_toast_and_keeps_the_draft() {
     for window in [DESKTOP, PHONE] {
         let mut app = start(window, false, false);
+        app.wait_for("role:button[Attach files]")
+            .expect("the composer has opened its writable draft");
         app.type_text("id:composer-editor", "not yet")
             .expect("type");
         app.wait_for("Client draft \"not yet\"").expect("saved");
