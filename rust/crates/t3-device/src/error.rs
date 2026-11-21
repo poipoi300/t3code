@@ -58,17 +58,24 @@ impl Error {
         reason: String,
         cause: Option<serde_json::Value>,
     ) -> Self {
+        // TypeScript reports the cause's message in Failed status; the RPC retains its
+        // feature-specific host reason.
+        let detail = cause
+            .as_ref()
+            .and_then(|value| value["message"].as_str())
+            .unwrap_or(&reason)
+            .to_owned();
         Self::Device {
             wire: Box::new(DeviceError::DeviceHostUnavailableError(
                 DeviceHostUnavailableError {
                     _tag: DeviceHostUnavailableErrorTag::Error,
                     host_id: id.into(),
                     host_label: label.map(|s| Some(s.into())),
-                    reason: reason.clone(),
+                    reason,
                     cause: cause.map(Some),
                 },
             )),
-            reason,
+            reason: detail,
         }
     }
     pub fn operation(operation: &str, reason: DeviceOperationErrorReason) -> Self {

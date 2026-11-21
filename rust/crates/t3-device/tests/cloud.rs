@@ -549,6 +549,36 @@ async fn simlock_fixture_with_record(
     (temp, host, commands, pool)
 }
 #[tokio::test]
+async fn simlock_without_node_exposes_the_cause_in_failed_status_and_the_host_reason_on_the_wire() {
+    let (temp, previous, commands, http) = simlock_fixture(1, false).await;
+    previous.stop().await.unwrap();
+    let host = SimlockHost::new(SimlockOptions {
+        config: serde_json::from_value(json!({"kind":"simlock","id":"pool","label":"Pool","gatewayUrl":"https://simlock.test:4700"})).unwrap(),
+        state: temp.path().into(), node: t3_device::io::NodeRuntime::from_search_path(None),
+        agent_entry: "/entry".into(), cli_provider: None, commands, http, secrets: Arc::new(LiteralSecrets), environment: BTreeMap::new(),
+    }).unwrap();
+    let error = host.ensure_ready(Arc::new(|_, _| {})).await.err().unwrap();
+    let detail = error.to_string();
+    let Error::Device { wire, .. } = error else {
+        panic!("expected a host error")
+    };
+    let wire = serde_json::to_value(wire).unwrap();
+    assert_eq!(wire["hostId"], "pool");
+    assert_eq!(wire["cause"]["name"], "NodeRuntimeUnavailableError");
+    assert!(
+        wire["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Local device support requires Node.js.")
+    );
+    assert!(
+        detail.starts_with("Device automation requires Node.js."),
+        "{detail}"
+    );
+    assert_eq!(detail, wire["cause"]["message"]);
+}
+
+#[tokio::test]
 async fn simlock_catalog_filters_unavailable_workers_and_non_mobile_models() {
     let (_temp, host, _commands, pool) = simlock_fixture(2, false).await;
     let list = host.list().await.unwrap().devices;

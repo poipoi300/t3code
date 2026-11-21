@@ -231,3 +231,45 @@ async fn missing_bound_runtime_reports_recovery_guidance() {
         result.stderr
     );
 }
+
+#[tokio::test]
+async fn launcher_without_node_reports_the_typed_failure_and_warns_on_best_effort_close() {
+    // A scoped subscriber captures the actual warning emitted during release.
+    let bytes = tempfile::tempfile().unwrap();
+    let sink = bytes.try_clone().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(sink))
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let dir = tempfile::tempdir().unwrap();
+    let launchers = FileLaunchers {
+        state: dir.path().into(),
+        node: t3_device::io::NodeRuntime::from_search_path(None),
+        entry: dir.path().join("entry.mjs"),
+        commands: Arc::new(NativeCommands),
+        cli_provider: None,
+    };
+    let t3_device::Error::Device { wire, .. } = launchers.ensure_shim().await.unwrap_err() else {
+        panic!("expected a host error")
+    };
+    let wire = serde_json::to_value(wire).unwrap();
+    assert_eq!(wire["cause"]["name"], "NodeRuntimeUnavailableError");
+    assert!(
+        wire["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Device automation requires Node.js.")
+    );
+    launchers.release("fixture/agent-device").await.unwrap();
+    use std::io::{Read, Seek};
+    let mut bytes = bytes;
+    bytes.rewind().unwrap();
+    let mut log = String::new();
+    bytes.read_to_string(&mut log).unwrap();
+    assert!(
+        log.contains("Could not end the agent-device session"),
+        "{log}"
+    );
+}

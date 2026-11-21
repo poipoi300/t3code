@@ -212,11 +212,12 @@ async fn local_fixture(
     Arc<Health>,
     Arc<AtomicUsize>,
 ) {
-    local_fixture_with_stop_signal(startup_code, None).await
+    local_fixture_with_stop_signal(startup_code, None, "node").await
 }
 async fn local_fixture_with_stop_signal(
     startup_code: i32,
     daemon_stopped: Option<Arc<Notify>>,
+    node: &str,
 ) -> (
     tempfile::TempDir,
     LocalDeviceHost,
@@ -265,7 +266,7 @@ async fn local_fixture_with_stop_signal(
     let host = LocalDeviceHost::new(LocalOptions {
         state,
         cwd: temp.path().into(),
-        node: "node".into(),
+        node: node.into(),
         tools,
         http: http.clone(),
         commands: commands.clone(),
@@ -279,7 +280,7 @@ async fn local_fixture_with_stop_signal(
 async fn local_stops_daemon_before_slow_hub_shutdown_completes() {
     let requested = Arc::new(Notify::new());
     let (_temp, host, _commands, spawner, _http, _attempts) =
-        local_fixture_with_stop_signal(0, Some(requested.clone())).await;
+        local_fixture_with_stop_signal(0, Some(requested.clone()), "node").await;
     let host = Arc::new(host);
     host.ensure_agent_ready(Arc::new(|_, _| {})).await.unwrap();
     let gate = Gate::new();
@@ -703,4 +704,26 @@ fn missing_node_can_be_installed_and_removed_while_the_server_runs() {
             "server alias cannot launch Node tooling"
         );
     }
+}
+
+#[test]
+fn hard_link_to_running_binary_is_not_node() {
+    let exe = std::env::current_exe().unwrap();
+    let root = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+    let alias = root
+        .path()
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    std::fs::hard_link(&exe, &alias).unwrap();
+    let runtime = t3_device::io::NodeRuntime::from_search_path(Some(root.path().as_os_str()));
+    assert!(runtime.resolve().is_none());
+}
+
+#[tokio::test]
+async fn stopping_a_recorded_local_agent_without_node_is_best_effort() {
+    let (temp, host, commands, ..) = local_fixture_with_stop_signal(0, None, "").await;
+    let state = temp.path().join("state/device/agent-device");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("daemon.json"), "{}").unwrap();
+    host.stop_agent().await.unwrap();
+    assert!(commands.calls.lock().unwrap().is_empty());
 }

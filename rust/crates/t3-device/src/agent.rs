@@ -230,6 +230,11 @@ impl Launchers for FileLaunchers {
     async fn release(&self, launcher: &str) -> Result<()> {
         // TypeScript treats closing an unreachable agent launcher as best effort.
         let Some(node) = self.node.resolve() else {
+            tracing::warn!(
+                launcher,
+                cause = "Device automation requires Node.js",
+                "Could not end the agent-device session"
+            );
             return Ok(());
         };
         let parent = Path::new(launcher)

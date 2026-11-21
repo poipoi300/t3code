@@ -9,6 +9,7 @@ default = []
 mcp = ["dep:t3-mcp"]
 
 [dependencies]
+tracing = "0.1"
 same-file = "1"
 t3-contracts = { path = "../t3-contracts" }
 t3-process = { path = "../t3-process" }
@@ -39,6 +40,7 @@ uuid = { version = "1", features = ["v4"] }
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
