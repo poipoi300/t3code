@@ -321,6 +321,8 @@ enum SidebarScenario {
     ConfirmUnpin,
     DeferredBatch,
     RejectedBatch,
+    ProjectFolders,
+    DraggableShelves,
 }
 
 #[component]
@@ -341,6 +343,16 @@ fn DeferredBatchSidebar() -> impl IntoElement {
 #[component]
 fn RejectedBatchSidebar() -> impl IntoElement {
     live_sidebar_fixture().scenario(SidebarScenario::RejectedBatch as usize)
+}
+
+#[component]
+fn ProjectFolderSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::ProjectFolders as usize)
+}
+
+#[component]
+fn DraggableSidebar() -> impl IntoElement {
+    live_sidebar_fixture().scenario(SidebarScenario::DraggableShelves as usize)
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -381,10 +393,28 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
             thread["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
         }
     }
+    if props.scenario == SidebarScenario::DraggableShelves as usize {
+        initial["threads"][1]["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
+        initial["threads"][1]["pinOrderKey"] = json!("a0");
+    }
+    if props.scenario == SidebarScenario::ProjectFolders as usize {
+        server.register("projects.mutate", t3_client::testing::CallKind::Unary);
+        let mut pinned = initial["projects"][0].clone();
+        pinned["pinnedAt"] = json!("2026-11-21T00:00:00.000Z");
+        pinned["deletedAt"] = json!(null);
+        server.reply("projects.mutate", Ok(pinned));
+    }
     server.set_shell(initial);
     server.edit_config(|config| {
+        config["environment"]["capabilities"]["projectOrganization"] = json!(true);
         config["settings"]["snoozePresets"] = json!([{ "kind": "after", "minutes": 17 }]);
-        for capability in ["threadPinning", "threadSettlement", "threadSnooze"] {
+        for capability in [
+            "threadPinning",
+            "threadPinReorder",
+            "threadActiveReorder",
+            "threadSettlement",
+            "threadSnooze",
+        ] {
             config["environment"]["capabilities"][capability] = json!(true);
         }
     });
@@ -486,6 +516,12 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
                     .await
                     .expect("enable unpin confirmation");
             }
+            if props.scenario == SidebarScenario::ProjectFolders as usize {
+                prefs
+                    .update(|prefs| prefs.boring_sidebar_enabled = true)
+                    .await
+                    .expect("enable project folders");
+            }
             pairing.await.expect("pair sidebar environment");
         }
         .boxed_local(),
@@ -511,6 +547,14 @@ fn LiveSidebarFixture(props: LiveSidebarFixtureProps) -> impl IntoElement {
                             payload["threadId"].as_str().unwrap_or_default()
                         )
                     })
+                    .chain(server.calls("projects.mutate").into_iter().map(|payload| {
+                        format!(
+                            "{}:{}:{}",
+                            payload["type"].as_str().unwrap_or_default(),
+                            payload["projectId"].as_str().unwrap_or_default(),
+                            payload["pinned"].as_bool().unwrap_or_default(),
+                        )
+                    }))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -599,6 +643,8 @@ fn start_sidebar(window: (f32, f32), root: Root) -> Headless {
     fixtures.register::<ConfirmUnpinSidebar>();
     fixtures.register::<DeferredBatchSidebar>();
     fixtures.register::<RejectedBatchSidebar>();
+    fixtures.register::<ProjectFolderSidebar>();
+    fixtures.register::<DraggableSidebar>();
     let mut sets = t3_ui::registries();
     sets.push(fixtures);
     let mut config = EngineConfig {
@@ -637,6 +683,20 @@ pub(super) fn assert_commands(app: &mut Headless, expected: &str) {
         .expect("expected thread commands");
 }
 
+pub(super) fn wait_for_undo_summary(app: &mut Headless, summary: &str) {
+    app.wait_for("role:button[Ctrl+Z to undo]")
+        .expect("footer Undo button");
+    // The source wraps the summary out of view if the footer is too narrow.
+    app.wait_until(summary, std::time::Duration::from_secs(5), |screen| {
+        screen.layout_nodes().iter().any(|node| {
+            node.text
+                .as_ref()
+                .is_some_and(|text| text.text.text == summary)
+        })
+    })
+    .expect("accepted action summary");
+}
+
 #[test]
 fn live_sidebar_archives_and_undoes_from_the_footer_desktop() {
     archives_and_undoes_from_the_footer(DESKTOP);
@@ -652,8 +712,7 @@ fn archives_and_undoes_from_the_footer(window: (f32, f32)) {
     open_row_menu(&mut app, window, "Alpha thread");
     app.press("role:menuitem[Archive thread]")
         .expect("archive from row");
-    app.wait_for("Archived,")
-        .expect("footer announces accepted archive");
+    wait_for_undo_summary(&mut app, "Archived,");
     app.press("role:button[Ctrl+Z to undo]")
         .expect("undo from footer");
     assert_commands(&mut app, "thread.archive:alpha thread.unarchive:alpha");
@@ -736,7 +795,7 @@ fn live_sidebar_cannot_undo_after_five_seconds() {
     open_row_menu(&mut app, DESKTOP, "Alpha thread");
     app.press("role:menuitem[Archive thread]")
         .expect("archive Alpha");
-    app.wait_for("Archived,").expect("undo initially available");
+    wait_for_undo_summary(&mut app, "Archived,");
     app.press_key("f7")
         .expect("advance the client clock by five seconds");
     assert!(!app.screen().shows("Ctrl+Z to undo"));
@@ -934,7 +993,7 @@ fn live_sidebar_keeps_a_new_selection_made_while_a_batch_is_pending() {
     app.wait_for("Selection 2")
         .expect("new selection made during request");
     app.press_key("f5").expect("finish first RPC");
-    app.wait_for("Settled 2,").expect("both mutations accepted");
+    wait_for_undo_summary(&mut app, "Settled 2,");
     app.wait_for("Selection 2")
         .expect("late response leaves the new selection intact");
 }
@@ -954,4 +1013,102 @@ fn live_sidebar_preserves_selection_if_permission_is_revoked_during_batch_confir
     app.wait_for("Selection 2")
         .expect("preserve selection when the operation is denied");
     assert_commands(&mut app, "");
+}
+
+#[test]
+fn followup_updates_footer_desktop() {
+    updates_footer(DESKTOP);
+}
+
+#[test]
+fn followup_updates_footer_phone() {
+    updates_footer(PHONE);
+}
+
+fn updates_footer(window: (f32, f32)) {
+    let app = start_live_sidebar(window);
+    assert!(
+        app.screen()
+            .layout_nodes()
+            .iter()
+            .any(|node| node.test_id.as_deref() == Some("sidebar-update-footer")),
+        "production update footer slot"
+    );
+}
+
+#[test]
+fn followup_project_folder_desktop() {
+    project_folder(DESKTOP);
+}
+
+#[test]
+fn followup_project_folder_phone() {
+    project_folder(PHONE);
+}
+
+fn project_folder(window: (f32, f32)) {
+    let mut app = start_sidebar(window, Root::of::<ProjectFolderSidebar>());
+    let folder = "role:button[Project]";
+    app.wait_for(folder)
+        .expect("mount the enabled project folder");
+    app.press(folder).expect("close the project folder");
+    app.wait_for_gone(
+        "role:button[Alpha thread, Project]",
+        std::time::Duration::from_secs(5),
+    )
+    .expect("closed folder hides inactive threads");
+    app.press(folder).expect("reopen the project folder");
+    app.wait_for("role:button[Alpha thread, Project]")
+        .expect("thread is visible again");
+    let open_folder_menu = |app: &mut Headless| {
+        if window == PHONE {
+            app.long_press(folder).expect("folder actions on touch");
+        } else {
+            app.right_click(folder).expect("folder actions on desktop");
+        }
+    };
+    open_folder_menu(&mut app);
+    app.wait_for("role:menuitem[Copy path]")
+        .expect("copy workspace path action");
+    app.press("role:menuitem[Pin project]")
+        .expect("pin the folder project");
+    assert_commands(&mut app, "project.update:project:true");
+
+    open_folder_menu(&mut app);
+    app.press("role:menuitem[Project settings]")
+        .expect("scoped settings action");
+    app.wait_for("Route /settings/projects")
+        .expect("open project settings");
+
+    let mut app = start_sidebar(window, Root::of::<ProjectFolderSidebar>());
+    app.wait_for("role:button[New thread in Project]")
+        .expect("mount the folder action");
+    app.press("role:button[New thread in Project]")
+        .expect("start in the folder");
+    app.wait_for("Draft route").expect("open a project draft");
+}
+
+#[test]
+fn followup_shelf_drag_desktop() {
+    shelf_drag(DESKTOP);
+}
+
+#[test]
+fn followup_shelf_drag_phone() {
+    shelf_drag(PHONE);
+}
+
+fn shelf_drag(window: (f32, f32)) {
+    let mut app = start_sidebar(window, Root::of::<DraggableSidebar>());
+    let offset = app
+        .screen()
+        .layout_nodes()
+        .iter()
+        .filter(|node| node.test_id.as_deref() == Some("sidebar-row-card"))
+        .map(|node| node.bounds.origin.y.0)
+        .collect::<Vec<_>>();
+    let rise = offset.first().expect("pinned row") - offset.last().expect("active row");
+    app.drag("label:Move Alpha thread", point(px(0.0), px(rise)))
+        .expect("drag the active thread to the pinned shelf");
+    assert_commands(&mut app, "thread.pin:alpha thread.pin.reorder:beta");
 }

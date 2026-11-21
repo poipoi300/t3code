@@ -78,6 +78,7 @@ pub struct SidebarState {
     pub project_scope: Vec<LogicalProjectKey>,
     pub selected: BTreeSet<ThreadKey>,
     pub new_thread_projects: Vec<ProjectKey>,
+    preferences: projects::Preferences,
 }
 
 pub fn sidebar_state() -> Signal<SidebarState> {
@@ -254,8 +255,14 @@ pub fn project_sidebar(
         delegated_under_parent: &delegated,
         selected: &state.selected,
         route: route.as_ref(),
-        working_shelf: true,
-        active_order: ActiveOrder::InboxReturn,
+        working_shelf: state.preferences.working,
+        active_order: if state.preferences.folders {
+            ActiveOrder::LatestUserMessage
+        } else if state.preferences.working {
+            ActiveOrder::InboxReturn
+        } else {
+            ActiveOrder::Manual
+        },
         inbox: None,
     };
     let environments: BTreeMap<_, _> = shells
@@ -293,7 +300,13 @@ pub fn project_sidebar(
         .iter()
         .map(|view| ThreadInput::from_environment_shell(view, None, &timestamp_ms))
         .collect();
-    let ordered = present_sidebar(&groups, &inputs, &options, &timestamp_ms, |_| false);
+    let ordered = present_sidebar(&groups, &inputs, &options, &timestamp_ms, |group| {
+        if scope.is_empty() {
+            group.group.pinned && !group.group.archived
+        } else {
+            scope.contains(&group.group.key)
+        }
+    });
     let project_index: BTreeMap<_, _> = shells
         .iter()
         .flat_map(|(environment, shell)| {
@@ -342,6 +355,11 @@ pub fn project_sidebar(
                 activity_at: activity(&source.thread),
                 active: source.active,
                 variant: match source.section {
+                    Section::Active
+                        if state.preferences.folders && !state.preferences.multiline =>
+                    {
+                        RowVariant::Slim
+                    }
                     Section::Pinned | Section::Active | Section::Working => RowVariant::Card,
                     Section::Snoozed | Section::Settled => RowVariant::Slim,
                 },
@@ -369,13 +387,52 @@ pub fn project_sidebar(
         || Rc::new(rows.iter().map(|row| row.item.list_key()).collect()),
         |previous| previous.keys.clone(),
     );
+    let indexed_rows = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (&row.item.key, index))
+        .collect::<BTreeMap<_, _>>();
     let folders = ordered
         .folders
         .iter()
-        .map(|folder| SidebarFolder {
-            group: folder.group.clone(),
-            rows: folder.rows.clone(),
-            dot: folder.dot,
+        .filter_map(|folder| {
+            let group = folder.group;
+            if !scope.is_empty() && !scope.contains(&group.group.key) {
+                return None;
+            }
+            let indices = folder
+                .rows
+                .iter()
+                .filter_map(|index| {
+                    let row = &ordered.rows[*index];
+                    (row.section == Section::Active)
+                        .then(|| indexed_rows.get(&row.source.thread.key).copied())
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            if indices.is_empty()
+                && scope.is_empty()
+                && (!group.group.pinned || group.group.archived)
+            {
+                return None;
+            }
+            let statuses = folder
+                .rows
+                .iter()
+                .filter_map(|index| {
+                    let row = &ordered.rows[*index];
+                    (row.section == Section::Active && !row.active)
+                        .then(|| row.source.status.clone())
+                })
+                .collect::<Vec<_>>();
+            Some(SidebarFolder {
+                group: group.clone(),
+                rows: indices,
+                dot: t3_client::view_logic::shell::sidebar::status::folder_dot(
+                    &statuses,
+                    &timestamp_ms,
+                ),
+            })
         })
         .collect();
     let next_snooze_wake = ordered.next_snooze_wake;
@@ -448,30 +505,48 @@ fn empty_message(list: &SidebarList) -> String {
     }
 }
 
-/// A list entry's key: the row's own, or the marker's stable name.
-fn list_item_key(item: &SidebarListItem, rows: &[Rc<ListRow>]) -> SharedString {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListEntry {
+    Shelf(SidebarListItem),
+    Folder(usize),
+}
+
+fn list_item_key(item: ListEntry, model: &SidebarList) -> SharedString {
     match item {
-        SidebarListItem::Thread(index) => rows
-            .get(*index)
+        ListEntry::Shelf(SidebarListItem::Thread(index)) => model
+            .rows
+            .get(index)
             .map(|row| row.item.list_key())
             .unwrap_or_default(),
-        SidebarListItem::Marker(marker) => format!("marker:{}", marker.name()).into(),
-        SidebarListItem::SettledMore => "settled:more".into(),
+        ListEntry::Shelf(SidebarListItem::Marker(marker)) => {
+            format!("marker:{}", marker.name()).into()
+        }
+        ListEntry::Shelf(SidebarListItem::SettledMore) => "settled:more".into(),
+        ListEntry::Folder(index) => format!(
+            "folder:{}",
+            t3_client::services::settings::scope::logical_project_scope_key(
+                &model.folders[index].group.group.key
+            )
+        )
+        .into(),
     }
 }
 
 type ShelfCount = fn(&SidebarListItems) -> usize;
 type ShelfAnchored = fn(&SidebarListItems) -> bool;
 
-/// Port of Sidebar.tsx's marker switch (SidebarListMarkers.tsx). The drag-only markers stay
-/// closed: SB-DRAG has not landed, so no drag is ever in progress.
+/// The shelf markers and drop hints from SidebarListMarkers.tsx.
 fn shelf_marker(
     marker: Marker,
     items: Memo<Shared<SidebarListItems>>,
     expansion: Signal<ShelfExpansion>,
     store: Stored<Option<crate::runtime::services::shell::SidebarShelvesStore>>,
+    drag: drag::Drag,
 ) -> AnyElement {
     let tasks = crate::runtime::tasks::TaskOwner::here();
+    let target = stored(marker.id());
+    let dragging = Prop::bind(move || drag.active());
+    let highlighted = Prop::bind(move || target.with(|key| drag.over(key)));
     let header = |label: &'static str, count: ShelfCount, anchored: ShelfAnchored| {
         let class_name = items
             .with_untracked(|list| anchored(list))
@@ -481,8 +556,8 @@ fn shelf_marker(
             label: Text::from(label),
             count: Prop::bind(move || items.with(|list| count(list))),
             class_name,
-            dragging: false.into(),
-            is_drop_target: false.into(),
+            dragging: dragging.clone(),
+            is_drop_target: highlighted.clone(),
             toggle: crate::ui::collapsible::CollapsibleHandle::controlled(
                 move || expansion.with(|expansion| expansion.of(marker).unwrap_or(false)),
                 || false,
@@ -500,26 +575,32 @@ fn shelf_marker(
         .into_element()
     };
     match marker {
-        Marker::PinnedHeader => {
-            shelves::sidebar_drag_boundary(marker, "Pinned".into(), false.into(), false.into())
-                .into_element()
-        }
-        Marker::PinnedDivider => {
-            shelves::sidebar_drag_boundary(marker, "Active".into(), false.into(), false.into())
-                .into_element()
-        }
+        Marker::PinnedHeader => shelves::sidebar_drag_boundary(
+            marker,
+            "Pinned".into(),
+            dragging.clone(),
+            highlighted.clone(),
+        )
+        .into_element(),
+        Marker::PinnedDivider => shelves::sidebar_drag_boundary(
+            marker,
+            "Active".into(),
+            dragging.clone(),
+            highlighted.clone(),
+        )
+        .into_element(),
         Marker::ActivePlaceholder => shelves::sidebar_section_placeholder(
             marker,
             "Active".into(),
-            false.into(),
-            false.into(),
+            dragging.clone(),
+            highlighted.clone(),
         )
         .into_element(),
         Marker::SettledPlaceholder => shelves::sidebar_section_placeholder(
             marker,
             "Settled".into(),
-            false.into(),
-            false.into(),
+            dragging.clone(),
+            highlighted.clone(),
         )
         .into_element(),
         Marker::WorkingHeader => header("Working", |list| list.working_count, |_| true),
@@ -539,11 +620,24 @@ fn shelf_marker(
 pub fn sidebar() -> impl IntoElement {
     let runtime = rt();
     let nav = navigator();
-    let undo_notice = row::thread_actions().map(actions::footer_undo);
+    let client = row::thread_actions();
+    let undo_notice = client.clone().map(actions::footer_undo);
     let snooze_dialog = snooze::dialog_host();
     let selection_store = selection::use_thread_selection_store();
     selection::install_escape(selection_store);
     let state = sidebar_state();
+    if let Some(client) = &client {
+        use futures::StreamExt;
+        let mut preferences = client.sidebar_preferences();
+        crate::runtime::tasks::watch(async move {
+            while let Some(prefs) = preferences.next().await {
+                let prefs = projects::Preferences::from(prefs.as_ref());
+                if state.with_untracked(|state| state.preferences != prefs) {
+                    state.update(|state| state.preferences = prefs);
+                }
+            }
+        });
+    }
     let environments = runtime.environments_signal();
     let ids = computed(move || {
         environments.with(|list| {
@@ -620,6 +714,10 @@ pub fn sidebar() -> impl IntoElement {
     // (`sidebar_list::sidebar_list_items`); search lists matching rows without markers.
     let shelves_store = use_context::<crate::runtime::services::shell::SidebarShelvesStore>();
     let expansion = signal(ShelfExpansion::default());
+    let folder_expansion = global::<BTreeMap<String, bool>>();
+    if let Some(store) = &shelves_store {
+        store.load_project_expansion(folder_expansion);
+    }
     crate::runtime::services::shell::load_sidebar_shelves(expansion, shelves_store.clone());
     let shelves_store = stored(shelves_store);
     let settled_visible = signal(SETTLED_TAIL_INITIAL_COUNT);
@@ -651,16 +749,63 @@ pub fn sidebar() -> impl IntoElement {
             )))
         })
     });
+    let grouped = computed(move || state.with(|state| state.preferences.folders));
+    let entries = computed(move || {
+        let shelves = shelf_items.get();
+        if !grouped.get() {
+            return shelves
+                .items
+                .iter()
+                .copied()
+                .map(ListEntry::Shelf)
+                .collect::<Vec<_>>();
+        }
+        model.with(|model| {
+            folder_expansion.with(|expansion| {
+                let mut entries = vec![];
+                let add_folders = || {
+                    model
+                        .folders
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, folder)| {
+                            let open = projects::expanded(&folder.group.group, expansion);
+                            std::iter::once(ListEntry::Folder(index)).chain(
+                                folder
+                                    .rows
+                                    .iter()
+                                    .copied()
+                                    .filter(move |index| open || model.rows[*index].source.active)
+                                    .map(|index| ListEntry::Shelf(SidebarListItem::Thread(index))),
+                            )
+                        })
+                };
+                for item in shelves.items.iter().copied() {
+                    match item {
+                        SidebarListItem::Marker(Marker::ActivePlaceholder) => {
+                            entries.extend(add_folders())
+                        }
+                        SidebarListItem::Thread(index)
+                            if model.rows[index].source.section == Section::Active => {}
+                        item => entries.push(ListEntry::Shelf(item)),
+                    }
+                }
+                if shelves.items.is_empty() {
+                    entries.extend(add_folders());
+                }
+                entries
+            })
+        })
+    });
     let visible_threads = computed(move || {
         if searching.get() {
             return results.with(|rows| rows.iter().map(|row| row.item.key.clone()).collect());
         }
-        shelf_items.with(|list| {
+        entries.with(|list| {
             model.with(|model| {
-                list.items
-                    .iter()
+                list.iter()
                     .filter_map(|item| {
-                        let SidebarListItem::Thread(index) = *item else {
+                        let ListEntry::Shelf(SidebarListItem::Thread(index)) = *item else {
                             return None;
                         };
                         let row = model.rows.get(index)?;
@@ -702,16 +847,16 @@ pub fn sidebar() -> impl IntoElement {
         if searching.get() {
             results.with(|rows| rows.len())
         } else {
-            shelf_items.with(|list| list.items.len())
+            entries.with(Vec::len)
         }
     });
     let normal_keys = computed(move || {
-        shelf_items.with(|list| {
+        entries.with(|entries| {
             model.with(|model| {
                 Shared(Rc::new(
-                    list.items
+                    entries
                         .iter()
-                        .map(|item| list_item_key(item, &model.rows))
+                        .map(|item| list_item_key(*item, model))
                         .collect::<Vec<_>>(),
                 ))
             })
@@ -738,6 +883,83 @@ pub fn sidebar() -> impl IntoElement {
     let show_environments = computed(move || {
         model.with(|model| t3_client::workspace::sidebar::groups_span_environments(&model.groups))
     });
+    let client = stored(client);
+    let drag_enabled = computed(move || !grouped.get() && !searching.get());
+    let make_drop = move |source: &str, destination: &str| {
+        use t3_client::{
+            thread_views::thread_ops::actions::SidebarDrop, view_logic::shell::sidebar::ListItem,
+        };
+        if !drag_enabled.get_untracked() {
+            return None;
+        }
+        let mut threads = BTreeMap::new();
+        let items = entries.with_untracked(|entries| {
+            model.with_untracked(|model| {
+                entries
+                    .iter()
+                    .filter_map(|entry| match *entry {
+                        ListEntry::Shelf(SidebarListItem::Marker(marker)) => {
+                            Some(ListItem::Marker(marker))
+                        }
+                        ListEntry::Shelf(SidebarListItem::Thread(index)) => {
+                            let row = &model.rows[index];
+                            let id = selection::row_key(&row.item.key);
+                            threads.insert(id.clone(), row.item.key.clone());
+                            Some(ListItem::Thread {
+                                key: id,
+                                section: row.source.section,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        Some(SidebarDrop {
+            items,
+            threads,
+            source: source.to_owned(),
+            destination: destination.to_owned(),
+            active_time_ordered: state.with_untracked(|state| state.preferences.working),
+        })
+    };
+    let drag = drag::Drag::new(
+        list_ref,
+        interactions.tasks,
+        move |source, destination| {
+            make_drop(source, destination)
+                .zip(client.get())
+                .is_some_and(|(drop, client)| client.can_sidebar_drop(&drop))
+        },
+        move |source, destination| {
+            let Some((drop, client)) = make_drop(&source, &destination).zip(client.get()) else {
+                return;
+            };
+            let Some(key) = drop.threads.get(&source).cloned() else {
+                return;
+            };
+            let plan = interactions.plan_navigation(nav, "settle", std::slice::from_ref(&key));
+            interactions.tasks.spawn(async move {
+                match client.sidebar_drop(drop).await {
+                    Ok(true) => interactions.finish(
+                        nav,
+                        "settle",
+                        std::slice::from_ref(&key),
+                        std::slice::from_ref(&key),
+                        client.as_ref(),
+                        plan,
+                    ),
+                    Ok(false) => {}
+                    Err(error) => actions::action_failed("move-thread", error),
+                }
+            });
+        },
+    );
+    effect(move || {
+        if !drag_enabled.get() {
+            drag.clear();
+        }
+    });
     let list = virtual_list(count, move |at| {
         // The list can move a cell to another shelf while its old row is resolving a memo.
         // Publish its next kind and contents after the list bindings have settled. Reading
@@ -749,8 +971,8 @@ pub fn sidebar() -> impl IntoElement {
                     results.with(|rows| rows.get(at.index()).cloned().map(Shared)),
                 );
             }
-            match shelf_items.with(|list| list.items.get(at.index()).copied()) {
-                Some(SidebarListItem::Thread(index)) => (
+            match entries.with(|list| list.get(at.index()).copied()) {
+                Some(ListEntry::Shelf(SidebarListItem::Thread(index))) => (
                     None,
                     model.with(|model| model.rows.get(index).cloned().map(Shared)),
                 ),
@@ -798,29 +1020,142 @@ pub fn sidebar() -> impl IntoElement {
                     .unwrap_or_default()
             })
         });
+        let node = element_ref();
+        let source_key = computed(move || {
+            data.with(|row| row.as_ref().map(|row| selection::row_key(&row.item.key)))
+        });
+        let drop_key = computed(move || {
+            if !drag_enabled.get() {
+                return None;
+            }
+            match kind.get() {
+                Some(ListEntry::Shelf(SidebarListItem::Marker(marker)))
+                    if !matches!(marker, Marker::WorkingHeader | Marker::SnoozedHeader) =>
+                {
+                    Some(marker.id())
+                }
+                None => data.with(|row| {
+                    row.as_ref()
+                        .filter(|row| {
+                            !matches!(row.source.section, Section::Working | Section::Snoozed)
+                        })
+                        .map(|row| selection::row_key(&row.item.key))
+                }),
+                _ => None,
+            }
+        });
+        let drop_min_height = computed(move || match kind.get() {
+            // Match the rendered h-9 hint and the target bands for collapsed dividers.
+            Some(ListEntry::Shelf(SidebarListItem::Marker(
+                Marker::ActivePlaceholder | Marker::SettledPlaceholder,
+            ))) => 36,
+            Some(ListEntry::Shelf(SidebarListItem::Marker(
+                Marker::PinnedHeader | Marker::PinnedDivider,
+            ))) => 12,
+            _ => 0,
+        });
+        drag.attach(drop_key, node, drop_min_height);
         // A recycled cell rebuilds only when its kind changes (row, marker, Show more); a row
         // cell reads its row through the memos above.
-        dynamic(move || match kind.get() {
-            Some(SidebarListItem::Marker(marker)) => {
-                untracked(|| shelf_marker(marker, shelf_items, expansion, shelves_store))
-            }
-            Some(_) => untracked(|| {
-                shelves::sidebar_settled_more(
-                    Prop::bind(move || expansion.get().settled),
-                    Prop::bind(move || shelf_items.with(|list| list.hidden_settled)),
-                    shelves::OlderSettledState::Ready.into(),
-                    move || settled_visible.update(|count| *count += SETTLED_TAIL_PAGE_COUNT),
-                )
-                .into_element()
-            }),
-            None => untracked(|| {
-                // The direct API avoids thread_row's full-shell lookup when a cell is recycled.
-                view()
-                    .app_class(tw("pb-px"))
-                    .child(row::sidebar_thread_row(item, thread, project, extras, nav))
+        view()
+            .element_ref(&node)
+            .app_class(move || {
+                Some(tw(
+                    if drop_key.with(|key| key.as_ref().is_some_and(|key| drag.over(key))) {
+                        "rounded-md ring-1 ring-inset ring-primary/50"
+                    } else {
+                        ""
+                    },
+                ))
+            })
+            .child(dynamic(move || match kind.get() {
+                Some(ListEntry::Folder(_)) => untracked(|| {
+                    let folder = computed(move || {
+                        let Some(ListEntry::Folder(index)) = kind.get() else {
+                            return None;
+                        };
+                        model.with(|model| {
+                            model
+                                .folders
+                                .get(index)
+                                .cloned()
+                                .map(|folder| Shared(Rc::new(folder)))
+                        })
+                    });
+                    let hidden_count = computed(move || {
+                        folder.with(|folder| {
+                            folder.as_ref().map_or(0, |folder| {
+                                model.with(|model| {
+                                    folder
+                                        .rows
+                                        .iter()
+                                        .filter(|index| {
+                                            model
+                                                .rows
+                                                .get(**index)
+                                                .is_some_and(|row| !row.source.active)
+                                        })
+                                        .count()
+                                })
+                            })
+                        })
+                    });
+                    projects::header(
+                        folder,
+                        folder_expansion,
+                        client.get(),
+                        nav,
+                        interactions.tasks,
+                        shelves_store,
+                        hidden_count,
+                    )
                     .into_element()
-            }),
-        })
+                }),
+                Some(ListEntry::Shelf(SidebarListItem::Marker(marker))) => {
+                    untracked(|| shelf_marker(marker, shelf_items, expansion, shelves_store, drag))
+                }
+                Some(_) => untracked(|| {
+                    shelves::sidebar_settled_more(
+                        Prop::bind(move || expansion.get().settled),
+                        Prop::bind(move || shelf_items.with(|list| list.hidden_settled)),
+                        shelves::OlderSettledState::Ready.into(),
+                        move || settled_visible.update(|count| *count += SETTLED_TAIL_PAGE_COUNT),
+                    )
+                    .into_element()
+                }),
+                None => untracked(|| {
+                    // The direct API avoids thread_row's full-shell lookup when a cell is recycled.
+                    let title = computed(move || {
+                        item.with(|item| {
+                            item.as_ref()
+                                .map(|item| item.title.clone())
+                                .unwrap_or_default()
+                        })
+                    });
+                    view()
+                        .app_class(tw("flex w-full min-w-0 items-stretch pb-px"))
+                        .child(
+                            view()
+                                .app_class(tw("min-w-0 flex-1"))
+                                .child(row::sidebar_thread_row(item, thread, project, extras, nav)),
+                        )
+                        .child(when(
+                            move || {
+                                drag_enabled.get()
+                                    && data.with(|row| {
+                                        row.as_ref().is_some_and(|row| {
+                                            row.source.section != Section::Working
+                                                && client.get().is_some_and(|client| {
+                                                    client.can_drag_thread(&row.item.key)
+                                                })
+                                        })
+                                    })
+                            },
+                            move || drag.grip(source_key, title),
+                        ))
+                        .into_element()
+                }),
+            }))
     })
     .keys(move || keys.with(|keys| keys.0.as_ref().clone()))
     .element_ref(&list_ref)
@@ -829,6 +1164,7 @@ pub fn sidebar() -> impl IntoElement {
     .flex_1()
     .min_h(px(0.0))
     .test_id("sidebar-threads");
+    let list = drag.listen(list);
     let reveal = stored(RouteReveal::default());
     // History/deep links are external navigation: the client widens scope and reveals once.
     effect(move || {
@@ -870,11 +1206,10 @@ pub fn sidebar() -> impl IntoElement {
         } else if pending.is_some()
             && !searching
             && let Some(row) = list.rows.iter().position(|row| row.source.active)
-            && let Some(index) = shelf_items.with_untracked(|items| {
+            && let Some(index) = entries.with_untracked(|items| {
                 items
-                    .items
                     .iter()
-                    .position(|item| *item == SidebarListItem::Thread(row))
+                    .position(|item| *item == ListEntry::Shelf(SidebarListItem::Thread(row)))
             })
             && let Ok(index) = u32::try_from(index)
         {
@@ -972,6 +1307,7 @@ pub fn sidebar() -> impl IntoElement {
                         .iter()
                         .all(|row| row.source.section == Section::Settled)
                         && (model.rows.is_empty() || !model.scope.is_empty())
+                        && (!grouped.get() || model.folders.is_empty())
                 })
             }
     });
@@ -999,6 +1335,7 @@ pub fn sidebar() -> impl IntoElement {
         .child(snooze_dialog)
         .child(chrome::sidebar_chrome_footer(crate::screens::pull_requests::list::supported(), Route::Home.into(), chrome::ChromeFooterSlots {
             undo_notice,
+            update: Some(view().test_id("sidebar-update-footer").child(crate::screens::updates::footer()).into_element()),
             ..Default::default()
         }))
 }

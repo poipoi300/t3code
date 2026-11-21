@@ -22,8 +22,7 @@ fn uses_a_configured_snooze_preset(window: (f32, f32)) {
     app.press("role:menuitem[In 17 minutes]")
         .expect("choose snooze preset");
     assert_commands(&mut app, "thread.snooze:alpha");
-    app.wait_for("Snoozed,")
-        .expect("footer announces accepted snooze");
+    super::sb_actions_1::wait_for_undo_summary(&mut app, "Snoozed,");
 }
 
 #[test]

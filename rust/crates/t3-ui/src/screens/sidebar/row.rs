@@ -1,6 +1,6 @@
 //! Port of apps/web/src/components/sidebar/SidebarThreadRow.tsx SidebarThreadRow.
 
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 
@@ -96,7 +96,43 @@ pub trait RowThreadActions {
         None
     }
 
-    fn archive_draft(&self, _: ProjectKey) -> LocalBoxFuture<'static, Result<String, ClientError>> {
+    fn can_drag_thread(&self, _: &ThreadKey) -> bool {
+        false
+    }
+
+    fn can_sidebar_drop(
+        &self,
+        _: &t3_client::thread_views::thread_ops::actions::SidebarDrop,
+    ) -> bool {
+        false
+    }
+
+    fn sidebar_drop(
+        &self,
+        _: t3_client::thread_views::thread_ops::actions::SidebarDrop,
+    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
+        Box::pin(async { Err(ClientError::Unsupported("sidebar drag")) })
+    }
+
+    fn sidebar_preferences(
+        &self,
+    ) -> LocalBoxStream<'static, Rc<t3_contracts::settings::ClientSettingsSchema>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    fn can_pin_project(&self, _: &[ProjectKey]) -> bool {
+        false
+    }
+
+    fn pin_project(
+        &self,
+        _: Vec<ProjectKey>,
+        _: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        Box::pin(async { Err(ClientError::Unsupported("project pinning")) })
+    }
+
+    fn project_draft(&self, _: ProjectKey) -> LocalBoxFuture<'static, Result<String, ClientError>> {
         Box::pin(async { Err(ClientError::Unsupported("project drafts")) })
     }
 
@@ -222,7 +258,48 @@ impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
         })
     }
 
-    fn archive_draft(
+    fn can_drag_thread(&self, key: &ThreadKey) -> bool {
+        self.thread_actions().can_drag_thread(key)
+    }
+
+    fn can_sidebar_drop(
+        &self,
+        drop: &t3_client::thread_views::thread_ops::actions::SidebarDrop,
+    ) -> bool {
+        self.thread_actions().can_sidebar_drop(drop)
+    }
+
+    fn sidebar_drop(
+        &self,
+        drop: t3_client::thread_views::thread_ops::actions::SidebarDrop,
+    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
+        self.thread_actions().perform_sidebar_drop(drop)
+    }
+
+    fn sidebar_preferences(
+        &self,
+    ) -> LocalBoxStream<'static, Rc<t3_contracts::settings::ClientSettingsSchema>> {
+        let preferences = self.composer_preferences();
+        let first = preferences.snapshot();
+        Box::pin(
+            futures::stream::once(futures::future::ready(first))
+                .chain(preferences.changes().map(move |()| preferences.snapshot())),
+        )
+    }
+
+    fn can_pin_project(&self, keys: &[ProjectKey]) -> bool {
+        self.thread_actions().can_organize_projects(keys)
+    }
+
+    fn pin_project(
+        &self,
+        keys: Vec<ProjectKey>,
+        pinned: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        self.thread_actions().set_project_group_pinned(keys, pinned)
+    }
+
+    fn project_draft(
         &self,
         project: ProjectKey,
     ) -> LocalBoxFuture<'static, Result<String, ClientError>> {
@@ -829,7 +906,7 @@ pub fn sidebar_thread_row(
                     {
                         archive_return.update(|state| state.0 = Some(key.clone()));
                         if nav.top() == requested && !client.can_still_show(&key) {
-                            match client.archive_draft(project).await {
+                            match client.project_draft(project).await {
                                 Ok(draft)
                                     if nav.top() == requested && !client.can_still_show(&key) =>
                                 {

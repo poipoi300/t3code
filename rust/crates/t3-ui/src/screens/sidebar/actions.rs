@@ -327,22 +327,24 @@ pub fn sidebar_thread_undo_notice(
 ) -> impl IntoElement {
     let on_undo: Rc<dyn Fn()> = Rc::new(on_undo);
     let width = signal(0.0_f32);
+    effect(move || {
+        if let Some(notice) = notice.get() {
+            announce_for_accessibility(tr(
+                "{summary}, {undo}",
+                &[
+                    ("summary", Value::Text(undo_summary(&notice))),
+                    ("undo", Value::Text(undo_label(notice.shortcut))),
+                ],
+            ));
+        }
+    });
     dynamic(move || {
         let on_undo = on_undo.clone();
         // Only the notice selects what is built; translations and theme reads must not rebuild
         // the button while it is mounted.
         notice.get().map(|notice_value| untracked(move || {
-            let summary = if notice_value.count == 1 {
-                t(&notice_value.action)
-            } else {
-                tr("{action} {count}", &[
-                    ("action", Value::Text(t(&notice_value.action))),
-                    ("count", Value::Int(notice_value.count as i64)),
-                ])
-            };
-            let label = notice_value.shortcut.map_or_else(|| t("Undo"), |shortcut| {
-                tr("{shortcut} to undo", &[("shortcut", Value::Text(shortcut))])
-            });
+            let summary = undo_summary(&notice_value);
+            let label = undo_label(notice_value.shortcut);
             // NSH has no transitionend/starting: presence ends immediately, including accessibility.
             view()
                 .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
@@ -362,6 +364,27 @@ pub fn sidebar_thread_undo_notice(
                     .child(text(tr("{summary},", &[("summary", Value::Text(summary))]))))
         }))
     })
+}
+
+fn undo_summary(notice: &ThreadUndoNotice) -> String {
+    let action = t(&notice.action);
+    if notice.count == 1 {
+        return action;
+    }
+    tr(
+        "{action} {count}",
+        &[
+            ("action", Value::Text(action)),
+            ("count", Value::from(notice.count)),
+        ],
+    )
+}
+
+fn undo_label(shortcut: Option<String>) -> String {
+    shortcut.map_or_else(
+        || t("Undo"),
+        |shortcut| tr("{shortcut} to undo", &[("shortcut", Value::Text(shortcut))]),
+    )
 }
 
 fn glyph(path: &'static str) -> nsh_core::element::Svg {
@@ -447,6 +470,8 @@ pub(super) fn action_failed(action: &str, error: t3_client::ClientError) {
     let title = match action {
         "undo" => "Failed to undo thread action",
         "archive-draft" => "Thread archived. Failed to open a new draft.",
+        "project-pin" => "Failed to update project pin",
+        "move-thread" => "Failed to move thread",
         "snooze" => "Failed to snooze thread",
         action => t3_client::thread_views::thread_ops::header::action_failure_title(action),
     };

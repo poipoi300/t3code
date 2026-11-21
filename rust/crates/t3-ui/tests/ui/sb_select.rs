@@ -265,8 +265,7 @@ fn selects_a_range_and_batches_settlement(window: (f32, f32)) {
     open_row_menu(&mut app, window, "Beta thread");
     app.press("role:menuitem[Settle (2)]")
         .expect("settle both selected rows");
-    app.wait_for("Settled 2,")
-        .expect("one notice contains both rows");
+    super::sb_actions_1::wait_for_undo_summary(&mut app, "Settled 2,");
     app.press_key("f9").expect("read RPC trace");
     let forward = app.shows("RPC thread.settle:alpha thread.settle:beta");
     let reverse = app.shows("RPC thread.settle:beta thread.settle:alpha");

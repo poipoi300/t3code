@@ -732,9 +732,8 @@ pub fn sidebar_utility_menu(
             .child(sidebar_utility_item(t("Settings"), move || nav.open(Route::Settings(SettingsPage::General)), icon(Icon::Settings, 16.0, move || palette().sidebar_icon)))
             .child(when(move || pull_requests_supported.get(), move || sidebar_utility_item(t("Pull requests"), move || {
                 if pull_requests_supported.get_untracked() { nav.open(Route::PullRequests); }
-            }, svg(Icon::GitPullRequestArrow.asset()).accessible(false).app_class(tw("size-4 text-(--sidebar-icon-color)")))))))
-            // The web's Usage entry (ChartNoAxesColumn, `Route::Usage`) returns with MISC-USAGE's
-            // screen; until then it would lead to a not-built placeholder.
+            }, svg(Icon::GitPullRequestArrow.asset()).accessible(false).app_class(tw("size-4 text-(--sidebar-icon-color)")))))
+            .child(sidebar_utility_item(t("Usage"), move || nav.open(Route::Usage), icon(Icon::ChartNoAxesColumn, 16.0, move || palette().sidebar_icon)))))
         .child(undo_notice).child(update)
 }
 

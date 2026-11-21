@@ -289,12 +289,6 @@ fn utilities_navigate_and_back_returns_to_main_with_live_capability_changes() {
         app.press("role:button[Settings]").expect("settings");
         app.wait_for("text:route:/settings/general")
             .expect("general settings route");
-        assert!(
-            !app.screen()
-                .matches("role:button[Usage]")
-                .expect("valid selector"),
-            "Usage stays hidden until its screen exists"
-        );
         app.press("role:button[Pull requests]")
             .expect("pull requests");
         app.wait_for("role:button[Back]")
@@ -322,6 +316,23 @@ fn utilities_navigate_and_back_returns_to_main_with_live_capability_changes() {
         app.wait_for("text:route:/pull-requests")
             .expect("destination");
     }
+}
+
+#[test]
+fn followup_usage_shortcut_desktop() {
+    usage_shortcut(DESKTOP);
+}
+
+#[test]
+fn followup_usage_shortcut_phone() {
+    usage_shortcut(PHONE);
+}
+
+fn usage_shortcut(window: (f32, f32)) {
+    let mut app = fixture(Root::of::<Footer>(), window);
+    app.press("role:button[Usage]").expect("Usage shortcut");
+    app.wait_for("text:route:/usage")
+        .expect("Usage destination");
 }
 
 #[component]

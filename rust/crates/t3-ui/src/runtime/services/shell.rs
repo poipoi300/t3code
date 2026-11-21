@@ -125,18 +125,53 @@ pub fn reset_thread_sidebar_width(
 pub struct SidebarShelvesStore {
     load: Rc<dyn Fn() -> LocalBoxFuture<'static, ShelfExpansion>>,
     save: Rc<SaveShelf>,
+    load_projects: Rc<LoadProjectExpansion>,
+    save_projects: futures::channel::mpsc::UnboundedSender<(Vec<String>, bool)>,
 }
 
 type SaveShelf = dyn Fn(Marker, bool) -> LocalBoxFuture<'static, Result<(), PlatformError>>;
+
+type ProjectExpansion = std::collections::BTreeMap<String, bool>;
+type LoadProjectExpansion = dyn Fn() -> LocalBoxFuture<'static, ProjectExpansion>;
+
+impl SidebarShelvesStore {
+    pub(crate) fn load_project_expansion(&self, expansion: Signal<ProjectExpansion>) {
+        let pending = (self.load_projects)();
+        watch(async move {
+            let mut saved = pending.await;
+            expansion.update(|local| {
+                saved.append(local);
+                *local = saved;
+            });
+        });
+    }
+
+    pub(crate) fn save_project_expansion(&self, aliases: Vec<String>, expanded: bool) {
+        let _ = self.save_projects.unbounded_send((aliases, expanded));
+    }
+}
 
 pub fn sidebar_shelves_store<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
 ) -> SidebarShelvesStore {
     let shelves = client.sidebar_shelves();
     let saving = shelves.clone();
+    let folders = shelves.clone();
+    let save_folders = shelves.clone();
+    let (save_projects, mut writes) = futures::channel::mpsc::unbounded::<(Vec<String>, bool)>();
+    watch(async move {
+        use futures::StreamExt;
+        while let Some((aliases, expanded)) = writes.next().await {
+            if let Err(error) = save_folders.save_project_expansion(aliases, expanded).await {
+                log::error!("Could not persist sidebar project expansion. {error}");
+            }
+        }
+    });
     SidebarShelvesStore {
         load: Rc::new(move || shelves.load()),
         save: Rc::new(move |marker, expanded| saving.save(marker, expanded)),
+        load_projects: Rc::new(move || folders.project_expansion()),
+        save_projects,
     }
 }
 
