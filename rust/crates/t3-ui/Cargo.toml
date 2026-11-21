@@ -33,7 +33,7 @@ two-face = { version = "0.4.5", default-features = false, features = ["syntect-f
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-nsh-platform-android = { git = "https://github.com/poipoi300/nsh", rev = "70d98da725fa54c8822caabf8de8571a6ead55a1", default-features = false }
+nsh = { package = "nsh-platform-android", git = "https://github.com/poipoi300/nsh", rev = "70d98da725fa54c8822caabf8de8571a6ead55a1", default-features = false }
 
 [dev-dependencies]
 # The connectable fake environment (`t3_client::testing::environment`) for UI tests only.
