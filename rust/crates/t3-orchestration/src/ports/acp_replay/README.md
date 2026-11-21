@@ -8,7 +8,7 @@ mapped files are not automatically complete ports. The exact 182-row audit is ex
 ## Registering Replay in the composed runtime
 
 Build with `--features acp-adapter`. Add
-`adapters::acp::dev_replay_registration(clock.clone(), ids.clone(), true)` to the
+`adapters::acp::dev_replay_registration(clock.clone(), ids.clone(), true, None)` to the
 `Vec<AdapterRegistration>` passed to `AdapterRegistry::new`, then supply that
 registry as `RuntimePorts.providers`. The helper registers the canonical
 `devReplay` instance, driver `acpRegistry`, enabled, without credential gates or

@@ -43,6 +43,7 @@ fn make_registry(
         Arc::new(ManualClock::new(TEST_TIME)),
         Arc::new(SequenceIds::new(prefix)),
         false,
+        None,
     );
     registration.adapter = t3_orchestration::ports::acp_replay::testkit::provider_replay_harness::event_tap::observe_adapter(registration.adapter, Arc::new(move |event| observed.lock().expect("test value").push(event.clone())));
     Arc::new(AdapterRegistry::new(vec![registration]))

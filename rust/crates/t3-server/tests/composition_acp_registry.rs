@@ -58,6 +58,12 @@ fn main() -> ExitCode {
             "management_calls_never_raise_consent_and_logout_reaches_the_agent",
             || Box::pin(management_calls_never_raise_consent()),
         ),
+        ("registry_turn_delivers_checked_attachments", || {
+            Box::pin(registry_turn_delivers_checked_attachments())
+        }),
+        ("replay_turn_accepts_a_file_attachment", || {
+            Box::pin(replay_turn_accepts_a_file_attachment())
+        }),
         ("registry_agent_inherits_no_t3_owned_variable", || {
             Box::pin(registry_agent_inherits_no_t3_owned_variable())
         }),
@@ -309,6 +315,20 @@ mod harness {
             policy: Option<&str>,
             extra: &[(&str, &str)],
         ) -> Self {
+            Self::start_configured(home, settings, policy, extra, false).await
+        }
+
+        pub async fn start_replay(home: &Path) -> Self {
+            Self::start_configured(home, &json!({}), None, &[], true).await
+        }
+
+        async fn start_configured(
+            home: &Path,
+            settings: &Value,
+            policy: Option<&str>,
+            extra: &[(&str, &str)],
+            dev_replay: bool,
+        ) -> Self {
             std::fs::create_dir_all(home.join("userdata")).unwrap();
             if !home.join("userdata/settings.json").exists() {
                 std::fs::write(home.join("userdata/settings.json"), settings.to_string()).unwrap();
@@ -358,6 +378,7 @@ mod harness {
                 },
                 StartOptions {
                     provider_effects: Some(effects::provider_effects()),
+                    dev_replay,
                     ..Default::default()
                 },
             )
@@ -610,6 +631,34 @@ mod harness {
             );
         }
 
+        pub async fn upload(
+            &mut self,
+            kind: &str,
+            name: &str,
+            mime: &str,
+            bytes: &'static [u8],
+        ) -> Value {
+            let mut attachment =
+                json!({"type":kind,"name":name,"mimeType":mime,"sizeBytes":bytes.len()});
+            let grant = self
+                .call("attachments.createUploadUrl", attachment.clone())
+                .await
+                .unwrap();
+            let stored = reqwest::Client::new()
+                .post(format!(
+                    "{}{}",
+                    self.origin,
+                    grant["relativeUrl"].as_str().unwrap()
+                ))
+                .body(bytes)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(stored.status(), 204, "{}", stored.text().await.unwrap());
+            attachment["id"] = grant["attachmentId"].clone();
+            attachment
+        }
+
         pub async fn send(&mut self, id: &str, text: &str) -> Result<Value, Value> {
             self.dispatch(json!({"type":"message.dispatch","commandId":format!("command:{id}"),"threadId":THREAD,"messageId":format!("message:{id}"),"text":text,"attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await
         }
@@ -839,6 +888,97 @@ async fn settle(server: &mut Server) -> String {
         .await
 }
 
+async fn registry_turn_delivers_checked_attachments() {
+    use base64::Engine;
+
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x50,
+        0xAA, 0x3A, 0xF4, 0x1F, 0x00, 0x04, 0x7E, 0x02, 0x5E, 0xD3, 0x29, 0x7D, 0xC0, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    let (temp, state, mut server) = started_with(None, &[], &[]).await;
+    server.create_thread("full-access").await.unwrap();
+    server.subscribe_thread(THREAD);
+    let mut image = server.upload("image", "pixel.png", "image/png", PNG).await;
+    image["source"] = json!({"kind":"snap-shot","capturedAt":"2026-11-14T12:00:00.000Z","appName":"Fixture","windowTitle":"Captured window","accessibleText":"A button"});
+    let file = server
+        .upload("file", "notes.txt", "text/plain", b"notes\n")
+        .await;
+    server
+        .dispatch(json!({"type":"message.dispatch","commandId":"command:attachments","threadId":THREAD,"messageId":"message:attachments","text":"Review these","attachments":[image,file],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded("ACP attachment turn", settle(&mut server)).await,
+        "completed"
+    );
+    let calls = calls(&state);
+    let prompt = &calls
+        .iter()
+        .find(|call| call["method"] == "session/prompt")
+        .unwrap()["params"]["prompt"];
+    let text = prompt[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Review these\n\n[Attached image \"pixel.png\" is saved at: "),
+        "{text}"
+    );
+    assert!(
+        text.contains("[Attached file \"notes.txt\" is saved at: "),
+        "{text}"
+    );
+    assert!(
+        text.contains("Untrusted captured-window data follows as JSON."),
+        "{text}"
+    );
+    assert!(text.contains("A button"), "{text}");
+    assert_eq!(
+        prompt[1],
+        json!({
+            "type":"image", "mimeType":"image/png",
+            "data":base64::engine::general_purpose::STANDARD.encode(PNG),
+        })
+    );
+    let saved = text
+        .split("[Attached file \"notes.txt\" is saved at: ")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let saved = Path::new(saved);
+    assert!(!saved.starts_with(temp.path().join("userdata/attachments")));
+    let copies =
+        t3_workspace::attachment_delivery::PinnedFiles::new(saved.parent().unwrap().into());
+    assert_eq!(copies.read(saved, 1024).unwrap(), b"notes\n");
+    server.stop().await;
+    let restarted = Server::start(temp.path(), &settings(&state, None), None).await;
+    assert_eq!(copies.read(saved, 1024).unwrap(), b"notes\n");
+    restarted.stop().await;
+}
+
+async fn replay_turn_accepts_a_file_attachment() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut server = Server::start_replay(temp.path()).await;
+    server
+        .create_thread_on(THREAD, "devReplay", "multi-turn")
+        .await
+        .unwrap();
+    server.subscribe_thread(THREAD);
+    let file = server
+        .upload("file", "notes.txt", "text/plain", b"notes\n")
+        .await;
+    server
+        .dispatch(json!({"type":"message.dispatch","commandId":"command:replay-attachment","threadId":THREAD,"messageId":"message:replay-attachment","text":"Read the notes","attachments":[file],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}))
+        .await.unwrap();
+    assert_eq!(
+        bounded("Replay file attachment turn", settle(&mut server)).await,
+        "completed"
+    );
+    server.stop().await;
+}
+
 /// M1: the registry agent inherits the server's environment minus T3's own variables, on its
 /// status probe, a management call and a turn.
 async fn registry_agent_inherits_no_t3_owned_variable() {
@@ -866,7 +1006,7 @@ async fn registry_agent_inherits_no_t3_owned_variable() {
 }
 
 /// M1 for the built-in providers: Codex's app-server and Claude's CLI, launched by a turn, get
-/// the same base. The stand-in records its environment and exits, so each run fails.
+/// the same base. The stand-ins record the variables and deliberately fail to initialize.
 async fn codex_and_claude_inherit_no_t3_owned_variable() {
     let temp = tempfile::tempdir().unwrap();
     let state = temp.path().join("children");
@@ -900,9 +1040,13 @@ async fn codex_and_claude_inherit_no_t3_owned_variable() {
             .send_to(thread, &format!("{instance}-first"), "Hello")
             .await
             .unwrap();
-        assert_eq!(settle(&mut server).await, "failed", "{thread}");
+        assert_eq!(
+            bounded(thread, settle(&mut server)).await,
+            "failed",
+            "{thread}"
+        );
     }
-    // Each driver's launch is retried after the stand-in exits; every attempt is checked.
+    // A driver's launch may be retried. Check the environment of every attempt.
     let children = records(&state, "children.jsonl");
     let codex = |child: &&Value| {
         child["args"]
@@ -1842,11 +1986,36 @@ mod fake {
         json!({"leaked": named("leak-"), "kept": named("keep-")})
     }
 
-    /// Codex or Claude, launched as a provider child: records its environment and exits.
+    /// Codex or Claude, launched as a provider child: records its environment and refuses startup.
     pub fn record_child(directory: PathBuf) -> ExitCode {
+        let arguments: Vec<_> = std::env::args().skip(1).collect();
+        let is_claude_query = arguments.iter().any(|arg| arg == "--input-format");
         let mut record = inherited();
-        record["args"] = json!(std::env::args().skip(1).collect::<Vec<_>>());
+        record["args"] = json!(arguments);
         append(&directory, "children.jsonl", &record);
+        if is_claude_query {
+            // A bare EOF races Claude's initialize reply against its query-local cancellation.
+            // Return a protocol error and keep stdin open until the server shuts the query down.
+            let mut output = std::io::stdout().lock();
+            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                let message: Value = serde_json::from_str(&line).unwrap();
+                if message["type"] == "control_request"
+                    && message["request"]["subtype"] == "initialize"
+                {
+                    send(
+                        &mut output,
+                        json!({
+                            "type":"control_response",
+                            "response": {
+                                "subtype":"error",
+                                "request_id":message["request_id"],
+                                "error":"fixture refused initialization",
+                            },
+                        }),
+                    );
+                }
+            }
+        }
         ExitCode::FAILURE
     }
 
@@ -1935,6 +2104,7 @@ mod fake {
                     "protocolVersion": 1,
                     "agentCapabilities": {
                         "loadSession": true,
+                        "promptCapabilities": {"image": true},
                         "sessionCapabilities": {"list": {}, "delete": {}, "resume": {}},
                         "auth": {"logout": {}},
                         "providers": {},

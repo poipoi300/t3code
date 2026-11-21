@@ -319,6 +319,7 @@ mod turns {
         pub environment: &'a Environment,
         pub home: &'a std::path::Path,
         pub cwd: &'a std::path::Path,
+        pub attachments: Option<t3_orchestration::adapters::acp::AcpAttachmentSource>,
         pub platform: Platform,
         pub clock: Arc<dyn Clock>,
         pub ids: Arc<dyn IdGenerator>,
@@ -379,7 +380,8 @@ mod turns {
             })),
             host.clock,
             host.ids,
-        );
+        )
+        .with_attachments(host.attachments);
         Ok(AdapterRegistration {
             adapter: Arc::new(adapter),
             continuation_key: spec.default_continuation_key(),

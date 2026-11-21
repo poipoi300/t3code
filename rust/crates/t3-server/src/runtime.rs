@@ -521,6 +521,17 @@ async fn start_domains(
         .map(|a| a as Arc<dyn t3_orchestration::api::AttachmentBackend>);
     #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
     let attachment_port = None;
+    #[cfg(all(feature = "workspace", feature = "orchestration"))]
+    let acp_attachments = domains
+        .get::<crate::adapters::workspace::WorkspaceAdapter>()
+        .map(|workspace| {
+            t3_orchestration::adapters::acp::AcpAttachmentSource::new(
+                workspace.attachments.base.clone(),
+                workspace.attachments.delivery.clone(),
+            )
+        });
+    #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
+    let acp_attachments = None;
     #[cfg(feature = "orchestration")]
     domains.insert_runtime(
         crate::adapters::orchestration::OrchestrationAdapter::start(
@@ -537,6 +548,7 @@ async fn start_domains(
                 authority: authority.clone(),
             },
             attachment_port,
+            acp_attachments.clone(),
         )
         .await?,
     )?;
@@ -630,6 +642,7 @@ async fn start_domains(
                 Arc::new(t3_orchestration::composition::RandomIds),
                 t3_mcp,
                 track_agent,
+                acp_attachments,
             ));
             // Shuts down before the providers: sessions stop while the domain is alive.
             domains.insert_runtime(Arc::new(

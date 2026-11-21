@@ -113,7 +113,7 @@ async fn start_with(
     configure: impl FnOnce(&mut RuntimePorts),
 ) -> Result<OrchestrationRuntime> {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(now));
-    let mut replay = dev_replay_registration(clock.clone(), Arc::new(RandomIds), false);
+    let mut replay = dev_replay_registration(clock.clone(), Arc::new(RandomIds), false, None);
     replay.adapter = wrap(replay.adapter);
     let registry = AdapterRegistry::new(vec![replay]);
     let mut ports = RuntimePorts::new(

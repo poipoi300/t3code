@@ -140,6 +140,7 @@ mod native {
         cwd: PathBuf,
         platform: Platform,
         attachments: PathBuf,
+        acp_attachments: Option<t3_orchestration::adapters::acp::AcpAttachmentSource>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdGenerator>,
         /// Each thread's T3 MCP server (`McpProviderSessions`), read when a session configures it.
@@ -168,6 +169,7 @@ mod native {
             ids: Arc<dyn IdGenerator>,
             t3_mcp: Option<Arc<dyn t3_orchestration::provider::T3McpSessions>>,
             track_agent: Option<t3_orchestration::adapters::codex::CodexAgentTracker>,
+            acp_attachments: Option<t3_orchestration::adapters::acp::AcpAttachmentSource>,
         ) -> Arc<Self> {
             let manifest = domain.manifest.source();
             Arc::new(Self {
@@ -178,6 +180,7 @@ mod native {
                     cwd: context.local.config.cwd.clone(),
                     platform: Platform::current(),
                     attachments: context.local.config.paths.attachments(),
+                    acp_attachments,
                     clock,
                     ids,
                     t3_mcp,
@@ -199,6 +202,7 @@ mod native {
                         environment: &self.host.environment,
                         home: &self.host.home,
                         cwd: &self.host.cwd,
+                        attachments: self.host.acp_attachments.clone(),
                         platform: self.host.platform,
                         clock: self.host.clock.clone(),
                         ids: self.host.ids.clone(),

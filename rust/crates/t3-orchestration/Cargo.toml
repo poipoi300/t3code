@@ -15,7 +15,7 @@ workspace = true
 git-backend = ["dep:t3-git"]
 codex-adapter = ["dep:t3-codex-app-server", "dep:t3-process"]
 claude-adapter = ["dep:t3-claude-cli", "dep:t3-process"]
-acp-adapter = ["dep:t3-acp", "dep:t3-process"]
+acp-adapter = ["dep:t3-acp", "dep:t3-process", "dep:base64"]
 # Codex and Claude replay testkits. They embed fixtures generated from the TypeScript into
 # the gitignored rust/fixtures/samples, so the product library must not compile them.
 testkit = []
@@ -40,6 +40,7 @@ t3-process = { path = "../t3-process", optional = true }
 t3-codex-app-server = { path = "../t3-codex-app-server", optional = true }
 t3-claude-cli = { path = "../t3-claude-cli", optional = true }
 t3-acp = { path = "../t3-acp", optional = true }
+base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: persisted event JSON must reproduce JavaScript's number text.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

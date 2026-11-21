@@ -320,7 +320,7 @@ must drain effects; RPC handlers use the calls above.
 ### Provider adapters
 
 The host builds each adapter and registers it in the `ProviderRegistry`; the composition does not
-construct adapters. Replay: `adapters::acp::dev_replay_registration(clock, ids, streaming_delays)`
+construct adapters. Replay: `adapters::acp::dev_replay_registration(clock, ids, streaming_delays, attachments)`
 (`acp-adapter` feature), instance `devReplay`, driver `acpRegistry`, configured in settings as
 `providerInstances.devReplay = { driver: "acpRegistry", enabled: true }`. Codex (`codex-adapter`)
 takes host bridges through `CodexAdapterOptions`: `attachments`, `background`, `turn_context`,

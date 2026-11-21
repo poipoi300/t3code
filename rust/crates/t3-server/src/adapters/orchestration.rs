@@ -289,6 +289,7 @@ impl OrchestrationAdapter {
         launch: Option<LaunchPorts>,
         restore: RestorePorts,
         attachments: Option<Arc<dyn t3_orchestration::api::AttachmentBackend>>,
+        acp_attachments: Option<t3_orchestration::adapters::acp::AcpAttachmentSource>,
     ) -> crate::Result<Arc<Self>> {
         use t3_orchestration::{
             composition::{OrchestrationRuntime, RandomIds, RuntimePorts},
@@ -318,6 +319,7 @@ impl OrchestrationAdapter {
                 clock.clone(),
                 Arc::new(RandomIds),
                 true,
+                acp_attachments,
             ));
         }
         // Native instances join once the provider domain has started (`native_providers`).
