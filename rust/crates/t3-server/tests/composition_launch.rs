@@ -644,6 +644,13 @@ async fn cancelled_and_shutdown_launches_remove_their_worktrees() {
     s.runtime.take().unwrap().shutdown().await.unwrap();
     if !cfg!(windows) {
         assert!(!path.exists(), "{}", path.display());
+        assert!(!git(&project, &["branch", "--list"]).contains("feature/shutdown"));
+        assert_eq!(
+            git(&project, &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
     }
     // The stream ended with the server.
     loop {

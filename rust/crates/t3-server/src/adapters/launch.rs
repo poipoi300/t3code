@@ -64,7 +64,7 @@ struct Inner {
 /// A worktree only this launch may remove (TS `createdWorktreePath`/`createdBranch`).
 struct Created {
     thread: ThreadId,
-    project_root: PathBuf,
+    repository: t3_git::Git,
     branch: String,
     /// A cancelled setup's cancel waiter, released once the worktree is removed.
     ended: Option<CancellationToken>,
@@ -546,7 +546,7 @@ impl Inner {
             self.stage(thread, Stage::Fetch, Status::Done, None);
         }
         self.stage(thread, Stage::Checkout, Status::Running, None);
-        let created = GitWorkflowService::new(bound)
+        let created = GitWorkflowService::new(bound.clone())
             .with_worktrees_directory(self.worktrees_dir.clone())
             .with_worktree_host(self.worktree_host.clone())
             .with_cancellation(cancellation)
@@ -574,7 +574,7 @@ impl Inner {
                 path.clone(),
                 Created {
                     thread: thread.clone(),
-                    project_root: root.to_owned(),
+                    repository: bound,
                     branch: branch.clone(),
                     ended: None,
                 },
@@ -1090,22 +1090,18 @@ impl WorkspaceBackend for Inner {
             .map(|active| active.preparation.is_cancelled());
         // Through the root's bound handle, like the creation; cleanup completes during shutdown
         // too (TS removes in an uninterruptible finalizer), so not under the shutdown token.
-        let removed = match self.bound_root(&created.project_root).await {
-            Ok(git) => {
-                let git = git.with_cancellation(CancellationToken::new());
-                let removed = git
-                    .remove_worktree(&path, true)
-                    .await
-                    .map_err(git_failure("remove-worktree"));
-                if removed.is_ok()
-                    && let Err(error) = git.delete_local_branch(&created.branch, true).await
-                {
-                    tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
-                }
-                removed
-            }
-            Err(error) => Err(error),
-        };
+        let git = created
+            .repository
+            .with_cancellation(CancellationToken::new());
+        let removed = git
+            .remove_worktree(&path, true)
+            .await
+            .map_err(git_failure("remove-worktree"));
+        if removed.is_ok()
+            && let Err(error) = git.delete_local_branch(&created.branch, true).await
+        {
+            tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
+        }
         // Still running: the launch failed or was cancelled before its setup step.
         match cancelled {
             Some(true) => self.finish(&created.thread, WorktreeSetupPhase::Cancelled, None),
