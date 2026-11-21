@@ -43,6 +43,11 @@ const EVENT_CAPACITY: usize = 64;
 // `CLAUDE_MCP_REGISTRATION_TIMEOUT`.
 const CLAUDE_BOOT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CLAUDE_MCP_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(90);
+const CLAUDE_STDERR_TAIL_LENGTH: usize = 2_048;
+const CLAUDE_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const CLAUDE_TRANSPORT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const CLAUDE_ROOT_REFUSAL: &str =
+    "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons";
 
 /// `ClaudeMcpRegistrationTimeoutError`: the open fails with the phase that timed out.
 fn mcp_registration_timeout(thread: &ThreadId, phase: &'static str) -> ProviderError {
@@ -2261,9 +2266,23 @@ fn approval_only_schema(schema: Option<&Value>) -> bool {
         .is_some_and(|p| p.is_empty())
 }
 
+enum QueryStartupError {
+    Transport,
+    Operation(ProviderError),
+}
+
+impl From<t3_claude_cli::Error> for QueryStartupError {
+    fn from(error: t3_claude_cli::Error) -> Self {
+        match error {
+            t3_claude_cli::Error::Closed | t3_claude_cli::Error::Io(_) => Self::Transport,
+            error => Self::Operation(operation(ProviderOperation::Open, error.to_string())),
+        }
+    }
+}
+
 struct LiveQuery {
     client: Client,
-    task: JoinHandle<()>,
+    task: JoinHandle<Option<OrchestrationV2ProviderFailure>>,
     cancellation: CancellationToken,
     policy: ClaudeRuntimeQueryPolicy,
     native: String,
@@ -2397,7 +2416,7 @@ impl ClaudeSessionRuntime {
         &self,
         input: &TurnInput,
         mut prepared: PreparedClaudeLaunch,
-    ) -> ProviderResult<Client> {
+    ) -> ProviderResult<(Client, CancellationToken)> {
         lock(&self.inner.projection).auto_compact_window = prepared.auto_compact_window;
         // `CLAUDE_T3_MCP_TOOL_TIMEOUT_MS`: T3 waits can block for an hour.
         if let Some(session) = self
@@ -2461,7 +2480,7 @@ impl ClaudeSessionRuntime {
                 if !query.selection_matches(&model) {
                     query.apply_selection(model).await?;
                 }
-                return Ok(query.client.clone());
+                return Ok((query.client.clone(), query.cancellation.clone()));
             }
             if lock(&self.inner.projection).pending_background_work(true) {
                 return Err(operation(
@@ -2521,20 +2540,18 @@ impl ClaudeSessionRuntime {
             wake.clear_schedule();
         }
         *lock(&self.inner.permission_policy) = Some((policy.clone(), policy.permission_mode));
-        let connection = self
-            .options
-            .connector
-            .connect(&options, cancellation.clone())
-            .await?;
+        let connection = tokio::select! {
+            biased;
+            _ = self.inner.cancellation.cancelled() => return Err(ProviderError::Cancelled),
+            result = self.options.connector.connect(&options, cancellation.clone()) => result?,
+        };
         let client = connection.session.client();
         for (name, server) in &self.mcp_servers {
             client.register_mcp_server(name.clone(), server.clone());
         }
         let inner = self.inner.clone();
         let token = cancellation.clone();
-        let task = tokio::spawn(async move {
-            run_query(inner, connection, token).await;
-        });
+        let task = tokio::spawn(run_query(inner, connection, token));
         *current = Some(LiveQuery {
             client: client.clone(),
             task,
@@ -2551,64 +2568,104 @@ impl ClaudeSessionRuntime {
         // over stdin after initialize, never in argv or the environment. With servers to send,
         // boot and registration are bounded; a failed registration is logged by server name only
         // (its errors and mcp_status can echo headers) and the session goes on without them.
-        let boot = client.initialize(description.initialize);
-        let result = if dynamic_mcp.is_empty() {
-            tokio::select! { _ = cancellation.cancelled() => Err(ProviderError::Cancelled), result=boot=>result.map(|_|()).map_err(protocol) }
-        } else {
-            tokio::select! {
-                _ = cancellation.cancelled() => Err(ProviderError::Cancelled),
-                result = tokio::time::timeout(CLAUDE_BOOT_TIMEOUT, boot) => match result {
-                    Ok(result) => result.map(|_| ()).map_err(protocol),
-                    Err(_) => Err(mcp_registration_timeout(&input.thread_id, "initialize")),
-                },
+        let startup = async {
+            let boot = client.initialize(description.initialize);
+            if dynamic_mcp.is_empty() {
+                boot.await?;
+                return Ok(());
             }
-        };
-        if let Err(error) = result {
-            self.stop_query().await?;
-            return Err(error);
-        }
-        if !dynamic_mcp.is_empty() {
+            tokio::time::timeout(CLAUDE_BOOT_TIMEOUT, boot)
+                .await
+                .map_err(|_| {
+                    QueryStartupError::Operation(mcp_registration_timeout(
+                        &input.thread_id,
+                        "initialize",
+                    ))
+                })??;
+
             let names: Vec<String> = dynamic_mcp.keys().cloned().collect();
-            let registration = tokio::select! {
-                _ = cancellation.cancelled() => None,
-                result = tokio::time::timeout(
-                    CLAUDE_MCP_REGISTRATION_TIMEOUT,
-                    client.request(OutboundRequest::McpSetServers { servers: dynamic_mcp }),
-                ) => Some(result),
-            };
+            let registration = tokio::time::timeout(
+                CLAUDE_MCP_REGISTRATION_TIMEOUT,
+                client.request(OutboundRequest::McpSetServers {
+                    servers: dynamic_mcp,
+                }),
+            )
+            .await
+            .map_err(|_| {
+                QueryStartupError::Operation(mcp_registration_timeout(
+                    &input.thread_id,
+                    "setMcpServers",
+                ))
+            })?;
             let failed: Vec<String> = match registration {
-                None => {
-                    self.stop_query().await?;
-                    return Err(ProviderError::Cancelled);
-                }
-                Some(Err(_)) => {
-                    self.stop_query().await?;
-                    return Err(mcp_registration_timeout(&input.thread_id, "setMcpServers"));
-                }
-                Some(Ok(Ok(reply))) => {
-                    match reply.decode::<t3_claude_cli::control::McpSetServersResult>() {
-                        Ok(result) => result.errors.into_keys().collect(),
-                        Err(_) => names,
-                    }
-                }
-                Some(Ok(Err(_))) => names,
+                Ok(reply) => match reply.decode::<t3_claude_cli::control::McpSetServersResult>() {
+                    Ok(result) => result.errors.into_keys().collect(),
+                    Err(_) => names,
+                },
+                Err(error) => match QueryStartupError::from(error) {
+                    QueryStartupError::Transport => return Err(QueryStartupError::Transport),
+                    QueryStartupError::Operation(_) => names,
+                },
             };
             if !failed.is_empty() {
                 tracing::warn!(thread = ?input.thread_id, servers = ?failed, "orchestration-v2.claude-mcp-servers-unavailable");
             }
+            Ok(())
+        };
+        let result = tokio::select! {
+            biased;
+            _ = self.inner.cancellation.cancelled() => Err(QueryStartupError::Operation(ProviderError::Cancelled)),
+            _ = cancellation.cancelled() => Err(QueryStartupError::Transport),
+            result = startup => result,
+        };
+        if let Err(error) = result {
+            let exit = self
+                .finish_query(matches!(error, QueryStartupError::Transport))
+                .await;
+            if self.inner.cancellation.is_cancelled() {
+                return Err(ProviderError::Cancelled);
+            }
+            return Err(match error {
+                QueryStartupError::Transport => operation(
+                    ProviderOperation::Open,
+                    exit?.map_or_else(
+                        || CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL.into(),
+                        |failure| failure.message.0,
+                    ),
+                ),
+                QueryStartupError::Operation(error) => error,
+            });
         }
-        Ok(client)
+        Ok((client, cancellation))
     }
     async fn stop_query(&self) -> ProviderResult<()> {
-        let query = self.query.lock().await.take();
-        if let Some(query) = query {
-            query.cancellation.cancel();
-            query
-                .task
-                .await
-                .map_err(|_| operation(ProviderOperation::Close, "Claude query task failed"))?;
+        self.finish_query(false).await.map(|_| ())
+    }
+    async fn finish_query(
+        &self,
+        drain: bool,
+    ) -> ProviderResult<Option<OrchestrationV2ProviderFailure>> {
+        let Some(mut query) = self.query.lock().await.take() else {
+            return Ok(None);
+        };
+        // A write can fail before the reader observes EOF. Give the query time
+        // to collect startup diagnostics before forcing cleanup.
+        if drain {
+            let finished = tokio::select! {
+                biased;
+                _ = self.inner.cancellation.cancelled() => None,
+                result = tokio::time::timeout(CLAUDE_TRANSPORT_DRAIN_TIMEOUT, &mut query.task) => result.ok(),
+            };
+            if let Some(result) = finished {
+                return result
+                    .map_err(|_| operation(ProviderOperation::Close, "Claude query task failed"));
+            }
         }
-        Ok(())
+        query.cancellation.cancel();
+        query
+            .task
+            .await
+            .map_err(|_| operation(ProviderOperation::Close, "Claude query task failed"))
     }
     async fn client(&self) -> ProviderResult<Client> {
         self.query
@@ -2620,25 +2677,60 @@ impl ClaudeSessionRuntime {
             .ok_or(ProviderError::SessionStopped)
     }
 }
+fn root_refusal_failure(stderr_tail: &[u8]) -> Option<OrchestrationV2ProviderFailure> {
+    stderr_tail
+        .windows(CLAUDE_ROOT_REFUSAL.len())
+        .any(|window| window == CLAUDE_ROOT_REFUSAL.as_bytes())
+        .then(|| OrchestrationV2ProviderFailure {
+            class: OrchestrationV2ProviderFailureClass::TransportError,
+            message: TrimmedNonEmptyString(format!(
+                "Claude Code exited before it started: {CLAUDE_ROOT_REFUSAL}"
+            )),
+            code: None,
+            retryable: None,
+            reset_at: None,
+        })
+}
+
 async fn run_query(
     inner: Arc<RuntimeInner>,
     mut connection: ClaudeConnection,
     cancellation: CancellationToken,
-) {
-    let mut stderr_task = connection
+) -> Option<OrchestrationV2ProviderFailure> {
+    let stderr_task = connection
         .process
         .as_mut()
         .and_then(|p| p.stderr.take())
         .map(|mut stderr| {
             tokio::spawn(async move {
-                let mut buffer = [0u8; 8192];
-                while matches!(stderr.read(&mut buffer).await,Ok(n) if n>0) {}
+                let mut buffer = [0u8; CLAUDE_STDERR_TAIL_LENGTH];
+                let mut tail = Vec::new();
+                while let Ok(n @ 1..) = stderr.read(&mut buffer).await {
+                    let discard = (tail.len() + n).saturating_sub(CLAUDE_STDERR_TAIL_LENGTH);
+                    tail.drain(..discard);
+                    tail.extend_from_slice(&buffer[..n]);
+                }
+                tail
             })
         });
-    loop {
-        let result = tokio::select! { biased; _=cancellation.cancelled()=>break,event=connection.session.next_event()=>event };
+    let mut answered = false;
+    let mut drain_until = None;
+    let reached_eof = loop {
+        let drained = async {
+            match drain_until {
+                Some(until) => tokio::time::sleep_until(until).await,
+                None => std::future::pending().await,
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => break false,
+            _ = drained => break false,
+            event = connection.session.next_event() => event,
+        };
         let result = match result {
             Some(Ok(Event::Message(message))) => {
+                answered = true;
                 let frame = lock(&inner.projection).observe_result(message.raw());
                 if frame["type"] == "system"
                     && matches!(frame["subtype"].as_str(), Some("init" | "status"))
@@ -2652,7 +2744,7 @@ async fn run_query(
                     Ok(false) => {}
                     Err(error) => {
                         inner.error(error).await;
-                        break;
+                        break false;
                     }
                 }
                 let budget_changed = if frame["type"] == "system" {
@@ -2717,15 +2809,41 @@ async fn run_query(
             Some(Ok(
                 Event::Diagnostic { .. } | Event::NonJson { .. } | Event::UnmatchedResponse { .. },
             )) => Ok(()),
+            Some(Err(t3_claude_cli::Error::Io(_) | t3_claude_cli::Error::Closed)) => {
+                // A broken writer can leave stdout open. Drain remaining frames and
+                // bound the wait for EOF so the active turn can still settle.
+                drain_until.get_or_insert_with(|| {
+                    tokio::time::Instant::now() + CLAUDE_TRANSPORT_DRAIN_TIMEOUT
+                });
+                Ok(())
+            }
             Some(Err(error)) => Err(protocol(error)),
-            None => break,
+            None => break true,
         };
         if let Err(error) = result {
             inner.error(error).await;
         }
-    }
+    };
     cancellation.cancel();
     lock(&inner.wake).clear_schedule();
+    let _ = connection
+        .session
+        .shutdown_with_cancellation(cancellation.clone())
+        .await;
+    if let Some(process) = connection.process.as_mut() {
+        let _ = process.terminate(Duration::from_secs(1)).await;
+    }
+    let mut stderr_tail = Vec::new();
+    if let Some(mut task) = stderr_task {
+        if reached_eof
+            && !answered
+            && let Ok(Ok(tail)) = tokio::time::timeout(CLAUDE_STDERR_DRAIN_TIMEOUT, &mut task).await
+        {
+            stderr_tail = tail;
+        }
+        task.abort();
+    }
+    let failure = root_refusal_failure(&stderr_tail);
     let ids = lock(&inner.pending).keys().cloned().collect::<Vec<_>>();
     lock(&inner.pending).clear();
     for id in ids {
@@ -2735,19 +2853,30 @@ async fn run_query(
         }
     }
     let terminal = lock(&inner.projection).query_ended();
-    if let Ok(events) = terminal {
+    if let Ok(mut events) = terminal {
+        for event in &mut events {
+            if let ProviderEventKind::Terminal {
+                outcome:
+                    TerminalOutcome::Failed {
+                        failure: terminal, ..
+                    },
+                ..
+            } = &mut event.kind
+            {
+                **terminal = failure
+                    .clone()
+                    .unwrap_or_else(|| OrchestrationV2ProviderFailure {
+                        class: OrchestrationV2ProviderFailureClass::TransportError,
+                        message: TrimmedNonEmptyString("Provider turn failed.".into()),
+                        code: None,
+                        retryable: None,
+                        reset_at: None,
+                    });
+            }
+        }
         let _ = inner.emit(events).await;
     }
-    let _ = connection
-        .session
-        .shutdown_with_cancellation(cancellation.clone())
-        .await;
-    if let Some(process) = connection.process.as_mut() {
-        let _ = process.terminate(Duration::from_secs(1)).await;
-    }
-    if let Some(task) = stderr_task.take() {
-        let _ = task.await;
-    }
+    failure
 }
 
 #[async_trait]
@@ -2922,9 +3051,22 @@ impl SessionRuntime for ClaudeSessionRuntime {
         lock(&self.inner.wake).ambiguous_user_turn = ambiguous;
         let (message, reservation) = self.prepare_message(&input.message, None).await?;
         let prepared = self.prepare_launch(&input, &options).await?;
-        let client = self.launch(&input, prepared).await?;
+        let (client, cancellation) = self.launch(&input, prepared).await?;
         *lock(&self.policy_options) = options;
-        let events = lock(&self.inner.projection).begin(input)?;
+        let events = {
+            let mut projection = lock(&self.inner.projection);
+            if self.inner.cancellation.is_cancelled() {
+                return Err(ProviderError::Cancelled);
+            }
+            if cancellation.is_cancelled() {
+                return Err(ProviderError::Protocol {
+                    reason: None,
+                    detail: CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL.into(),
+                    payload: None,
+                });
+            }
+            projection.begin(input)?
+        };
         self.inner.emit(events).await?;
         client.send_user(message).await.map_err(protocol)?;
         lock(&self.inner.wake).absorb_open_tail();

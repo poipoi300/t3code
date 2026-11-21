@@ -69,34 +69,7 @@ async fn running_with_input(
         write,
         SessionOptions::default(),
     )));
-    let adapter = ClaudeAdapterV2::new(ClaudeAdapterOptions {
-        instance_id: ProviderInstanceId("claudeAgent".into()),
-        launch,
-        connector,
-        clock: Arc::new(ManualClock::new(FIXTURE_DATE)),
-        ids: Arc::new(SequenceIds::new("runtime")),
-        new_native_session_id: Arc::new(|| "00000000-0000-4000-8000-000000000001".into()),
-        mcp_servers: BTreeMap::new(),
-        transcript_root: None,
-        attachments: Arc::new(DirectoryClaudeAttachments::default()),
-        host,
-    });
-    let runtime = adapter
-        .open_session(
-            OpenSession {
-                thread_id: input.thread_id.clone(),
-                provider_session_id: ProviderSessionId("session".into()),
-                model_selection: input.model_selection.clone(),
-                runtime_policy: input.runtime_policy.clone(),
-                prompt_suggestions: None,
-                resume_from_session: None,
-                initial_native_thread_id: None,
-                initial_provider_item_identity_version: None,
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .expect("open Claude fixture session");
+    let runtime = fixture_runtime(host, launch, connector, &input, CancellationToken::new()).await;
     let subscription = runtime
         .subscribe()
         .await
@@ -121,6 +94,349 @@ async fn running_with_input(
         .expect("join fixture start")
         .expect("start fixture turn");
     (runtime, subscription, peer)
+}
+
+async fn fixture_runtime(
+    host: ClaudeHostOptions,
+    launch: LaunchOptions,
+    connector: Arc<dyn ClaudeConnector>,
+    input: &TurnInput,
+    cancellation: CancellationToken,
+) -> Arc<dyn SessionRuntime> {
+    let adapter = ClaudeAdapterV2::new(ClaudeAdapterOptions {
+        instance_id: ProviderInstanceId("claudeAgent".into()),
+        launch,
+        connector,
+        clock: Arc::new(ManualClock::new(FIXTURE_DATE)),
+        ids: Arc::new(SequenceIds::new("runtime")),
+        new_native_session_id: Arc::new(|| "00000000-0000-4000-8000-000000000001".into()),
+        mcp_servers: BTreeMap::new(),
+        transcript_root: None,
+        attachments: Arc::new(DirectoryClaudeAttachments::default()),
+        host,
+    });
+    adapter
+        .open_session(
+            OpenSession {
+                thread_id: input.thread_id.clone(),
+                provider_session_id: ProviderSessionId("session".into()),
+                model_selection: input.model_selection.clone(),
+                runtime_policy: input.runtime_policy.clone(),
+                prompt_suggestions: None,
+                resume_from_session: None,
+                initial_native_thread_id: None,
+                initial_provider_item_identity_version: None,
+            },
+            cancellation,
+        )
+        .await
+        .expect("open Claude fixture session")
+}
+
+#[cfg(unix)]
+async fn process_fixture(
+    script: &str,
+    with_mcp: bool,
+) -> (tempfile::TempDir, Arc<dyn SessionRuntime>, TurnInput) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("create Claude fixture directory");
+    let cli = directory.path().join("fake-claude");
+    std::fs::write(&cli, format!("#!/bin/sh\nset -eu\n{script}\n"))
+        .expect("write Claude fixture executable");
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+        .expect("make Claude fixture executable");
+    let mut input = fixture_turn_input().expect("build Claude fixture turn");
+    input.runtime_policy.cwd = Some(directory.path().to_owned());
+    let mut launch = LaunchOptions {
+        cli_path: Some(cli.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    if with_mcp {
+        launch.mcp_servers.insert(
+            "fixture".into(),
+            json!({"type":"http","url":"http://127.0.0.1:1/mcp"}),
+        );
+    }
+    let runtime = fixture_runtime(
+        ClaudeHostOptions::default(),
+        launch,
+        Arc::new(ProcessConnector),
+        &input,
+        CancellationToken::new(),
+    )
+    .await;
+    (directory, runtime, input)
+}
+
+#[cfg(unix)]
+const INITIALIZE_CLI: &str = r#"
+IFS= read -r initialize
+id=${initialize#*'"request_id":"'}
+id=${id%%'"'*}
+printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$id"
+"#;
+
+#[cfg(unix)]
+async fn assert_startup_failure(script: &str, with_mcp: bool, expected: &str) {
+    let (_directory, runtime, input) = process_fixture(script, with_mcp).await;
+    let result = runtime.start_turn(input).await;
+    assert!(
+        matches!(&result, Err(ProviderError::Operation { operation: ProviderOperation::Open, detail }) if detail == expected),
+        "expected startup failure {expected:?}, got {result:?}",
+    );
+    let _events = runtime
+        .subscribe()
+        .await
+        .expect("the parent session remains live");
+    runtime.close().await.expect("close Claude fixture session");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_immediate_eof_before_any_protocol_message_fails_startup() {
+    // The original composition fixture logged its launch and exited unsuccessfully.
+    assert_startup_failure(
+        "printf 'launched\n' > fixture.log; exit 1",
+        false,
+        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+    )
+    .await;
+    assert_startup_failure("exit 0", false, CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_eof_during_mcp_registration_fails_startup() {
+    assert_startup_failure(
+        &format!("{INITIALIZE_CLI}\nIFS= read -r registration\nexit 23"),
+        true,
+        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_stderr_only_root_refusal_is_curated() {
+    let stderr = "token=sk-fixture\n--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons\nat /private/fixture/settings.json";
+    let (_directory, runtime, input) =
+        process_fixture(&format!("printf '%s\n' '{stderr}' >&2\nexit 1"), false).await;
+    let error = runtime
+        .start_turn(input)
+        .await
+        .expect_err("Claude startup must fail");
+    assert!(
+        matches!(&error, ProviderError::Operation { operation: ProviderOperation::Open, detail } if detail == "Claude Code exited before it started: --dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons"),
+        "{error:?}",
+    );
+    runtime.close().await.expect("close Claude fixture session");
+
+    assert_startup_failure(
+        "printf 'token=sk-fixture\\n' >&2; exit 1",
+        false,
+        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+async fn assert_mid_turn_failure(exit: &str) {
+    use t3_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass;
+
+    let script = format!(
+        r#"{INITIALIZE_CLI}
+IFS= read -r prompt
+printf '%s\n' '{{"type":"assistant","uuid":"partial","message":{{"id":"partial","role":"assistant","content":[{{"type":"text","text":"Partial reply"}}]}}}}'
+printf 'token=sk-fixture\n' >&2
+{exit}
+"#,
+    );
+    let (_directory, runtime, input) = process_fixture(&script, false).await;
+    let mut events = runtime
+        .subscribe()
+        .await
+        .expect("subscribe to Claude fixture");
+    runtime
+        .start_turn(input)
+        .await
+        .expect("start Claude fixture turn");
+    loop {
+        let event = events
+            .events
+            .recv()
+            .await
+            .expect("Claude event stream remains open")
+            .expect("Claude provider event");
+        if let ProviderEventKind::Terminal { outcome, .. } = event.kind {
+            let TerminalOutcome::Failed { failure, .. } = outcome else {
+                panic!("expected a failed turn after {exit}, got {outcome:?}");
+            };
+            assert_eq!(
+                failure.class,
+                OrchestrationV2ProviderFailureClass::TransportError
+            );
+            assert_eq!(failure.code, None);
+            assert_eq!(failure.message.0, "Provider turn failed.");
+            break;
+        }
+    }
+    runtime.close().await.expect("close Claude fixture session");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_clean_eof_mid_turn_is_a_transport_failure() {
+    assert_mid_turn_failure("exit 0").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_nonzero_exit_mid_turn_is_a_transport_failure() {
+    assert_mid_turn_failure("exit 37").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_killed_mid_turn_is_a_transport_failure() {
+    assert_mid_turn_failure("kill -KILL $$").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_stdout_eof_while_cli_is_live_has_no_signal_code() {
+    assert_mid_turn_failure("mkfifo held\nexec 1>&-\nIFS= read -r release < held").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_lifecycle_broken_stdin_settles_even_while_stdout_stays_open() {
+    use t3_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass;
+
+    let (reader, mut output) = tokio::io::duplex(65536);
+    let (writer, input_pipe) = tokio::io::duplex(65536);
+    let connector = Arc::new(PipeConnector::new(Session::connect(
+        reader,
+        writer,
+        SessionOptions::default(),
+    )));
+    let input = fixture_turn_input().expect("build Claude fixture turn");
+    let runtime = fixture_runtime(
+        ClaudeHostOptions::default(),
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        connector,
+        &input,
+        CancellationToken::new(),
+    )
+    .await;
+    let mut events = runtime
+        .subscribe()
+        .await
+        .expect("subscribe to Claude fixture");
+    let captured = runtime.clone();
+    let start = tokio::spawn(async move { captured.start_turn(input).await });
+    let mut input_pipe = BufReader::new(input_pipe).lines();
+    let line = input_pipe
+        .next_line()
+        .await
+        .expect("read Claude initialize request")
+        .expect("Claude initialize request");
+    let initialize: Value = serde_json::from_str(&line).expect("decode Claude initialize request");
+    assert_eq!(initialize["request"]["subtype"], "initialize");
+
+    // The control frame was read, but the prompt will hit a closed stdin.
+    drop(input_pipe);
+    let reply = json!({"type":"control_response","response":{"subtype":"success","request_id":initialize["request_id"],"response":{}}});
+    output
+        .write_all(format!("{reply}\n").as_bytes())
+        .await
+        .expect("send Claude initialize reply");
+    assert!(start.await.expect("join Claude startup task").is_err());
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events
+                .events
+                .recv()
+                .await
+                .expect("Claude event stream remains open")
+                .expect("Claude provider event");
+            if let ProviderEventKind::Terminal { outcome, .. } = event.kind {
+                break outcome;
+            }
+        }
+    })
+    .await
+    .expect("broken stdin must settle before the stdout pipe closes");
+    let TerminalOutcome::Failed { failure, .. } = outcome else {
+        panic!("expected a terminal failure, got {outcome:?}");
+    };
+    assert_eq!(
+        failure.class,
+        OrchestrationV2ProviderFailureClass::TransportError
+    );
+    assert_eq!(failure.code, None);
+    drop(output);
+    runtime.close().await.expect("close Claude fixture session");
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_lifecycle_initialize_timeout_and_parent_cancellation_are_distinct() {
+    use std::time::Duration;
+
+    for cancel in [false, true] {
+        let (client, server) = tokio::io::duplex(65536);
+        let (read, write) = tokio::io::split(client);
+        let (peer_read, peer_write) = tokio::io::split(server);
+        let connector = Arc::new(PipeConnector::new(Session::connect(
+            read,
+            write,
+            SessionOptions::default(),
+        )));
+        let mut launch = LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        };
+        launch.mcp_servers.insert(
+            "fixture".into(),
+            json!({"type":"http","url":"http://127.0.0.1:1/mcp"}),
+        );
+        let input = fixture_turn_input().expect("build Claude fixture turn");
+        let parent = CancellationToken::new();
+        let runtime = fixture_runtime(
+            ClaudeHostOptions::default(),
+            launch,
+            connector,
+            &input,
+            parent.clone(),
+        )
+        .await;
+        let captured = runtime.clone();
+        let start = tokio::spawn(async move { captured.start_turn(input).await });
+        let mut peer = Peer {
+            read: BufReader::new(peer_read).lines(),
+            write: peer_write,
+        };
+        assert_eq!(peer.read().await["request"]["subtype"], "initialize");
+        if cancel {
+            parent.cancel();
+            assert!(matches!(
+                start.await.expect("join Claude startup task"),
+                Err(ProviderError::Cancelled)
+            ));
+        } else {
+            tokio::time::advance(Duration::from_secs(300)).await;
+            let error = start.await.expect("join Claude startup task").unwrap_err();
+            assert!(
+                matches!(&error, ProviderError::Operation { operation: ProviderOperation::Open, detail } if detail.starts_with("Claude timed out while starting up.")),
+                "{error:?}",
+            );
+            assert!(runtime.subscribe().await.is_ok());
+        }
+        runtime.close().await.expect("close Claude fixture session");
+    }
 }
 
 #[tokio::test]
