@@ -446,6 +446,7 @@ impl RewindReservation {
         } else {
             draft["type"] = json!("file");
             draft["fileUri"] = json!("");
+            draft["restoredFromRewind"] = json!(true);
             self.files.push(draft);
         }
         Ok(())
@@ -470,12 +471,7 @@ impl crate::thread_views::thread_ops::rewind::PreparedRewindAttachments for Rewi
             );
             web_content::sync_persisted_attachments(document, draft_key, &saved);
         }
-        let files = web_content::add_files(document, draft_key, &self.files, true, false);
-        if files.len() + images.accepted_ids.len() != self.count {
-            return Err(ClientError::InvalidPayload(
-                "Make room for this message's attachments in the composer before rewinding.".into(),
-            ));
-        }
+        web_content::add_files(document, draft_key, &self.files, true, false);
         Ok(())
     }
 }
@@ -1418,6 +1414,140 @@ mod tests {
             source: None,
             insertion: None,
         }
+    }
+
+    #[test]
+    fn picked_file_drafts_persist_metadata_without_picked_bytes() {
+        block_on(async {
+            let (_, client) = session();
+            client
+                .intake_bytes(vec![file("note.txt", "text/plain", b"note")])
+                .await
+                .unwrap();
+            let saved =
+                web_drafts::partialize_state(&client.0.drafts.borrow(), &Default::default());
+            let metadata = &saved["draftsByThreadKey"]["env:thread"]["files"][0];
+            assert_eq!(metadata["name"], "note.txt");
+            assert_eq!(metadata["sizeBytes"], 4);
+            assert!(
+                metadata.get("dataUrl").is_none(),
+                "only the live draft may hold picked bytes"
+            );
+            let id = client.draft()["files"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            web_content::set_file_upload(
+                &mut client.0.drafts.borrow_mut(),
+                "env:thread",
+                &id,
+                "env",
+                "upload",
+            );
+            let saved =
+                web_drafts::partialize_state(&client.0.drafts.borrow(), &Default::default());
+            let metadata = &saved["draftsByThreadKey"]["env:thread"]["files"][0];
+            assert_eq!(metadata["attachmentId"], "upload");
+            assert!(
+                metadata.get("dataUrl").is_none(),
+                "uploaded drafts keep the upload identity"
+            );
+        });
+    }
+
+    #[test]
+    fn a_saved_pick_keeps_bytes_in_the_live_session_and_requires_reattach_after_restart() {
+        use crate::thread_views::composer::draft_service::ComposerDraftService;
+
+        block_on(async {
+            let platform = Rc::new(FakePlatform::default());
+            let drafts = ComposerDraftService::new(platform.clone());
+            drafts.load().await.unwrap();
+            let client = AttachmentSession::new(
+                platform.clone(),
+                drafts.document(),
+                "env:thread".into(),
+                EnvironmentId("env".into()),
+            );
+            client
+                .intake_bytes(vec![file("note.txt", "text/plain", b"note")])
+                .await
+                .unwrap();
+            drafts
+                .update(|document| {
+                    document["draftsByThreadKey"]["env:thread"]["prompt"] = json!("edited");
+                    Ok(())
+                })
+                .unwrap();
+            drafts.flush().await.unwrap();
+            drafts.load().await.unwrap();
+            assert!(client.draft()["files"][0]["dataUrl"].is_string());
+
+            let reopened = ComposerDraftService::new(platform);
+            reopened.load().await.unwrap();
+            let document = reopened.document();
+            let document = document.borrow();
+            let file = &document["draftsByThreadKey"]["env:thread"]["files"][0];
+            assert_eq!(file["name"], "note.txt");
+            assert!(web_content::needs_reattach(file));
+        });
+    }
+
+    #[test]
+    fn rewind_keeps_the_prompt_and_attachments_that_fit_after_the_draft_changes() {
+        use crate::thread_views::thread_ops::rewind::PreparedRewindAttachments;
+
+        let (_, client) = session();
+        let mut rewind = client.reserve_rewind(2).unwrap();
+        for name in ["one.txt", "two.txt"] {
+            let original = serde_json::from_value(json!({
+                "type":"file", "id":name, "name":name, "mimeType":"text/plain", "sizeBytes":1
+            }))
+            .unwrap();
+            rewind
+                .prepare(
+                    &original,
+                    crate::view_logic::chat_view::RestoredAttachment {
+                        name: name.into(),
+                        mime_type: "text/plain".into(),
+                        bytes: b"x".to_vec(),
+                    },
+                )
+                .unwrap();
+        }
+        let old: Vec<_> = (0..PROVIDER_SEND_TURN_MAX_ATTACHMENTS - 1)
+            .map(|i| json!({"id":i.to_string(), "name":"old.txt", "type":"file", "sizeBytes":1}))
+            .collect();
+        let mut document =
+            json!({"draftsByThreadKey":{"env:thread":{"prompt":"Restored prompt","files":old}}});
+        rewind.commit(&mut document, "env:thread").unwrap();
+        let saved = web_drafts::partialize_state(&document, &Default::default());
+        let draft = &saved["draftsByThreadKey"]["env:thread"];
+        assert_eq!(draft["prompt"], "Restored prompt");
+        let files = draft["files"].as_array().unwrap();
+        assert_eq!(files.len(), PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
+        assert_eq!(files.last().unwrap()["name"], "one.txt");
+        assert!(
+            files.last().unwrap()["dataUrl"].is_string(),
+            "rewind bytes survive reload"
+        );
+        let legacy = document["draftsByThreadKey"]["env:thread"]["files"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        legacy.as_object_mut().unwrap().remove("restoredFromRewind");
+        let saved = web_drafts::partialize_state(&document, &Default::default());
+        let legacy = saved["draftsByThreadKey"]["env:thread"]["files"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert!(
+            legacy["dataUrl"].is_string(),
+            "older rewind bytes survive reload"
+        );
+        assert_eq!(legacy["restoredFromRewind"], true);
     }
 
     #[test]

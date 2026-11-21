@@ -67,6 +67,30 @@ fn empty() -> SavedDraftDocument {
     SavedDraftDocument::decode_web(br#"{"version":9,"state":{"draftsByThreadKey":{},"draftThreadsByThreadKey":{},"logicalProjectDraftThreadKeyByLogicalProjectKey":{}}}"#)
         .expect("canonical empty web draft")
 }
+
+// Persisted picks contain metadata only. When reloading after a storage
+// notification, carry the current session's bytes for the files still present.
+fn retain_picked_file_bytes(hydrated: &mut Value, live: &Value) {
+    if let Some(drafts) = hydrated["draftsByThreadKey"].as_object_mut() {
+        for (key, draft) in drafts {
+            let live_files = live["draftsByThreadKey"][key]["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|file| Some((file["id"].as_str()?, file["dataUrl"].as_str()?)))
+                .collect::<BTreeMap<_, _>>();
+            if let Some(files) = draft["files"].as_array_mut() {
+                for file in files {
+                    if !file["dataUrl"].is_string()
+                        && let Some(bytes) = file["id"].as_str().and_then(|id| live_files.get(id))
+                    {
+                        file["dataUrl"] = Value::from(*bytes);
+                    }
+                }
+            }
+        }
+    }
+}
 struct DraftAttachmentOwner<P: Platform> {
     drafts: Rc<ComposerDraftService<P>>,
     key: String,
@@ -325,6 +349,7 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
                     *draft = web_drafts::hydrate_draft(draft);
                 }
             }
+            retain_picked_file_bytes(&mut hydrated, &self.document.borrow());
             let merged = merge_web_states(
                 &hydrated,
                 &self.document.borrow(),
@@ -419,6 +444,7 @@ impl<P: Platform + 'static> ComposerDraftService<P> {
                 };
             }
         }
+        retain_picked_file_bytes(&mut hydrated, &captured);
         let merged = merge_web_states(&hydrated, &current, &captured)?;
         self.dirty.set(current != captured);
         self.deadline.set(

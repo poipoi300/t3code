@@ -878,6 +878,23 @@ pub fn partialize_state(state: &Value, open_previews: &BTreeSet<String>) -> Valu
                     file["environmentId"] = file["uploadEnvironmentId"].clone();
                 }
                 if let Some(object) = file.as_object_mut() {
+                    // Restored files must survive the accepted rewind. Ordinary picks
+                    // keep their bytes in the live draft and persist metadata only.
+                    // Earlier rewinds used UUIDs. Earlier picks used undashed IDs.
+                    let restored = object
+                        .get("restoredFromRewind")
+                        .and_then(Value::as_bool)
+                        .unwrap_or_else(|| {
+                            object.get("fileUri").and_then(Value::as_str) == Some("")
+                                && object.get("id").and_then(Value::as_str).is_some_and(|id| {
+                                    id.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+                                })
+                        });
+                    if !restored {
+                        object.remove("dataUrl");
+                    } else if object.contains_key("dataUrl") {
+                        object.insert("restoredFromRewind".into(), Value::Bool(true));
+                    }
                     for key in [
                         "file",
                         "previewUrl",
