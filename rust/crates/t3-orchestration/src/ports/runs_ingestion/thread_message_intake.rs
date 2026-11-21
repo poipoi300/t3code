@@ -1,6 +1,4 @@
-use super::attachment_claims::{
-    attachment_id, attachment_is_pending_upload, attachment_path, validate_attachment_limits,
-};
+use super::attachment_claims::{attachment_id, attachment_path, validate_attachment_limits};
 use crate::{
     api::*,
     error::{Error, Result},
@@ -71,7 +69,7 @@ async fn claim(
     {
         return Err(intake_error("Duplicate attachment ids are not allowed."));
     }
-    if !attachments.iter().any(attachment_is_pending_upload) {
+    if attachments.is_empty() {
         return Ok(ClaimedAttachments {
             attachments,
             claimed_paths: vec![],
@@ -380,13 +378,13 @@ impl ThreadMessageIntake {
             return launches.launch(input).await;
         };
         validate_attachment_limits(&message.attachments)?;
-        if !message.attachments.iter().any(attachment_is_pending_upload) {
+        if message.attachments.is_empty() {
             return launches.launch(input).await;
         }
         let thread = input
             .thread_id
             .clone()
-            .ok_or_else(|| intake_error("Uploaded attachments need a thread id at launch."))?;
+            .ok_or_else(|| intake_error("Attachments need a thread id at launch."))?;
         let before = message.attachments.clone();
         let claimed = claim(self.attachments.as_ref(), thread, before.clone()).await?;
         message.attachments = claimed.attachments;
