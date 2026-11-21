@@ -525,7 +525,8 @@ fn panels_terminal_drawer_opens_and_focuses_a_live_session() {
         .expect("drawer was hidden");
     app.press("role:button[Toggle terminal drawer]")
         .expect("reopen drawer before the first write completes");
-    app.wait_for("text:shell ready").expect("reattached shell replay");
+    app.wait_for("text:shell ready")
+        .expect("reattached shell replay");
     app.press_key("p").expect("send input after remount");
     app.settle();
     app.press("role:button[Release first terminal write]")
