@@ -1136,7 +1136,7 @@ async fn provider_update_uses_the_configured_binary_and_verifies_the_fake_proces
 }
 
 fn transferred_profile() -> Value {
-    json!({"registration":{"clientId":"fixture"},"credentials":{"clientId":"fixture","accessToken":"private-transfer-access","refreshToken":null,"idToken":"private-transfer-id","issuer":"https://auth.openai.com","expiresAt":1800000000000_u64,"earliestRefreshAt":null,"scopes":[],"subject":"fixture","email":null}})
+    json!({"registration":{"clientId":"oaiapp_fixture"},"credentials":{"clientId":"oaiapp_fixture","accessToken":"private-transfer-access","refreshToken":null,"idToken":"private-transfer-id","issuer":"https://auth.openai.com","expiresAt":1800000000000_u64,"earliestRefreshAt":null,"scopes":[],"subject":"fixture","email":null}})
 }
 #[tokio::test]
 async fn every_served_provider_method_refuses_a_session_missing_its_contract_scope() {
@@ -1305,10 +1305,10 @@ fn sign_claims(claims: Value) -> String {
 }
 fn transferred_signed_profile() -> Value {
     let token = sign_claims(
-        json!({"iss":"https://auth.openai.com","aud":"fixture","sub":"fixture-subject","exp":1_800_003_600_u64}),
+        json!({"iss":"https://auth.openai.com","aud":"oaiapp_fixture","sub":"fixture-subject","exp":1_800_003_600_u64}),
     );
-    json!({"registration":{"clientId":"fixture","subject":"fixture-subject","idTokenHint":"private-import-hint"},
-        "credentials":{"clientId":"fixture","accessToken":"private-transfer-access","refreshToken":null,"idToken":token,
+    json!({"registration":{"clientId":"oaiapp_fixture","subject":"fixture-subject","idTokenHint":"private-import-hint"},
+        "credentials":{"clientId":"oaiapp_fixture","accessToken":"private-transfer-access","refreshToken":null,"idToken":token,
         "issuer":"https://auth.openai.com","expiresAt":1_800_003_600_000_u64,"earliestRefreshAt":null,
         "scopes":["chatgpt.tokens.use.direct"],"subject":"fixture-subject","email":null}})
 }
@@ -1354,7 +1354,7 @@ async fn reconnect_exports_only_the_authorized_hint_and_import_strips_it_from_re
     let exported = ok(server
         .call(
             "provider.chatgpt.reconnect-profile",
-            json!({"instanceId":"codex","methodId":"chatgpt-profile:fixture"}),
+            json!({"instanceId":"codex","methodId":"chatgpt-profile:oaiapp_fixture"}),
         )
         .await);
     assert_eq!(exported["idTokenHint"], token);
@@ -1419,4 +1419,71 @@ async fn reconnect_exports_only_the_authorized_hint_and_import_strips_it_from_re
     for secret in [token, "private-import-hint", "private-transfer-access"] {
         assert!(!logs.contains(secret));
     }
+}
+
+#[tokio::test]
+async fn scoped_refresh_refuses_an_unknown_workspace_with_a_typed_error() {
+    let mut s = Server::start().await;
+    let result = s
+        .call(
+            "server.refreshProviders",
+            json!({"instanceId":"codex","cwd":"relative"}),
+        )
+        .await;
+    let result = serde_json::to_value(result).unwrap();
+    let error = &result["cause"][0]["error"];
+    assert_eq!(error["_tag"], "ProviderSetupError");
+    assert_eq!(error["instanceId"], "codex");
+    assert_eq!(error["operation"], "refresh-models");
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn handoff_start_failure_names_the_start_operation() {
+    let mut s = Server::start().await;
+    s.effects.now.store(i64::MAX, Ordering::SeqCst);
+    s.client
+        .start(
+            "provider.chatgpt.handoff.subscribe",
+            json!({
+                "instanceId":"destination-only","environmentId":"remote","attemptId":"attempt",
+                "profile":null,"returnUrl":"https://app.t3.codes/settings"
+            }),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let CallEvent::Exit { exit, .. } = s.event().await else {
+        panic!("expected start failure")
+    };
+    let error = serde_json::to_value(exit).unwrap()["cause"][0]["error"].clone();
+    assert_eq!(error["_tag"], "ProviderSetupError");
+    assert_eq!(error["operation"], "start");
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn access_only_session_cannot_read_or_subscribe_to_config_on_first_or_next_socket() {
+    let mut server = Server::start().await;
+    server
+        .reconnect_with(&["access:read", "access:write"])
+        .await;
+    for attempt in 0..2 {
+        if attempt == 1 {
+            server.reopen(server.cookie.clone()).await;
+        }
+        for (tag, kind) in [
+            ("server.getConfig", CallKind::Unary),
+            ("subscribeServerConfig", CallKind::Stream),
+        ] {
+            let call = server.client.start(tag, json!({}), kind).unwrap();
+            let CallEvent::Exit { id, exit } = server.event().await else {
+                panic!("unauthorized config read delivered data");
+            };
+            assert_eq!(id, call);
+            let error = serde_json::to_value(exit).unwrap()["cause"][0]["error"].clone();
+            assert_eq!(error["_tag"], "EnvironmentAuthorizationError");
+            assert_eq!(error["requiredPermission"], "orchestration:read");
+        }
+    }
+    server.runtime.shutdown().await.unwrap();
 }

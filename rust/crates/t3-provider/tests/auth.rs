@@ -269,7 +269,7 @@ async fn an_admitted_response_finishes_after_the_requesting_client_disconnects()
 async fn invalid_profile_import_leaves_existing_sessions_running() {
     let (controller, mut events) = setup(Duration::from_secs(300)).await;
     let access = controller.admit_access().await.unwrap();
-    let profile=serde_json::from_value(json!({"registration":{"clientId":"client"},"credentials":{"clientId":"client","issuer":"https://auth.openai.com","accessToken":"secret-test-key","refreshToken":null,"idToken":"secret-id","expiresAt":1234,"earliestRefreshAt":null,"scopes":[],"subject":"subject","email":null}})).unwrap();
+    let profile=serde_json::from_value(json!({"registration":{"clientId":"oaiapp_client"},"credentials":{"clientId":"oaiapp_client","issuer":"https://auth.openai.com","accessToken":"secret-test-key","refreshToken":null,"idToken":"secret-id","expiresAt":1234,"earliestRefreshAt":null,"scopes":[],"subject":"subject","email":null}})).unwrap();
     assert_eq!(
         controller
             .adopt_credentials(Sensitive::new(profile))

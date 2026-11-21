@@ -33,6 +33,8 @@ pub type SecretString = Sensitive<String>;
 pub enum ServiceError {
     #[error("This provider instance is no longer available.")]
     Unavailable,
+    #[error("Complete ChatGPT sign-in before transferring this connection.")]
+    IncompleteTransfer,
     #[error("This provider does not support this operation.")]
     Unsupported,
     #[error("Provider setup is already in progress.")]

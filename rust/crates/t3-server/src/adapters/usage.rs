@@ -333,13 +333,13 @@ pub(super) mod provider_sources {
     impl GlobalProviderSources for Sources {
         async fn refresh_usage(&self) -> ServiceResult<()> {
             let _guard = self.refresh_lock.lock().await;
-            let settings = self
+            let (sources, providers) = self
                 .settings
                 .snapshot()
                 .await
-                .map_err(|_| ServiceError::Storage)?;
-            let enabled = settings
-                .usage_limit_sources
+                .map(|settings| (settings.usage_limit_sources, settings.secret_providers))
+                .unwrap_or_default();
+            let enabled = sources
                 .into_iter()
                 .filter(|(_, s)| s.enabled)
                 .collect::<Vec<_>>();
@@ -352,7 +352,7 @@ pub(super) mod provider_sources {
                 .collect();
             let mut resolved = self
                 .secrets
-                .read(&settings.secret_providers, &references, false)
+                .read(&providers, &references, false)
                 .await
                 .into_iter();
             let configs: Vec<_> = enabled
@@ -381,7 +381,9 @@ pub(super) mod provider_sources {
                 .map_err(|_| ServiceError::Response)
         }
         async fn reload_secrets(&self) -> ServiceResult<()> {
-            self.secrets.invalidate(None).await;
+            let settings = self.settings.snapshot().await.ok();
+            let references = refresh_references(settings.as_ref());
+            self.secrets.invalidate(references.as_deref()).await;
             Ok(())
         }
         async fn with_usage_commands(
@@ -395,5 +397,76 @@ pub(super) mod provider_sources {
                 ),
             ))
         }
+    }
+    fn refresh_references(
+        settings: Option<&t3_contracts::settings::ServerSettings>,
+    ) -> Option<Vec<t3_contracts::secret_reference::SecretReference>> {
+        settings.map(t3_config::secrets::settings_refresh_references)
+    }
+    #[test]
+    fn global_secret_refresh_selects_only_settings_credential_references() {
+        use serde_json::json;
+        use t3_contracts::settings::ServerSettings;
+        let mut raw = serde_json::to_value(ServerSettings::default()).expect("valid fixture");
+        let reference = |key: &str| json!({"provider":"vault","reference":key});
+        raw["sourceControlHosts"] = json!({"github":{"tokens":{"host":reference("token")},"unrelated":reference("other")},"bitbucket":{"apiToken":reference("api")}});
+        raw["cloudSpeechCredentials"]["xai"] = reference("voice");
+        raw["usageLimitSources"] = json!({"meter":{"kind":"cliproxy","url":"https://fixture.invalid","managementKey":reference("usage")}});
+        raw["textGenerators"] = json!({"text":{"kind":"openaiCompatible","baseUrl":"https://fixture.invalid","apiKey":reference("generator")}});
+        raw["easDeviceHosts"] =
+            json!([{"kind":"eas","id":"eas","label":"EAS","accessToken":reference("device")}]);
+        raw["simlockDeviceHosts"] = json!([{"kind":"simlock","id":"sim","label":"Sim","gatewayUrl":"https://fixture.invalid","agentToken":reference("agent")}]);
+        let settings = serde_json::from_value(raw).expect("valid fixture");
+        let mut keys = refresh_references(Some(&settings))
+            .expect("readable settings select references")
+            .into_iter()
+            .map(|r| r.reference)
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "agent",
+                "api",
+                "device",
+                "generator",
+                "token",
+                "usage",
+                "voice"
+            ]
+        );
+        assert_eq!(
+            refresh_references(Some(&ServerSettings::default())),
+            Some(vec![])
+        );
+        assert_eq!(refresh_references(None), None);
+    }
+
+    #[tokio::test]
+    async fn unreadable_settings_clear_secrets_and_allow_global_usage_refresh() {
+        use t3_provider::{
+            secrets::OnePassword,
+            transport::{ReqwestTransport, SystemClock},
+        };
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let settings = t3_config::settings::SettingsService::new(directory.path());
+        assert!(settings.snapshot().await.is_err());
+        let sources = Sources::new(
+            settings,
+            Arc::new(SecretResolver::new(OnePassword::new(Default::default()))),
+            Arc::new(ReqwestTransport::new().expect("HTTP client")),
+            Arc::new(SystemClock),
+            "linux",
+            "x64",
+        );
+        sources
+            .reload_secrets()
+            .await
+            .expect("invalidate cached secrets");
+        sources
+            .refresh_usage()
+            .await
+            .expect("refresh with zero configured usage sources");
+        assert!(sources.snapshots.current().is_empty());
     }
 }

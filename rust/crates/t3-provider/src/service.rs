@@ -420,7 +420,9 @@ impl ProviderService {
         scan_cwd: Option<&str>,
     ) -> Result<ServerProviderUpdatedPayload, RefreshProvidersError> {
         if input.model_catalog_only.flatten() == Some(true) {
-            self.catalog.refresh().await?;
+            if let Err(error) = self.catalog.refresh().await {
+                tracing::warn!(%error, "Could not refresh provider model catalog");
+            }
             return Ok(ServerProviderUpdatedPayload {
                 providers: ServerCompatibleArray(vec![]),
             });
@@ -463,23 +465,31 @@ impl ProviderService {
             .filter(|(key, _)| id.is_none_or(|id| id == *key))
             .map(|(_, instance)| instance.clone())
             .collect();
-        for instance in instances {
-            if input.reload_secrets.flatten() == Some(true) {
-                instance.reload_secrets().await?;
+        let refresh_models = input.refresh_models.flatten() == Some(true);
+        let fresh = input.fresh.flatten() == Some(true);
+        for instance in &instances {
+            if refresh_models {
+                instance.invalidate_models(cwd, fresh).await?;
             }
-            if input.refresh_models.flatten() == Some(true) {
-                instance
-                    .invalidate_models(cwd, input.fresh.flatten() == Some(true))
-                    .await?;
+            if cwd.is_none()
+                && input.reload_secrets.flatten() == Some(true)
+                && let Err(error) = instance.reload_secrets().await
+            {
+                tracing::warn!(%error, "Could not reload provider secrets; preserving cached provider");
+                continue;
             }
-            let mut snapshot = instance
-                .snapshot(scan_cwd.or(cwd), input.fresh.flatten() == Some(true))
-                .await?;
+            let snapshot = match instance.snapshot(scan_cwd.or(cwd), fresh).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::warn!(%error, "Provider probe failed; preserving cached provider");
+                    continue;
+                }
+            };
             if let Some(cwd) = cwd {
                 let current = self.instances.read().await;
                 if current
                     .get(instance.instance_id())
-                    .is_some_and(|registered| Arc::ptr_eq(registered, &instance))
+                    .is_some_and(|registered| Arc::ptr_eq(registered, instance))
                 {
                     let mut parked = self.parked.write().await;
                     let id = instance.instance_id();
@@ -506,22 +516,47 @@ impl ProviderService {
                     }
                 }
             }
-            if input.refresh_models.flatten() == Some(true)
-                && snapshot.enabled
-                && snapshot.installed
-            {
+            if self.store_snapshot(instance, snapshot).await {
+                self.publish();
+            }
+        }
+        if refresh_models {
+            for instance in instances {
+                let id = instance.instance_id();
+                if !self
+                    .instances
+                    .read()
+                    .await
+                    .get(id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &instance))
+                    || !self
+                        .snapshots
+                        .read()
+                        .await
+                        .get(id)
+                        .is_some_and(|current| current.enabled && current.installed)
+                {
+                    continue;
+                }
                 instance
                     .refresh_models()
                     .await
                     .map_err(|error| RefreshProvidersError::Models {
-                        instance_id: instance.instance_id().clone(),
+                        instance_id: id.clone(),
                         error,
                     })?;
-                snapshot = instance.snapshot(None, false).await?;
+                match instance.snapshot(None, false).await {
+                    Ok(snapshot) => {
+                        if self.store_snapshot(&instance, snapshot).await {
+                            self.publish();
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Provider probe after model refresh failed; preserving cached provider")
+                    }
+                }
             }
-            self.store_snapshot(&instance, snapshot).await;
         }
-        self.publish();
         let mut providers = self.get_providers().await;
         if input.omit_providers.flatten() == Some(true) && (id.is_none() || cwd.is_none()) {
             providers.0.clear();

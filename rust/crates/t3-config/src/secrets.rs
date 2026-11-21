@@ -95,6 +95,56 @@ struct Slot {
     sensitive: bool,
     redacted: bool,
 }
+fn source_control_secret_fields(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "github" | "gitlab" => &["tokens", "signIns"],
+        "bitbucket" => &["accessToken", "apiToken"],
+        "gitcafe" => &["token"],
+        _ => &[],
+    }
+}
+
+/// External credentials re-read by a global provider refresh.
+pub fn settings_refresh_references(
+    settings: &t3_contracts::settings::ServerSettings,
+) -> Vec<t3_contracts::secret_reference::SecretReference> {
+    use serde::Deserialize;
+    use t3_contracts::{
+        secret_reference::SecretReference, settings_secret_value::SettingsSecretValue,
+    };
+    let speech = &settings.cloud_speech_credentials;
+    let mut refs: Vec<_> = settings
+        .usage_limit_sources
+        .values()
+        .map(|s| &s.management_key)
+        .chain(settings.text_generators.values().map(|s| &s.api_key))
+        .chain(settings.eas_device_hosts.iter().map(|h| &h.access_token))
+        .chain(settings.simlock_device_hosts.iter().map(|h| &h.agent_token))
+        .chain([&speech.openai, &speech.xai, &speech.openrouter])
+        .filter_map(|s| match s {
+            SettingsSecretValue::Reference(reference) => Some(reference.clone()),
+            SettingsSecretValue::Literal(_) => None,
+        })
+        .collect();
+    for (kind, host) in &settings.source_control_hosts {
+        for field in source_control_secret_fields(kind) {
+            let Some(value) = host.get(*field) else {
+                continue;
+            };
+            if let Ok(reference) = SecretReference::deserialize(value) {
+                refs.push(reference);
+            } else if let Some(entries) = value.as_object() {
+                refs.extend(
+                    entries
+                        .values()
+                        .filter_map(|v| SecretReference::deserialize(v).ok()),
+                );
+            }
+        }
+    }
+    refs
+}
+
 fn slots(value: &Value) -> Vec<Slot> {
     let mut slots = Vec::new();
     let mut field = |path: String, name: String| {
@@ -149,13 +199,7 @@ fn slots(value: &Value) -> Vec<Slot> {
         .into_iter()
         .flatten()
     {
-        let names: &[&str] = match kind.as_str() {
-            "github" | "gitlab" => &["tokens", "signIns"],
-            "bitbucket" => &["accessToken", "apiToken"],
-            "gitcafe" => &["token"],
-            _ => &[],
-        };
-        for f in names {
+        for f in source_control_secret_fields(kind) {
             if fields.get(*f).is_some() {
                 field(
                     format!("/sourceControlHosts/{}/{f}", pointer_escape(kind)),

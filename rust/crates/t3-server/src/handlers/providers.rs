@@ -82,17 +82,16 @@ fn register_status(
         async move {
             let id = input.instance_id.clone().flatten();
             let scan = if input.model_catalog_only.flatten() != Some(true)
-                && id.is_some()
+                && let Some(id) = id.as_ref()
                 && let Some(cwd) = input.cwd.as_ref().and_then(Option::as_ref)
             {
                 Some(
                     a.workspace_scan_directory(&ctx.services, &cwd.0)
                         .await
-                        .map_err(|error| {
-                            Failure::Defect(crate::registry::ServerDefect::Internal {
-                                message: error.to_string(),
-                            })
-                        })?,
+                        .map_err(|_| Failure::Typed(WsServerRefreshProvidersError::ProviderSetupError(
+                            crate::adapters::providers::setup_error(id, "refresh-models",
+                                "Provider refresh requires a known workspace in this environment."),
+                        )))?,
                 )
             } else {
                 None
@@ -128,9 +127,9 @@ fn register_status(
             // The destination instance belongs to the other environment. The host creates an
             // isolated controller with this socket's session and keeps its profiles in memory.
             let id = input.instance_id.clone();
-            let typed = move |error| {
+            let typed = move |operation, error| {
                 Failure::Typed(ProviderSetupRpcError::ProviderSetupError(
-                    crate::adapters::providers::auth_error(&id, "handoff", error),
+                    crate::adapters::providers::auth_error(&id, operation, error),
                 ))
             };
             let mut handoff = a
@@ -138,9 +137,9 @@ fn register_status(
                 .handoff
                 .subscribe(input, &ctx.session_id.0)
                 .await
-                .map_err(&typed)?;
+                .map_err(|error| typed("start", error))?;
             Ok(async_stream::try_stream! {
-                while let Some(state) = handoff.next().await.map_err(&typed)? {
+                while let Some(state) = handoff.next().await.map_err(|error| typed("export", error))? {
                     yield state.into_inner();
                 }
             })

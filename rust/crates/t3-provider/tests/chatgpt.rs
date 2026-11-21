@@ -476,3 +476,13 @@ async fn config_store_reads_legacy_single_records_and_writes_existing_secret_lay
     repository.save(&saved).await.unwrap();
     assert_eq!(repository.load().await.unwrap().sessions.sessions.len(), 1);
 }
+
+#[tokio::test]
+async fn exporting_without_completed_sign_in_reports_the_transfer_requirement() {
+    let h = harness(vec![]);
+    let error = h.auth.export_profile().await.expect_err("no sign-in");
+    assert_eq!(
+        error.to_string(),
+        "Complete ChatGPT sign-in before transferring this connection."
+    );
+}

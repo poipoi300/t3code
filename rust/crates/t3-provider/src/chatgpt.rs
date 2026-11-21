@@ -588,13 +588,21 @@ impl ChatGptAuth {
             .run(async {
                 lease.check()?;
                 let saved = self.store.load().await?;
-                let credentials = Self::active(&saved).ok_or(ServiceError::Unavailable)?;
+                let credentials = Self::active(&saved)
+                    .filter(|value| {
+                        value
+                            .id_token
+                            .as_ref()
+                            .is_some_and(|t| !t.expose().is_empty())
+                            && value.issuer.as_ref().is_some_and(|s| !s.is_empty())
+                    })
+                    .ok_or(ServiceError::IncompleteTransfer)?;
                 let registration = saved
                     .registrations
                     .profiles
                     .iter()
                     .find(|p| p.client_id == credentials.client_id)
-                    .ok_or(ServiceError::Unavailable)?;
+                    .ok_or(ServiceError::IncompleteTransfer)?;
                 let credentials = serde_json::from_value(
                     serde_json::to_value(credentials).map_err(crate::diagnostics::mapped(
                         concat!(module_path!(), "::error"),

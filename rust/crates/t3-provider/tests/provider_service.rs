@@ -27,6 +27,7 @@ struct Instance {
     events: mpsc::UnboundedSender<String>,
     ownership: Mutex<String>,
     model_error: Option<ServiceError>,
+    snapshot_failure: std::sync::atomic::AtomicBool,
 }
 #[async_trait]
 impl ProviderInstanceService for Instance {
@@ -40,6 +41,12 @@ impl ProviderInstanceService for Instance {
         self.events
             .send(format!("snapshot:{}", cwd.unwrap_or("machine")))
             .unwrap();
+        if self
+            .snapshot_failure
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(ServiceError::Response);
+        }
         Ok(self.value.lock().await.clone())
     }
     async fn reload_secrets(&self) -> ServiceResult<()> {
@@ -100,6 +107,7 @@ fn instance_at(id: &str, enabled: bool) -> (Arc<Instance>, mpsc::UnboundedReceiv
             events,
             ownership: Mutex::new("shared".into()),
             model_error: None,
+            snapshot_failure: Default::default(),
         }),
         receiver,
     )
@@ -193,9 +201,15 @@ async fn global_model_refresh_attributes_the_failure_to_its_instance() {
     Arc::get_mut(&mut instance).unwrap().model_error = Some(ServiceError::Response);
     let service = service(idle_executor());
     service.register(instance).await;
+    let changes = service.subscribe();
     let input = serde_json::from_value(json!({"refreshModels":true})).unwrap();
     assert!(matches!(service.refresh_providers_at(input, None).await,
         Err(RefreshProvidersError::Models { instance_id, error:ServiceError::Response }) if instance_id.0 == "model-error"));
+    assert!(
+        changes.has_changed().unwrap(),
+        "subscribers see the successful probe even when model refresh fails"
+    );
+    assert_eq!(service.get_providers().await.0.len(), 1);
 }
 
 #[tokio::test]
@@ -269,7 +283,6 @@ async fn refresh_models_obeys_installation_enablement_and_returns_only_the_reque
     assert_eq!(
         calls,
         [
-            "secrets",
             "invalidate",
             "snapshot:/workspace",
             "models",
@@ -410,4 +423,27 @@ async fn an_already_current_installation_is_verified_without_running_its_updater
         ServerProviderUpdateStatus::Succeeded
     );
     assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn registry_probe_failure_preserves_cached_providers_and_reply_projection() {
+    let (instance, _events) = instance(true);
+    let service = service(idle_executor());
+    service.register(instance.clone()).await;
+    let input = |v| serde_json::from_value(v).unwrap();
+    let before = service.refresh_providers(input(json!({}))).await.unwrap();
+    assert_eq!(before.providers.0.len(), 1);
+    instance
+        .snapshot_failure
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let cached = service
+        .refresh_providers(input(json!({"instanceId":"work","cwd":"/workspace"})))
+        .await
+        .unwrap();
+    assert_eq!(cached, before);
+    let omitted = service
+        .refresh_providers(input(json!({"omitProviders":true})))
+        .await
+        .unwrap();
+    assert!(omitted.providers.0.is_empty());
 }
