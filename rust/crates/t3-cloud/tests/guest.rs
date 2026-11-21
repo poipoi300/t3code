@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,6 +24,8 @@ struct Threads {
     enabled: AtomicBool,
     host: Mutex<Option<String>>,
     clock: Arc<Time>,
+    reads: AtomicUsize,
+    live: std::sync::Mutex<Vec<GuestStreamEvent>>,
 }
 impl Threads {
     fn new(clock: Arc<Time>) -> Self {
@@ -40,6 +42,8 @@ impl Threads {
             enabled: AtomicBool::new(true),
             host: Mutex::new(Some("env.test".into())),
             clock,
+            reads: AtomicUsize::new(0),
+            live: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -61,6 +65,7 @@ impl GuestThreads for Threads {
             .map(|t| t.thread_id.clone()))
     }
     async fn read(&self, id: &ThreadId) -> Result<GuestThread> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.rows
             .lock()
             .await
@@ -115,7 +120,10 @@ impl GuestThreads for Threads {
         Ok(())
     }
     async fn stream(&self, _: &ThreadId, _: &GuestShareId) -> Result<GuestEvents> {
-        Ok(Box::pin(futures_util::stream::pending()))
+        let live = std::mem::take(&mut *self.live.lock().unwrap());
+        Ok(Box::pin(
+            futures_util::stream::iter(live).chain(futures_util::stream::pending()),
+        ))
     }
 }
 async fn sharing() -> (Arc<GuestSharing>, Arc<Threads>, Arc<Time>) {
@@ -259,6 +267,20 @@ async fn turning_off_guest_sharing_closes_the_stream_for_reconnect() {
     time.advance(30_000);
     tokio::time::advance(Duration::from_secs(30)).await;
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_events_pass_through_without_reauthorizing_the_guest() {
+    // Authorization reads the secret store, the thread and the Connect state; per event,
+    // many open streams multiply that work. The 30 s recheck and share events cover changes.
+    let (sharing, threads, _) = sharing().await;
+    let invite = create(&sharing).await;
+    let (session, _) = sharing.redeem(redeem_request(&invite)).await.unwrap();
+    threads.live.lock().unwrap().push(GuestStreamEvent::Ended);
+    let mut stream = sharing.stream(&session).await.unwrap();
+    let opened = threads.reads.load(Ordering::Relaxed);
+    assert!(matches!(stream.next().await, Some(GuestStreamEvent::Ended)));
+    assert_eq!(threads.reads.load(Ordering::Relaxed), opened);
 }
 
 #[tokio::test(start_paused = true)]

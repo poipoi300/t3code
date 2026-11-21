@@ -329,7 +329,10 @@ impl GuestSharing {
                         _ = interval.tick() => None,
                         event = events.next() => Some(event?),
                     };
-                    if auth.check(&token).await.is_err() {
+                    // Only the 30 s tick re-authorizes, as TypeScript does: share, archive
+                    // and delete events end the stream on their own, and a per-event check
+                    // multiplies secret, thread and Connect reads by every open stream.
+                    if event.is_none() && auth.check(&token).await.is_err() {
                         // The browser reconnects after a temporary settings or tunnel interruption.
                         if !auth.threads.enabled().await.unwrap_or(false)
                             || auth
