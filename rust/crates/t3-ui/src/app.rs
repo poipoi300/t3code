@@ -276,6 +276,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     // RightPanelSurfaceContent.tsx's surfaces. Browser, Terminal tabs, pull requests, devices and
     // side chats register here when their lanes land (briefs/ui-mounts-notes.md).
     provide_context(PanelRegistry::new(vec![
+        crate::screens::preview::pane::registration(client, host),
         crate::screens::pull_requests::detail::registration(client),
         panel::file_viewer::files_panel_registration(host),
         panel::diff::diff_panel_registration(diff::diff_panel_runtime(client), host),
