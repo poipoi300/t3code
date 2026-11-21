@@ -1,6 +1,6 @@
 //! Port of apps/web/src/components/chat/MessagesTimeline.tsx MessagesTimeline and TimelineRowContent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
@@ -664,9 +664,71 @@ impl BlockListOptions {
     }
 }
 
+/// ChatView releases an optimistic row as soon as either server projection acknowledges it.
+fn reconcile_pending(key: ThreadKey, pending: PendingMessages) -> PendingMessages {
+    use t3_contracts::orchestration_v2::{ConversationMessageRole, OrchestrationV2TurnItem};
+    use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+
+    let projection = rt().store.thread_state(key, |state| {
+        state
+            .and_then(|thread| thread.projection.clone())
+            .map(Shared)
+    });
+    let visible = signal(Rc::new(Vec::new()));
+    let retired = stored(BTreeSet::new());
+    effect(move || {
+        let pending = pending.messages.get();
+        let remaining = retired.with(|retired| {
+            let pending_ids: BTreeSet<_> =
+                pending.iter().map(|row| &row.message.message_id).collect();
+            retired.retain(|id| pending_ids.contains(id));
+            if pending_ids.len() == retired.len() {
+                return Vec::new();
+            }
+            projection.with(|projection| {
+                let Some(p) = projection else { return };
+                let items = p
+                    .visible_turn_items
+                    .iter()
+                    .filter_map(|row| match &row.item {
+                        OrchestrationV2TurnItem::UserMessage(item) => Some(&item.message_id),
+                        _ => None,
+                    });
+                let messages = p
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == ConversationMessageRole::User)
+                    .map(|message| &message.id);
+                for id in items.chain(messages) {
+                    if let IdOrIndex::Id(id) = id
+                        && pending_ids.contains(id)
+                    {
+                        retired.insert(id.clone());
+                    }
+                }
+            });
+            pending
+                .iter()
+                .filter(|row| !retired.contains(&row.message.message_id))
+                .cloned()
+                .collect()
+        });
+        visible.set(Rc::new(remaining));
+    });
+    PendingMessages {
+        messages: visible,
+        ..pending
+    }
+}
+
 pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl IntoElement {
     let state = options.state;
-    let thread = options.thread.clone();
+    let mut thread = options.thread.clone();
+    if let Some(context) = &mut thread
+        && let Some((messages, _)) = &mut context.pending
+    {
+        *messages = reconcile_pending(context.key.clone(), *messages);
+    }
     let viewport = thread
         .as_ref()
         .map(|context| TimelineViewport::new(context.key.clone(), timeline_row_keys(rows)));

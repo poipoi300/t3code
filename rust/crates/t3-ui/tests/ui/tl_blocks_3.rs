@@ -1452,3 +1452,120 @@ fn mod_f_opens_find_over_the_timeline_and_counts_the_replys_matches() {
     })
     .expect("closed");
 }
+
+#[component]
+fn OptimisticEchoFixture() -> impl IntoElement {
+    use t3_client::thread_views::composer::send::{PendingMessage, SendState};
+    use t3_client::{
+        composition::ClientRuntime,
+        testing::{FakePlatform, environment},
+    };
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::screens::composer::send::PendingMessages;
+
+    t3_ui::theme::install(&Default::default());
+    let mut options = thread_options();
+    let thread = options.thread.as_mut().expect("thread");
+    let key = thread.key.clone();
+    let store = t3_ui::runtime::rt().store.store();
+    let generation = store.begin_session(key.environment.clone());
+    let client = Rc::new(ClientRuntime::new(
+        FakePlatform::default(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        Rc::new(|_| {}),
+    ));
+    let pending = |id: &str| PendingMessage {
+        message: Rc::new(
+            serde_json::from_value(json!({
+                "environmentId": "environment", "threadId": "blocks", "messageId": id,
+                "commandId": format!("command-{id}"), "text": "Same prompt",
+                "attachments": [], "createdAt": AT
+            }))
+            .expect("outbox entry"),
+        ),
+        state: SendState::Dispatching,
+    };
+    thread.pending = Some((
+        PendingMessages {
+            messages: signal(Rc::new(vec![pending("echoed"), pending("still-pending")])),
+            restored_draft: signal(None),
+            delivery_problem: signal(None),
+        },
+        client,
+    ));
+    let timeline = t3_ui::runtime::rt().store.timeline(key.clone());
+    let rows = computed(move || {
+        timeline.with(|entries| {
+            Shared(
+                derive_messages_timeline_rows_with_state(
+                    &MessagesTimelineRowsInput {
+                        timeline_entries: entries.entries.as_ref().clone(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .rows,
+            )
+        })
+    });
+    let snapshot = move |sequence, echo| {
+        let item = json!({
+            "id": "turn-item", "threadId": "blocks", "runId": "run", "nodeId": null,
+            "providerThreadId": null, "providerTurnId": null, "nativeItemRef": null,
+            "parentItemId": null, "ordinal": 1, "status": "completed", "title": null,
+            "startedAt": AT, "completedAt": AT, "updatedAt": AT, "type": "user_message",
+            "messageId": "echoed", "inputIntent": "turn_start", "text": "Same prompt",
+            "attachments": [], "createdBy": "user", "creationSource": "web",
+        });
+        let mut p = environment::projection("blocks", "Thread", json!([]), json!([]));
+        if echo {
+            p["visibleTurnItems"] = json!([{"position":0,"visibility":"local","sourceThreadId":"blocks","sourceItemId":"turn-item","item":item}]);
+        }
+        let snapshot = serde_json::from_value(
+            json!({"kind":"snapshot","snapshotSequence":sequence,"projection":p}),
+        )
+        .expect("thread snapshot");
+        store
+            .apply_thread(key.clone(), generation, vec![snapshot])
+            .expect("thread applied");
+    };
+    let snapshot = Rc::new(snapshot);
+    let echo = snapshot.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(control("Echo", move || echo(1, true)))
+        .child(control("Remove from history", move || snapshot(2, false)))
+        .child(messages_timeline(rows, options))
+}
+
+#[test]
+fn echoed_user_message_retires_only_its_matching_optimistic_row() {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(1280.0), px(850.0)),
+        ..EngineConfig::new(Root::of::<OptimisticEchoFixture>())
+    })
+    .expect("timeline");
+    app.wait_for("Submitting message").expect("pending footer");
+    let count =
+        |app: &Headless, label: &str| app.screen().texts().iter().filter(|v| **v == label).count();
+    assert_eq!(count(&app, "Same prompt"), 2);
+    app.press("role:button[Echo]").expect("server echo");
+    app.wait_for("role:button[Copy message]")
+        .expect("canonical row");
+    assert_eq!(
+        count(&app, "Submitting message"),
+        1,
+        "same-text sibling remains pending"
+    );
+    assert_eq!(count(&app, "Same prompt"), 2);
+    app.press("role:button[Remove from history]")
+        .expect("history update");
+    assert_eq!(
+        count(&app, "Same prompt"),
+        1,
+        "acknowledged message stays retired"
+    );
+}
