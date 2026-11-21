@@ -99,6 +99,9 @@ pub struct StartOptions {
     /// credential a provider session was opened with.
     #[cfg(feature = "mcp")]
     pub mcp_sessions: Option<Arc<crate::adapters::mcp::McpSessions>>,
+    /// Provider discovery and availability supplied by a trusted MCP embedding or test fixture.
+    #[cfg(feature = "mcp")]
+    pub mcp_delegation_host: Option<Arc<dyn t3_mcp::adapters::delegation::DelegationHost>>,
     /// Test seam: the review-guide generator reports each finished cleanup's run id here.
     #[cfg(feature = "textgen-native")]
     pub review_guide_cleanups: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -771,8 +774,12 @@ async fn start_domains(
     )?;
     // Last: it binds the tools of every domain above.
     #[cfg(feature = "mcp")]
-    if let Some(mcp) =
-        crate::adapters::mcp::McpAdapter::start(&context, domains, options.dev_replay).await?
+    if let Some(mcp) = crate::adapters::mcp::McpAdapter::start(
+        &context,
+        domains,
+        options.mcp_delegation_host.clone(),
+    )
+    .await?
     {
         domains.insert_runtime(mcp)?;
     }

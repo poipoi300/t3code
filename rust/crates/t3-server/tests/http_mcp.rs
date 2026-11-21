@@ -814,3 +814,55 @@ async fn mcp_prepare_upload_enforces_the_per_issuer_allowance() {
     );
     f.stop().await;
 }
+
+#[cfg(all(feature = "mcp", feature = "workspace"))]
+#[tokio::test]
+async fn mcp_prepare_upload_reports_the_byte_quota_as_an_invalid_request() {
+    let f = fixture(&[]).await;
+    let admin = f.admin_cookie().await;
+    let access = http_common::approved_mcp_access(&f.http, &f.base, &admin).await;
+    let request = json!({"upload":{
+        "type":"file", "name":"report.txt", "mimeType":"text/plain",
+        "sizeBytes": t3_workspace::attachments::FILE_MAX_BYTES,
+    }});
+    let mut pending = Vec::new();
+    for _ in 0..4 {
+        let grant =
+            mcp_attachment_tool(&f, &access, "t3_attachment_prepare_upload", request.clone()).await;
+        pending.push(
+            grant["result"]["structuredContent"]["attachmentId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected a grant: {grant}"))
+                .to_owned(),
+        );
+    }
+    let overflow =
+        mcp_attachment_tool(&f, &access, "t3_attachment_prepare_upload", request.clone()).await;
+    assert_eq!(overflow["result"]["isError"], true, "{overflow}");
+    let failure: Value =
+        serde_json::from_str(overflow["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(failure["code"], "invalid_request", "{overflow}");
+    assert_eq!(
+        failure["message"],
+        "Pending upload byte quota exceeded. Discard a pending upload or try a smaller file.",
+        "{overflow}"
+    );
+    let discarded = mcp_attachment_tool(
+        &f,
+        &access,
+        "t3_attachment_discard",
+        json!({"attachmentId": pending[0]}),
+    )
+    .await;
+    assert_eq!(
+        discarded["result"]["structuredContent"],
+        json!({}),
+        "{discarded}"
+    );
+    let grant = mcp_attachment_tool(&f, &access, "t3_attachment_prepare_upload", request).await;
+    assert!(
+        grant["result"]["structuredContent"]["attachmentId"].is_string(),
+        "{grant}"
+    );
+    f.stop().await;
+}

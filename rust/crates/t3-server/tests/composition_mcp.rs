@@ -1079,6 +1079,25 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
             .await;
         assert!(!is_error(&accepted), "{accepted}");
         assert_eq!(accepted["result"]["structuredContent"]["threadId"], PEER);
+        let foreign_discard = mcp
+            .call(
+                &peer_token,
+                "t3_attachment_discard",
+                json!({"attachmentId": id}),
+            )
+            .await;
+        assert!(
+            is_error(&foreign_discard) && foreign_discard.to_string().contains("invalid_request"),
+            "{foreign_discard}"
+        );
+        let owner_discard = mcp
+            .call(&token, "t3_attachment_discard", json!({"attachmentId": id}))
+            .await;
+        assert_eq!(
+            owner_discard["result"]["structuredContent"],
+            json!({}),
+            "{owner_discard}"
+        );
         let repeated = mcp.call(&token, "t3_thread_send_attachments", send).await;
         assert!(
             is_error(&repeated) && repeated.to_string().contains("attachment not found"),
@@ -1577,10 +1596,55 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
             [&effect_id],
         )
         .unwrap();
+    // Keep the result empty. Once the continuation leaves the outbox, both observers must
+    // receive the derived summary. Either observer may reach the delivery before it is acknowledged.
+    let (first, second) = tokio::join!(
+        mcp.call(&token, "task_status", json!({"taskId": task_id})),
+        mcp.call(&token, "task_status", json!({"taskId": task_id})),
+    );
+    for response in [first, second] {
+        assert!(!is_error(&response), "{response}");
+        let status = &response["result"]["structuredContent"];
+        assert_eq!(status["taskId"], task_id, "{status}");
+        assert_eq!(status["status"], "completed", "{status}");
+        assert_eq!(status["workState"], "result_available", "{status}");
+        assert_eq!(status["summary"], "first fixture turn complete", "{status}");
+    }
+    let after_concurrent = acknowledgements();
+    assert!((2..=3).contains(&after_concurrent), "{after_concurrent}");
+    let (summary, delivery, observer): (Option<String>, String, Option<String>) = database
+        .query_row(
+            "SELECT json_extract(payload_json, '$.result'), completion_delivery_state,
+                    json_extract(payload_json, '$.completionDelivery.observedByRunId')
+             FROM orchestration_v2_projection_subagents WHERE subagent_id = ?1",
+            [&task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let parent_run: String = database
+        .query_row(
+            "SELECT json_extract(payload_json, '$.runId')
+             FROM orchestration_v2_projection_subagents WHERE subagent_id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(summary, None, "the summary comes from the completed run");
+    assert_eq!(delivery, "acknowledged");
+    assert_eq!(observer.as_deref(), Some(parent_run.as_str()));
+    let reread = mcp
+        .call(&token, "task_status", json!({"taskId": task_id}))
+        .await;
+    assert_eq!(
+        reread["result"]["structuredContent"]["summary"],
+        "first fixture turn complete"
+    );
+    assert_eq!(acknowledgements(), after_concurrent);
+    // Restore the actual completed-task payload before exercising provider-driven follow-ups.
     database
         .execute(
             "UPDATE orchestration_v2_projection_subagents
-         SET payload_json = ?1, completion_delivery_state = ?2 WHERE subagent_id = ?3",
+             SET payload_json = ?1, completion_delivery_state = ?2 WHERE subagent_id = ?3",
             [&old_task, "acknowledged", &task_id],
         )
         .unwrap();
@@ -1690,6 +1754,16 @@ struct DelegationWorld {
 
 #[cfg(feature = "providers")]
 async fn delegation_world(parent: &str, mode: &str, policy: Option<&str>) -> DelegationWorld {
+    delegation_world_with_host(parent, mode, policy, None).await
+}
+
+#[cfg(feature = "providers")]
+async fn delegation_world_with_host(
+    parent: &str,
+    mode: &str,
+    policy: Option<&str>,
+    host: Option<Arc<dyn t3_mcp::adapters::delegation::DelegationHost>>,
+) -> DelegationWorld {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_path_buf();
     std::fs::create_dir_all(home.join("userdata")).unwrap();
@@ -1733,6 +1807,7 @@ async fn delegation_world(parent: &str, mode: &str, policy: Option<&str>) -> Del
             providers: vec![Arc::new(adapter)],
             dev_replay: true,
             mcp_sessions: Some(sessions.clone()),
+            mcp_delegation_host: host,
             ..Default::default()
         },
     )
@@ -2027,6 +2102,63 @@ async fn create_threads_records_an_ordered_batch_and_retries_a_partially_started
     world.runtime.shutdown().await.unwrap();
 }
 
+#[cfg(feature = "providers")]
+const REPLAY_CEILING_POLICY: &str =
+    r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#;
+
+#[cfg(feature = "providers")]
+#[tokio::test]
+async fn delegation_uses_provider_readiness_under_managed_policy() {
+    let world = delegation_world(
+        "thread:mcp-provider-readiness",
+        "auto-accept-edits",
+        Some(REPLAY_CEILING_POLICY),
+    )
+    .await;
+    let response = world.mcp
+        .call(
+            &world.token,
+            "delegate_task",
+            json!({"task":"Summarise","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}),
+        )
+        .await;
+    assert!(
+        is_error(&response) && response.to_string().contains("provider_unavailable"),
+        "{response}"
+    );
+    world.runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "providers")]
+struct ReplayDelegationFixture;
+
+#[cfg(feature = "providers")]
+#[async_trait]
+impl t3_mcp::adapters::delegation::DelegationHost for ReplayDelegationFixture {
+    async fn providers(&self) -> t3_mcp::Result<Vec<Value>> {
+        Ok(vec![json!({
+            "instanceId": "devReplay", "driver": "acpRegistry", "enabled": true,
+            "installed": true, "status": "ready", "models": [{"slug": "multi-turn"}],
+        })])
+    }
+
+    async fn orchestration_instances(&self) -> t3_mcp::Result<std::collections::BTreeSet<String>> {
+        Ok(["devReplay".to_owned()].into())
+    }
+
+    async fn enabled_for_project(
+        &self,
+        project: &t3_contracts::base_schemas::ProjectId,
+        instance: &str,
+    ) -> t3_mcp::Result<bool> {
+        Ok(project.0 == "project:mcp" && instance == "devReplay")
+    }
+
+    async fn refresh_instance(&self, _: &str) -> t3_mcp::Result<Vec<Value>> {
+        self.providers().await
+    }
+}
+
 /// The organisation's managed ceiling bounds what a delegating thread starts: the parent runs at the
 /// ceiling, its child inherits no more, and asking for more is refused before anything starts. (A
 /// parent cannot run above the ceiling, so the runtime's ceiling check on the child's creation event
@@ -2034,12 +2166,11 @@ async fn create_threads_records_an_ordered_batch_and_retries_a_partially_started
 #[cfg(feature = "providers")]
 #[tokio::test]
 async fn a_managed_ceiling_bounds_what_a_delegating_thread_starts() {
-    let world = delegation_world(
+    let world = delegation_world_with_host(
         "thread:mcp-ceiling-parent",
         "auto-accept-edits",
-        Some(
-            r#"{"schemaVersion":1,"organization":"Acme","limits":{"maxRuntimeMode":"auto-accept-edits"}}"#,
-        ),
+        Some(REPLAY_CEILING_POLICY),
+        Some(Arc::new(ReplayDelegationFixture)),
     )
     .await;
     let (mcp, token) = (&world.mcp, world.token.as_str());
@@ -2137,6 +2268,37 @@ async fn a_delegated_child_inherits_its_parents_link_fence() {
         found.contains("\"sessionId\":\"link-session\"") && found.contains("\"label\":\"Laptop\""),
         "{snapshot}"
     );
+    let created = mcp
+        .call(
+            token,
+            "create_threads",
+            json!({"threads":[{"title":"Linked batch thread","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}]}),
+        )
+        .await;
+    assert!(!is_error(&created), "{created}");
+    let created_id = created["result"]["structuredContent"]["threads"][0]["threadId"]
+        .as_str()
+        .unwrap();
+    let created_origin: String = t3_persistence::rusqlite::Connection::open(&world.database)
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(payload_json, '$.linkOrigin') FROM orchestration_v2_projection_threads WHERE thread_id = ?1",
+            [created_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&created_origin).unwrap(),
+        link
+    );
+    let renamed_batch = mcp
+        .call(
+            token,
+            "t3_thread_update",
+            json!({"threadId": created_id, "action":"rename", "title":"Same link"}),
+        )
+        .await;
+    assert!(!is_error(&renamed_batch), "{renamed_batch}");
     // The fenced parent may change its link's child, not the user's thread.
     let renamed = mcp
         .call(

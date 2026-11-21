@@ -426,16 +426,28 @@ async fn dispatch_failures_keep_typescripts_codes_and_cut() {
         }
         other => panic!("{other}"),
     }
+    use t3_contracts::provider_policy::RuntimeMode;
+    use t3_orchestration::ports::decisions::dispatch_mode_limit::{
+        CeilingRefused, RuntimeModeCeiling,
+    };
+
+    fn ceiling_reason(mode: RuntimeMode, phase: CeilingRefused) -> String {
+        RuntimeModeCeiling {
+            organization: "Acme limits threads to opportunities".into(),
+            max_runtime_mode: mode,
+        }
+        .message(phase)
+    }
     let ceiling = organize(|_| error::Error::Rejected {
         command_id: t3_contracts::base_schemas::CommandId("command".into()),
-        reason: "Acme limits threads to Auto. Switch this thread's mode to continue.".into(),
+        reason: ceiling_reason(RuntimeMode::Auto, CeilingRefused::Turn),
     })
     .await;
     assert!(matches!(
         ceiling,
         McpError::Failure { code, message }
             if code == "invalid_request"
-                && message == "Acme limits threads to Auto. Switch this thread's mode to continue."
+                && message == ceiling_reason(RuntimeMode::Auto, CeilingRefused::Turn)
     ));
     let disabled = organize(|_| error::Error::Service {
         operation: "ThreadManagementProviderInstanceDisabledError",
@@ -493,5 +505,74 @@ async fn an_unbound_attachment_backend_names_the_attachment_tool() {
             assert!(method.starts_with("AttachmentBackend."), "{method}");
         }
         other => panic!("{other}"),
+    }
+}
+
+#[tokio::test]
+async fn sending_to_an_archived_thread_gets_the_typescript_refusal() {
+    let adapter = adapter();
+    create(&adapter, "archived").await;
+    dispatch(
+        &adapter,
+        json!({"type":"thread.archive","commandId":"archive","threadId":"archived"}),
+    )
+    .await;
+    let input = json!({"threadId":"archived","message":"Please reply"});
+    let admitted = context(adapter.clone(), "t3_thread_send", &input).await;
+    let request = serde_json::from_value(input).unwrap();
+    let error = adapter.t3_thread_send(admitted, request).await.unwrap_err();
+    assert!(
+        matches!(error, McpError::Failure { code, message } if code == "thread_not_sendable"
+        && message == "Thread archived is archived and cannot receive messages.")
+    );
+}
+
+#[tokio::test]
+async fn pending_requests_distinguish_answered_and_cancelled_questions() {
+    let adapter = adapter();
+    create(&adapter, "target").await;
+    adapter.database.transaction(|tx| {
+        for (id, state) in [("answered", "resolved"), ("cancelled", "cancelled")] {
+            let request = json!({"id":id,"nodeId":"node","providerTurnId":"turn","nativeRequestRef":null,
+                "kind":"user_input","status":state,"responseCapability":{"type":"not_resumable","reason":"ended"},
+                "createdAt":TEST_TIME,"resolvedAt":TEST_TIME});
+            tx.execute(
+                "INSERT INTO orchestration_v2_projection_runtime_requests
+                 (runtime_request_id, thread_id, node_id, provider_turn_id, kind, status, created_at, resolved_at, payload_json)
+                 VALUES (?1, 'target', 'node', 'turn', 'user_input', ?2, ?3, ?3, ?4)",
+                [id, state, TEST_TIME, &request.to_string()],
+            )?;
+            let item = json!({"id":id,"threadId":"target","runId":null,"nodeId":"node",
+                "providerThreadId":null,"providerTurnId":"turn","nativeItemRef":null,"parentItemId":null,
+                "ordinal":1,"status":"completed","title":"Question","startedAt":TEST_TIME,
+                "completedAt":TEST_TIME,"updatedAt":TEST_TIME,"type":"user_input_request","requestId":id,"questions":[]});
+            tx.execute(
+                "INSERT INTO orchestration_v2_projection_turn_items
+                 (turn_item_id, thread_id, node_id, provider_turn_id, ordinal, type, status, updated_at, payload_json)
+                 VALUES (?1, 'target', 'node', 'turn', 1, 'user_input_request', 'completed', ?2, ?3)",
+                [id, TEST_TIME, &item.to_string()],
+            )?;
+        }
+        Ok(())
+    }).await.unwrap();
+
+    for (id, message) in [
+        ("answered", "The user-input request was already answered."),
+        (
+            "cancelled",
+            "The user-input request is no longer pending (cancelled).",
+        ),
+    ] {
+        let input = json!({"threadId":"target","action":"read","requestId":id});
+        let admitted = context(adapter.clone(), "t3_pending_request", &input).await;
+        let error = adapter
+            .t3_pending_request(admitted, decode_input("t3_pending_request", input).unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, McpError::Failure {code, message: actual}
+            if code == "invalid_request" && actual == message),
+            "{error}"
+        );
     }
 }

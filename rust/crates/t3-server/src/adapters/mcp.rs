@@ -311,6 +311,10 @@ impl t3_mcp::services::AttachmentService for McpAttachments {
                 crate::adapters::attachments::UploadRefusal::TooMany => {
                     McpError::failure("invalid_request", error.to_string())
                 }
+                crate::adapters::attachments::UploadRefusal::ByteQuota => McpError::failure(
+                    "invalid_request",
+                    "Pending upload byte quota exceeded. Discard a pending upload or try a smaller file.",
+                ),
                 crate::adapters::attachments::UploadRefusal::Store(_) => McpError::unavailable(),
             })
     }
@@ -366,7 +370,7 @@ impl McpAdapter {
     pub async fn start(
         context: &DomainContext<'_>,
         domains: &Domains,
-        dev_replay: bool,
+        host: Option<Arc<dyn t3_mcp::adapters::delegation::DelegationHost>>,
     ) -> crate::Result<Option<Arc<Self>>> {
         let Some(sessions) = domains.get::<McpSessions>() else {
             return Ok(None);
@@ -421,13 +425,15 @@ impl McpAdapter {
                     threads: runtime.threads.clone(),
                     database: t3_orchestration::stores::StoreDatabase(context.database.clone()),
                 }),
-                delegation: delegation(
-                    orchestration_adapter.clone(),
-                    domains,
-                    context,
-                    dev_replay,
-                    services.orchestrator.clone(),
-                ),
+                delegation: host
+                    .or_else(|| delegation_host(domains, context))
+                    .map(|host| {
+                        Arc::new(t3_mcp::adapters::delegation::DelegationAdapter {
+                            orchestration: orchestration_adapter.clone(),
+                            host,
+                        }) as Arc<dyn t3_mcp::services::OrchestratorService>
+                    })
+                    .unwrap_or_else(|| services.orchestrator.clone()),
                 rest: services.orchestrator.clone(),
             });
         }
@@ -773,43 +779,30 @@ struct Orchestrator {
     rest: Arc<dyn t3_mcp::services::OrchestratorService>,
 }
 
-/// Delegated tasks over the caller's commands, with provider snapshots from the provider domain;
-/// without the provider domain they answer their missing piece.
+/// Provider visibility and enablement come from the corresponding runtime domains.
 #[cfg(feature = "providers")]
-fn delegation(
-    orchestration: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
+fn delegation_host(
     domains: &Domains,
     context: &DomainContext<'_>,
-    dev_replay: bool,
-    fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
-) -> Arc<dyn t3_mcp::services::OrchestratorService> {
-    let (Some(providers), Some(source)) = (
-        domains.get::<t3_provider::domain::ProviderDomain>(),
-        domains
-            .get::<crate::adapters::orchestration::OrchestrationAdapter>()
-            .and_then(|o| o.provider_source().cloned()),
-    ) else {
-        return fallback;
-    };
-    Arc::new(t3_mcp::adapters::delegation::DelegationAdapter {
-        orchestration,
-        host: Arc::new(DelegationHost {
-            providers,
-            source,
-            settings: context.local.settings.clone(),
-            dev_replay,
-        }),
-    })
+) -> Option<Arc<dyn t3_mcp::adapters::delegation::DelegationHost>> {
+    let providers = domains.get::<t3_provider::domain::ProviderDomain>()?;
+    let source = domains
+        .get::<crate::adapters::orchestration::OrchestrationAdapter>()?
+        .provider_source()
+        .cloned()?;
+    Some(Arc::new(DelegationHost {
+        providers,
+        source,
+        settings: context.local.settings.clone(),
+    }))
 }
+
 #[cfg(not(feature = "providers"))]
-fn delegation(
-    _: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
+fn delegation_host(
     _: &Domains,
     _: &DomainContext<'_>,
-    _: bool,
-    fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
-) -> Arc<dyn t3_mcp::services::OrchestratorService> {
-    fallback
+) -> Option<Arc<dyn t3_mcp::adapters::delegation::DelegationHost>> {
+    None
 }
 
 #[cfg(feature = "providers")]
@@ -817,7 +810,6 @@ struct DelegationHost {
     providers: Arc<t3_provider::domain::ProviderDomain>,
     source: Arc<crate::adapters::native_providers::ProviderSource>,
     settings: Arc<t3_config::settings::SettingsService>,
-    dev_replay: bool,
 }
 
 #[cfg(feature = "providers")]
@@ -830,28 +822,7 @@ impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
             .await
             .0
             .iter()
-            .map(|provider| {
-                let mut snapshot = serde_json::to_value(provider).map_err(|_| McpError::Internal)?;
-                if self.dev_replay
-                    && provider.instance_id.0 == t3_orchestration::adapters::acp::DEV_REPLAY_INSTANCE_ID
-                    && snapshot["driver"] == "acpRegistry"
-                    && snapshot["enabled"] == true
-                    && snapshot["availability"] != "unavailable"
-                    && snapshot["status"] == "warning"
-                    && snapshot["installed"] == false
-                {
-                    // This adapter replays fixtures in process even when policy locks ACP launch paths.
-                    snapshot["installed"] = true.into();
-                    snapshot["status"] = "ready".into();
-                    snapshot["models"] = serde_json::Value::Array(
-                        t3_orchestration::testing::replay::DEV_SCENARIOS
-                            .iter()
-                            .map(|(slug, name, _)| serde_json::json!({"slug":slug,"name":name,"isCustom":false}))
-                            .collect(),
-                    );
-                }
-                Ok(snapshot)
-            })
+            .map(|provider| serde_json::to_value(provider).map_err(|_| McpError::Internal))
             .collect()
     }
     async fn orchestration_instances(&self) -> t3_mcp::Result<BTreeSet<String>> {
