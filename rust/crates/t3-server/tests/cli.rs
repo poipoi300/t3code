@@ -691,7 +691,7 @@ async fn status_reads_settings_without_opening_a_database() {
     assert!(invalid.stdout.is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn desktop_bootstrap_closed_and_malformed_descriptors() {
     let root = TempDir::new().unwrap();
@@ -712,15 +712,6 @@ async fn desktop_bootstrap_closed_and_malformed_descriptors() {
         stderr(&result).contains("Failed to decode bootstrap envelope from file descriptor 0.")
     );
     assert!(!stderr(&result).contains("private-fixture"));
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn desktop_bootstrap_reports_the_unsupported_windows_transport() {
-    let root = TempDir::new().unwrap();
-    let result = output(root.path(), &["--bootstrap-fd", "3", "status"]).await;
-    assert!(!result.status.success());
-    assert!(stderr(&result).contains("bootstrap fd not supported on this platform yet"));
 }
 
 #[cfg(unix)]

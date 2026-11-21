@@ -15,13 +15,51 @@ pub enum BootstrapError {
     Unsupported(i64),
 }
 
+/// The one Windows module that allows `unsafe`: it maps the inherited CRT descriptor to a handle.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
+
 /// The envelope is a few hundred bytes; a longer line is not one.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const MAX_ENVELOPE_BYTES: usize = 1 << 20;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, BootstrapError> {
     Err(BootstrapError::Unsupported(fd))
+}
+
+#[cfg(windows)]
+pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, BootstrapError> {
+    use std::time::Duration;
+    use windows::Failure;
+
+    match windows::read_first_line(fd, Duration::from_secs(1), MAX_ENVELOPE_BYTES) {
+        Ok(Some(line)) => decode(fd, &line).map(Some),
+        Ok(None) => Ok(None),
+        Err(Failure::Read) => Err(BootstrapError::Read(fd)),
+        Err(Failure::Open | Failure::UnsupportedHandle) => Err(BootstrapError::Open(fd)),
+    }
+}
+
+/// The envelope on the first line, validated. The decoder's error is dropped: it can quote input.
+#[cfg(any(unix, windows))]
+fn decode(fd: i64, line: &[u8]) -> Result<DesktopBackendBootstrap, BootstrapError> {
+    let envelope: DesktopBackendBootstrap =
+        serde_json::from_slice(line).map_err(|_| BootstrapError::Decode(fd))?;
+    if envelope.port == 0
+        || envelope.tailscale_serve_port == 0
+        || [
+            envelope.desktop_telemetry_fd,
+            envelope.desktop_telemetry_control_fd,
+            envelope.desktop_browser_fd,
+            envelope.desktop_browser_control_fd,
+        ]
+        .contains(&Some(0))
+    {
+        return Err(BootstrapError::Decode(fd));
+    }
+    Ok(envelope)
 }
 
 #[cfg(unix)]
@@ -100,21 +138,7 @@ pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, Bootstrap
             break;
         }
     }
-    let envelope: DesktopBackendBootstrap =
-        serde_json::from_slice(&line).map_err(|_| BootstrapError::Decode(fd))?;
-    if envelope.port == 0
-        || envelope.tailscale_serve_port == 0
-        || [
-            envelope.desktop_telemetry_fd,
-            envelope.desktop_telemetry_control_fd,
-            envelope.desktop_browser_fd,
-            envelope.desktop_browser_control_fd,
-        ]
-        .contains(&Some(0))
-    {
-        return Err(BootstrapError::Decode(fd));
-    }
-    Ok(Some(envelope))
+    decode(fd, &line).map(Some)
 }
 
 #[cfg(all(test, unix))]
