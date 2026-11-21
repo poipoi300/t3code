@@ -502,6 +502,106 @@ fn writes_recheck_permission_before_dispatch_and_require_it_at_enqueue() {
 }
 
 #[test]
+fn clear_waits_for_earlier_queued_input() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "first".into());
+    h.settle();
+    let queued = terminals.write(&key(), "term-1", "queued".into());
+    let (done, cleared) = oneshot::channel();
+    let clear = terminals.clear(&key(), "term-1");
+    h.spawn(async move { done.send(clear.await).unwrap() });
+    h.settle();
+    assert!(
+        requests(&terminal, "terminal.clear").is_empty(),
+        "clear overtook queued writes"
+    );
+    let later = terminals.write(&key(), "term-1", "later".into());
+    release.send(()).unwrap();
+    h.run(first).unwrap();
+    h.run(queued).unwrap();
+    h.run(cleared).unwrap().unwrap();
+    h.run(later).unwrap();
+    let log = terminal.requests.borrow();
+    let order = log
+        .iter()
+        .map(|(tag, input)| input["data"].as_str().unwrap_or(tag))
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["first", "queued", "terminal.clear", "later"]);
+}
+
+#[test]
+fn terminal_restart_releases_a_held_write_and_discards_old_input() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let frames = stream(&terminal);
+    let lease = terminals.session(
+        &environment("env"),
+        TerminalSessions::<TestPlatform>::attach_input(&key(), "term-1", &launch()),
+    );
+    frames
+        .unbounded_send(json!({"type":"snapshot","snapshot":snapshot("term-1","")}))
+        .unwrap();
+    h.settle();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "held".into());
+    h.settle();
+    let queued = terminals.write(&key(), "term-1", "old input".into());
+    assert_eq!(lease.view().status, TerminalStatus::Running);
+    drop(lease);
+    h.settle();
+    frames.unbounded_send(json!({"type":"restarted","threadId":"t1","terminalId":"term-1","snapshot":snapshot("term-1","")})).unwrap();
+    h.settle();
+    h.run(terminals.write(&key(), "term-1", "new input".into()))
+        .unwrap();
+    assert!(matches!(h.run(first), Err(ClientError::Cancelled)));
+    assert!(matches!(h.run(queued), Err(ClientError::Cancelled)));
+    assert!(release.is_canceled());
+    let writes = requests(&terminal, "terminal.write");
+    assert_eq!(
+        writes
+            .iter()
+            .map(|input| input["data"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("held"), Some("new input")]
+    );
+}
+
+#[test]
+fn reconnect_releases_a_held_write_and_discards_old_input() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "held".into());
+    h.settle();
+    let queued = terminals.write(&key(), "term-1", "old input".into());
+    h.server().hang_up();
+    h.settle();
+    h.advance(10_000);
+    set_grants(&runtime, OPERATE);
+    h.run(terminals.write(&key(), "term-1", "new input".into()))
+        .unwrap();
+    assert!(h.run(first).is_err());
+    assert!(h.run(queued).is_err());
+    assert!(release.is_canceled());
+    let writes = requests(&terminal, "terminal.write");
+    assert_eq!(
+        writes
+            .iter()
+            .map(|input| input["data"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("held"), Some("new input")]
+    );
+}
+
+#[test]
 fn closing_a_terminal_cancels_queued_input_and_other_terminals_keep_writing() {
     let mut h = Harness::new("env");
     let (runtime, terminal) = setup(&mut h, OPERATE);

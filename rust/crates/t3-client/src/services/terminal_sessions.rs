@@ -18,7 +18,7 @@ use crate::{
     composition::ClientRuntime,
     platform::{Platform, StorageArea, StorageKey, StorageWrite},
     rpc::{RpcCallError, RpcEndpoint, RpcMethod, SessionEndpoint},
-    types::{EnvironmentId, ThreadKey},
+    types::{EnvironmentId, Generation, ThreadId, ThreadKey},
     view_logic::{
         session::terminal_drawer::{
             self as drawer, SessionMark, TerminalLabel, project_script_cwd,
@@ -30,14 +30,14 @@ use crate::{
 use futures::{
     FutureExt, StreamExt,
     channel::{mpsc, oneshot},
-    future::{AbortHandle, LocalBoxFuture},
+    future::{AbortHandle, Abortable, LocalBoxFuture},
     lock::Mutex,
     stream::LocalBoxStream,
 };
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, VecDeque},
     rc::{Rc, Weak},
 };
 use t3_contracts::{
@@ -98,6 +98,15 @@ type InputWrite = (
     LocalBoxFuture<'static, Result<(), ClientError>>,
     oneshot::Sender<Result<(), ClientError>>,
 );
+type InputSlot = (ThreadKey, String);
+
+struct InputQueue {
+    connection: (u64, Generation),
+    waiting: RefCell<VecDeque<InputWrite>>,
+    abort: AbortHandle,
+    // Keep receiving restart and exit events while accepted input outlives a drawer mount.
+    _session: Option<Rc<SessionShared>>,
+}
 
 /// Shared by every [`TerminalSessions`] handle of one runtime.
 #[derive(Default)]
@@ -109,8 +118,17 @@ pub struct TerminalSessionsState {
     sessions: RefCell<BTreeMap<String, Weak<SessionShared>>>,
     generations: Rc<RefCell<AttachGenerations>>,
     lifecycle: RefCell<BTreeMap<ThreadKey, Rc<Mutex<()>>>>,
-    input: RefCell<BTreeMap<(ThreadKey, String), VecDeque<InputWrite>>>,
+    input: RefCell<BTreeMap<InputSlot, Rc<InputQueue>>>,
     resizes: ResizeSlots,
+}
+
+impl TerminalSessionsState {
+    fn cancel_input(&self, slot: &InputSlot) {
+        if let Some(queue) = self.input.borrow_mut().remove(slot) {
+            queue.waiting.borrow_mut().clear();
+            queue.abort.abort();
+        }
+    }
 }
 
 /// Where a new terminal starts. Without one, the thread's project and worktree.
@@ -194,8 +212,7 @@ struct SessionShared {
     mode: Cell<SessionMode>,
     changes: Notifier,
     metadata: TerminalMetadataLease,
-    thread: String,
-    terminal: String,
+    slot: InputSlot,
     driver: Cell<Option<AbortHandle>>,
 }
 impl Drop for SessionShared {
@@ -233,7 +250,7 @@ impl TerminalSessionLease {
         let summary = self
             .shared
             .metadata
-            .summary(&self.shared.thread, &self.shared.terminal);
+            .summary(&self.shared.slot.0.thread.0, &self.shared.slot.1);
         let failure = self.shared.failure.borrow().clone();
         let status = if failure.is_some() {
             TerminalStatus::Error
@@ -669,11 +686,17 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
             mode: Cell::new(SessionMode::Idle),
             changes: Notifier::default(),
             metadata: self.metadata(environment),
-            thread: input.thread_id.0.clone(),
-            terminal: input.terminal_id.0.clone(),
+            slot: (
+                ThreadKey {
+                    environment: environment.clone(),
+                    thread: ThreadId(input.thread_id.0.clone()),
+                },
+                input.terminal_id.0.clone(),
+            ),
             driver: Cell::new(None),
         });
         let weak = Rc::downgrade(&shared);
+        let input_state = Rc::downgrade(&self.state);
         let connections = self
             .runtime
             .query_connections(environment)
@@ -744,6 +767,15 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
                         Ok(event) => {
                             shared.failure.replace(None);
                             apply(&shared, &event, &generations);
+                            if matches!(
+                                event,
+                                TerminalAttachStreamEvent::TerminalRestartedEvent(_)
+                                    | TerminalAttachStreamEvent::TerminalExitedEvent(_)
+                                    | TerminalAttachStreamEvent::TerminalClosedEvent(_)
+                            ) && let Some(state) = input_state.upgrade()
+                            {
+                                state.cancel_input(&shared.slot);
+                            }
                         }
                         Err(error) => {
                             shared.failure.replace(Some(error.to_string()));
@@ -839,47 +871,84 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         terminal: &str,
         data: String,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        let allowed = self
-            .endpoint(&key.environment)
-            .and_then(|endpoint| Self::require_operate::<WsTerminalWriteRpc>(&endpoint));
-        if let Err(error) = allowed {
-            return futures::future::ready(Err(error)).boxed_local();
-        }
-        let command = self.guarded::<WsTerminalWriteRpc>(
-            &key.environment,
+        self.enqueue_input::<WsTerminalWriteRpc>(
+            (key.clone(), terminal.to_owned()),
             TerminalWriteInput {
                 thread_id: text(&key.thread.0),
                 terminal_id: text(terminal),
                 data,
             },
-        );
-        let slot = (key.clone(), terminal.to_owned());
-        let (reply, result) = oneshot::channel();
-        let start = match self.state.input.borrow_mut().entry(slot.clone()) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().push_back((command, reply));
-                false
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(VecDeque::from([(command, reply)]));
-                true
-            }
+            None,
+        )
+    }
+
+    fn enqueue_input<M: RpcMethod<Output = ()> + 'static>(
+        &self,
+        slot: InputSlot,
+        input: M::Input,
+        lifecycle: Option<Rc<Mutex<()>>>,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>
+    where
+        M::Input: 'static,
+    {
+        let Some(client) = self.runtime.client(&slot.0.environment) else {
+            return futures::future::ready(Err(ClientError::Disconnected)).boxed_local();
         };
-        if start {
+        let Some(endpoint) = client.session() else {
+            return futures::future::ready(Err(ClientError::Disconnected)).boxed_local();
+        };
+        if let Err(error) = Self::require_operate::<M>(&endpoint) {
+            return futures::future::ready(Err(error)).boxed_local();
+        }
+        let connection = (client.serial(), client.state().generation);
+        let command = async move {
+            let _turn = match &lifecycle {
+                Some(lifecycle) => Some(lifecycle.lock().await),
+                None => None,
+            };
+            Self::require_operate::<M>(&endpoint)?;
+            endpoint
+                .command::<M>(input)
+                .await
+                .map_err(RpcCallError::into_client_error)
+        }
+        .boxed_local();
+        let (reply, result) = oneshot::channel();
+        let existing = self.state.input.borrow().get(&slot).cloned();
+        if let Some(queue) = existing.filter(|queue| queue.connection == connection) {
+            queue.waiting.borrow_mut().push_back((command, reply));
+        } else {
+            self.state.cancel_input(&slot);
+            let session = self
+                .state
+                .sessions
+                .borrow()
+                .values()
+                .filter_map(Weak::upgrade)
+                .find(|session| session.slot == slot);
+            let (abort, registration) = AbortHandle::new_pair();
+            let queue = Rc::new(InputQueue {
+                connection,
+                waiting: RefCell::new(VecDeque::from([(command, reply)])),
+                abort,
+                _session: session,
+            });
+            self.state
+                .input
+                .borrow_mut()
+                .insert(slot.clone(), queue.clone());
             let state = self.state.clone();
             self.runtime.spawn(
                 async move {
-                    loop {
-                        let next = state
-                            .input
-                            .borrow_mut()
-                            .get_mut(&slot)
-                            .and_then(VecDeque::pop_front);
-                        let Some((command, reply)) = next else {
-                            state.input.borrow_mut().remove(&slot);
-                            break;
-                        };
-                        let _ = reply.send(command.await);
+                    let worker = async {
+                        loop {
+                            let next = queue.waiting.borrow_mut().pop_front();
+                            let Some((command, reply)) = next else { break };
+                            let _ = reply.send(command.await);
+                        }
+                    };
+                    if Abortable::new(worker, registration).await.is_ok() {
+                        state.input.borrow_mut().remove(&slot);
                     }
                 }
                 .boxed_local(),
@@ -893,13 +962,19 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         key: &ThreadKey,
         terminal: &str,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        self.lifecycle::<WsTerminalClearRpc>(
-            key,
-            TerminalSessionInput {
-                thread_id: text(&key.thread.0),
-                terminal_id: text(terminal),
-            },
-        )
+        let service = self.clone();
+        let slot = (key.clone(), terminal.to_owned());
+        let input = TerminalSessionInput {
+            thread_id: text(&key.thread.0),
+            terminal_id: text(terminal),
+        };
+        async move {
+            let lifecycle = service.lifecycle_lane(&slot.0);
+            service
+                .enqueue_input::<WsTerminalClearRpc>(slot, input, Some(lifecycle))
+                .await
+        }
+        .boxed_local()
     }
 
     pub fn close(
@@ -920,8 +995,8 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
             let _turn = lane.lock().await;
             let endpoint = service.endpoint(&slot.0.environment)?;
             Self::require_operate::<WsTerminalCloseRpc>(&endpoint)?;
-            if let Some(queue) = service.state.input.borrow_mut().get_mut(&slot) {
-                queue.clear();
+            if let Some(queue) = service.state.input.borrow().get(&slot) {
+                queue.waiting.borrow_mut().clear();
             }
             endpoint
                 .command::<WsTerminalCloseRpc>(input)
