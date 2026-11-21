@@ -543,6 +543,23 @@ mod native {
         }
     }
 
+    #[cfg(test)]
+    mod attachment_review_tests {
+        use super::*;
+        #[tokio::test]
+        async fn codex_session_drop_removes_its_private_copy() {
+            let tmp=tempfile::tempdir().unwrap();
+            let image=serde_json::from_value(serde_json::json!({"type":"image","id":"thread-00000000-0000-4000-8000-000000000001","mimeType":"image/png","name":"a.png","sizeBytes":1})).unwrap();
+            let files=DirectoryClaudeAttachments::new(tmp.path().into());
+            std::fs::write(files.path(&image).unwrap(),b"x").unwrap();
+            let registration: Arc<dyn CodexAttachmentResolver>=Arc::new(CodexAttachments(files));
+            let session=registration.session_resolver().unwrap_or_else(|| registration.clone());
+            let copy=session.resolve(&image).await.unwrap().unwrap().path;
+            assert!(copy.is_file());
+            drop(session);
+            assert!(!copy.exists(), "registration retained a completed session's copy");
+        }
+    }
     /// `CodexInstallation.compatibility` as the adapter's initialize check: the live manifest's
     /// policy for this server's version, else the bundled one; a `broken` native version
     /// refuses the session with TypeScript's setup error.

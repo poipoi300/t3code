@@ -105,6 +105,41 @@ fn boolean_option(options: &[ProviderOptionSelection], id: &str) -> Option<bool>
     }
 }
 
+fn title_image_paths(directory: &Path, attachments: &[t3_contracts::chat_attachment::ChatAttachment]) -> Vec<PathBuf> {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            matches!(
+                attachment,
+                t3_contracts::chat_attachment::ChatAttachment::Image(_)
+            )
+        })
+        .filter_map(|attachment| {
+            t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
+                directory,
+                attachment,
+            )
+        })
+        .filter(|path| path.is_absolute() && path.is_file())
+        .collect()
+}
+
+#[cfg(test)]
+mod attachment_review_tests {
+    use super::*;
+    #[test]
+    fn title_image_uses_a_private_snapshot() {
+        let tmp=tempfile::tempdir().unwrap();
+        let image=serde_json::from_value(serde_json::json!({"type":"image","id":"thread-00000000-0000-4000-8000-000000000001","mimeType":"image/png","name":"a.png","sizeBytes":1})).unwrap();
+        let raw=t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(tmp.path(),&image).unwrap();
+        std::fs::write(&raw,b"x").unwrap();
+        let paths=title_image_paths(tmp.path(),&[image]);
+        assert_eq!(paths.len(),1);
+        assert!(!paths[0].starts_with(tmp.path()), "original path passed to title provider");
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"x");
+    }
+}
+
 /// `makeCodexTextGeneration` for a direct (`existing`) instance.
 async fn codex(
     domain: &Arc<ProviderDomain>,
@@ -187,23 +222,7 @@ async fn codex(
             })
         })
         .flatten();
-    let image_paths = request
-        .attachments
-        .iter()
-        .filter(|attachment| {
-            matches!(
-                attachment,
-                t3_contracts::chat_attachment::ChatAttachment::Image(_)
-            )
-        })
-        .filter_map(|attachment| {
-            t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
-                &host.attachments,
-                attachment,
-            )
-        })
-        .filter(|path| path.is_absolute() && path.is_file())
-        .collect();
+    let image_paths = title_image_paths(&host.attachments, &request.attachments);
     let program = match text(config, "binaryPath") {
         "" => "codex".to_owned(),
         configured => expand_home_path(configured, &host.home),

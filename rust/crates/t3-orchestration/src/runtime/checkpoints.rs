@@ -8,13 +8,34 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 use t3_git::{DiffFormat, DiffOptions, Git, GitError};
 use tokio_util::sync::CancellationToken;
+
+/// Keep the proven identity across a failed store write. A retry checks both the
+/// existing record and the file IDs before it can finish the interrupted write.
+#[derive(Clone)]
+struct PendingBinding {
+    previous: Option<serde_json::Value>,
+    identity: t3_git::RepositoryBinding,
+}
+
+/// The recorded destination and source repository, read before Git modifies the filesystem.
+pub struct BeforeRecreation {
+    destination: PathBuf,
+    previous: Option<serde_json::Value>,
+    source: t3_git::RepositoryBinding,
+}
 
 pub struct GitCheckpointBackend {
     factory: Arc<dyn Fn(PathBuf) -> Git + Send + Sync>,
     bindings: Option<Arc<dyn crate::api::RepositoryBindingStore>>,
+    binding_locks: crate::ports::checkpoints_forks::checkpoint_service::WorkspaceLocks,
+    pending: Mutex<HashMap<PathBuf, PendingBinding>>,
 }
 
 pub struct GitRollbackWorkspaceRecovery {
@@ -92,6 +113,8 @@ impl Default for GitCheckpointBackend {
         Self {
             factory: Arc::new(Git::new),
             bindings: None,
+            binding_locks: Default::default(),
+            pending: Default::default(),
         }
     }
 }
@@ -101,6 +124,8 @@ impl GitCheckpointBackend {
         Self {
             factory: Arc::new(factory),
             bindings: None,
+            binding_locks: Default::default(),
+            pending: Default::default(),
         }
     }
 
@@ -120,7 +145,11 @@ impl GitCheckpointBackend {
     }
 
     /// A recovery must use the project repository previously recorded for this environment.
-    pub async fn worktree_source(&self, root: PathBuf) -> Result<(Git, t3_git::RepositoryBinding)> {
+    pub async fn worktree_source(
+        &self,
+        root: PathBuf,
+        destination: PathBuf,
+    ) -> Result<(Git, t3_git::RepositoryBinding, BeforeRecreation)> {
         let store = self
             .bindings
             .as_ref()
@@ -140,7 +169,36 @@ impl GitCheckpointBackend {
             operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
             detail: "The project folder was recorded without a Git repository.".into(),
         })?;
-        Ok((self.handle(root), binding))
+        let before = BeforeRecreation {
+            previous: store.get(&destination).await?,
+            destination,
+            source: binding.clone(),
+        };
+        Ok((self.handle(root), binding, before))
+    }
+
+    /// Capture the new checkout's file IDs before any fallible binding-store IO.
+    pub async fn record_recreated(&self, before: BeforeRecreation) -> Result<()> {
+        let expected_root = std::fs::canonicalize(&before.destination)?;
+        let git = self.handle(before.destination.clone());
+        let identity = git.rebind_repository().await.map_err(git_error)?
+            .filter(|id| id.top_level == expected_root && id.git_dir != id.common_dir && id.common_dir == before.source.common_dir
+                && id.ids.as_ref().map(|v| v.common_dir) == before.source.ids.as_ref().map(|v| v.common_dir))
+            .ok_or(Error::Service {
+                operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+                detail: "The recreated checkout no longer belongs to the project repository.".into(),
+            })?;
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                before.destination,
+                PendingBinding {
+                    previous: before.previous,
+                    identity,
+                },
+            );
+        Ok(())
     }
 
     async fn git(&self, cwd: PathBuf) -> Result<Git> {
@@ -152,8 +210,36 @@ impl GitCheckpointBackend {
         let Some(bindings) = &self.bindings else {
             return Ok(git);
         };
-        if !replace && let Some(saved) = bindings.get(&cwd).await? {
-            let saved: SavedBinding = serde_json::from_value(saved)?;
+        let _lock = self.binding_locks.acquire(&cwd).await?;
+        let saved = bindings.get(&cwd).await?;
+        if !replace && let Some(pending) = self.pending_for(&cwd) {
+            if saved == pending.previous {
+                let verified = git
+                    .with_repository_binding(pending.identity.clone())
+                    .await
+                    .map_err(git_error)?;
+                bindings
+                    .put(
+                        &cwd,
+                        serde_json::to_value(SavedBinding {
+                            repository: Some(pending.identity),
+                        })?,
+                    )
+                    .await?;
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&cwd);
+                return Ok(verified);
+            }
+            // Another explicit trust took precedence.
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&cwd);
+        }
+        if !replace && let Some(saved) = saved.as_ref() {
+            let saved: SavedBinding = serde_json::from_value(saved.clone())?;
             return match saved.repository {
                 Some(identity) => git.with_repository_binding(identity).await.map_err(git_error),
                 // First seen outside any repository: one created there since is not trusted.
@@ -172,10 +258,30 @@ impl GitCheckpointBackend {
             git.bind_repository().await
         }
         .map_err(git_error)?;
-        bindings
-            .put(&cwd, serde_json::to_value(SavedBinding { repository })?)
-            .await?;
+        let record = serde_json::to_value(SavedBinding { repository })?;
+        bindings.put(&cwd, record).await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&cwd);
         Ok(git)
+    }
+
+    fn pending_for(&self, cwd: &Path) -> Option<PendingBinding> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(cwd)
+            .cloned()
+    }
+
+    /// An unchanged directory cannot authorize a new identity. Finish only a save
+    /// that failed after this process had already verified the recreated checkout.
+    pub async fn finish_pending_binding(&self, cwd: &Path) -> Result<()> {
+        if self.pending_for(cwd).is_some() {
+            self.git(cwd.to_owned()).await?;
+        }
+        Ok(())
     }
 
     fn reference(scope: &OrchestrationV2CheckpointScope, ordinal: u64) -> Result<CheckpointRef> {
@@ -396,6 +502,17 @@ impl CheckpointMetadata for GitCheckpointBackend {
 
     async fn bind_scope(&self, cwd: PathBuf, replace: bool) -> Result<()> {
         self.bound(cwd, replace).await.map(|_| ())
+    }
+
+    async fn bind_recreated_scope(&self, cwd: PathBuf) -> Result<()> {
+        if self.pending_for(&cwd).is_some() {
+            return self.finish_pending_binding(&cwd).await;
+        }
+        self.bind_scope(cwd, true).await
+    }
+
+    async fn finish_pending_binding(&self, cwd: &Path) -> Result<()> {
+        GitCheckpointBackend::finish_pending_binding(self, cwd).await
     }
 
     async fn delete_refs(
@@ -698,19 +815,84 @@ mod tests {
         let repo = Repository::new().await?;
         let file = repo._temp.path().join("bindings.json");
         let backend = GitCheckpointBackend::new(isolated_git(&repo._temp.path().join("home")))
-            .with_repository_bindings(Arc::new(crate::runtime::repository_bindings::FileRepositoryBindings::new(file.clone())));
+            .with_repository_bindings(Arc::new(
+                crate::runtime::repository_bindings::FileRepositoryBindings::new(file.clone()),
+            ));
         let path = repo._temp.path().join("checkout");
         std::fs::create_dir(&path)?;
         backend.bind_scope(path.clone(), false).await?;
+        let (_, _, before) = backend
+            .worktree_source(repo.root.clone(), path.clone())
+            .await?;
         std::fs::remove_dir(&path)?;
-        repo.git.add_worktree(t3_git::WorktreeOptions { new_branch: Some("recovered".into()), ..t3_git::WorktreeOptions::new(&path, "HEAD") }).await.map_err(git_error)?;
+        repo.git
+            .add_worktree(t3_git::WorktreeOptions {
+                new_branch: Some("recovered".into()),
+                ..t3_git::WorktreeOptions::new(&path, "HEAD")
+            })
+            .await
+            .map_err(git_error)?;
+        backend.record_recreated(before).await?;
+        // A read error immediately after recreation also leaves the verified proof available.
+        let original = file.with_extension("saved");
+        std::fs::rename(&file, &original)?;
+        std::fs::create_dir(&file)?;
+        assert!(backend.bind_recreated_scope(path.clone()).await.is_err());
+        std::fs::remove_dir(&file)?;
+        std::fs::rename(original, &file)?;
         let temporary = file.with_extension("json.tmp");
         std::fs::create_dir(&temporary)?;
-        assert!(backend.bind_scope(path.clone(), true).await.is_err());
+        assert!(backend.bind_recreated_scope(path.clone()).await.is_err());
         std::fs::remove_dir(temporary)?;
+        let away = repo._temp.path().join("away");
+        std::fs::rename(&path, &away)?;
+        assert!(backend.is_repository(path.clone()).await.is_err());
+        std::fs::rename(&away, &path)?;
         assert!(backend.is_repository(path.clone()).await?);
         let saved = std::fs::read_to_string(file)?;
         assert!(saved.contains("common_dir"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_recreated_checkout_leaves_the_previous_git_binding_in_place() -> Result<()>
+    {
+        let project = Repository::new().await?;
+        let other = Repository::new().await?;
+        let folder = project._temp.path().join("feature");
+        let moved = project._temp.path().join("previous");
+        let folder_name = folder.to_str().expect("fixture path");
+        project
+            .command(&["worktree", "add", "-b", "first", folder_name])
+            .await?;
+        let checkout = project.git.at(&folder);
+        checkout.bind_repository().await.map_err(git_error)?;
+        project
+            .command(&[
+                "worktree",
+                "move",
+                folder_name,
+                moved.to_str().expect("moved path"),
+            ])
+            .await?;
+        project
+            .command(&["worktree", "add", "-b", "second", folder_name])
+            .await?;
+        let before = BeforeRecreation {
+            destination: folder,
+            previous: None,
+            source: other
+                .git
+                .bind_repository()
+                .await
+                .map_err(git_error)?
+                .expect("other repository"),
+        };
+        assert!(project.backend.record_recreated(before).await.is_err());
+        assert!(
+            checkout.bind_repository().await.is_err(),
+            "a declined rebind replaced the cached identity"
+        );
         Ok(())
     }
 

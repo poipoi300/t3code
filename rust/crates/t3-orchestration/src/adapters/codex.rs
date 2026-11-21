@@ -40,6 +40,8 @@ pub struct ResolvedCodexAttachment {
 // Local host seam until attachment/document services are wired into runtime composition.
 #[async_trait]
 pub trait CodexAttachmentResolver: Send + Sync {
+    fn session_resolver(&self) -> Option<Arc<dyn CodexAttachmentResolver>> { None }
+
     async fn resolve(
         &self,
         attachment: &t3_contracts::chat_attachment::ChatAttachment,

@@ -8,6 +8,12 @@ be enabled by a normal native build. `ui.ps1` fills the checked-in desktop
 `Cargo.toml.in` templates from the shared crate's pin; the resulting manifests
 are ignored. Only the templates and entry points are hand maintained.
 
+Without PowerShell, `node rust/shells/ui.ts <generate|install-cli|check>` does the same three steps
+on any platform: it fills the templates, installs the pinned NSH CLI under `<target>/tools`, and runs
+the format, Clippy and wasm checks. Like `ui.ps1`, it builds under `$T3_SHELLS_TARGET` or
+`shells/target` and ignores an ambient `CARGO_TARGET_DIR`. Packaging (`all`, `web`, `android`,
+`ios`) is still `ui.ps1` or the CLI directly.
+
 `nsh.json` is the packaging entry for **web (HTML/wasm), Android and iOS**, and
 native desktop bundles. The pinned CLI owns the runners it generates below
 `.nsh/rust/rust-{web,android,ios,windows,macos,linux}`. Regenerate those runners;

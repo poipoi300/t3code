@@ -540,6 +540,14 @@ mod claims {
         use super::*;
 
         #[test]
+        fn attachment_review_rejects_unsigned_extracted_text() {
+            let temp=tempfile::tempdir().unwrap();
+            let store=AttachmentStore::new(temp.path().into(),t3_workspace::assets::AssetSigner::new(vec![3;32]).unwrap(),Arc::new(NoDocuments));
+            let side=temp.path().join("pending-00000000-0000-4000-8000-000000000001-pdf.pdf.txt");
+            std::fs::write(&side,b"unauthenticated").unwrap();
+            assert!(copy_contained(&store,&side,&temp.path().join("copy.pdf.txt")).is_err());
+        }
+        #[test]
         fn claim_rechecks_link_count_on_the_opened_handle() {
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("source.png");

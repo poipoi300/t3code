@@ -55,7 +55,15 @@ fn provider_error(error: serde_json::Error) -> ProviderError {
     }
 }
 
+#[derive(Default)]
+struct RestorePause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    gate: Arc<t3_server::writers::FolderGate>,
+}
+
 struct ScriptedAdapter {
+    pause: Option<Arc<RestorePause>>,
     instance: ProviderInstanceId,
     capabilities: OrchestrationV2ProviderCapabilities,
 }
@@ -63,6 +71,7 @@ struct ScriptedAdapter {
 impl ScriptedAdapter {
     fn new() -> Self {
         Self {
+            pause: None,
             instance: ProviderInstanceId("replay".into()),
             capabilities: {
                 let mut capabilities =
@@ -110,6 +119,7 @@ impl ProviderAdapter for ScriptedAdapter {
         session["capabilities"] =
             serde_json::to_value(&self.capabilities).map_err(provider_error)?;
         Ok(Arc::new(ScriptedSession {
+            pause: self.pause.clone(),
             session: serde_json::from_value(session).map_err(provider_error)?,
             subscribers: Mutex::new(Vec::new()),
         }))
@@ -117,6 +127,7 @@ impl ProviderAdapter for ScriptedAdapter {
 }
 
 struct ScriptedSession {
+    pause: Option<Arc<RestorePause>>,
     session: OrchestrationV2ProviderSession,
     subscribers: Mutex<Vec<mpsc::Sender<ProviderResult<ProviderEvent>>>>,
 }
@@ -252,6 +263,10 @@ impl SessionRuntime for ScriptedSession {
         Err(ProviderError::Unsupported("snapshot"))
     }
     async fn rollback(&self, input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
+        if let Some(pause) = &self.pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
         Ok(ThreadSnapshot {
             provider_thread: input.provider_thread,
             provider_turns: Vec::new(),
@@ -1087,9 +1102,18 @@ async fn admin_session(server: &t3_server::runtime::RunningServer) -> (String, S
         .next()
         .unwrap()
         .to_owned();
-    let ticket: Value = http
+    let (socket, client) = session_socket(server, &cookie).await;
+    (cookie, socket, client)
+}
+
+async fn session_socket(
+    server: &t3_server::runtime::RunningServer,
+    cookie: &str,
+) -> (Socket, Client) {
+    let origin = format!("http://{}", server.address);
+    let ticket: Value = reqwest::Client::new()
         .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
-        .header("cookie", &cookie)
+        .header("cookie", cookie)
         .send()
         .await
         .unwrap()
@@ -1103,7 +1127,7 @@ async fn admin_session(server: &t3_server::runtime::RunningServer) -> (String, S
     ))
     .await
     .unwrap();
-    (cookie, socket, Client::new(0, Default::default()))
+    (socket, Client::new(0, Default::default()))
 }
 
 async fn call_exit(socket: &mut Socket, client: &mut Client, tag: &str, payload: Value) -> Value {
@@ -1248,6 +1272,7 @@ fn agent_credentials() -> AgentCredentials {
 async fn restore_server(
     home: &Path,
     credentials: &AgentCredentials,
+    pause: Option<Arc<RestorePause>>,
 ) -> t3_server::runtime::RunningServer {
     let mut env = std::collections::BTreeMap::new();
     for key in ["PATH", "SystemRoot", "ComSpec", "WINDIR", "SHELL"] {
@@ -1283,7 +1308,11 @@ async fn restore_server(
             static_dir: None,
         },
         StartOptions {
-            providers: vec![Arc::new(ScriptedAdapter::new())],
+            writer_gate: pause.as_ref().map(|p| p.gate.clone()),
+            providers: vec![Arc::new(ScriptedAdapter {
+                pause,
+                ..ScriptedAdapter::new()
+            })],
             dev_replay: false,
             #[cfg(feature = "mcp")]
             mcp_sessions: Some(credentials.clone()),
@@ -1314,6 +1343,10 @@ struct RestoreFixture {
 
 impl RestoreFixture {
     async fn start(scope: Option<&str>) -> Self {
+        Self::start_with_pause(scope, None).await
+    }
+
+    async fn start_with_pause(scope: Option<&str>, pause: Option<Arc<RestorePause>>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().to_path_buf();
         std::fs::create_dir_all(home.join("userdata")).unwrap();
@@ -1331,7 +1364,7 @@ impl RestoreFixture {
         git_in(&repository, &gitconfig, &["add", "."]);
         git_in(&repository, &gitconfig, &["commit", "-q", "-m", "first"]);
         let credentials = agent_credentials();
-        let server = restore_server(&home, &credentials).await;
+        let server = restore_server(&home, &credentials, pause).await;
         let layout = t3_config::home::HomeLayout {
             base_dir: home.clone(),
             state_dir: home.join("userdata"),
@@ -1468,7 +1501,7 @@ impl RestoreFixture {
         server.shutdown().await.unwrap();
         between(&home, &folder);
         let credentials = agent_credentials();
-        let server = restore_server(&home, &credentials).await;
+        let server = restore_server(&home, &credentials, None).await;
         let (cookie, socket, mut client) = admin_session(&server).await;
         let subscription = client
             .start(
@@ -1491,6 +1524,323 @@ impl RestoreFixture {
             checkpoint,
         }
     }
+}
+
+#[cfg(all(
+    feature = "git",
+    feature = "workspace",
+    any(feature = "providers", feature = "forge")
+))]
+async fn remove_recorded_checkout(f: &mut RestoreFixture) -> std::path::PathBuf {
+    let path = f.home.join("worktrees/repository/feature");
+    let gitconfig = f.home.join("gitconfig");
+    git_in(
+        &f.repository,
+        &gitconfig,
+        &["worktree", "add", "-b", "feature", path.to_str().unwrap()],
+    );
+    std::fs::create_dir(path.join("sub")).unwrap();
+    std::fs::write(path.join("sub/file"), "fixture").unwrap();
+    git_in(&path, &gitconfig, &["add", "sub/file"]);
+    git_in(&path, &gitconfig, &["commit", "-m", "nested terminal cwd"]);
+    let update = f.call("orchestration.dispatchCommand",
+        json!({"type":"thread.metadata.update","commandId":"command:move","threadId":RESTORE_THREAD,"branch":"feature","worktreePath":path})).await;
+    assert_eq!(update["_tag"], "Success", "{update}");
+    // Record the existing checkout's identity, as at launch.
+    let trusted = f
+        .call("vcs.trustRepository", json!({"threadId":RESTORE_THREAD}))
+        .await;
+    assert_eq!(trusted["_tag"], "Success", "{trusted}");
+    git_in(
+        &f.repository,
+        &gitconfig,
+        &["worktree", "remove", path.to_str().unwrap()],
+    );
+    path
+}
+
+#[cfg(all(
+    feature = "terminal",
+    all(
+        feature = "git",
+        feature = "workspace",
+        any(feature = "providers", feature = "forge")
+    )
+))]
+#[tokio::test]
+async fn opening_a_terminal_recovers_only_its_own_recorded_checkout() {
+    let mut f = RestoreFixture::start(None).await;
+    let path = remove_recorded_checkout(&mut f).await;
+    let unknown = f.call("terminal.open", json!({"threadId":"another-thread","terminalId":"foreign","cwd":path,"worktreePath":path})).await;
+    assert_eq!(
+        unknown["cause"][0]["error"]["_tag"], "TerminalCwdNotFoundError",
+        "{unknown}"
+    );
+    assert!(!path.exists());
+    // Reattaching to a running terminal ignores its supplied cwd.
+    let live = f
+        .call(
+            "terminal.open",
+            json!({"threadId":RESTORE_THREAD,"terminalId":"live","cwd":f.repository}),
+        )
+        .await;
+    assert_eq!(live["_tag"], "Success", "{live}");
+    let (mut socket, mut client) = session_socket(&f.server, &f.cookie).await;
+    for restart in [false, true] {
+        let attach = client.start("terminal.attach", json!({"threadId":RESTORE_THREAD,"terminalId":"live","cwd":path,"restartIfNotRunning":restart}), CallKind::Stream).unwrap();
+        loop {
+            match event(&mut socket, &mut client).await {
+                CallEvent::Chunk { id, .. } if id == attach => {
+                    client.acknowledge(id);
+                    break;
+                }
+                CallEvent::Chunk { id, .. } => client.acknowledge(id),
+                CallEvent::Exit { id, .. } if id == attach => {
+                    panic!("running terminal did not attach")
+                }
+                _ => {}
+            }
+        }
+    }
+    drop(socket);
+    assert!(
+        !path.exists(),
+        "attach to a running terminal recreated the ignored cwd"
+    );
+    // The requested cwd is missing, although the checkout root itself still has build leftovers.
+    std::fs::create_dir_all(path.join("node_modules")).unwrap();
+    let nested = path.join("sub");
+    let opened = f.call("terminal.open", json!({"threadId":RESTORE_THREAD,"terminalId":"owned","cwd":nested,"worktreePath":f.repository})).await;
+    assert_eq!(opened["_tag"], "Success", "{opened}");
+    assert!(path.join(".git").is_file());
+    assert_eq!(opened["value"]["cwd"], nested.to_string_lossy().as_ref());
+    assert!(!path.join("node_modules").exists());
+    f.server.shutdown().await.unwrap();
+}
+
+/// A thread keeps its recorded branch when a managed checkout is removed between turns.
+#[cfg(all(
+    feature = "git",
+    feature = "workspace",
+    any(feature = "providers", feature = "forge")
+))]
+#[tokio::test]
+async fn a_turn_recreates_its_missing_managed_checkout() {
+    let mut f = RestoreFixture::start(None).await;
+    let path = remove_recorded_checkout(&mut f).await;
+    let sent = f.call("orchestration.dispatchCommand",
+        json!({"type":"message.dispatch","commandId":"command:next","threadId":RESTORE_THREAD,"messageId":"message:next","text":"Again","attachments":[],"dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"})).await;
+    assert_eq!(sent["_tag"], "Success", "{sent}");
+    let (_, result) = thread_outcome(
+        &mut f.socket,
+        &mut f.client,
+        &f.subscription,
+        &[
+            &["\"run.updated\"", "\"completed\""],
+            &["\"run.updated\"", "\"failed\""],
+        ],
+    )
+    .await;
+    assert!(
+        path.join(".git").is_file(),
+        "the missing checkout was not recreated: {result}"
+    );
+    assert!(result.contains("\"completed\""), "{result}");
+    assert_eq!(
+        std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+        "first\n"
+    );
+    let refs = f.call("vcs.listRefs", json!({"cwd":path})).await;
+    assert_eq!(refs["_tag"], "Success", "{refs}");
+    f.server.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "workspace")]
+#[tokio::test]
+async fn overlapping_socket_writers_wait_through_provider_rollback() {
+    let pause = Arc::new(RestorePause::default());
+    let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
+    let folder = f.folder();
+    let mut calls = Vec::new();
+    let mut waiting = pause.gate.waiting();
+    let writers = [
+        (
+            "projects.writeFile",
+            json!({"cwd":folder,"relativePath":"after.txt","contents":"released"}),
+        ),
+        #[cfg(feature = "git")]
+        (
+            "vcs.createRef",
+            json!({"cwd":folder,"refName":"after-restore"}),
+        ),
+        #[cfg(feature = "terminal")]
+        (
+            "terminal.open",
+            json!({"threadId":"another-thread","terminalId":"writer","cwd":folder}),
+        ),
+    ];
+    let count = writers.len();
+    for (tag, payload) in writers {
+        let (socket, client) = session_socket(&f.server, &f.cookie).await;
+        calls.push((socket, client, tag, payload));
+    }
+    let file = f.folder.join("after.txt");
+    {
+        let rollback = f.restore("command:held");
+        tokio::pin!(rollback);
+        tokio::select! {
+            () = pause.entered.notified() => {}
+            result = &mut rollback => panic!("provider rollback did not start: {result:?}"),
+        }
+        let mut writers: futures::stream::FuturesUnordered<_> = calls
+            .into_iter()
+            .map(|(mut socket, mut client, tag, payload)| async move {
+                let exit = call_exit(&mut socket, &mut client, tag, payload).await;
+                assert_eq!(exit["_tag"], "Success", "{tag}: {exit}");
+            })
+            .collect();
+        tokio::select! {
+            reached = waiting.wait_for(|n| *n == count) => { reached.unwrap(); }
+            _ = writers.next() => panic!("a writer ran inside the restore"),
+        }
+        assert!(!file.exists());
+        pause.release.notify_one();
+        let (result, _) = tokio::join!(rollback, writers.collect::<Vec<_>>());
+        assert_eq!(result, None);
+    }
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "released");
+    f.server.shutdown().await.unwrap();
+}
+
+#[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
+fn setup_preview_launch(f: &RestoreFixture, ready: &tokio::net::TcpListener) -> Value {
+    // Keep the fixture outside the checkout the rollback is asked to restore.
+    let script = f.home.join("serve.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+const http = require("node:http"), net = require("node:net");
+const server = http.createServer((req, res) => res.end("setup preview"));
+server.listen(0, "127.0.0.1", () => {{
+  const ready = net.connect({}, "127.0.0.1", () => ready.end(String(server.address().port)));
+}});
+"#,
+            ready.local_addr().unwrap().port()
+        ),
+    )
+    .unwrap();
+    let scripts = json!([{"id":"preview","name":"Setup preview","command":format!("node \"{}\"", script.display()),"icon":"configure","runOnWorktreeCreate":true,"async":false}]);
+    let layout = t3_config::home::HomeLayout {
+        base_dir: f.home.clone(),
+        state_dir: f.home.join("userdata"),
+    };
+    t3_persistence::rusqlite::Connection::open(layout.database())
+        .unwrap()
+        .execute(
+            "UPDATE projection_projects SET scripts_json=?1 WHERE project_id='project:restore'",
+            [scripts.to_string()],
+        )
+        .unwrap();
+    json!({
+        "commandId":"command:setup","threadId":"thread:preview","projectId":"project:restore","title":"Preview",
+        "modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"full-access","interactionMode":"default",
+        "workspaceStrategy":{"type":"existing_worktree","worktreePath":f.folder(),"branch":"main"}
+    })
+}
+
+/// A preview server started by another thread's setup script is a live writer in
+/// the shared checkout, including after the launch call has returned.
+#[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
+#[tokio::test]
+async fn a_live_setup_script_serving_a_preview_refuses_file_restore() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut f = RestoreFixture::start(None).await;
+    let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let launch = setup_preview_launch(&f, &ready);
+    let launched = f.call("orchestration.launchThread", launch).await;
+    assert_eq!(launched["_tag"], "Success", "{launched}");
+    let (mut connected, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), ready.accept())
+            .await
+            .expect("setup script did not start its preview listener")
+            .unwrap();
+    let mut port = String::new();
+    connected.read_to_string(&mut port).await.unwrap();
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap()))
+        .await
+        .unwrap();
+    socket
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).await.unwrap();
+    assert!(response.ends_with("setup preview"), "{response}");
+    // Move the launch thread's projection away. Its still-running setup terminal
+    // independently owns this cwd, even though the thread no longer shares it.
+    let moved = f.home.join("other-checkout");
+    std::fs::create_dir(&moved).unwrap();
+    let changed = f.call("orchestration.dispatchCommand", json!({"type":"thread.metadata.update","commandId":"command:move-preview","threadId":"thread:preview","worktreePath":moved,"branch":null})).await;
+    assert_eq!(changed["_tag"], "Success", "{changed}");
+    let refused = f.restore("command:refuse-preview").await;
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|text| text.contains("still writing to its folder: terminal")),
+        "{refused:?}"
+    );
+    f.server.shutdown().await.unwrap();
+}
+
+/// The launch RPC returns after enqueueing setup. The script itself must wait
+/// until rollback releases the hold, even though it belongs to another thread.
+#[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
+#[tokio::test]
+async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
+    let pause = Arc::new(RestorePause::default());
+    let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
+    let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let launch = setup_preview_launch(&f, &ready);
+    let (mut socket, mut client) = session_socket(&f.server, &f.cookie).await;
+    let mut waiting = pause.gate.waiting();
+    {
+        let rollback = f.restore("command:hold-setup");
+        tokio::pin!(rollback);
+        tokio::select! {
+            () = pause.entered.notified() => {}
+            result = &mut rollback => panic!("provider rollback did not start: {result:?}"),
+        }
+        let call = tokio::spawn(async move {
+            call_exit(
+                &mut socket,
+                &mut client,
+                "orchestration.launchThread",
+                launch,
+            )
+            .await
+        });
+        tokio::select! {
+            result = waiting.wait_for(|n| *n > 0) => { result.unwrap(); }
+            connected = ready.accept() => panic!("preview started before restore released its folder: {connected:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("setup did not reach the writer gate"),
+        }
+        pause.release.notify_one();
+        let (restored, launched) = tokio::join!(rollback, call);
+        assert!(
+            restored
+                .as_deref()
+                .is_none_or(|reason| reason.contains("isolated worktree")),
+            "{restored:?}"
+        );
+        let launched = launched.unwrap();
+        assert_eq!(launched["_tag"], "Success", "{launched}");
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(30), ready.accept())
+        .await
+        .expect("setup must resume")
+        .unwrap();
+    f.server.shutdown().await.unwrap();
 }
 
 /// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,

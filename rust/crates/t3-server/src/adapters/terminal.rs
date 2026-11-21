@@ -68,6 +68,14 @@ mod enabled {
         pub launch: Arc<dyn TerminalLaunchPreparation>,
         /// The environment's one writer gate (`crate::writers`).
         pub gate: Arc<crate::writers::FolderGate>,
+        #[cfg(all(
+            feature = "workspace",
+            feature = "orchestration",
+            feature = "local-services"
+        ))]
+        recovery: std::sync::OnceLock<
+            std::sync::Weak<t3_orchestration::composition::OrchestrationRuntime>,
+        >,
     }
     impl TerminalAdapter {
         pub fn new(
@@ -81,7 +89,113 @@ mod enabled {
                 manager,
                 launch,
                 gate: Arc::default(),
+                #[cfg(all(
+                    feature = "workspace",
+                    feature = "orchestration",
+                    feature = "local-services"
+                ))]
+                recovery: Default::default(),
             })
+        }
+        #[cfg(all(
+            feature = "workspace",
+            feature = "orchestration",
+            feature = "local-services"
+        ))]
+        pub(crate) fn bind_worktree_recovery(
+            &self,
+            runtime: &Arc<t3_orchestration::composition::OrchestrationRuntime>,
+        ) {
+            let _ = self.recovery.set(Arc::downgrade(runtime));
+        }
+
+        #[cfg(all(
+            feature = "workspace",
+            feature = "orchestration",
+            feature = "local-services"
+        ))]
+        async fn prepare_worktree(
+            &self,
+            thread_id: &str,
+            cwd: &str,
+        ) -> TerminalResult<
+            Option<(
+                t3_contracts::base_schemas::TrimmedNonEmptyString,
+                t3_orchestration::composition::TerminalWorktreeLease,
+            )>,
+        > {
+            use t3_orchestration::api::ProjectionReader;
+            use t3_workspace::paths;
+            let Some(runtime) = self.recovery.get().and_then(std::sync::Weak::upgrade) else {
+                return Ok(None);
+            };
+            let Ok(Some(thread)) = runtime
+                .projections
+                .thread(t3_orchestration::api::ThreadId(thread_id.into()))
+                .await
+            else {
+                return Ok(None);
+            };
+            let Some(worktree) = thread.worktree_path.clone() else {
+                return Ok(None);
+            };
+            let root = std::path::Path::new(&worktree.0);
+            let cwd = std::path::Path::new(cwd);
+            if !root.is_absolute()
+                || !cwd.is_absolute()
+                || paths::validate_host_path(root).is_err()
+                || paths::validate_host_path(cwd).is_err()
+                || !paths::absolute(cwd).is_ok_and(|path| paths::within(&path, root))
+            {
+                return Ok(None);
+            }
+            match runtime.lease_terminal_worktree(thread).await {
+                Ok(lease) => Ok(lease.map(|guard| (worktree, guard))),
+                Err(error) => {
+                    tracing::warn!(%error, "terminal worktree recovery failed");
+                    Err(failure(
+                        ServiceError::CwdNotFound {
+                            cwd: cwd.to_string_lossy().into_owned(),
+                        },
+                        thread_id,
+                        "",
+                    ))
+                }
+            }
+        }
+        async fn launch_with_recovery<T, F>(
+            &self,
+            thread: &str,
+            terminal: &str,
+            cwd: Option<&str>,
+            launch: impl Fn(Option<t3_contracts::base_schemas::TrimmedNonEmptyString>) -> F,
+        ) -> TerminalResult<T>
+        where
+            F: Future<Output = Result<T, ServiceError>>,
+        {
+            #[cfg(all(
+                feature = "workspace",
+                feature = "orchestration",
+                feature = "local-services"
+            ))]
+            if let Some(cwd) = cwd
+                && let Some((path, lease)) = self.prepare_worktree(thread, cwd).await?
+            {
+                let result = launch(Some(path.clone())).await;
+                if matches!(&result, Err(ServiceError::CwdNotFound { .. })) {
+                    match lease.recover_missing_cwd().await {
+                        Ok(()) => {
+                            return launch(Some(path))
+                                .await
+                                .map_err(|e| failure(e, thread, terminal));
+                        }
+                        Err(error) => tracing::warn!(%error, "terminal worktree recovery failed"),
+                    }
+                }
+                return result.map_err(|e| failure(e, thread, terminal));
+            }
+            let _ = cwd;
+            launch(None).await.map_err(|e| failure(e, thread, terminal))
         }
         pub async fn open(
             &self,
@@ -96,10 +210,19 @@ mod enabled {
                 )
                 .await;
             let input = self.launch.open(input).await?;
-            self.manager
-                .open(input.clone())
-                .await
-                .map_err(|e| failure(e, &input.thread_id.0, &input.terminal_id.0))
+            self.launch_with_recovery(
+                &input.thread_id.0,
+                &input.terminal_id.0,
+                Some(&input.cwd.0),
+                |path| {
+                    let mut input = input.clone();
+                    if let Some(path) = path {
+                        input.worktree_path = Some(Some(path));
+                    }
+                    self.manager.open(input)
+                },
+            )
+            .await
         }
         pub async fn attach(
             &self,
@@ -120,10 +243,48 @@ mod enabled {
                 )
                 .await;
             let input = self.launch.attach(input).await?;
-            self.manager
-                .attach(input.clone(), Some(viewer_id))
-                .await
-                .map_err(|e| failure(e, &input.thread_id.0, &input.terminal_id.0))
+            // An attach without a cwd can only observe an existing session. Let the
+            // manager take that path first. Only an exited session needs a requested restart.
+            if input.cwd.as_ref().is_some_and(Option::is_some) {
+                let mut existing = input.clone();
+                existing.cwd = None;
+                match self.manager.attach(existing, Some(viewer_id.clone())).await {
+                    Ok(stream) => {
+                        let restart = input.restart_if_not_running.flatten() == Some(true)
+                            && input.resume.flatten() != Some(true);
+                        if !restart
+                            || self
+                                .manager
+                                .get_shell(TerminalObserveInput {
+                                    thread_id: input.thread_id.clone(),
+                                    terminal_id: input.terminal_id.clone(),
+                                })
+                                .await
+                                .is_ok()
+                        {
+                            return Ok(stream);
+                        }
+                        drop(stream);
+                    }
+                    Err(ServiceError::SessionLookup { .. }) => {}
+                    Err(error) => {
+                        return Err(failure(error, &input.thread_id.0, &input.terminal_id.0));
+                    }
+                }
+            }
+            let cwd = input
+                .cwd
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|v| v.0.as_str());
+            self.launch_with_recovery(&input.thread_id.0, &input.terminal_id.0, cwd, |path| {
+                let mut input = input.clone();
+                if let Some(path) = path {
+                    input.worktree_path = Some(Some(path));
+                }
+                self.manager.attach(input, Some(viewer_id.clone()))
+            })
+            .await
         }
         pub async fn observe(&self, input: TerminalObserveInput) -> TerminalResult<AttachStream> {
             self.manager

@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 const shellRoot = fileURLToPath(new URL(".", import.meta.url));
 const uiManifest = join(shellRoot, "../crates/t3-ui/Cargo.toml");
 const desktopManifest = join(shellRoot, "desktop/Cargo.toml");
-const target = resolve(
-  process.env.CARGO_TARGET_DIR || process.env.T3_SHELLS_TARGET || join(shellRoot, "target"),
-);
+// As in ui.ps1: T3_SHELLS_TARGET or shells/target, never an ambient CARGO_TARGET_DIR, so the UI and
+// shell workspaces stay independent of rust/target.
+const target = resolve(process.env.T3_SHELLS_TARGET || join(shellRoot, "target"));
 const env: NodeJS.ProcessEnv = {
   ...process.env,
   CARGO_TARGET_DIR: target,
@@ -17,14 +17,18 @@ const env: NodeJS.ProcessEnv = {
 if (env.CARGO_HOME) env.CARGO_HOME = resolve(env.CARGO_HOME);
 
 function cargo(args: string[], capture = false): string {
-  const result = spawnSync("cargo", args, {
+  return run("cargo", args, capture);
+}
+
+function run(program: string, args: string[], capture = false): string {
+  const result = spawnSync(program, args, {
     cwd: shellRoot,
     env,
     encoding: "utf8",
     stdio: ["inherit", capture ? "pipe" : "inherit", "inherit"],
   });
   if (result.error) throw result.error;
-  if (result.signal) throw new Error(`cargo ${args[0]} terminated by ${result.signal}`);
+  if (result.signal) throw new Error(`${program} ${args[0]} terminated by ${result.signal}`);
   if (result.status !== 0) process.exit(result.status ?? 1);
   return result.stdout ?? "";
 }
@@ -69,7 +73,8 @@ function main(): void {
   }
 
   if (action === "install-cli") {
-    const root = env.CARGO_HOME || join(target, "tools");
+    // Under the build root, as ui.ps1 does: never a user's CARGO_HOME (~/.cargo/bin/nsh).
+    const root = join(target, "tools");
     env.CARGO_TARGET_DIR = join(target, "cli-build");
     cargo([
       "install",
@@ -100,17 +105,10 @@ function main(): void {
         "warnings",
       ]);
     }
+    run("rustup", ["target", "add", "wasm32-unknown-unknown"]);
     env.CC_wasm32_unknown_unknown ??= "clang";
     env.AR_wasm32_unknown_unknown ??= "llvm-ar";
-    cargo([
-      "check",
-      "--locked",
-      "--manifest-path",
-      uiManifest,
-      "--target",
-      "wasm32-unknown-unknown",
-      "--lib",
-    ]);
+    cargo(["check", "--locked", "--manifest-path", uiManifest, "--target", "wasm32-unknown-unknown"]);
   }
 }
 

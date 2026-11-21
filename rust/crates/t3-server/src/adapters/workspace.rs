@@ -232,6 +232,37 @@ mod enabled {
         }
     }
     #[cfg(feature = "orchestration")]
+    const RECORDED_ATTACHMENT: &str = "SELECT EXISTS (
+                   SELECT 1 FROM orchestration_v2_projection_messages m
+                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(m.payload_json,'$.attachments') a
+                   WHERE t.deleted_at IS NULL AND instr(m.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1
+                   UNION ALL
+                   SELECT 1 FROM orchestration_v2_projection_threads t, json_each(t.payload_json,'$.guestShare.messages') m, json_each(m.value,'$.attachments') a
+                   WHERE t.deleted_at IS NULL AND instr(t.payload_json,?1)>0 AND json_extract(m.value,'$.status')='pending' AND json_extract(a.value,'$.id')=?1
+                   UNION ALL
+                   SELECT 1 FROM orchestration_v2_projection_turn_items i
+                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(i.payload_json,'$.questionAnswer.attachmentsByQuestionId') q, json_each(q.value) a
+                   WHERE t.deleted_at IS NULL AND i.type='user_input_request' AND instr(i.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1)";
+
+    #[cfg(all(test, feature="orchestration"))]
+    mod attachment_review_tests {
+        use super::*;
+        #[test]
+        fn preview_membership_uses_thread_indexes() {
+            let db=t3_persistence::rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT PRIMARY KEY, deleted_at TEXT, payload_json TEXT);
+            CREATE TABLE orchestration_v2_projection_messages(thread_id TEXT, payload_json TEXT);
+            CREATE INDEX messages_by_thread ON orchestration_v2_projection_messages(thread_id);
+            CREATE TABLE orchestration_v2_projection_turn_items(thread_id TEXT, type TEXT, payload_json TEXT);
+            CREATE INDEX items_by_thread ON orchestration_v2_projection_turn_items(thread_id);").unwrap();
+            let mut plan=db.prepare(&format!("EXPLAIN QUERY PLAN {RECORDED_ATTACHMENT}")).unwrap();
+            let args=vec!["fixture";plan.parameter_count()];
+            let rows:Vec<String>=plan.query_map(t3_persistence::rusqlite::params_from_iter(args), |r|r.get(3)).unwrap().collect::<std::result::Result<_,_>>().unwrap();
+            assert!(rows.iter().any(|r|r.contains("SEARCH m USING INDEX messages_by_thread")) && rows.iter().any(|r|r.contains("SEARCH i USING INDEX items_by_thread")),"{rows:?}");
+        }
+    }
+
+    #[cfg(feature = "orchestration")]
     async fn thread_has_attachment(
         caller: &crate::registry::Context,
         id: &str,
@@ -253,17 +284,7 @@ mod enabled {
             // Chat and question references can be shared across threads. The filename
             // prefix is not an authority for these records.
             let recorded: bool = db.query_row(
-                "SELECT EXISTS (
-                   SELECT 1 FROM orchestration_v2_projection_messages m
-                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(m.payload_json,'$.attachments') a
-                   WHERE t.deleted_at IS NULL AND instr(m.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1
-                   UNION ALL
-                   SELECT 1 FROM orchestration_v2_projection_threads t, json_each(t.payload_json,'$.guestShare.messages') m, json_each(m.value,'$.attachments') a
-                   WHERE t.deleted_at IS NULL AND instr(t.payload_json,?1)>0 AND json_extract(m.value,'$.status')='pending' AND json_extract(a.value,'$.id')=?1
-                   UNION ALL
-                   SELECT 1 FROM orchestration_v2_projection_turn_items i
-                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(i.payload_json,'$.questionAnswer.attachmentsByQuestionId') q, json_each(q.value) a
-                   WHERE t.deleted_at IS NULL AND i.type='user_input_request' AND instr(i.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1)",
+                RECORDED_ATTACHMENT,
                 [&id], |row| row.get(0))?;
             if recorded { return Ok(true); }
             // Tool-generated previews have additional producer and thread ownership rules.
