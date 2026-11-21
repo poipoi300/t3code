@@ -1,13 +1,13 @@
 use crate::{Environment, ProcessError};
-use std::ffi::{OsStr, OsString};
-#[cfg(any(windows, test))]
-use std::path::Path;
 #[cfg(windows)]
 use std::{
     collections::VecDeque,
-    path::PathBuf,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
+};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
 };
 
 #[cfg(windows)]
@@ -57,6 +57,40 @@ pub struct ResolvedCommand {
     pub args: Vec<OsString>,
     /// Reserved for compatibility; resolution returns `None` and std handles batch quoting.
     pub shell_line: Option<OsString>,
+}
+
+/// Find an executable for callers that inspect the file before spawning it.
+/// Preserve the invoked path so version-manager shims retain their dispatch names.
+pub fn resolve_command_path(program: &OsStr, env: &Environment) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use nix::unistd::{AccessFlags, access};
+
+        let is_executable = |path: &Path| path.is_file() && access(path, AccessFlags::X_OK).is_ok();
+        let path = if program.as_encoded_bytes().contains(&b'/') {
+            let path = PathBuf::from(program);
+            is_executable(&path).then_some(path)?
+        } else {
+            let search = ["PATH", "Path", "path"]
+                .into_iter()
+                .find_map(|key| env.get(OsStr::new(key)).and_then(Option::as_deref))?;
+            std::env::split_paths(search)
+                .map(|entry| match entry.to_str() {
+                    Some(text) => PathBuf::from(text.trim().trim_matches('"')),
+                    None => entry,
+                })
+                .filter(|entry| !entry.as_os_str().is_empty())
+                .map(|entry| entry.join(program))
+                .find(|path| is_executable(path))?
+        };
+        std::path::absolute(path).ok()
+    }
+    #[cfg(not(unix))]
+    {
+        resolve_command(program, &[], env, false)
+            .ok()
+            .map(|resolved| PathBuf::from(resolved.program))
+    }
 }
 
 pub fn resolve_command(

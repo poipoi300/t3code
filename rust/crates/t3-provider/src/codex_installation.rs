@@ -274,12 +274,9 @@ impl ProcessLocalCodex {
 impl LocalCodex for ProcessLocalCodex {
     async fn resolve(&self) -> ServiceResult<Option<CodexExecutable>> {
         let mut options = process_options("codex", &[], &self.environment);
-        let resolved = match t3_process::resolve_command(&options.program, &[], &options.env, false)
-        {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
+        let Some(path) = t3_process::resolve_command_path(&options.program, &options.env) else {
+            return Ok(None);
         };
-        let path = PathBuf::from(&resolved.program);
         let real = match fs::canonicalize(&path) {
             Ok(path) => path,
             Err(_) => return Ok(None),
@@ -348,7 +345,7 @@ impl LocalCodex for ProcessLocalCodex {
         {
             return Ok(cached.executable.clone());
         }
-        options.program = resolved.program;
+        options.program = path.clone().into_os_string();
         options.args = vec!["--version".into()];
         options.max_output_bytes = 8192;
         let executable = tokio::time::timeout(Duration::from_secs(5), async {

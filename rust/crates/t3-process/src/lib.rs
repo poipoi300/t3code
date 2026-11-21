@@ -9,7 +9,7 @@ pub use detached::{DetachedConsole, spawn_detached};
 pub use non_blocking::{env_trampoline, spawn_non_blocking, supports_env_chdir};
 
 use process_wrap::tokio::{ChildWrapper, CommandWrap};
-pub use resolve::{ResolvedCommand, resolve_command};
+pub use resolve::{ResolvedCommand, resolve_command, resolve_command_path};
 use std::{
     collections::BTreeMap, ffi::OsString, io, path::PathBuf, process::Stdio, sync::Arc,
     time::Duration,

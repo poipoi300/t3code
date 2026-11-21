@@ -425,13 +425,33 @@ fn local_fixture(version: &str) -> common::Fixture {
 #[tokio::test]
 async fn local_acquire_reuses_probe_until_the_executable_fingerprint_changes() {
     let fixture = local_fixture("codex-cli 0.170.0");
+    let environment = fixture.environment.clone();
+    #[cfg(unix)]
+    let (environment, launcher) = {
+        let mut environment = environment;
+        let shadow = fixture.directory.path().join("shadow");
+        let entry = fixture.directory.path().join("entry");
+        std::fs::create_dir_all(&shadow).unwrap();
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(shadow.join("codex"), "not executable").unwrap();
+        let launcher = entry.join("codex");
+        std::os::unix::fs::symlink(fixture.directory.path().join("codex"), &launcher).unwrap();
+        environment.remove("PATH");
+        environment.insert(
+            "Path".into(),
+            format!(" \"{}\" : \"{}\" ", shadow.display(), entry.display()),
+        );
+        (environment, launcher)
+    };
     let local = Arc::new(ProcessLocalCodex::new(
-        fixture.environment.clone(),
+        environment,
         fixture.directory.path().join("managed"),
     ));
     let (_directory, installation, _) = setup_with_local(local).await;
     let first = installation.acquire().await.unwrap();
     assert_eq!(first.executable.version, "0.170.0");
+    #[cfg(unix)]
+    assert_eq!(first.executable.path, launcher);
     drop(first);
     drop(installation.acquire().await.unwrap());
     assert_eq!(
