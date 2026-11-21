@@ -12,9 +12,15 @@ use nsh_testing::Headless;
 use t3_client::{
     services::filesystem::ReadAccess,
     types::{EnvironmentId, ThreadId, ThreadKey},
-    workspace::project_files::{FilesWorkspace, read::FileReadView, tree::Problem},
+    workspace::project_files::{
+        FilesWorkspace, assets::AssetReadError, read::FileReadView, tree::Problem,
+    },
 };
-use t3_contracts::{assets::AssetResource, project::{ProjectReadFileError, ProjectReadFileResult}};
+use t3_contracts::{
+    assets::AssetResource,
+    chat_attachment::ChatFileAttachment,
+    project::{ProjectReadFileError, ProjectReadFileResult},
+};
 use t3_ui::screens::panel::{
     Action, PanelHost, PanelStore, SurfaceContext,
     file_viewer::{FileReadHandle, FileViewerRuntime, FileViewerService, file_preview_panel},
@@ -50,6 +56,7 @@ pub fn contents(path: &str, text: &str) -> FileReadView {
 #[derive(Clone, Default)]
 pub struct FakeViewer {
     pub files: Rc<RefCell<BTreeMap<String, FileReadView>>>,
+    pub assets: Rc<RefCell<BTreeMap<String, Vec<u8>>>>,
 }
 impl FileViewerService for FakeViewer {
     fn workspace(&self, _: &ThreadKey) -> Option<FilesWorkspace> {
@@ -64,8 +71,30 @@ impl FileViewerService for FakeViewer {
     fn read(&self, _: &EnvironmentId, _: &str, path: &str) -> Rc<dyn FileReadHandle> {
         Rc::new(FakeRead(self.files.borrow().get(path).cloned().unwrap_or_default()))
     }
-    fn asset_url(&self, _: &EnvironmentId, _: AssetResource) -> LocalBoxFuture<'static, Result<String, Problem>> {
-        async { Err(Problem::client("This environment is not connected.")) }.boxed_local()
+    fn asset_bytes(
+        &self,
+        _: &EnvironmentId,
+        resource: AssetResource,
+        limit: usize,
+        _: Option<String>,
+    ) -> LocalBoxFuture<'static, Result<Vec<u8>, AssetReadError>> {
+        let assets = self.assets.borrow();
+        let result = match asset_path(&resource).and_then(|path| assets.get(path)) {
+            Some(bytes) if bytes.len() <= limit => Ok(bytes.clone()),
+            Some(_) => Err(AssetReadError::TooLarge),
+            None => Err(AssetReadError::Unavailable),
+        };
+        async { result }.boxed_local()
+    }
+}
+
+fn asset_path(resource: &AssetResource) -> Option<&str> {
+    match resource {
+        AssetResource::WorkspaceFile { path, .. } => Some(&path.0),
+        // The fixture accepts host-only grants only for paths explicitly outside its workspace.
+        AssetResource::MediaFile { path, .. } if !path.0.starts_with("/repo/") => Some(&path.0),
+        AssetResource::Attachment { attachment_id, .. } => Some(&attachment_id.0),
+        _ => None,
     }
 }
 
@@ -98,15 +127,26 @@ pub struct Setup {
 
 /// The Files surface as PNL-HOST mounts it, over `setup`'s fakes.
 pub fn surface_fixture(setup: Setup) -> impl IntoElement {
+    surface_fixture_with_attachment(setup, None)
+}
+
+pub fn surface_fixture_with_attachment(
+    setup: Setup,
+    attachment: Option<ChatFileAttachment>,
+) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     provide_context(setup.files);
     provide_context(FileViewerRuntime(Rc::new(setup.viewer)));
     let thread = ThreadKey { environment: EnvironmentId("env".into()), thread: ThreadId("t".into()) };
     let host = PanelHost::new(PanelStore::default(), |_| {});
-    host.apply(&thread, match setup.open {
-        Some(path) => Action::OpenFile { path, line: None },
-        None => Action::Open("files".into()),
-    });
+    host.apply(
+        &thread,
+        match (attachment, setup.open) {
+            (Some(attachment), _) => Action::OpenAttachment(attachment),
+            (None, Some(path)) => Action::OpenFile { path, line: None },
+            (None, None) => Action::Open("files".into()),
+        },
+    );
     let panel = host.panel(thread.clone());
     let surface = computed(move || panel.with(|p| p.active().cloned()));
     let tabs = computed(move || panel.with(|p| p.surfaces.iter().map(|s| s.id.clone()).collect::<Vec<_>>().join(",")));

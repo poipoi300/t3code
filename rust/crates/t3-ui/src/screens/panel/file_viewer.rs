@@ -14,12 +14,17 @@ use t3_client::{
     types::{EnvironmentId, ThreadKey},
     workspace::project_files::{
         FilesWorkspace,
+        assets::{AssetReadError, AttachmentPreview, attachment_preview},
         preview::{self, AssetKind, CrumbKind, PathKinds, RenderedMode},
         read::FileReadView,
-        tree::Problem,
     },
 };
-use t3_contracts::assets::AssetResource;
+use t3_contracts::{
+    assets::AssetResource,
+    base_schemas::TrimmedNonEmptyString,
+    chat_attachment::ChatFileAttachment,
+    project::ProjectFileFailure,
+};
 
 use super::files_tree::{FileBrowserProps, FilesRuntime, file_browser_panel, file_explorer_pane, files_runtime, problem_text};
 use super::{Action, PanelHost, PanelRegistration, SurfaceContent, SurfaceContext, SurfaceKind};
@@ -51,7 +56,20 @@ pub trait FileViewerService {
     fn workspace_mutation(&self, thread: &ThreadKey) -> Option<String>;
     fn can_write(&self, environment: &EnvironmentId) -> bool;
     fn read(&self, environment: &EnvironmentId, cwd: &str, relative_path: &str) -> Rc<dyn FileReadHandle>;
-    fn asset_url(&self, environment: &EnvironmentId, resource: AssetResource) -> LocalBoxFuture<'static, Result<String, Problem>>;
+    fn asset_bytes(
+        &self,
+        environment: &EnvironmentId,
+        resource: AssetResource,
+        limit: usize,
+        revision: Option<String>,
+    ) -> LocalBoxFuture<'static, Result<Vec<u8>, AssetReadError>>;
+}
+
+pub(super) struct PreviewAsset {
+    pub viewer: FileViewerRuntime,
+    pub environment: EnvironmentId,
+    pub resource: AssetResource,
+    pub revision: Option<String>,
 }
 
 #[derive(Clone)]
@@ -90,7 +108,7 @@ struct Target {
     reveal_line: Option<i64>,
     reveal_request_id: u64,
     folder_trail: Option<String>,
-    attachment: bool,
+    attachment: Option<ChatFileAttachment>,
 }
 
 fn target(surface: &Option<super::Surface>) -> Target {
@@ -106,7 +124,7 @@ fn target(surface: &Option<super::Surface>) -> Target {
             reveal_line: *reveal_line,
             reveal_request_id: *reveal_request_id,
             folder_trail: folder_trail.clone(),
-            attachment: attachment.is_some(),
+            attachment: attachment.clone(),
         },
         Some(SurfaceContent::Files { folder_trail }) => Target {
             folder_trail: folder_trail.clone(),
@@ -152,12 +170,14 @@ pub fn file_preview_panel(context: SurfaceContext) -> impl IntoElement {
         .app_class(tw("flex min-h-0 flex-1 flex-col"))
         .test_id("file-preview-panel")
         .child(dynamic(move || {
-            let workspace = workspace.get()?;
             let target = target.get();
-            if target.attachment {
-                // AttachmentFilePreview (chat attachments) is not built yet: FILES-3.
-                return None;
+            if let Some(attachment) = target.attachment {
+                return Some(untracked(|| {
+                    attachment_file_preview(viewer.clone(), environment.clone(), attachment)
+                        .into_element()
+                }));
             }
+            let workspace = workspace.get()?;
             let access = access.get();
             Some(untracked(|| {
                 if !access.allowed {
@@ -223,16 +243,28 @@ fn preference_bool(files: &FilesRuntime, key: &'static str, default: bool) -> Si
 }
 
 /// FileSurfaceAction: a ghost icon button with its tooltip.
-fn file_surface_action(label: String, icon: Icon, on_press: impl Fn() + 'static) -> impl IntoElement {
+pub(super) fn file_surface_button(
+    label: String,
+    icon: Icon,
+    disabled: impl Fn() -> bool + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
     let caption = label.clone();
     view()
         .app_class(tw("inline-flex shrink-0"))
-        .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(caption)))
+        .tooltip(tooltip(
+            tooltip_create_handle(),
+            TooltipOptions::default(),
+            text(caption),
+        ))
         .child(button(
-            ButtonContent::Custom { label, child: icon_with_class(icon, "size-3.5").into_element() },
+            ButtonContent::Custom {
+                label,
+                child: icon_with_class(icon, "size-3.5").into_element(),
+            },
             ButtonVariant::Ghost,
             ButtonSize::IconSm,
-            || false,
+            disabled,
             on_press,
         ))
 }
@@ -240,7 +272,7 @@ fn file_surface_action(label: String, icon: Icon, on_press: impl Fn() + 'static)
 /// FileSurfaceAction with `pressed`: a ghost toggle whose name and glyph follow its state. NSH's
 /// toggle takes a fixed name and a press must not dispose its own control, so both states stay
 /// mounted and the inactive one is hidden (as rows/plan.rs keeps both of its buttons).
-fn file_surface_toggle(
+pub(super) fn file_surface_toggle(
     pressed: Memo<bool>,
     label: impl Fn(bool) -> String,
     icon: impl Fn(bool) -> Icon,
@@ -327,7 +359,9 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
     };
     let render_browser_file = computed(move || kinds.pdf || (kinds.html && rendered.get()));
     let shows_raw_text = computed(move || {
-        relative_path_is_some(&file) && !is_folder.get()
+        relative_path_is_some(&file)
+            && !is_folder.get()
+            && !kinds.media()
             && !(rendered_mode.is_some() && rendered.get())
             && !render_browser_file.get()
             && !kinds.document
@@ -457,20 +491,32 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
                     return None;
                 }
                 let absolute = t3_client::view_logic::session::links::resolve_path_link_target(&path, &cwd);
+                let asset = |resource, revision| PreviewAsset {
+                    viewer: viewer.clone(),
+                    environment: environment.clone(),
+                    resource,
+                    revision,
+                };
                 if kinds.image {
                     let resource = preview::workspace_asset_resource(AssetKind::WorkspaceFile, &thread_id, false, &cwd, &absolute);
-                    return Some(untracked(|| workspace_image_preview(viewer.clone(), environment.clone(), resource, path.clone(), mutation).into_element()));
+                    let asset = asset(resource, mutation.get());
+                    return Some(untracked(|| super::file_formats::image_preview(asset, path).into_element()));
                 }
                 let notebook = preview::office_preview_kind(&path) == Some("ipynb");
-                if kinds.video || kinds.audio || render_browser_file.get() || (kinds.document && !notebook) {
-                    // Media (PRV-4), browser documents and office/binary documents: FILES-3 hand-off.
+                if kinds.video || kinds.audio || render_browser_file.get() {
+                    // Media and browser documents: PRV-4 and FILES-3 hand-off.
                     return None;
                 }
                 let rendered_now = rendered.get();
                 let (data, error, read_error, missing) = file.with(|f| (f.data.clone(), f.error.clone(), f.read_error.clone(), f.missing));
-                if read_error.as_ref().is_some_and(|e| e.failure.clone().flatten() == Some(t3_contracts::project::ProjectFileFailure::BinaryFile)) {
-                    // WorkspaceDocumentPreview for binary files: FILES-3.
-                    return None;
+                let binary_read = read_error.as_ref().is_some_and(|error| {
+                    error.failure.as_ref().and_then(Option::as_ref) == Some(&ProjectFileFailure::BinaryFile)
+                });
+                let known_binary = preview::binary_preview_kind(&path).is_some();
+                if known_binary && (binary_read || data.is_some()) {
+                    let resource = preview::workspace_asset_resource(AssetKind::WorkspaceFile, &thread_id, false, &cwd, &absolute);
+                    let asset = asset(resource, mutation.get());
+                    return Some(untracked(|| super::file_formats::binary_preview(asset).into_element()));
                 }
                 if data.is_none() && (error.is_some() || missing) {
                     let message = match (&read_error, missing) {
@@ -488,6 +534,15 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
                 let Some(data) = data else {
                     return Some(untracked(|| file_surface_loading().into_element()));
                 };
+                if kinds.document && !notebook {
+                    // Office and font renderers: FILES-3 hand-off.
+                    return None;
+                }
+                if notebook && data.truncated {
+                    let resource = preview::workspace_asset_resource(AssetKind::WorkspaceFile, &thread_id, false, &cwd, &absolute);
+                    let asset = asset(resource, mutation.get());
+                    return Some(untracked(|| super::file_formats::notebook_asset_preview(asset).into_element()));
+                }
                 Some(untracked(|| {
                     if notebook {
                         return super::file_formats::notebook_preview(&data.contents, data.byte_length).into_element();
@@ -576,7 +631,7 @@ fn relative_path_is_some(file: &Signal<FileReadView>) -> bool {
 }
 
 /// FileSurfaceLoading: a static glyph in place of the spinner.
-fn file_surface_loading() -> impl IntoElement {
+pub(super) fn file_surface_loading() -> impl IntoElement {
     view()
         .label(t("Loading file"))
         .app_class(tw("flex min-h-0 flex-1 items-center justify-center text-muted-foreground"))
@@ -708,113 +763,69 @@ fn read_only_source_preview(
 
 /// Port of WorkspaceImagePreview and PreviewImageContent: the signed workspace URL, re-minted
 /// per workspace mutation, with fit, zoom and actual size.
-fn workspace_image_preview(
+/// AttachmentFilePreview's header and the extended formats shared with workspace files.
+fn attachment_file_preview(
     viewer: FileViewerRuntime,
     environment: EnvironmentId,
-    resource: AssetResource,
-    name: String,
-    mutation: Signal<Option<String>>,
+    attachment: ChatFileAttachment,
 ) -> impl IntoElement {
-    let url = signal(None::<Result<String, Problem>>);
-    let mint = viewer.0.asset_url(&environment, resource);
-    watch(async move {
-        let result = mint.await;
-        url.try_set(Some(result));
-    });
-    let natural = signal((0.0_f32, 0.0_f32));
-    let viewport = signal((0.0_f32, 0.0_f32));
-    let zoom = signal(None::<f32>);
-    let failed = signal(false);
-    let fit = computed(move || {
-        let (w, h) = natural.get();
-        let (vw, vh) = viewport.get();
-        if w <= 0.0 { 1.0 } else { 1.0_f32.min((vw - 32.0).max(1.0) / w).min((vh - 32.0).max(1.0) / h) }
-    });
-    let scale = computed(move || zoom.get().unwrap_or_else(|| fit.get()));
-    let change = move |factor: f32| zoom.set(Some((scale.get_untracked() * factor).clamp(0.05, 8.0)));
-    view().app_class(tw("flex min-h-0 flex-1 flex-col overflow-hidden")).child(dynamic(move || {
-        match url.get() {
-            None => Some(untracked(|| file_surface_loading().into_element())),
-            Some(Err(_)) => Some(untracked(|| {
-                view()
-                    .app_class(tw("flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive"))
-                    .child(text(t("Unable to load workspace image.")))
-                    .into_element()
-            })),
-            Some(Ok(base)) => {
-                let src = match mutation.get_untracked() {
-                    None => base,
-                    Some(token) => format!(
-                        "{base}{}workspace-revision={}",
-                        if base.contains('?') { "&" } else { "?" },
-                        url_encode(&token)
-                    ),
-                };
-                let name = name.clone();
-                Some(untracked(move || {
-                    if failed.get_untracked() {
-                        return view()
-                            .app_class(tw("flex min-h-0 flex-1 items-center justify-center text-xs text-destructive"))
-                            .child(text(t("Unable to load image.")))
-                            .into_element();
-                    }
-                    view()
-                        .app_class(tw("flex min-h-0 flex-1 flex-col"))
-                        .child(
-                            view()
-                                .app_class(tw("flex min-h-10 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-1 text-xs text-muted-foreground"))
-                                .child(text(move || {
-                                    let (w, h) = natural.get();
-                                    if w > 0.0 {
-                                        let formats = crate::i18n::formats();
-                                        SharedString::from(format!("{} × {}", formats.decimal(w as f64), formats.decimal(h as f64)))
-                                    } else {
-                                        SharedString::from(t("Loading image…"))
-                                    }
-                                }).app_class(tw("tabular-nums")))
-                                .child(
-                                    view()
-                                        .app_class(tw("flex items-center gap-1"))
-                                        .child(file_surface_action(t("Zoom out"), Icon::Minus, move || change(1.0 / 1.25)))
-                                        .child(text(move || SharedString::from(format!("{}%", (scale.get() * 100.0).round()))).app_class(tw("min-w-10 text-center tabular-nums")))
-                                        .child(file_surface_action(t("Zoom in"), Icon::Plus, move || change(1.25)))
-                                        .child(file_surface_toggle(computed(move || zoom.get().is_none()), |_| t("Fit image"), |_| Icon::Scan, move || zoom.set(None)))
-                                        .child(file_surface_toggle(computed(move || zoom.get() == Some(1.0)), |_| t("Actual image size"), |_| Icon::Maximize, move || zoom.set(Some(1.0)))),
-                                ),
-                        )
-                        .child(
-                            scroll()
-                                .horizontal()
-                                .app_class(tw("min-h-0 flex-1"))
-                                .on_layout(move |bounds: &Bounds<Points>| viewport.set((bounds.size.width.0, bounds.size.height.0)))
-                                .child(
-                                    view()
-                                        .app_class(tw("flex min-h-full min-w-full items-center justify-center p-4"))
-                                        .child(
-                                            image(src.clone())
-                                                .label(name.clone())
-                                                .w(move || px(natural.get().0 * scale.get()))
-                                                .h(move || px(natural.get().1 * scale.get()))
-                                                .on_load(move |size: &Size<DevicePixels>| natural.set((size.width.0 as f32, size.height.0 as f32)))
-                                                .on_error(move |_: &str| failed.set(true)),
-                                        ),
-                                ),
-                        )
-                        .into_element()
-                }))
-            }
+    let ChatFileAttachment {
+        id,
+        name,
+        mime_type,
+        size_bytes,
+        ..
+    } = attachment;
+    let asset = PreviewAsset {
+        viewer,
+        environment,
+        resource: AssetResource::Attachment {
+            attachment_id: TrimmedNonEmptyString(id),
+            file_name: Some(TrimmedNonEmptyString(name.clone())),
+            mime_type: Some(TrimmedNonEmptyString(mime_type.clone())),
+            disposition: Some(t3_contracts::assets::AssetDisposition::Inline),
+            render_intent: None,
+        },
+        revision: None,
+    };
+    let body = attachment_preview(&name, &mime_type).map(|format| match format {
+        AttachmentPreview::Raster => {
+            super::file_formats::image_preview(asset, name.clone()).into_element()
         }
-    }))
-}
-
-fn url_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+        AttachmentPreview::Notebook => {
+            super::file_formats::notebook_asset_preview(asset).into_element()
+        }
+        AttachmentPreview::Binary => super::file_formats::binary_preview(asset).into_element(),
+    });
+    view()
+        .app_class(tw(
+            "flex min-h-0 flex-1 flex-col overflow-hidden bg-background",
+        ))
+        .child(
+            view().app_class(tw(FILE_SURFACE_SUBHEADER_CLASS)).child(
+                view()
+                    .app_class(tw("flex min-w-0 flex-1 items-center text-xs"))
+                    .child(
+                        text(t("Attachment"))
+                            .app_class(tw("shrink-0 px-0.5 text-muted-foreground")),
+                    )
+                    .child(icon_with_class(
+                        Icon::ChevronRight,
+                        "mx-1 size-3.5 shrink-0 text-muted-foreground/60",
+                    ))
+                    .child(
+                        text(name)
+                            .app_class(tw("min-w-0 truncate px-0.5 font-medium text-foreground")),
+                    )
+                    .child((size_bytes > 0).then(|| {
+                        text(t3_client::services::assets::format_attachment_size(
+                            size_bytes,
+                        ))
+                        .app_class(tw("ml-2 shrink-0 text-muted-foreground"))
+                    })),
+            ),
+        )
+        .child(body)
 }
 
 #[cfg(test)]
@@ -830,10 +841,5 @@ mod tests {
         assert!(chunks[0].first && chunks[2].last && !chunks[1].first);
         assert_eq!(chunks.iter().map(|c| c.text.as_str()).collect::<String>(), text);
         assert_eq!(file_code_chunks("rs", "").len(), 1, "an empty file still shows one row");
-    }
-
-    #[test]
-    fn revision_tokens_are_url_encoded() {
-        assert_eq!(url_encode("a b/é"), "a%20b%2F%C3%A9");
     }
 }

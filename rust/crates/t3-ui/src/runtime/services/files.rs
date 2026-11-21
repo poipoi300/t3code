@@ -77,7 +77,11 @@ mod viewer {
     use crate::screens::panel::file_viewer::{FileReadHandle, FileViewerRuntime, FileViewerService};
     use t3_client::{
         types::ThreadKey,
-        workspace::project_files::{FilesWorkspace, read::{FileRead, FileReadView}, tree::Problem},
+        workspace::project_files::{
+            FilesWorkspace,
+            assets::AssetReadError,
+            read::{FileRead, FileReadView},
+        },
     };
 
     /// The file viewer's services over the host client.
@@ -98,12 +102,14 @@ mod viewer {
         fn read(&self, environment: &EnvironmentId, cwd: &str, relative_path: &str) -> Rc<dyn FileReadHandle> {
             Rc::new(ReadBinding(self.0.read_file(environment, cwd, relative_path)))
         }
-        fn asset_url(
+        fn asset_bytes(
             &self,
             environment: &EnvironmentId,
             resource: t3_contracts::assets::AssetResource,
-        ) -> LocalBoxFuture<'static, Result<String, Problem>> {
-            self.0.asset_url(environment, resource)
+            limit: usize,
+            revision: Option<String>,
+        ) -> LocalBoxFuture<'static, Result<Vec<u8>, AssetReadError>> {
+            self.0.asset_bytes(environment, resource, limit, revision)
         }
     }
 

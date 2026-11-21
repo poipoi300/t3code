@@ -5,15 +5,25 @@
 //! Dropped: `contain-strict`, `backdrop-blur` on the sticky header (no NSH form),
 //! `scrollbar-gutter-both`, `whitespace-pre*`/`break-words` (NSH text keeps newlines and wraps).
 
+mod binary;
+mod image;
+mod notebook;
+
+pub(super) use binary::binary_preview;
+pub(super) use image::image_preview;
+
 use std::rc::Rc;
 
 use nsh_core::prelude::*;
-use t3_client::workspace::project_files::formats::{
-    CellKind, DelimitedLimits, Notebook, OutputKind, notebook_cell_language, open_notebook,
-    parse_delimited_preview,
+use t3_client::workspace::project_files::{
+    assets::AssetReadError,
+    formats::{
+        CellKind, DelimitedLimits, NOTEBOOK_MAX_BYTES, Notebook, OutputKind,
+        notebook_cell_language, open_notebook, parse_delimited_preview,
+    },
 };
 
-use super::file_viewer::file_code_chunks;
+use super::file_viewer::{PreviewAsset, file_code_chunks, file_surface_loading};
 use crate::i18n::{Value, t, tr};
 use crate::screens::thread::blocks::code::{CodeHighlightState, code_chunk_row, highlighted_chunk};
 use crate::theme::{cn, tw};
@@ -131,6 +141,60 @@ fn file_surface_notice(message: String) -> impl IntoElement {
 }
 
 /// Port of NotebookPreview, from the notebook's text as the server read it.
+pub(super) fn asset_preview(
+    asset: PreviewAsset,
+    limit: usize,
+    render: impl Fn(Result<Rc<Vec<u8>>, AssetReadError>) -> AnyElement + 'static,
+) -> impl IntoElement {
+    let result = signal(None::<Result<Rc<Vec<u8>>, AssetReadError>>);
+    let read =
+        asset
+            .viewer
+            .0
+            .asset_bytes(&asset.environment, asset.resource, limit, asset.revision);
+    crate::runtime::tasks::watch(async move {
+        result.try_set(Some(read.await.map(Rc::new)));
+    });
+    view()
+        .app_class(tw("flex min-h-0 flex-1 flex-col overflow-hidden"))
+        .child(dynamic(move || {
+            let result = result.get();
+            Some(untracked(|| match result {
+                Some(result) => render(result),
+                None => file_surface_loading().into_element(),
+            }))
+        }))
+}
+
+fn asset_failure(message: String) -> impl IntoElement {
+    view()
+        .app_class(tw("flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive"))
+        .child(text(message))
+}
+
+pub(super) fn notebook_asset_preview(asset: PreviewAsset) -> impl IntoElement {
+    asset_preview(asset, NOTEBOOK_MAX_BYTES, |result| match result {
+        Ok(bytes) => match std::str::from_utf8(&bytes) {
+            Ok(source) => notebook_preview(
+                source.strip_prefix('\u{feff}').unwrap_or(source),
+                bytes.len() as u64,
+            )
+            .into_element(),
+            Err(_) => asset_failure(t(
+                "Preview supports version 4 notebooks with up to 500 cells.",
+            ))
+            .into_element(),
+        },
+        Err(AssetReadError::TooLarge) => {
+            asset_failure(t("Notebook preview limited to files under 8 MB.")).into_element()
+        }
+        Err(AssetReadError::Unavailable) => {
+            asset_failure(t("The file could not be loaded. Close it and try again.")).into_element()
+        }
+    })
+}
+
+/// NotebookPreview: notebook input is decoded and bounded by t3-client.
 pub fn notebook_preview(source: &str, size_bytes: u64) -> impl IntoElement {
     match open_notebook(source) {
         Err(message) => view()
@@ -207,49 +271,64 @@ fn notebook_cell(
         CellKind::Raw => "raw".to_owned(),
     };
     let body = match cell.kind {
-        CellKind::Markdown => {
-            let source = cell.source.clone();
-            Some(
-                crate::screens::thread::markdown::base::chat_markdown_with_root_classes(
-                    move || source.clone(),
-                    || false,
-                    "px-4 py-3",
-                ),
-            )
-        }
+        CellKind::Markdown => Some(notebook::notebook_markdown(&cell.source)),
         _ if cell.source.trim().is_empty() => None,
         kind => {
-            let language = if kind == CellKind::Code { highlight_language.to_owned() } else { "txt".to_owned() };
+            let language = if kind == CellKind::Code {
+                highlight_language.to_owned()
+            } else {
+                "txt".to_owned()
+            };
             Some(highlighted_source(&language, &cell.source).into_element())
         }
     };
     view()
-        .label(tr("Cell {index}", &[("index", Value::Text((index + 1).to_string()))]))
-        .app_class(tw("min-w-0 overflow-hidden rounded-md border border-border/60"))
-        .child(
-            text(format!("{kind_label} · {}", index + 1))
-                .app_class(tw("border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground")),
-        )
+        .label(tr(
+            "Cell {index}",
+            &[("index", Value::Text((index + 1).to_string()))],
+        ))
+        .app_class(tw(
+            "min-w-0 overflow-hidden rounded-md border border-border/60",
+        ))
+        .child(text(format!("{kind_label} · {}", index + 1)).app_class(tw(
+            "border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground",
+        )))
         .child(body)
-        .children(cell.outputs.into_iter().filter_map(|output| match output.kind {
-            OutputKind::Image => Some(
-                view()
-                    .app_class(tw("border-t border-border/60"))
-                    .child(
-                        image(output.text)
-                            .label(tr("Cell {index} output", &[("index", Value::Text((index + 1).to_string()))]))
-                            .app_class(tw("max-h-96 max-w-full p-4")),
+        .children(cell.outputs.into_iter().filter_map(|output| {
+            match output.kind {
+                OutputKind::Image => {
+                    let (data_mime, bytes) = nsh_core::image::decode_data_uri(&output.text).ok()?;
+                    let (mime, width, height) = image::raster_info(&bytes)?;
+                    if mime != data_mime {
+                        return None;
+                    }
+                    let scale = 1.0_f32.min(384.0 / height as f32);
+                    Some(
+                        view()
+                            .app_class(tw("border-t border-border/60 p-4"))
+                            .child(
+                                image(output.text)
+                                    .role(AccessibilityRole::Image)
+                                    .label(tr(
+                                        "Cell {index} output",
+                                        &[("index", Value::Text((index + 1).to_string()))],
+                                    ))
+                                    .w(px(width as f32 * scale))
+                                    .app_class(tw("max-w-full"))
+                                    .aspect_ratio(width as f32 / height as f32),
+                            )
+                            .into_element(),
                     )
-                    .into_element(),
-            ),
-            OutputKind::Text => Some(
-                view()
-                    .app_class(tw("border-t border-border/60"))
-                    .child(text(output.text).app_class(tw("p-4 font-mono text-xs")))
-                    .into_element(),
-            ),
-            // DocumentPages' sandboxed HTML output frame is not built: FILES-3 hand-off.
-            OutputKind::Html => None,
+                }
+                OutputKind::Text => Some(
+                    view()
+                        .app_class(tw("border-t border-border/60"))
+                        .child(text(output.text).app_class(tw("p-4 font-mono text-xs")))
+                        .into_element(),
+                ),
+                // DocumentPages' sandboxed HTML output frame is not built: FILES-3 hand-off.
+                OutputKind::Html => None,
+            }
         }))
 }
 
