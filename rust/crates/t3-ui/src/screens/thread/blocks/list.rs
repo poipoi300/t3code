@@ -685,6 +685,10 @@ fn reconcile_pending(key: ThreadKey, pending: PendingMessages) -> PendingMessage
             if pending_ids.len() == retired.len() {
                 return Vec::new();
             }
+            // A snapshot can page or replace either array at the same length. With unresolved
+            // outbox IDs, inspect at most V visible items and M messages per projection revision.
+            // A length cursor would miss replacements. Once all pending IDs are accounted for,
+            // the early return above drops the reactive dependency on the projection.
             projection.with(|projection| {
                 let Some(p) = projection else { return };
                 let items = p

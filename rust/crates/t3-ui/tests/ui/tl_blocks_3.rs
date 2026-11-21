@@ -1486,9 +1486,10 @@ fn OptimisticEchoFixture() -> impl IntoElement {
         ),
         state: SendState::Dispatching,
     };
+    let messages = signal(Rc::new(Vec::new()));
     thread.pending = Some((
         PendingMessages {
-            messages: signal(Rc::new(vec![pending("echoed"), pending("still-pending")])),
+            messages,
             restored_draft: signal(None),
             delivery_problem: signal(None),
         },
@@ -1509,7 +1510,7 @@ fn OptimisticEchoFixture() -> impl IntoElement {
             )
         })
     });
-    let snapshot = move |sequence, echo| {
+    let snapshot = move |sequence, echo, acknowledged: Option<&str>| {
         let item = json!({
             "id": "turn-item", "threadId": "blocks", "runId": "run", "nodeId": null,
             "providerThreadId": null, "providerTurnId": null, "nativeItemRef": null,
@@ -1522,6 +1523,13 @@ fn OptimisticEchoFixture() -> impl IntoElement {
         if echo {
             p["visibleTurnItems"] = json!([{"position":0,"visibility":"local","sourceThreadId":"blocks","sourceItemId":"turn-item","item":item}]);
         }
+        if let Some(id) = acknowledged {
+            p["messages"] = json!([{
+                "id":id, "threadId":"blocks", "runId":null, "nodeId":null, "role":"user",
+                "text":"Same prompt", "attachments":[], "streaming":false,
+                "createdBy":"user", "creationSource":"web", "createdAt":AT, "updatedAt":AT
+            }]);
+        }
         let snapshot = serde_json::from_value(
             json!({"kind":"snapshot","snapshotSequence":sequence,"projection":p}),
         )
@@ -1532,11 +1540,20 @@ fn OptimisticEchoFixture() -> impl IntoElement {
     };
     let snapshot = Rc::new(snapshot);
     let echo = snapshot.clone();
+    let acknowledge = snapshot.clone();
     view()
         .w_full()
         .h_full()
-        .child(control("Echo", move || echo(1, true)))
-        .child(control("Remove from history", move || snapshot(2, false)))
+        .child(control("Echo", move || echo(1, true, None)))
+        .child(control("Acknowledge messages", move || {
+            acknowledge(1, false, Some("echoed"))
+        }))
+        .child(control("Publish outbox", move || {
+            messages.set(Rc::new(vec![pending("echoed"), pending("still-pending")]))
+        }))
+        .child(control("Remove from history", move || {
+            snapshot(2, false, None)
+        }))
         .child(messages_timeline(rows, options))
 }
 
@@ -1548,6 +1565,9 @@ fn echoed_user_message_retires_only_its_matching_optimistic_row() {
         ..EngineConfig::new(Root::of::<OptimisticEchoFixture>())
     })
     .expect("timeline");
+    app.wait_for("role:button[Publish outbox]")
+        .expect("timeline controls");
+    app.press("role:button[Publish outbox]").expect("outbox");
     app.wait_for("Submitting message").expect("pending footer");
     let count =
         |app: &Headless, label: &str| app.screen().texts().iter().filter(|v| **v == label).count();
@@ -1568,4 +1588,37 @@ fn echoed_user_message_retires_only_its_matching_optimistic_row() {
         1,
         "acknowledged message stays retired"
     );
+}
+
+#[test]
+fn messages_only_acknowledgement_handles_either_delivery_order() {
+    for echo_first in [false, true] {
+        let mut app = Headless::start(EngineConfig {
+            ui_sets: t3_ui::registries(),
+            viewport: size(px(1280.0), px(850.0)),
+            ..EngineConfig::new(Root::of::<OptimisticEchoFixture>())
+        })
+        .expect("timeline");
+        app.wait_for("role:button[Publish outbox]")
+            .expect("timeline controls");
+        if !echo_first {
+            app.press("role:button[Publish outbox]").expect("outbox");
+            app.wait_for("Submitting message").expect("pending footer");
+        }
+        app.press("role:button[Acknowledge messages]")
+            .expect("messages-only acknowledgement");
+        if echo_first {
+            app.press("role:button[Publish outbox]")
+                .expect("optimistic update");
+        }
+        assert_eq!(
+            app.screen()
+                .texts()
+                .into_iter()
+                .filter(|s| *s == "Submitting message")
+                .count(),
+            1,
+            "only the unacknowledged message stays pending, echo_first={echo_first}"
+        );
+    }
 }
