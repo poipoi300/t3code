@@ -107,10 +107,15 @@ impl ResourceSampler for NativeSampler {
         let selected = select_tracked(&rows, &roots);
         let mut details = System::new();
         if two_stage && !selected.is_empty() {
+            // sysinfo drops a process listed twice, and the monitor is usually the
+            // server root itself, so the list must not repeat a pid.
             let pids: Vec<_> = selected
                 .iter()
-                .filter_map(|pid| u32::try_from(*pid).ok().map(Pid::from_u32))
-                .chain(std::iter::once(Pid::from_u32(std::process::id())))
+                .filter_map(|pid| u32::try_from(*pid).ok())
+                .chain(std::iter::once(std::process::id()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(Pid::from_u32)
                 .collect();
             details.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&pids),
