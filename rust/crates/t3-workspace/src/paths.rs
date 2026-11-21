@@ -376,6 +376,49 @@ impl InternalPaths {
     }
 }
 
+/// Private attachment storage is accessible through attachment authority only.
+pub(crate) struct AttachmentStorage {
+    roots: [PathBuf; 2],
+    canonical_roots: [PathBuf; 2],
+    temporary: PathBuf,
+}
+
+impl AttachmentStorage {
+    pub(crate) fn new(uploads: &Path) -> Self {
+        let roots = [
+            uploads.to_owned(),
+            uploads.with_file_name("attachment-references"),
+        ];
+        let canonical_roots = roots
+            .each_ref()
+            .map(|p| canonicalize(p).unwrap_or_else(|_| p.clone()));
+        let temporary = std::env::temp_dir();
+        let temporary = canonicalize(&temporary).unwrap_or(temporary);
+        Self {
+            roots,
+            canonical_roots,
+            temporary,
+        }
+    }
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.roots
+            .iter()
+            .chain(&self.canonical_roots)
+            .any(|root| within(path, root))
+            || relative_to(path, &self.temporary)
+                .ok()
+                .and_then(|relative| {
+                    relative
+                        .components()
+                        .next()
+                        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+                })
+                .is_some_and(|name| {
+                    name.starts_with(crate::attachment_delivery::TEMP_SNAPSHOT_PREFIX)
+                })
+    }
+}
+
 /// Authoritative roots supplied by orchestration after resolving managed/thread worktrees.
 #[derive(Debug, Clone, Default)]
 pub struct KnownWorkspaces {

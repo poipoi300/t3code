@@ -345,7 +345,8 @@ impl AssetAccess {
                     revision = Some(rev);
                     (grant, name)
                 } else if is_audio_video(&path.0) {
-                    let canonical = canonical_workspace_file(root, &path.0, &self.internal)
+                    let canonical = self
+                        .canonical_workspace_file(root, &path.0)
                         .ok_or(Error::AssetDenied)?;
                     #[cfg(test)]
                     draft_hook();
@@ -403,15 +404,14 @@ impl AssetAccess {
                         return Err(Error::AssetDenied);
                     }
                     let path = if external {
-                        canonical_file(&found, &self.internal)
+                        self.canonical_file(&found)
                     } else {
-                        canonical_workspace_file(
+                        self.canonical_workspace_file(
                             &root,
                             &found
                                 .strip_prefix(&root)
                                 .map_err(|_| Error::AssetDenied)?
                                 .to_string_lossy(),
-                            &self.internal,
                         )
                     }
                     .ok_or(Error::AssetDenied)?;
@@ -533,7 +533,7 @@ impl AssetAccess {
             AssetGrant::WorkspaceFileExact {
                 workspace_root,
                 relative_path,
-            } => canonical_workspace_file(Path::new(workspace_root), relative_path, &self.internal),
+            } => self.canonical_workspace_file(Path::new(workspace_root), relative_path),
             _ => None,
         };
         let image_dimensions = if inline_dimensions.is_some() {
@@ -595,7 +595,8 @@ impl AssetAccess {
         if preview_mime(&ext).is_none() || is_audio_video(&relative) {
             return Err(Error::AssetDenied);
         }
-        canonical_workspace_file(&root, &relative, &self.internal).ok_or(Error::AssetDenied)?;
+        self.canonical_workspace_file(&root, &relative)
+            .ok_or(Error::AssetDenied)?;
         let real_root = paths::canonicalize(&root)
             .map_err(|e| io_error("realpath-workspace-root", &root, e))?
             .to_string_lossy()
@@ -631,7 +632,7 @@ impl AssetAccess {
         {
             return Err(Error::AssetDenied);
         }
-        let canonical = canonical_file(&path, &self.internal).ok_or(Error::AssetDenied)?;
+        let canonical = self.canonical_file(&path).ok_or(Error::AssetDenied)?;
         if expected.is_some_and(|expected| expected != canonical) {
             return Err(Error::AssetDenied);
         }
@@ -710,7 +711,7 @@ impl AssetAccess {
                 if decoded.as_deref() != Some(&basename(Path::new(&relative_path))) {
                     return Ok(None);
                 }
-                canonical_granted_file(Path::new(&workspace_root), &relative_path, &self.internal)
+                self.canonical_granted_file(Path::new(&workspace_root), &relative_path)
                     .and_then(file_asset)
             }
             AssetGrant::WorkspaceFile {
@@ -732,7 +733,7 @@ impl AssetAccess {
                 } else {
                     format!("{base_relative_path}/{decoded}")
                 };
-                canonical_granted_file(Path::new(&workspace_root), &relative, &self.internal)
+                self.canonical_granted_file(Path::new(&workspace_root), &relative)
                     .filter(|path| {
                         paths::canonicalize(&workspace_root)
                             .ok()
@@ -756,7 +757,7 @@ impl AssetAccess {
                 if decoded.as_deref() != Some(&basename(&path)) {
                     return Ok(None);
                 }
-                let Some(path) = canonical_file(&path, &self.internal) else {
+                let Some(path) = self.canonical_file(&path) else {
                     return Ok(None);
                 };
                 let mime = if download == Some(true) {
@@ -787,15 +788,14 @@ impl AssetAccess {
                 let Some(relative) = relative_path else {
                     return Ok(None);
                 };
-                match canonical_granted_file(Path::new(&workspace_root), &relative, &self.internal)
-                {
+                match self.canonical_granted_file(Path::new(&workspace_root), &relative) {
                     Some(p) => favicon_asset(p).await?,
                     None => None,
                 }
             }
             AssetGrant::ProjectFaviconExternal { file_path } => {
                 let path = PathBuf::from(file_path);
-                if canonical_file(&path, &self.internal).as_ref() == Some(&path) {
+                if self.canonical_file(&path).as_ref() == Some(&path) {
                     favicon_asset(path).await?
                 } else {
                     None
@@ -815,7 +815,7 @@ impl AssetAccess {
                 .external
                 .native_icon(&app)
                 .await?
-                .and_then(|p| canonical_file(&p, &self.internal))
+                .and_then(|p| self.canonical_file(&p))
                 .and_then(file_asset),
             AssetGrant::SourceControlMedia {
                 url,
@@ -857,36 +857,36 @@ fn attachment_file(
         },
     ))
 }
-pub fn canonical_file(path: &Path, internal: &InternalPaths) -> Option<PathBuf> {
-    let canonical = paths::canonicalize(path).ok()?;
-    (canonical.is_file() && !internal.contains(&canonical)).then_some(canonical)
-}
-pub fn canonical_workspace_file(
-    root: &Path,
-    relative: &str,
-    internal: &InternalPaths,
-) -> Option<PathBuf> {
-    let scope = crate::scoped::ScopedDir::open(root).ok()?;
-    canonical_scoped_file(&scope, relative, internal)
-}
-fn canonical_granted_file(
-    root: &Path,
-    relative: &str,
-    internal: &InternalPaths,
-) -> Option<PathBuf> {
-    // Signed canonical roots may use short names, but must never acquire a symlink expansion.
-    let scope = crate::scoped::ScopedDir::open_unlinked(root).ok()?;
-    canonical_scoped_file(&scope, relative, internal)
-}
-fn canonical_scoped_file(
-    scope: &crate::scoped::ScopedDir,
-    relative: &str,
-    internal: &InternalPaths,
-) -> Option<PathBuf> {
-    let relative = scope.resolve(relative, false).ok()?;
-    let file = scope.open_file(&relative).ok()?;
-    let path = crate::scoped::final_path(&file, &scope.root.join(relative)).ok()?;
-    (!internal.contains(&path)).then_some(path)
+impl AssetAccess {
+    fn canonical_file(&self, path: &Path) -> Option<PathBuf> {
+        let canonical = paths::canonicalize(path).ok()?;
+        let storage = paths::AttachmentStorage::new(&self.attachments_dir);
+        (canonical.is_file()
+            && !self.internal.contains(&canonical)
+            && !storage.contains(path)
+            && !storage.contains(&canonical))
+        .then_some(canonical)
+    }
+    fn canonical_workspace_file(&self, root: &Path, relative: &str) -> Option<PathBuf> {
+        let scope = crate::scoped::ScopedDir::open(root).ok()?;
+        self.canonical_scoped_file(&scope, relative)
+    }
+    fn canonical_granted_file(&self, root: &Path, relative: &str) -> Option<PathBuf> {
+        // Signed canonical roots may use short names, but must never acquire a symlink expansion.
+        let scope = crate::scoped::ScopedDir::open_unlinked(root).ok()?;
+        self.canonical_scoped_file(&scope, relative)
+    }
+    fn canonical_scoped_file(
+        &self,
+        scope: &crate::scoped::ScopedDir,
+        relative: &str,
+    ) -> Option<PathBuf> {
+        let relative = scope.resolve(relative, false).ok()?;
+        let file = scope.open_file(&relative).ok()?;
+        let path = crate::scoped::final_path(&file, &scope.root.join(relative)).ok()?;
+        let storage = paths::AttachmentStorage::new(&self.attachments_dir);
+        (!self.internal.contains(&path) && !storage.contains(&path)).then_some(path)
+    }
 }
 fn basename(path: &Path) -> String {
     path.file_name()

@@ -20,7 +20,7 @@ local-services = [
     "dep:reqwest",
     "dep:t3-telemetry",
 ]
-orchestration = ["dep:t3-orchestration", "t3-orchestration/git-backend", "t3-orchestration/acp-adapter", "dep:t3-git", "dep:async-trait"]
+orchestration = ["dep:t3-orchestration", "dep:t3-persistence", "t3-orchestration/git-backend", "t3-orchestration/acp-adapter", "dep:t3-git", "dep:async-trait"]
 workspace = ["dep:t3-workspace", "dep:t3-git"]
 git = ["dep:t3-git", "dep:t3-shared", "dep:t3-workspace", "dep:async-trait"]
 forge = ["dep:t3-forge", "local-services", "git", "workspace", "dep:t3-process", "dep:async-trait"]

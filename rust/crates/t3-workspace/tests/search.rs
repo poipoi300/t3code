@@ -659,3 +659,25 @@ async fn browsing_hidden_prefix_and_explicit_relative_paths() {
         .expect("test fixture");
     assert_eq!(relative.entries[0].name.0, "Visible");
 }
+
+#[tokio::test]
+async fn browse_refuses_private_attachment_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let storage = root.join("attachments");
+    put(root, "attachment-references/claimed/image", "private");
+    fs::create_dir(&storage).unwrap();
+    let svc = entries(root);
+    let browse = |folder: &Path| {
+        svc.browse_with_storage(
+            FilesystemBrowseInput {
+                partial_path: Text(format!("{}/", folder.display())),
+                cwd: None,
+            },
+            Some(storage.clone()),
+        )
+    };
+    assert!(browse(&root.join("attachment-references")).await.is_err());
+    let parent = browse(root).await.unwrap();
+    assert!(parent.entries.is_empty());
+}

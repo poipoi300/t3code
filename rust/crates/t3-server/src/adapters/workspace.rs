@@ -1,4 +1,7 @@
 //! Filesystem and signed-asset boundary. Authorities are supplied by orchestration.
+#[cfg(all(feature = "workspace", feature = "orchestration"))]
+#[path = "workspace/attachment_membership.rs"]
+mod attachment_membership;
 #[cfg(feature = "workspace")]
 mod enabled {
     use futures::future::BoxFuture;
@@ -82,7 +85,9 @@ mod enabled {
             self.filesystem.write_file(input).await
         }
         pub async fn browse(&self, input: FilesystemBrowseInput) -> Result<FilesystemBrowseResult> {
-            self.entries.browse(input).await
+            self.entries
+                .browse_with_storage(input, Some(self.attachments.base.clone()))
+                .await
         }
         pub async fn metadata(
             &self,
@@ -232,37 +237,6 @@ mod enabled {
         }
     }
     #[cfg(feature = "orchestration")]
-    const RECORDED_ATTACHMENT: &str = "SELECT EXISTS (
-                   SELECT 1 FROM orchestration_v2_projection_messages m
-                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(m.payload_json,'$.attachments') a
-                   WHERE t.deleted_at IS NULL AND instr(m.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1
-                   UNION ALL
-                   SELECT 1 FROM orchestration_v2_projection_threads t, json_each(t.payload_json,'$.guestShare.messages') m, json_each(m.value,'$.attachments') a
-                   WHERE t.deleted_at IS NULL AND instr(t.payload_json,?1)>0 AND json_extract(m.value,'$.status')='pending' AND json_extract(a.value,'$.id')=?1
-                   UNION ALL
-                   SELECT 1 FROM orchestration_v2_projection_turn_items i
-                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(i.payload_json,'$.questionAnswer.attachmentsByQuestionId') q, json_each(q.value) a
-                   WHERE t.deleted_at IS NULL AND i.type='user_input_request' AND instr(i.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1)";
-
-    #[cfg(all(test, feature="orchestration"))]
-    mod attachment_review_tests {
-        use super::*;
-        #[test]
-        fn preview_membership_uses_thread_indexes() {
-            let db=t3_persistence::rusqlite::Connection::open_in_memory().unwrap();
-            db.execute_batch("CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT PRIMARY KEY, deleted_at TEXT, payload_json TEXT);
-            CREATE TABLE orchestration_v2_projection_messages(thread_id TEXT, payload_json TEXT);
-            CREATE INDEX messages_by_thread ON orchestration_v2_projection_messages(thread_id);
-            CREATE TABLE orchestration_v2_projection_turn_items(thread_id TEXT, type TEXT, payload_json TEXT);
-            CREATE INDEX items_by_thread ON orchestration_v2_projection_turn_items(thread_id);").unwrap();
-            let mut plan=db.prepare(&format!("EXPLAIN QUERY PLAN {RECORDED_ATTACHMENT}")).unwrap();
-            let args=vec!["fixture";plan.parameter_count()];
-            let rows:Vec<String>=plan.query_map(t3_persistence::rusqlite::params_from_iter(args), |r|r.get(3)).unwrap().collect::<std::result::Result<_,_>>().unwrap();
-            assert!(rows.iter().any(|r|r.contains("SEARCH m USING INDEX messages_by_thread")) && rows.iter().any(|r|r.contains("SEARCH i USING INDEX items_by_thread")),"{rows:?}");
-        }
-    }
-
-    #[cfg(feature = "orchestration")]
     async fn thread_has_attachment(
         caller: &crate::registry::Context,
         id: &str,
@@ -280,26 +254,12 @@ mod enabled {
             return false;
         };
         let id = id.to_owned();
-        runtime.projections.database.read(move |db| {
-            // Chat and question references can be shared across threads. The filename
-            // prefix is not an authority for these records.
-            let recorded: bool = db.query_row(
-                RECORDED_ATTACHMENT,
-                [&id], |row| row.get(0))?;
-            if recorded { return Ok(true); }
-            // Tool-generated previews have additional producer and thread ownership rules.
-            // The projection reader implements those rules for the originating thread.
-            let mut statement = db.prepare("SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL")?;
-            let threads = statement.query_map([],|row| row.get::<_, String>(0))?;
-            for thread in threads {
-                let thread = t3_orchestration::api::ThreadId(thread?);
-                if t3_workspace::attachments::safe_thread_segment(&thread.0).as_ref() == Some(&segment)
-                    && t3_orchestration::projections::read::attachment_ids(db, &thread)?.contains(&id) {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }).await.unwrap_or(false)
+        runtime
+            .projections
+            .database
+            .transaction(move |db| super::attachment_membership::readable(db, &id, &segment))
+            .await
+            .unwrap_or(false)
     }
     #[cfg(not(feature = "orchestration"))]
     async fn thread_has_attachment(_: &crate::registry::Context, _: &str, _: String) -> bool {

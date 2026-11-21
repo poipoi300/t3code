@@ -18,10 +18,19 @@ pub struct WorkspaceEntries {
 }
 impl WorkspaceEntries {
     pub async fn browse(&self, input: FilesystemBrowseInput) -> Result<FilesystemBrowseResult> {
+        self.browse_with_storage(input, None).await
+    }
+    pub async fn browse_with_storage(
+        &self,
+        input: FilesystemBrowseInput,
+        storage: Option<PathBuf>,
+    ) -> Result<FilesystemBrowseResult> {
         paths::bound_text(&input.partial_path.0, 32768, false, "browse path")?;
         let known = self.known.load().await?;
         let home = self.home.clone();
         blocking(move || {
+            let storage = storage.as_deref().map(paths::AttachmentStorage::new);
+            let private = |path: &Path| storage.as_ref().is_some_and(|s| s.contains(path));
             let partial = &input.partial_path.0;
             paths::validate_host_path(Path::new(partial))?;
             let explicit = [".", ".."].contains(&partial.as_str())
@@ -59,6 +68,9 @@ impl WorkspaceEntries {
             let hidden = separator || prefix.starts_with('.');
             let canonical_parent =
                 paths::canonicalize(parent).map_err(|e| io_error("realpath-target", parent, e))?;
+            if private(parent) || private(&canonical_parent) {
+                return Err(Error::AssetDenied);
+            }
             known.assert_contains(&canonical_parent)?;
             let scoped = crate::scoped::ScopedDir::open_authorized(&canonical_parent, &known)?;
             let (_held, children) = match scoped.read_dir(Path::new("")) {
@@ -86,6 +98,7 @@ impl WorkspaceEntries {
                     .is_dir()
                     && name.to_lowercase().starts_with(&prefix)
                     && (hidden || !name.starts_with('.'))
+                    && !private(&canonical_parent.join(child.file_name()))
                 {
                     entries.push(FilesystemBrowseEntry {
                         name: Text(name),

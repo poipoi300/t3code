@@ -904,3 +904,60 @@ async fn an_attachment_preview_grants_the_original_file() {
         "preview accepted a replacement file"
     );
 }
+
+#[tokio::test]
+async fn ordinary_asset_routes_refuse_attachment_storage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let service = service(root);
+    for folder in ["attachments", "attachment-references"] {
+        let rel = format!("{folder}/preview.png");
+        put(root, &rel, b"private");
+        let absolute = root.join(&rel);
+        for resource in [
+            workspace(&rel),
+            AssetResource::MediaFile {
+                thread_id: ThreadId("thread".into()),
+                path: Text(absolute.to_string_lossy().into()),
+                disposition: None,
+                host_only: None,
+            },
+            AssetResource::DraftWorkspaceFile {
+                cwd: Text(root.to_string_lossy().into()),
+                path: Text(rel.clone()),
+            },
+        ] {
+            assert!(
+                service
+                    .issue_url(resource, context(root), 100)
+                    .await
+                    .is_err(),
+                "ordinary preview accepted {rel}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn media_urls_refuse_provider_session_snapshots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let service = service(tmp.path());
+    put(tmp.path(), "attachments/source.png", b"x");
+    let delivery =
+        t3_workspace::attachment_delivery::AttachmentDelivery::new(service.attachments_dir.clone());
+    let copy = delivery
+        .reference(&service.attachments_dir.join("source.png"))
+        .unwrap();
+    let media = AssetResource::MediaFile {
+        thread_id: ThreadId("thread".into()),
+        path: Text(copy.to_string_lossy().into()),
+        disposition: None,
+        host_only: None,
+    };
+    assert!(
+        service
+            .issue_url(media, AssetContext::default(), 100)
+            .await
+            .is_err()
+    );
+}

@@ -8,6 +8,8 @@ use std::{
     sync::OnceLock,
 };
 
+pub(crate) const TEMP_SNAPSHOT_PREFIX: &str = "t3-attachment-";
+
 pub struct PinnedFiles {
     directory: PathBuf,
     pinned: OnceLock<ScopedDir>,
@@ -150,7 +152,7 @@ impl AttachmentDelivery {
                 builder.permissions(std::fs::Permissions::from_mode(0o700));
             }
             let dir = builder
-                .prefix("t3-attachment-")
+                .prefix(TEMP_SNAPSHOT_PREFIX)
                 .tempdir()
                 .map_err(|e| io_error("create-reference-directory", std::env::temp_dir(), e))?;
             let pinned = PinnedFiles::new(dir.path().into());
