@@ -240,7 +240,12 @@ fn Harness(props: HarnessProps) -> impl IntoElement {
 #[test]
 fn controlled_rewrites_update_the_view_without_echoing_a_user_edit() {
     let mut app = start_editor(DESKTOP, "");
-    app.type_text("id:composer-editor", "hello").expect("type");
+    // Paste is one editor transaction. Typing several keys can deliver one
+    // on-change notification per key or coalesce changes before the UI reads them.
+    let mut paste = nsh_core::PasteEvent::default();
+    paste.text = "hello".into();
+    app.paste("id:composer-editor", &paste)
+        .expect("paste one user edit");
     source(&mut app, "hello");
     app.wait_for("Changes 1").expect("one user edit");
     app.press("text:Replace").expect("controlled replacement");

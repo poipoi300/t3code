@@ -8,6 +8,7 @@ use nsh_testing::Headless;
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     rc::Rc,
 };
 use t3_client::{
@@ -46,6 +47,7 @@ struct DraftClient {
     loaded: Cell<bool>,
     denied: Cell<bool>,
     revision: Cell<u64>,
+    views: RefCell<BTreeMap<String, Rc<ComposerDraftView>>>,
 }
 
 impl DraftClient {
@@ -66,15 +68,24 @@ impl ComposerDraftClient for DraftClient {
         let key = Self::key(key);
         let document = self.document.borrow();
         let draft = &document["draftsByThreadKey"][&key];
-        Rc::new(ComposerDraftView {
-            draft_key: key,
+        let next = ComposerDraftView {
+            draft_key: key.clone(),
             revision: self.revision.get(),
             prompt: draft["prompt"].as_str().unwrap_or_default().into(),
             cursor: draft["cursor"].as_u64().unwrap_or_default() as usize,
             loaded: self.loaded.get(),
             writable: !self.denied.get(),
             error: None,
-        })
+        };
+        // The real draft service reuses an unchanged projection. A fresh Rc here
+        // would make the initial subscription echo look like an external draft edit.
+        let mut views = self.views.borrow_mut();
+        if let Some(prior) = views.get(&key).filter(|prior| ***prior == next) {
+            return prior.clone();
+        }
+        let next = Rc::new(next);
+        views.insert(key, next.clone());
+        next
     }
     fn set_prompt(
         &self,
@@ -110,6 +121,7 @@ fn DraftHarness(props: DraftHarnessProps) -> impl IntoElement {
         loaded: Cell::new(!props.loading),
         denied: Cell::new(false),
         revision: Cell::new(0),
+        views: RefCell::default(),
     });
     let environment = signal(String::from("one"));
     let mounted = signal(true);
@@ -227,6 +239,7 @@ fn start(window: (f32, f32), loading: bool) -> Headless {
     registries.push(fixture);
     let mut app = Headless::start(EngineConfig {
         ui_sets: registries,
+        clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
         viewport: size(px(window.0), px(window.1)),
         ..EngineConfig::new(Root::new::<DraftHarness>(move || DraftHarnessProps {
             loading,
@@ -257,6 +270,8 @@ fn editor_changes_survive_remount_and_do_not_cross_environment_scopes() {
         app.wait_for("saved 😀 typed")
             .expect("restored through binding");
         app.press("role:button[Mount]").expect("unmount");
+        app.wait_for_gone("id:composer-editor", nsh_testing::WAIT)
+            .expect("the editor unmounted");
         app.press("role:button[Mount]").expect("mount");
         app.wait_for("saved 😀 typed")
             .expect("client retains draft across mount");
