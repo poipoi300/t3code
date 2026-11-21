@@ -5,15 +5,23 @@
 //! natively without a render or a re-resolve. Components read [`palette`] and [`metrics`].
 
 mod classes;
+mod css;
 mod metrics;
 mod palette;
+mod preferences;
+mod transport;
+pub(crate) use preferences::{Edit, SaveKind, ThemeMerge, mode_key};
+pub use preferences::{ThemeState, bind, with_saved_theme};
+use std::rc::Rc;
+pub(crate) use transport::{ThemePlatform, bind_platform};
 
 use std::sync::Arc;
 
 use nsh_core::prelude::*;
 use t3_theme::color::Color;
 use t3_theme::palette::{
-    Appearance as ThemeAppearance, AppearanceMode, DesktopTheme, ThemeCatalog, ThemeHalves,
+    Appearance as ThemeAppearance, AppearanceMode, DesktopTheme, ThemeCatalog, ThemeDefinition,
+    ThemeHalves,
 };
 use t3_theme::resolved::{ResolvedTheme, ThemeInput, resolve_theme};
 use t3_theme::tokens::Value;
@@ -30,16 +38,32 @@ pub struct ThemeChoice {
     pub mode: AppearanceMode,
     pub halves: Option<ThemeHalves>,
     pub contrast: u32,
+    pub custom: Rc<[ThemeDefinition]>,
+    pub environment: Rc<[ThemeDefinition]>,
 }
 
 impl Default for ThemeChoice {
     fn default() -> Self {
         Self {
             theme: String::new(),
+            custom: Default::default(),
+            environment: Default::default(),
             mode: AppearanceMode::System,
             halves: None,
             contrast: t3_theme::resolved::DEFAULT_APPEARANCE_CONTRAST,
         }
+    }
+}
+
+impl ThemeChoice {
+    pub fn catalog(&self) -> ThemeCatalog<'_> {
+        ThemeCatalog {
+            custom: &self.custom,
+            environment: &self.environment,
+        }
+    }
+    pub fn owner(&self, appearance: ThemeAppearance) -> &str {
+        t3_theme::palette::resolve_theme_half(&self.theme, self.halves.as_ref(), appearance)
     }
 }
 
@@ -61,10 +85,7 @@ pub fn has_theme_id() -> bool {
 /// The appearance NSH shows: the system's while the theme has both halves and the user follows
 /// the system, else the one the theme or the user forces.
 pub fn scheme_for(choice: &ThemeChoice) -> Appearance {
-    let catalog = ThemeCatalog {
-        custom: &[],
-        environment: &[],
-    };
+    let catalog = choice.catalog();
     match catalog.resolve_desktop_theme(
         &choice.theme,
         Some(choice.mode == AppearanceMode::System),
@@ -79,10 +100,7 @@ pub fn scheme_for(choice: &ThemeChoice) -> Appearance {
 
 /// The NSH tokens of `choice`, both appearances paired.
 pub fn tokens_for(choice: &ThemeChoice) -> Tokens {
-    let catalog = ThemeCatalog {
-        custom: &[],
-        environment: &[],
-    };
+    let catalog = choice.catalog();
     let resolve = |appearance: ThemeAppearance| {
         let id = choice
             .halves
@@ -91,7 +109,11 @@ pub fn tokens_for(choice: &ThemeChoice) -> Tokens {
             .unwrap_or(&choice.theme);
         let mut input = ThemeInput::new(catalog.get(id), appearance);
         input.contrast = choice.contrast;
-        resolve_theme(&input)
+        let mut resolved = resolve_theme(&input);
+        if let Some(css) = input.theme.and_then(|theme| theme.css.as_deref()) {
+            css::apply(&mut resolved, css);
+        }
+        resolved
     };
     pair(
         &resolve(ThemeAppearance::Light),
@@ -308,7 +330,11 @@ mod tests {
             let resolve = |id, appearance| {
                 let mut input = ThemeInput::new(catalog.get(id), appearance);
                 input.contrast = 160;
-                resolve_theme(&input)
+                let mut resolved = resolve_theme(&input);
+                if let Some(css) = input.theme.and_then(|theme| theme.css.as_deref()) {
+                    css::apply(&mut resolved, css);
+                }
+                resolved
             };
             let light = resolve(light_id, ThemeAppearance::Light);
             let dark = resolve(dark_id, ThemeAppearance::Dark);

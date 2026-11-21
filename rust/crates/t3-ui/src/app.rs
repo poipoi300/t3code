@@ -15,7 +15,7 @@ use crate::state::clock;
 use crate::state::nav::{Navigator, Route, initial_route};
 use crate::state::panels::Panels;
 use crate::state::url::{UrlHistory, UrlState};
-use crate::theme::{self, ThemeChoice, palette};
+use crate::theme::{self, palette};
 
 use crate::runtime::tasks::watch;
 
@@ -124,8 +124,6 @@ fn navigation_error(error: crate::i18n::Text) {
 /// Everything below the boot: contexts, client services (`provide_services`), the routes and
 /// the root hosts. Tests mount it with a fake-platform client, as `App` does with the host's.
 pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> AnyElement {
-    theme::install(&ThemeChoice::default());
-    provide_context(theme::text_view_parts());
     if let Some(highlighter) = crate::host::code_highlighter() {
         provide_context(highlighter);
     }
@@ -134,6 +132,11 @@ pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> A
     let nav = Navigator::new(route);
     provide_context(nav);
     provide_services();
+    theme::with_saved_theme(move || themed_tree(nav))
+}
+
+fn themed_tree(nav: Navigator) -> AnyElement {
+    provide_context(theme::text_view_parts());
     let panels = Panels::new();
     provide_context(panels);
     clock::start();
@@ -208,6 +211,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
         diff, files, git_panel, navigation, shell, terminal, thread_ops,
     };
     use crate::screens::panel::{self, PanelRegistry};
+    theme::bind(client, None);
     thread_ops::bind_confirmation(client);
     provide_context(git_panel::git_actions(client.git_panel()));
     provide_context(git_panel::git_actions_registration(client.git_panel()));

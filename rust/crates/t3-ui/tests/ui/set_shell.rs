@@ -58,7 +58,10 @@ fn booted_root(store: ClientStore, started: Started) -> AnyElement {
     let rt = Rt::boot(store, started);
     let nav = t3_ui::state::nav::navigator();
     // What the client's record holds, read through the same client the shell uses.
-    let settings = rt.backend().client().map(|client| client.settings());
+    let settings = rt.backend().client().map(|client| {
+        theme::bind(&client, None);
+        client.settings()
+    });
     let record = signal(Vec::<String>::new());
     if let Some(settings) = settings {
         let read = settings.clone();
@@ -213,6 +216,7 @@ pub enum ReviewFixture {
     #[default]
     Normal,
     SlowAppearance,
+    PublishedThemes,
     WorktreeCleanup,
 }
 
@@ -252,6 +256,9 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
     server.edit_config(|config| {
         config["settings"]["autoResumeLimitedThreads"] = serde_json::json!(props.auto_resume);
         config["settings"]["snoozeLimitedThreads"] = serde_json::json!(false);
+        if props.review == ReviewFixture::PublishedThemes as usize {
+            config["environmentThemes"] = serde_json::json!([{"id":"dusk-lab","name":"Lab dusk","appearance":"dark","canvas":"#222233","accent":"#dd66aa"}]);
+        }
         if props.policy {
             config["managedPolicy"] =
                 serde_json::json!({"organization": "Acme", "lockedSettings": ["snoozeLimitedThreads"]});
@@ -318,6 +325,11 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
         Rc::new(client.clone()),
         t3_ui::runtime::host::Choice::Client,
     ));
+    if page == SettingsPage::Appearance {
+        let host = (props.review == ReviewFixture::PublishedThemes as usize)
+            .then(|| EnvironmentId("env".into()));
+        theme::bind(&client, host);
+    }
     let pairing = client.pair(server.pairing());
     let additional_id = extra.as_ref().map(|_| EnvironmentId("other".into()));
     {
@@ -370,6 +382,33 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
             }
         });
     }
+    let theme_record = signal(String::new());
+    if page == SettingsPage::Appearance {
+        let settings = client.settings();
+        on_key("ctrl+shift+y", move |_| {
+            let settings = settings.clone();
+            owner.run(move || {
+                spawn(async move {
+                    let halves = settings
+                        .read_device_preference("t3code:theme-halves:v1")
+                        .await;
+                    let library = settings.read_device_preference("t3code:themes:v1").await;
+                    let names = library
+                        .as_ref()
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|theme| theme["label"].as_str())
+                        .collect::<Vec<_>>();
+                    theme_record.set(format!(
+                        "Saved themes {} / {}",
+                        halves.unwrap_or_default(),
+                        names.join(", ")
+                    ));
+                });
+            });
+        });
+    }
     let updates = signal(Vec::<serde_json::Value>::new());
     let observed = server.clone();
     // The phone dialog covers the outer fixture button.
@@ -391,6 +430,7 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
                 .on_press(move || updates.set(server.calls("server.updateSettings")))
                 .child(text("Read server")),
         )
+        .child(text(move || SharedString::from(theme_record.get())))
         .child(text(move || format!("Updates {}", updates.with(Vec::len))))
         .child(text(move || {
             format!(

@@ -739,6 +739,7 @@ fn settings_content_layout(context: SettingsContext) -> impl IntoElement {
                         })),
                 ),
         )
+        .child(super::appearance::modal_theme_host())
 }
 
 /// The page body each settings package renders inside the shell.

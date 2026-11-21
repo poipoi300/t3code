@@ -1,5 +1,6 @@
 //! Headless Appearance, Diffs and Worktrees tests through the real client.
 
+use nsh_core::prelude::*;
 use t3_ui::state::nav::SettingsPage;
 
 use crate::set_shell::{Remote, ReviewFixture, start, start_connected, start_connected_with};
@@ -224,5 +225,258 @@ fn review_settled_worktree_retention_warns_when_a_selected_machine_is_offline() 
             .expect("take a machine offline");
         app.wait_for("Offline machines will not get this setting")
             .expect("settled rule warns about the offline machine");
+    }
+}
+
+#[test]
+fn themes_mixing_changes_only_the_picked_half_at_both_sizes() {
+    for size in [DESKTOP, PHONE] {
+        let mut app = start_connected(size, SettingsPage::Appearance, Remote::default());
+        let light = "role:button[Use Ocean light mode]";
+        let dark = "role:button[Use Ocean dark mode]";
+        scroll_to(&mut app, light);
+        app.press(light).expect("select the light half");
+        assert_eq!(app.screen().selected(light), Ok(true));
+        assert_eq!(app.screen().selected(dark), Ok(false));
+        app.press_key("ctrl+shift+y").expect("read device mix");
+        app.wait_for(r#"text:/Saved themes .*"light":"ocean"/"#)
+            .expect("mix written separately");
+    }
+}
+
+#[test]
+fn themes_custom_json_import_can_be_edited_at_both_sizes() {
+    for size in [DESKTOP, PHONE] {
+        let mut app = start_connected(size, SettingsPage::Appearance, Remote::default());
+        app.press("role:button[Add theme]").expect("open importer");
+        let mut theme = t3_theme::palette::built_in_theme("ocean")
+            .expect("Ocean")
+            .clone();
+        theme.id = "test-aurora".into();
+        theme.label = "Aurora".into();
+        let json = t3_theme::palette::serialize_theme_file(&theme).expect("valid theme file");
+        let mut paste = nsh_core::PasteEvent::default();
+        paste.text = json;
+        app.paste("label:Theme JSON", &paste).expect("paste theme");
+        app.press("id:theme-import-submit").expect("import");
+        let edit = "role:button[Edit Aurora]";
+        scroll_to(&mut app, edit);
+        app.press(edit).expect("edit imported theme");
+        app.type_text("label:Theme name", " II").expect("rename");
+        app.press("role:button[Save changes]").expect("save theme");
+        scroll_to(&mut app, "role:button[Edit Aurora II]");
+        app.press_key("ctrl+shift+y").expect("read device library");
+        app.wait_for("text:/Saved themes .*Aurora II/")
+            .expect("edited theme persisted");
+    }
+}
+
+#[test]
+fn themes_open_picker_uses_the_newly_typed_color_for_a_hue_drag() {
+    use nsh_core::prelude::{point, px};
+    let mut app = start_connected(DESKTOP, SettingsPage::Appearance, Remote::default());
+    app.press("role:button[Create theme]").expect("open editor");
+    app.press("role:button[Pick Accent color]")
+        .expect("open the picker");
+    app.clear("label:Accent").expect("clear the current value");
+    app.type_text("label:Accent", "#808080")
+        .expect("enter a neutral gray");
+    app.drag("role:adjustable[Accent hue]", point(px(400.0), px(0.0)))
+        .expect("adjust hue");
+    assert_eq!(app.screen().input_text("label:Accent"), Ok(Some("#808080")));
+}
+
+#[component]
+fn ThemeLaunch() -> impl IntoElement {
+    use std::{cell::RefCell, rc::Rc};
+    use t3_client::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        platform::StorageKey,
+        testing::environment::FakeEnvironment,
+    };
+    use t3_ui::{
+        runtime::{Rt, host::Choice},
+        state::nav::Route,
+    };
+    let tasks: Spawner = Rc::new(|future| {
+        spawn(future);
+    });
+    let env = FakeEnvironment::new("env", tasks.clone());
+    let held = RefCell::new(Some(env.defer_read(StorageKey::new(
+        "ui-preference",
+        None,
+        "t3code:theme",
+    ))));
+    on_key("ctrl+shift+e", move |_| {
+        if let Some(reply) = held.borrow_mut().take() {
+            let _ = reply.send(Some(b"ocean".to_vec()));
+        }
+    });
+    let delayed_save =
+        RefCell::<Option<futures::channel::oneshot::Sender<Option<Vec<u8>>>>>::new(None);
+    let writes = env.clone();
+    // The first press reserves the next library read in the save transaction, the second releases it.
+    on_key("ctrl+shift+k", move |_| {
+        let mut gate = delayed_save.borrow_mut();
+        if let Some(reply) = gate.take() {
+            let _ = reply.send(None);
+        } else {
+            *gate =
+                Some(writes.defer_read(StorageKey::new("ui-preference", None, "t3code:themes:v1")));
+        }
+    });
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        env.platform(),
+        store.clone(),
+        t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+        tasks,
+    );
+    let rt = Rt::new(store, Rc::new(client.clone()), Choice::Client);
+    let ocean = t3_ui::theme::tokens_for(&t3_ui::theme::ThemeChoice {
+        theme: "ocean".into(),
+        ..Default::default()
+    })
+    .color("background")
+    .expect("Ocean background");
+    view()
+        .size_full()
+        .child(text(move || {
+            if t3_ui::theme::has_theme_id()
+                && nsh_core::prelude::tokens().color("background") == Some(ocean)
+            {
+                "Ocean painted"
+            } else {
+                "Waiting for catalogue"
+            }
+        }))
+        .child(t3_ui::app::app_tree(
+            rt,
+            Route::Settings(SettingsPage::General),
+            move || t3_ui::app::provide_client_services(&client),
+        ))
+}
+
+fn start_theme_launch(viewport: (f32, f32)) -> nsh_testing::Headless {
+    use nsh_core::prelude::*;
+    use nsh_engine::{EngineConfig, Root};
+    nsh_testing::Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(viewport.0), px(viewport.1)),
+        ..EngineConfig::new(Root::of::<ThemeLaunch>())
+    })
+    .expect("start application root")
+}
+
+#[test]
+fn themes_editor_preserves_its_draft_when_another_route_is_opened() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_theme_launch(window);
+        app.wait_for("Waiting for catalogue")
+            .expect("launch fixture mounted");
+        app.press_key("ctrl+shift+e").expect("release saved theme");
+        app.wait_for("role:button[Appearance]")
+            .expect("settings navigation");
+        app.press("role:button[Appearance]")
+            .expect("open Appearance");
+        app.press("role:button[Create theme]").expect("open editor");
+        app.type_text("label:Theme name", "Across routes")
+            .expect("enter draft");
+        app.press("role:button[Minimize the theme editor]")
+            .expect("minimize editor");
+        app.press("role:button[Chat]").expect("visit Chat settings");
+        app.press("role:button[Expand the theme editor]")
+            .expect("reopen editor over Chat");
+        assert_eq!(
+            app.screen().input_text("label:Theme name"),
+            Ok(Some("Across routes"))
+        );
+        app.press_key("ctrl+shift+k").expect("hold save");
+        app.press("role:button[Create theme]")
+            .expect("save from Chat");
+        app.press("role:button[Minimize the theme editor]")
+            .expect("minimize pending save");
+        app.press("role:button[Close]").expect("close Settings");
+        app.wait_for_gone("id:settings-page-content", nsh_testing::WAIT)
+            .expect("back in the shell");
+        app.wait_for("role:button[Expand the theme editor]")
+            .expect("root host retained the editor");
+        app.press_key("ctrl+shift+k").expect("let the save finish");
+        app.wait_for_gone("id:theme-editor-panel", nsh_testing::WAIT)
+            .expect("saved editor closed in its new host");
+    }
+}
+
+#[test]
+fn themes_root_waits_for_saved_palette_before_mounting_general() {
+    let mut app = start_theme_launch(DESKTOP);
+    app.wait_for("Waiting for catalogue")
+        .expect("storage pending");
+    assert!(
+        !app.screen().shows("Notifications"),
+        "General painted before the saved palette arrived"
+    );
+    app.press_key("ctrl+shift+e").expect("release saved theme");
+    app.wait_for("Notifications").expect("General mounted");
+    assert!(
+        app.screen().shows("Ocean painted"),
+        "first mounted route has saved palette"
+    );
+}
+
+#[test]
+fn themes_device_formats_keep_library_halves_and_legacy_follow_flag() {
+    use serde_json::json;
+    use std::rc::Rc;
+    use t3_client::{ClientStore, composition::ClientRuntime, testing::FakePlatform};
+    let pool = futures::executor::LocalPool::new();
+    let client = ClientRuntime::new(
+        FakePlatform::default(),
+        ClientStore::default(),
+        t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+        Rc::new(|_| {}),
+    );
+    let mut pool = pool;
+    let settings = client.settings();
+    for (key, value) in [
+        ("t3code:themes:v1", json!([{"future": 42}])),
+        ("t3code:theme-halves:v1", json!({"dark":"ocean"})),
+        ("t3code:theme-follow-system", json!(false)),
+    ] {
+        pool.run_until(settings.write_device_preference(key, value.clone()))
+            .expect("typed theme setting");
+        assert_eq!(
+            pool.run_until(settings.read_device_preference(key)),
+            Some(value)
+        );
+        assert!(
+            pool.run_until(settings.write_device_preference(key, json!("false")))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn themes_host_s_published_palette_picks_its_one_available_half_at_both_sizes() {
+    for size in [DESKTOP, PHONE] {
+        let mut app = start_connected_with(
+            size,
+            SettingsPage::Appearance,
+            Remote::default(),
+            ReviewFixture::PublishedThemes,
+        );
+        let whole = "role:button[Use Lab dusk theme]";
+        scroll_to(&mut app, whole);
+        app.press(whole).expect("choose the published palette");
+        assert_eq!(
+            app.screen().selected("role:button[Use Lab dusk dark mode]"),
+            Ok(true)
+        );
+        assert!(
+            !app.screen()
+                .matches("role:button[Use Lab dusk light mode]")
+                .unwrap()
+        );
     }
 }

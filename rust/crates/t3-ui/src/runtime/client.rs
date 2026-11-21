@@ -49,6 +49,7 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
                 };
             }
         };
+        owner.run(|| crate::theme::bind_platform(platform.clone()));
         let (runtime, paired) = start_on(platform, store, host::SOURCE, spawner).await;
         Started {
             backend: Rc::new(runtime),

@@ -12,7 +12,7 @@ use t3_client::workspace::git_panel::details::{
     set_thread_details_item,
 };
 use t3_theme::fonts::*;
-use t3_theme::palette::{AppearanceMode, built_in_themes};
+use t3_theme::palette::built_in_themes;
 
 use super::setting_controls::{choice_row, reset, switch_row};
 use super::shell::{
@@ -25,7 +25,66 @@ use crate::ui::icon::Icon;
 use crate::ui::slider::{SliderProps, slider};
 use crate::ui::switch::{ControlState, Size, switch};
 
-const THEME_KEY: &str = "t3code:theme";
+#[derive(Clone, Copy)]
+struct ThemeForms {
+    form: Signal<Option<library::Form>>,
+    draft: Memo<Option<forms::EditorDraft>>,
+}
+
+impl ThemeForms {
+    fn layer(
+        self,
+        state: crate::theme::ThemeState,
+        visible: impl Fn() -> bool + 'static,
+    ) -> AnyElement {
+        region(
+            move || visible().then(|| self.form.get()).flatten(),
+            move |request| request.map(|request| forms::show(self.form, state, request)),
+        )
+    }
+}
+
+/// NSH's Settings dialog has its own overlay layer. Both layers use the root editor session.
+pub(super) fn modal_theme_host() -> Option<AnyElement> {
+    Some(use_context::<ThemeForms>()?.layer(use_context::<crate::theme::ThemeState>()?, || true))
+}
+
+pub(crate) fn with_form_host(
+    state: crate::theme::ThemeState,
+    build: impl FnOnce() -> AnyElement,
+) -> Vec<AnyElement> {
+    use crate::state::nav::{Route, navigator};
+    let form = signal(None);
+    let draft = computed(move || {
+        form.with(|request| match request {
+            Some(library::Form::Editor {
+                seed,
+                editing,
+                name,
+            }) => Some(untracked(|| {
+                forms::EditorDraft::new(seed.as_ref(), *editing, name.clone())
+            })),
+            _ => None,
+        })
+    });
+    effect(move || {
+        state
+            .preview
+            .set(draft.get().map(forms::EditorDraft::preview))
+    });
+    let host = ThemeForms { form, draft };
+    provide_context(host);
+    let nav = navigator();
+    vec![
+        build(),
+        host.layer(state, move || !matches!(nav.top(), Route::Settings(_))),
+    ]
+}
+
+mod community;
+mod forms;
+mod library;
+use library::theme_library;
 
 pub fn screen() -> AnyElement {
     let context = use_settings();
@@ -251,148 +310,133 @@ impl DevicePreference {
     }
 }
 
-fn theme_library(context: SettingsContext) -> impl IntoElement {
-    use t3_theme::palette::THEME_APPEARANCE_MODE_STORAGE_KEY as MODE_KEY;
-    let mode = DevicePreference::load(context, MODE_KEY, json!("system"));
-    let theme = DevicePreference::load(context, THEME_KEY, json!("system"));
-    let choice = computed(move || ThemeChoice {
-        theme: theme
-            .value
-            .with(|value| value.as_str().unwrap_or_default().to_owned()),
-        mode: mode.value.with(|value| {
-            value
-                .as_str()
-                .and_then(AppearanceMode::parse)
-                .unwrap_or(AppearanceMode::System)
-        }),
-        contrast: context.client_settings().appearance_contrast as u32,
-        ..ThemeChoice::default()
-    });
-    effect(move || {
-        let selection = choice.get();
-        untracked(|| crate::theme::install(&selection));
-    });
-
-    let modes = [
-        ("system", "System", "Follow the system appearance"),
-        ("light", "Light", "Use light mode"),
-        ("dark", "Dark", "Use dark mode"),
-    ].into_iter().map(|(key, label, accessible)| {
-        nsh_base::button()
-            .accessibility_label(Text::from(accessible).resolve())
-            .selected(move || mode.value.with(|value| value.as_str() == Some(key)))
-            .on_press(move || mode.choose(context, json!(key)))
-            .app_class(move || Some(tw(if mode.value.with(|value| value.as_str() == Some(key)) {
-                "flex flex-col items-stretch gap-1.5 rounded-xl border border-transparent bg-accent/30 p-2 ring-2 ring-inset ring-ring"
-            } else {
-                "flex flex-col items-stretch gap-1.5 rounded-xl border border-border/70 bg-card/60 p-2 hover:bg-accent/10"
-            })))
-            .child(view().app_class(tw("flex h-[8.75rem] flex-row overflow-hidden rounded-lg"))
-                .child((key != "dark").then(|| theme_wireframe(choice, false)))
-                .child((key != "light").then(|| theme_wireframe(choice, true))))
-            .child(text(Text::from(label).resolve()).app_class(tw("text-center text-xs font-medium")))
-            .into_element()
-    }).collect::<Vec<_>>();
-    let cards = std::iter::once(("system", "T3 Code", false))
-        .chain(built_in_themes().iter().map(|theme| (theme.id.as_str(), theme.label.as_str(), true)))
-        .map(|(id, name, literal)| {
-            let name = if literal { Text::content(name) } else { Text::from("T3 Code") }.resolve();
-            let picked = move || theme.value.with(|value| value.as_str() == Some(id));
-            let tokens = crate::theme::tokens_for(&ThemeChoice { theme: id.to_owned(), ..ThemeChoice::default() });
-            let swatches = crate::theme::Palette::of(&tokens);
-            nsh_base::button()
-                .accessibility_label(name.clone())
-                .on_press(move || theme.choose(context, json!(id)))
-                .app_class(move || Some(tw(if picked() {
-                    "flex flex-col gap-2 rounded-xl border border-ring bg-accent/30 p-3"
-                } else {
-                    "flex flex-col gap-2 rounded-xl border border-border/70 bg-card/60 p-3 hover:bg-accent/10"
-                })))
-                .child(view().app_class(tw("flex flex-row justify-center gap-8 py-2"))
-                    .child(theme_swatch(swatches.clone(), false))
-                    .child(theme_swatch(swatches, true)))
-                .child(text(name).app_class(tw("text-sm font-medium text-foreground")))
-                .into_element()
+fn theme_wireframe(choice: Memo<ThemeChoice>, dark: bool, clipped: bool) -> impl IntoElement {
+    use t3_theme::palette::{Appearance, ThemeColorRole as Role, standard_theme_colors};
+    let half = if dark {
+        Appearance::Dark
+    } else {
+        Appearance::Light
+    };
+    let color = move |role| {
+        choice.with(|choice| {
+            let palette = choice
+                .catalog()
+                .get(choice.owner(half))
+                .and_then(|t| t.colors_for(half));
+            let raw = palette
+                .unwrap_or_else(|| standard_theme_colors(half))
+                .get(role);
+            t3_theme::color::Color::parse(raw)
+                .map_or_else(|| rgba(0).into(), |c| crate::theme::hsla_of(&c))
         })
-        .collect::<Vec<_>>();
-
-    view()
-        .test_id("appearance")
-        .app_class(tw("flex flex-col gap-3"))
-        .child(heading("Color scheme"))
-        .child(
-            view()
-                .test_id("color-scheme")
-                .app_class(tw("grid w-full grid-cols-3 gap-3"))
-                .child(modes),
-        )
-        .child(view().app_class(tw("pt-5")).child(heading("Themes")))
-        .child(
-            view()
-                .test_id("theme")
-                .app_class(move || {
-                    Some(tw(match context.content_width.get() {
-                        width if width >= 784.0 => "grid w-full grid-cols-3 gap-2",
-                        width if width >= 520.0 => "grid w-full grid-cols-2 gap-2",
-                        _ => "grid w-full grid-cols-1 gap-2",
-                    }))
-                })
-                .child(cards),
-        )
-}
-
-fn theme_wireframe(choice: Memo<ThemeChoice>, dark: bool) -> impl IntoElement {
-    let colors =
-        computed(move || crate::theme::Palette::of(&crate::theme::tokens_for(&choice.get())));
-    let half = move |color: AdaptiveColor| if dark { color.dark } else { color.light };
+    };
+    let block =
+        move |class: &'static str, role| view().app_class(tw(class)).bg(move || color(role));
+    let line = rgba(0x7f7f7f40);
+    let rows = [
+        "absolute left-[11%] right-[11%] top-[10%] flex h-[20%] flex-row items-center gap-1",
+        "absolute left-[11%] right-[11%] top-[40%] flex h-[20%] flex-row items-center gap-1",
+        "absolute left-[11%] right-[11%] top-[70%] flex h-[20%] flex-row items-center gap-1",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, class)| {
+        view()
+            .app_class(tw(class))
+            .child(
+                view()
+                    .app_class(tw("aspect-square h-[26%] rounded-full opacity-55"))
+                    .bg(move || match index {
+                        0 => rgb(0x34d399).into(),
+                        1 => color(Role::MessageAction),
+                        _ => rgb(0xfbbf24).into(),
+                    }),
+            )
+            .child(view().app_class(tw("h-[30%] w-[52%] rounded-sm")).bg(line))
+            .into_element()
+    })
+    .collect::<Vec<_>>();
+    let pane = view().app_class(tw(if !clipped { "absolute inset-0" } else if dark {
+        "absolute inset-y-0 right-0 w-[200%]"
+    } else { "absolute inset-y-0 left-0 w-[200%]" })).bg(move||color(Role::Canvas))
+        .child(block("absolute inset-y-0 left-0 w-[22%] border-r",Role::Sidebar))
+        .child(block("absolute left-[3%] top-[8%] h-[8%] w-[16%] rounded-md border",Role::Surface))
+        .child(block("absolute left-[3%] top-[22%] h-[7%] w-[16%] rounded-md",Role::AccentSurface))
+        .child(block("absolute left-[3%] top-[32%] h-[7%] w-[16%] rounded-md opacity-70",Role::MessageSurface))
+        .child(block("absolute left-[3%] top-[42%] h-[7%] w-[16%] rounded-md opacity-50",Role::MessageSurface))
+        .child(block("absolute right-[28%] top-[11%] h-[9%] w-[24%] rounded-lg",Role::MessageSurface))
+        .child(view().app_class(tw("absolute left-[27%] top-[28%] h-[5%] w-[34%] rounded-sm")).bg(line))
+        .child(view().app_class(tw("absolute left-[27%] top-[38%] h-[5%] w-[26%] rounded-sm")).bg(line))
+        .child(block("absolute bottom-[8%] left-[26%] right-[6%] flex h-[15%] flex-row items-center justify-between rounded-md border px-1", Role::Surface)
+            .child(view().app_class(tw("h-[26%] w-[34%] rounded-full opacity-70")).bg(line))
+            .child(block("aspect-square h-[58%] rounded-full",Role::MessageAction)))
+        .child(block("absolute right-[5%] top-[8%] h-[46%] w-[20%] rounded-lg border shadow-sm",Role::Surface).child(rows));
     view()
         .accessible(false)
-        .app_class(tw("flex flex-1 flex-row"))
-        .bg(move || half(colors.get().background))
-        .child(
-            view()
-                .app_class(tw("w-1/3 border-r p-2"))
-                .bg(move || half(colors.get().sidebar))
-                .child(
-                    view()
-                        .app_class(tw("mt-3 h-1.5 w-full rounded-full"))
-                        .bg(move || half(colors.get().muted)),
-                ),
-        )
-        .child(
-            view()
-                .app_class(tw("flex flex-1 flex-col justify-end gap-2 p-2"))
-                .child(
-                    view()
-                        .app_class(tw("h-2 w-3/4 rounded-full"))
-                        .bg(move || half(colors.get().muted)),
-                )
-                .child(
-                    view()
-                        .app_class(tw("h-2 w-1/2 rounded-full"))
-                        .bg(move || half(colors.get().primary)),
-                )
-                .child(
-                    view()
-                        .app_class(tw("h-5 w-full rounded-md"))
-                        .bg(move || half(colors.get().muted)),
-                ),
-        )
+        .app_class(tw("relative flex-1 overflow-hidden"))
+        .child(pane)
 }
 
-fn theme_swatch(colors: crate::theme::Palette, dark: bool) -> impl IntoElement {
-    let half = |color: AdaptiveColor| if dark { color.dark } else { color.light };
-    view()
+/// The two radial glows, blur and scale of ThemePreviewCircle. Only generated hex colors
+/// and numbers from the bundled preview spec enter the SVG.
+fn theme_swatch(
+    definition: Option<&t3_theme::palette::ThemeDefinition>,
+    half: t3_theme::palette::Appearance,
+) -> AnyElement {
+    use t3_theme::ui_data::{
+        PreviewColors, mix_theme_preview_base, preview_render_spec, standard_preview_colors,
+    };
+    let colors = definition
+        .and_then(|theme| theme.colors_for(half))
+        .map(|c| PreviewColors {
+            canvas: c.get(t3_theme::palette::ThemeColorRole::Canvas).into(),
+            accent: c.get(t3_theme::palette::ThemeColorRole::Accent).into(),
+            message_action: c
+                .get(t3_theme::palette::ThemeColorRole::MessageAction)
+                .into(),
+        })
+        .or_else(|| standard_preview_colors(half).cloned());
+    let Some((c, spec)) = colors.zip(preview_render_spec(half)) else {
+        return view().into_element();
+    };
+    let hex = |s: &str| {
+        t3_theme::color::Color::parse(s).map_or_else(|| "#000000".into(), |color| color.to_hex())
+    };
+    let center = |point: [f64; 2]| {
+        let [x, y] = point.map(|n| n * 56.);
+        (x, y, x.max(56. - x).hypot(y.max(56. - y)))
+    };
+    let (ax, ay, ar) = center(spec.accent.center);
+    let (bx, by, br) = center(spec.action.center);
+    let svg_source = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56">
+      <defs><radialGradient id="a" gradientUnits="userSpaceOnUse" cx="{ax}" cy="{ay}" r="{ar}">
+        <stop stop-color="{accent}"/><stop offset="{mid}" stop-color="{accent}" stop-opacity="{opacity}"/>
+        <stop offset="{end}" stop-color="{accent}" stop-opacity="0"/></radialGradient>
+        <radialGradient id="b" gradientUnits="userSpaceOnUse" cx="{bx}" cy="{by}" r="{br}">
+        <stop stop-color="{action}" stop-opacity="{start}"/><stop offset="{bend}" stop-color="{action}" stop-opacity="0"/></radialGradient>
+        <clipPath id="circle"><circle cx="28" cy="28" r="28"/></clipPath>
+        <filter id="blur"><feGaussianBlur stdDeviation="{blur}"/></filter></defs>
+      <g clip-path="url(#circle)"><rect width="56" height="56" fill="{base}"/>
+        <g transform="translate(28 28) scale({scale}) translate(-28 -28)" filter="url(#blur)">
+        <rect width="56" height="56" fill="url(#b)"/><rect width="56" height="56" fill="url(#a)"/></g></g></svg>"##,
+        base = hex(&mix_theme_preview_base(&c, half)),
+        accent = hex(&c.accent),
+        action = hex(&c.message_action),
+        mid = spec.accent.middle_offset,
+        opacity = spec.accent.middle_opacity,
+        end = spec.accent.end_offset,
+        start = spec.action.start_opacity,
+        bend = spec.action.end_offset,
+        blur = spec.blur_at56_px,
+        scale = spec.scale
+    );
+    svg(nsh_core::element::ImageSrc::svg_markup(&svg_source))
         .accessible(false)
         .app_class(tw(
-            "flex size-14 items-center justify-center rounded-full border",
+            "size-14 shrink-0 overflow-hidden rounded-full border-2 border-background",
         ))
-        .bg(half(colors.background))
-        .child(
-            view()
-                .app_class(tw("size-5 rounded-full"))
-                .bg(half(colors.primary)),
-        )
+        .into_element()
 }
 
 fn thread_details_row(context: SettingsContext) -> impl IntoElement {
