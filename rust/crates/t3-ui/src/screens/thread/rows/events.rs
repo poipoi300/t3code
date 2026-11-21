@@ -154,7 +154,10 @@ impl EventRowContext {
         self.nav.open(Route::Thread(target.clone()));
     }
 
-    fn config(&self, environment: &EnvironmentId) -> Option<Shared<ServerConfig>> {
+    pub(in crate::screens::thread) fn config(
+        &self,
+        environment: &EnvironmentId,
+    ) -> Option<Shared<ServerConfig>> {
         self.configs
             .with(|configs| configs.get(environment).cloned())
     }
@@ -227,7 +230,12 @@ pub fn v2_event_timeline_row(row: TimelineRow, context: EventRowContext) -> impl
                     context.link_requests.clone(),
                 )
             } else {
-                v2_lifecycle_row(&row.projected_item.item, row.resource_summary, &context)
+                super::super::subagents::v2_lifecycle_projected_row(
+                    context.key.clone(),
+                    row.projected_item.clone(),
+                    row.resource_summary,
+                    &context,
+                )
             }
         }))
     })
@@ -1079,7 +1087,12 @@ fn v2_subagent_group(row: &EventRow, context: &EventRowContext) -> AnyElement {
                 "mt-1 mb-1 rounded-lg border border-border/60 bg-card/30 p-1",
             ));
             for member in &members {
-                panel = panel.child(v2_lifecycle_row(&member.item, false, &context));
+                panel = panel.child(super::super::subagents::v2_lifecycle_projected_row(
+                    context.key.clone(),
+                    member.clone(),
+                    false,
+                    &context,
+                ));
             }
             panel.into_element()
         })
