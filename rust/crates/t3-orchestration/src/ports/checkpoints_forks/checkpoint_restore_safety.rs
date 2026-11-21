@@ -60,6 +60,18 @@ pub fn canonicalize_missing(path: &Path) -> std::io::Result<PathBuf> {
     Ok(resolved)
 }
 
+/// The current target and the future named location of a linked checkout.
+pub(super) fn workspace_keys(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let target = canonicalize_missing(cwd)?;
+    let mut keys = vec![target];
+    if let Some((parent, name)) = cwd.parent().zip(cwd.file_name()) {
+        keys.push(canonicalize_missing(parent)?.join(name));
+        keys.sort();
+        keys.dedup();
+    }
+    Ok(keys)
+}
+
 pub fn paths_overlap(a: &Path, b: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -313,7 +325,7 @@ impl WorkspaceReservations {
         kind: ReservationKind,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<WorkspaceReservation> {
-        let canonical = canonicalize_missing(cwd)?;
+        let keys = workspace_keys(cwd)?;
         let mut released = self.released.subscribe();
         let mut waiting = None;
         loop {
@@ -324,14 +336,16 @@ impl WorkspaceReservations {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if !state.held.iter().any(|(_, path, held_kind)| {
                     (kind == ReservationKind::Restore || *held_kind == ReservationKind::Restore)
-                        && paths_overlap(path, &canonical)
+                        && keys.iter().any(|key| paths_overlap(path, key))
                 }) {
                     let id = state.next;
                     state.next = state.next.checked_add(1).ok_or_else(|| Error::Service {
                         operation: "workspace.reserve",
                         detail: "Reservation identity exhausted".into(),
                     })?;
-                    state.held.push((id, canonical, kind));
+                    state
+                        .held
+                        .extend(keys.into_iter().map(|key| (id, key, kind)));
                     return Ok(WorkspaceReservation {
                         owner: self.clone(),
                         id,
@@ -343,7 +357,9 @@ impl WorkspaceReservations {
                         operation: "workspace.reserve",
                         detail: "Reservation identity exhausted".into(),
                     })?;
-                    state.waiting.push((id, canonical.clone()));
+                    state
+                        .waiting
+                        .extend(keys.iter().cloned().map(|key| (id, key)));
                     waiting = Some(Waiting { owner: self, id });
                     self.waiters
                         .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -438,7 +454,7 @@ impl WorkspaceCoordination {
             Some(cwd) => Some(tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(Error::Cancelled),
-                lease = self.leases.acquire(cwd) => lease?,
+                lease = self.leases.acquire_for_recovery(cwd) => lease?,
             }),
             None => None,
         };
@@ -571,35 +587,57 @@ impl CoordinatedTurnStart {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<Option<crate::ports::runs_ingestion::run_execution_service::RunExecutionHandle>>
     {
-        let thread = self
-            .projections
-            .thread(thread_id.clone())
-            .await?
-            .ok_or_else(|| Error::ThreadNotFound(thread_id.clone()))?;
-        let worktree = thread.worktree_path.map(|path| PathBuf::from(path.0));
-        let cwd = match &worktree {
-            Some(path) => Some(path.clone()),
-            None => {
-                let project_id = expanded_id(&thread.project_id)?;
-                self.database
-                    .read(move |db| projects::get(db, &project_id, true))
-                    .await?
-                    .map(|project| PathBuf::from(project.workspace_root))
+        loop {
+            let thread = self
+                .projections
+                .thread(thread_id.clone())
+                .await?
+                .ok_or_else(|| Error::ThreadNotFound(thread_id.clone()))?;
+            let worktree = thread.worktree_path.map(|path| PathBuf::from(path.0));
+            let cwd = match &worktree {
+                Some(path) => Some(path.clone()),
+                None => {
+                    let project_id = expanded_id(&thread.project_id)?;
+                    self.database
+                        .read(move |db| projects::get(db, &project_id, true))
+                        .await?
+                        .map(|project| PathBuf::from(project.workspace_root))
+                }
+            };
+            let result = self
+                .coordination
+                .start(cwd.as_deref(), worktree.as_deref(), &cancellation, async {
+                    let context = self
+                        .projections
+                        .turn_start_context(thread_id.clone(), run_id.clone())
+                        .await?;
+                    if context
+                        .projection
+                        .thread
+                        .worktree_path
+                        .as_ref()
+                        .map(|p| Path::new(&p.0))
+                        != worktree.as_deref()
+                        || context.projection.thread.project_id != thread.project_id
+                    {
+                        return Ok(None);
+                    }
+                    self.inner
+                        .start_from(
+                            (thread_id.clone(), run_id.clone()),
+                            context,
+                            policy,
+                            will_retry,
+                            cancellation.clone(),
+                            None,
+                        )
+                        .await
+                        .map(Some)
+                })
+                .await?;
+            if let Some(result) = result {
+                return Ok(result);
             }
-        };
-        self.coordination
-            .start(
-                cwd.as_deref(),
-                worktree.as_deref(),
-                &cancellation,
-                self.inner.start_resolving(
-                    thread_id,
-                    run_id,
-                    policy,
-                    will_retry,
-                    cancellation.clone(),
-                ),
-            )
-            .await
+        }
     }
 }

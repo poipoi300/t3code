@@ -288,7 +288,7 @@ struct ManagementParts {
     database: StoreDatabase,
     settings: Arc<dyn SettingsService>,
     hydrator: Arc<dyn crate::ports::thread_project::thread_management_service::TranscriptHydrator>,
-    worktree_restore: Arc<dyn ThreadWorktreeRestore>,
+    worktree_restore: Arc<LeasedWorktreeRestore>,
     signals: OutboxSignals,
     clock: Arc<dyn Clock>,
 }
@@ -402,10 +402,81 @@ impl ThreadWorktreeRestore for RebindingWorktreeRestore {
         let recreated = self.inner.restore(thread).await?;
         if recreated && let Some(path) = worktree {
             self.repositories
-                .bind_scope(std::path::PathBuf::from(path.0), true)
+                .bind_recreated_scope(std::path::PathBuf::from(path.0))
                 .await?;
         }
         Ok(recreated)
+    }
+}
+
+/// Send validation and terminal recovery run outside provider startup's workspace lease.
+struct LeasedWorktreeRestore {
+    inner: Option<Arc<dyn ThreadWorktreeRestore>>,
+    reader: Arc<dyn ProjectionReader>,
+}
+
+impl LeasedWorktreeRestore {
+    async fn acquire(
+        &self,
+        thread: &OrchestrationV2AppThread,
+    ) -> Result<Option<Vec<tokio::sync::OwnedMutexGuard<()>>>> {
+        let Some(path) = &thread.worktree_path else {
+            return Ok(None);
+        };
+        let path = std::path::Path::new(&path.0);
+        if !path.is_absolute() {
+            return Ok(None);
+        }
+        t3_workspace::paths::nearest_real(path).map_err(|error| Error::Service {
+            operation: "worktree.recreate",
+            detail: error.to_string(),
+        })?;
+        let lease = WorkspaceLocks::workspace_leases()
+            .acquire_for_recovery(path)
+            .await?;
+        let id =
+            crate::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id(&thread.id)?;
+        let current = self
+            .reader
+            .thread(id.clone())
+            .await?
+            .ok_or(Error::ThreadNotFound(id))?;
+        if current.worktree_path != thread.worktree_path
+            || current.project_id != thread.project_id
+            || current.branch != thread.branch
+        {
+            return Err(Error::Service {
+                operation: "worktree.recreate",
+                detail: "The thread workspace changed while waiting for its lease.".into(),
+            });
+        }
+        Ok(Some(lease))
+    }
+}
+
+#[async_trait]
+impl ThreadWorktreeRestore for LeasedWorktreeRestore {
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> Result<bool> {
+        let Some(inner) = &self.inner else {
+            return Ok(false);
+        };
+        let Some(_lease) = self.acquire(&thread).await? else {
+            return Ok(false);
+        };
+        inner.restore(thread).await
+    }
+}
+
+/// A terminal keeps both names of its worktree leased until its launch returns.
+pub struct TerminalWorktreeLease {
+    _guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    thread: OrchestrationV2AppThread,
+    restore: Arc<dyn ThreadWorktreeRestore>,
+}
+
+impl TerminalWorktreeLease {
+    pub async fn recover_missing_cwd(&self) -> Result<()> {
+        self.restore.restore(self.thread.clone()).await.map(|_| ())
     }
 }
 
@@ -641,12 +712,19 @@ impl OrchestrationRuntime {
             RunExecutionService::new(ingestor.clone(), Some(checkpoint_backend))
                 .with_baseline_checkpoints(checkpoint_service.clone()),
         );
+        let restore = worktree_restore.map(|inner| {
+            Arc::new(RebindingWorktreeRestore {
+                inner,
+                repositories: repositories.clone(),
+            }) as Arc<dyn ThreadWorktreeRestore>
+        });
         let operations = Arc::new(ComposedThreads {
             policy: policy.clone(),
             // A restore holds the folder's reservation from before the provider's rollback to the
             // commit; a turn start on an overlapping folder waits for it (re-review 4 F2).
             turn_start: crate::ports::checkpoints_forks::checkpoint_restore_safety::CoordinatedTurnStart::new(
                 ProviderTurnStartService {
+                    worktree_restore: restore.clone(),
                     projections: reader.clone(),
                     committer: events.clone(),
                     sessions: session_directory.clone(),
@@ -735,9 +813,9 @@ impl OrchestrationRuntime {
             database: database.clone(),
             settings: settings.clone(),
             hydrator: Arc::new(NoLegacyTranscript),
-            worktree_restore: Arc::new(RebindingWorktreeRestore {
-                inner: worktree_restore.unwrap_or_else(|| Arc::new(NoWorktreeRestore)),
-                repositories: repositories.clone(),
+            worktree_restore: Arc::new(LeasedWorktreeRestore {
+                inner: restore,
+                reader: reader.clone(),
             }),
             signals,
             clock: clock.clone(),
@@ -1170,6 +1248,31 @@ impl OrchestrationRuntime {
             }
         }
         Ok(receipt)
+    }
+
+    /// Finish any previously verified binding write before starting a new PTY.
+    /// The terminal manager requests recreation only if launch reports a missing cwd.
+    pub async fn lease_terminal_worktree(
+        &self,
+        thread: OrchestrationV2AppThread,
+    ) -> Result<Option<TerminalWorktreeLease>> {
+        let restore = &self.management_parts.worktree_restore;
+        let Some(inner) = &restore.inner else {
+            return Ok(None);
+        };
+        let Some(guards) = restore.acquire(&thread).await? else {
+            return Ok(None);
+        };
+        if let Some(path) = &thread.worktree_path {
+            self.repositories
+                .finish_pending_binding(std::path::Path::new(&path.0))
+                .await?;
+        }
+        Ok(Some(TerminalWorktreeLease {
+            _guards: guards,
+            thread,
+            restore: inner.clone(),
+        }))
     }
 
     /// Records the repository a project folder belongs to (t3-git H-1), for hosts that bind

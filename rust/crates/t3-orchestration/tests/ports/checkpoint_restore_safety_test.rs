@@ -384,3 +384,36 @@ async fn cancelled_start_waiting_for_cleanup_never_runs_startup_or_leaks_reserva
         .await?;
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_keeps_the_named_workspace_leased_after_unlinking_a_leftover() -> Result<()> {
+    use t3_orchestration::ports::checkpoints_forks::checkpoint_service::WorkspaceLocks;
+    let temp = tempfile::tempdir()?;
+    let target = temp.path().join("leftover");
+    let named = temp.path().join("checkout");
+    std::fs::create_dir(&target)?;
+    std::os::unix::fs::symlink(&target, &named)?;
+    let locks = WorkspaceLocks::default();
+    let recovery = locks.acquire_for_recovery(&named).await?;
+    use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::{
+        ReservationKind, WorkspaceReservations,
+    };
+    let reservations = std::sync::Arc::new(WorkspaceReservations::default());
+    let token = tokio_util::sync::CancellationToken::new();
+    let start = reservations
+        .reserve(&named, ReservationKind::TurnStart, &token)
+        .await?;
+    std::fs::remove_file(&named)?;
+    let normal = locks.acquire(&named);
+    tokio::pin!(normal);
+    tokio::select! { biased; _ = &mut normal => panic!("new lease entered during recovery"), () = std::future::ready(()) => {} }
+    let rollback = reservations.reserve(&named, ReservationKind::Restore, &token);
+    tokio::pin!(rollback);
+    tokio::select! { biased; _ = &mut rollback => panic!("rollback entered during startup"), () = std::future::ready(()) => {} }
+    drop(start);
+    let _reserved = rollback.await?;
+    drop(recovery);
+    let _acquired = normal.await?;
+    Ok(())
+}

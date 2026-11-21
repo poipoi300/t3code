@@ -79,10 +79,15 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
         };
         // Through the project root's saved binding: a repository planted there refuses the
         // recreation instead of supplying the checkout (re-review 4 F6).
-        let git = self
+        let destination = PathBuf::from(&path.0);
+        let (git, source, before) = self
             .backend
-            .git(PathBuf::from(project.workspace_root))
-            .await?
+            .worktree_source(PathBuf::from(project.workspace_root), destination.clone())
+            .await?;
+        let git = git
+            .with_repository_binding(source)
+            .await
+            .map_err(git_error)?
             .with_cancellation(cancellation.clone());
         git.execute(&["worktree", "prune"], Default::default())
             .await
@@ -93,11 +98,9 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
         ))
         .await
         .map_err(git_error)?;
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        // The checkout this recovery made: the one trusted rebind (re-review 4 F1).
-        self.backend.bind_scope(PathBuf::from(&path.0), true).await
+        self.backend
+            .finish_rollback_recreation(before, &cancellation)
+            .await
     }
 }
 
@@ -150,44 +153,40 @@ impl GitCheckpointBackend {
         root: PathBuf,
         destination: PathBuf,
     ) -> Result<(Git, t3_git::RepositoryBinding, BeforeRecreation)> {
-        let store = self
-            .bindings
-            .as_ref()
-            .ok_or(Error::Unsupported("repository binding store"))?;
-        let saved = match store.get(&root).await? {
-            Some(saved) => saved,
-            None => {
-                self.bind_scope(root.clone(), false).await?;
-                store
-                    .get(&root)
-                    .await?
-                    .ok_or(Error::Unsupported("missing project binding"))?
-            }
+        let git = self.handle(root.clone());
+        let (source, previous) = if let Some(store) = &self.bindings {
+            self.bind_scope(root.clone(), false).await?;
+            let saved = store
+                .get(&root)
+                .await?
+                .ok_or(Error::Unsupported("missing project binding"))?;
+            let saved: SavedBinding = serde_json::from_value(saved)?;
+            (saved.repository, store.get(&destination).await?)
+        } else {
+            (git.bind_repository().await.map_err(git_error)?, None)
         };
-        let saved: SavedBinding = serde_json::from_value(saved)?;
-        let binding = saved.repository.ok_or(Error::Service {
+        let binding = source.ok_or(Error::Service {
             operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
             detail: "The project folder was recorded without a Git repository.".into(),
         })?;
         let before = BeforeRecreation {
-            previous: store.get(&destination).await?,
+            previous,
             destination,
             source: binding.clone(),
         };
-        Ok((self.handle(root), binding, before))
+        Ok((git, binding, before))
     }
 
     /// Capture the new checkout's file IDs before any fallible binding-store IO.
     pub async fn record_recreated(&self, before: BeforeRecreation) -> Result<()> {
-        let expected_root = std::fs::canonicalize(&before.destination)?;
-        let git = self.handle(before.destination.clone());
-        let identity = git.rebind_repository().await.map_err(git_error)?
-            .filter(|id| id.top_level == expected_root && id.git_dir != id.common_dir && id.common_dir == before.source.common_dir
-                && id.ids.as_ref().map(|v| v.common_dir) == before.source.ids.as_ref().map(|v| v.common_dir))
-            .ok_or(Error::Service {
-                operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
-                detail: "The recreated checkout no longer belongs to the project repository.".into(),
-            })?;
+        let identity = self
+            .handle(before.destination.clone())
+            .bind_recreated_worktree(&before.source)
+            .await
+            .map_err(git_error)?;
+        if self.bindings.is_none() {
+            return Ok(());
+        }
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -198,6 +197,22 @@ impl GitCheckpointBackend {
                     identity,
                 },
             );
+        Ok(())
+    }
+
+    async fn finish_rollback_recreation(
+        &self,
+        before: BeforeRecreation,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        // Git has completed the creation. Finish its verified binding even if
+        // the caller cancelled between checkout creation and this finalizer.
+        let destination = before.destination.clone();
+        self.record_recreated(before).await?;
+        self.finish_pending_binding(&destination).await?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         Ok(())
     }
 
@@ -505,10 +520,9 @@ impl CheckpointMetadata for GitCheckpointBackend {
     }
 
     async fn bind_recreated_scope(&self, cwd: PathBuf) -> Result<()> {
-        if self.pending_for(&cwd).is_some() {
-            return self.finish_pending_binding(&cwd).await;
-        }
-        self.bind_scope(cwd, true).await
+        // Another checkpoint operation may already have consumed the proof.
+        // Completion without that proof conveys no authority to trust a new identity.
+        self.finish_pending_binding(&cwd).await
     }
 
     async fn finish_pending_binding(&self, cwd: &Path) -> Result<()> {
@@ -851,6 +865,76 @@ mod tests {
         assert!(backend.is_repository(path.clone()).await?);
         let saved = std::fs::read_to_string(file)?;
         assert!(saved.contains("common_dir"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_rollback_recreation_retains_its_verified_binding() -> Result<()> {
+        let repo = Repository::new().await?;
+        let store = bindings_at(repo._temp.path().join("bindings.json"));
+        let backend = GitCheckpointBackend::new(isolated_git(&repo._temp.path().join("home")))
+            .with_repository_bindings(store.clone());
+        let path = repo._temp.path().join("linked");
+        let (_, _, before) = backend
+            .worktree_source(repo.root.clone(), path.clone())
+            .await?;
+        repo.command(&[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            path.to_str().expect("path"),
+        ])
+        .await?;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            backend.finish_rollback_recreation(before, &cancelled).await,
+            Err(Error::Cancelled)
+        ));
+        backend.finish_pending_binding(&path).await?;
+        assert!(
+            store.get(&path).await?.is_some(),
+            "completed checkout lost its verified identity after cancellation"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completing_a_consumed_recreation_cannot_trust_a_different_checkout() -> Result<()> {
+        let repo = Repository::new().await?;
+        let store = bindings_at(repo._temp.path().join("bindings.json"));
+        let backend = GitCheckpointBackend::new(isolated_git(&repo._temp.path().join("home")))
+            .with_repository_bindings(store.clone());
+        let path = repo._temp.path().join("linked");
+        let folder = path.to_str().expect("fixture path");
+        let (_, _, before) = backend
+            .worktree_source(repo.root.clone(), path.clone())
+            .await?;
+        repo.command(&["worktree", "add", "-b", "first", folder])
+            .await?;
+        backend.record_recreated(before).await?;
+        backend.finish_pending_binding(&path).await?;
+        let saved = store.get(&path).await?.expect("durable binding");
+        repo.command(&[
+            "worktree",
+            "move",
+            folder,
+            repo._temp
+                .path()
+                .join("moved")
+                .to_str()
+                .expect("fixture path"),
+        ])
+        .await?;
+        repo.command(&["worktree", "add", "-b", "second", folder])
+            .await?;
+        backend.bind_recreated_scope(path.clone()).await?;
+        assert_eq!(
+            store.get(&path).await?,
+            Some(saved),
+            "duplicate completion changed the saved identity"
+        );
         Ok(())
     }
 

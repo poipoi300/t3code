@@ -25,6 +25,7 @@ use t3_contracts::orchestration_v2_id_table::IdOrIndex;
 use tokio_util::sync::CancellationToken;
 
 pub struct ProviderTurnStartService {
+    pub worktree_restore: Option<Arc<dyn ThreadWorktreeRestore>>,
     pub projections: Arc<dyn ProjectionReader>,
     pub committer: Arc<dyn EventCommitter>,
     pub sessions: Arc<dyn SessionDirectory>,
@@ -260,9 +261,13 @@ impl ProviderTurnStartService {
         cancellation: CancellationToken,
         projector: Option<Arc<dyn ComposerContextProjector>>,
     ) -> Result<Option<RunExecutionHandle>> {
+        let context = self
+            .projections
+            .turn_start_context(thread_id.clone(), run_id.clone())
+            .await?;
         self.start_from(
-            thread_id,
-            run_id,
+            (thread_id, run_id),
+            context,
             policy,
             will_retry,
             cancellation,
@@ -271,19 +276,16 @@ impl ProviderTurnStartService {
         .await
     }
 
-    async fn start_from(
+    pub(crate) async fn start_from(
         &self,
-        thread_id: ThreadId,
-        run_id: RunId,
+        ids: (ThreadId, RunId),
+        context: TurnStartContext,
         policy: &dyn RuntimePolicyResolver,
         will_retry: bool,
         cancellation: CancellationToken,
         projector: Option<Arc<dyn ComposerContextProjector>>,
     ) -> Result<Option<RunExecutionHandle>> {
-        let context = self
-            .projections
-            .turn_start_context(thread_id.clone(), run_id.clone())
-            .await?;
+        let (thread_id, run_id) = ids;
         let projection = context.projection;
         let Some(run) = projection
             .runs
@@ -356,6 +358,19 @@ impl ProviderTurnStartService {
             return self.empty_compaction(&state).await;
         }
         let prepared_message = turn_message_with_projector(message, projector.as_deref())?;
+        if let Some(restore) = &self.worktree_restore
+            && let Err(error) = restore.restore(projection.thread.clone()).await
+        {
+            return self
+                .failed(
+                    &state,
+                    "worktree-recreate-failure",
+                    "Couldn't recreate thread workspace",
+                    error,
+                    will_retry,
+                )
+                .await;
+        }
         let recovery = match self.projections.runtime_recovery(thread_id.clone()).await {
             Ok(recovery) => recovery,
             Err(error) => {

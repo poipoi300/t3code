@@ -1801,6 +1801,8 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
     let pause = Arc::new(RestorePause::default());
     let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
     let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tracked = f.folder.join("tracked.txt");
+    std::fs::write(&tracked, "shared checkout edit").unwrap();
     let launch = setup_preview_launch(&f, &ready);
     let (mut socket, mut client) = session_socket(&f.server, &f.cookie).await;
     let mut waiting = pause.gate.waiting();
@@ -1827,11 +1829,15 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
         }
         pause.release.notify_one();
         let (restored, launched) = tokio::join!(rollback, call);
+        // The new thread has claimed this checkout during provider rollback.
+        // The post-provider ownership check must preserve its files.
         assert!(
-            restored
-                .as_deref()
-                .is_none_or(|reason| reason.contains("isolated worktree")),
-            "{restored:?}"
+            restored.is_some(),
+            "restore accepted a newly shared checkout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&tracked).unwrap(),
+            "shared checkout edit"
         );
         let launched = launched.unwrap();
         assert_eq!(launched["_tag"], "Success", "{launched}");
@@ -1841,6 +1847,14 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
         .expect("setup must resume")
         .unwrap();
     f.server.shutdown().await.unwrap();
+    // The client sees the generic rollback failure. The journal keeps the reason.
+    let db =
+        t3_persistence::rusqlite::Connection::open(f.home.join("userdata/statev2.sqlite")).unwrap();
+    let reason: String = db.query_row(
+        "SELECT last_error FROM orchestration_v2_effect_outbox WHERE command_id=?1 AND status='failed'",
+        ["command:hold-setup"], |row| row.get(0),
+    ).unwrap();
+    assert!(reason.contains("isolated worktree"), "{reason}");
 }
 
 /// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,

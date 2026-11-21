@@ -24,7 +24,22 @@ impl WorkspaceLocks {
     }
 
     pub async fn acquire(&self, cwd: &Path) -> Result<OwnedMutexGuard<()>> {
-        let key = canonicalize_missing(cwd)?;
+        Ok(self.lock_key(canonicalize_missing(cwd)?).await)
+    }
+
+    /// A linked leftover can be unlinked during recreation. Hold both the current
+    /// target and the eventual destination so an ordinary workspace lease conflicts
+    /// with the recovery on either side of that change.
+    pub async fn acquire_for_recovery(&self, cwd: &Path) -> Result<Vec<OwnedMutexGuard<()>>> {
+        let keys = super::checkpoint_restore_safety::workspace_keys(cwd)?;
+        let mut held = Vec::with_capacity(keys.len());
+        for key in keys {
+            held.push(self.lock_key(key).await);
+        }
+        Ok(held)
+    }
+
+    async fn lock_key(&self, key: PathBuf) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.0.lock().unwrap_or_else(|e| e.into_inner());
             locks.retain(|_, value| value.strong_count() > 0);
@@ -36,7 +51,7 @@ impl WorkspaceLocks {
                 lock
             }
         };
-        Ok(lock.lock_owned().await)
+        lock.lock_owned().await
     }
 }
 
@@ -108,6 +123,12 @@ pub trait CheckpointMetadata: Send + Sync {
     /// `replace` is for a trusted recreation of the folder. A backend without Git has nothing to
     /// record.
     async fn bind_scope(&self, _cwd: PathBuf, _replace: bool) -> Result<()> {
+        Ok(())
+    }
+    async fn bind_recreated_scope(&self, cwd: PathBuf) -> Result<()> {
+        self.bind_scope(cwd, true).await
+    }
+    async fn finish_pending_binding(&self, _cwd: &Path) -> Result<()> {
         Ok(())
     }
     async fn query_diff(

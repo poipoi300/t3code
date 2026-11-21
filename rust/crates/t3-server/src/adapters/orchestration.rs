@@ -167,6 +167,107 @@ pub struct RestorePorts {
     pub writers: Option<Arc<dyn t3_orchestration::api::ThreadWriters>>,
     /// Managed worktree folders at start, where rollback may recreate a missing worktree.
     pub managed_worktrees: Vec<std::path::PathBuf>,
+    #[cfg(all(feature = "local-services", feature = "workspace"))]
+    pub authority: Arc<crate::workspaces::EnvironmentWorkspaces>,
+}
+
+#[cfg(all(feature = "local-services", feature = "workspace"))]
+struct ThreadRestore {
+    database: StoreDatabase,
+    checkpoints: Arc<t3_orchestration::runtime::checkpoints::GitCheckpointBackend>,
+    authority: Arc<crate::workspaces::EnvironmentWorkspaces>,
+    leases: Arc<t3_workspace::leases::WorkspaceLeases>,
+    scratch: std::path::PathBuf,
+}
+
+#[cfg(all(feature = "local-services", feature = "workspace"))]
+#[async_trait::async_trait]
+impl t3_orchestration::api::ThreadWorktreeRestore for ThreadRestore {
+    async fn restore(&self, thread: OrchestrationV2AppThread) -> OrchestrationResult<bool> {
+        use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::expanded_id;
+        use t3_workspace::restore::{RestoreOutcome, WorktreeRestore};
+        let Some(path) = thread.worktree_path else {
+            return Ok(false);
+        };
+        let id = expanded_id(&thread.project_id)?;
+        let Some(project) = self
+            .database
+            .read(move |db| projects::get(db, &id, false))
+            .await?
+        else {
+            return Ok(false);
+        };
+        let root = std::path::Path::new(&project.workspace_root);
+        let restore = WorktreeRestore {
+            leases: self.leases.clone(),
+            managed_roots: self.authority.managed_directories().await,
+            scratch_root: self.scratch.clone(),
+        };
+        use t3_orchestration::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION;
+        let mut before = None;
+        let source = async {
+            let (git, binding, saved) = self
+                .checkpoints
+                .worktree_source(root.to_owned(), path.0.clone().into())
+                .await
+                .map_err(|error| match error {
+                    OrchestrationError::Service {
+                        operation: REPOSITORY_CHANGED_OPERATION,
+                        ..
+                    } => t3_workspace::Error::Git(t3_git::GitError::RepositoryChanged {
+                        path: root.into(),
+                        detail: "The project folder no longer matches its recorded repository.",
+                    }),
+                    error => t3_workspace::Error::Invalid(error.to_string()),
+                })?;
+            before = Some(saved);
+            Ok((git, binding))
+        };
+        let outcome = restore
+            .restore(
+                Some(root),
+                Some(std::path::Path::new(&path.0)),
+                thread.branch.as_ref().map(|b| b.0.as_str()),
+                source,
+            )
+            .await
+            .map_err(|error| {
+                let cause = match &error {
+                    t3_workspace::Error::WorktreeRecreate { source, .. } => source.as_ref(),
+                    error => error,
+                };
+                if let t3_workspace::Error::Git(t3_git::GitError::RepositoryChanged {
+                    detail,
+                    ..
+                }) = cause
+                {
+                    return OrchestrationError::Service {
+                        operation: REPOSITORY_CHANGED_OPERATION,
+                        detail: (*detail).into(),
+                    };
+                }
+                OrchestrationError::Service {
+                    operation: "worktree.recreate",
+                    detail: error.to_string(),
+                }
+            })?;
+        match outcome {
+            RestoreOutcome::CheckoutCreated => {
+                self.checkpoints
+                    .record_recreated(before.ok_or(OrchestrationError::Unsupported(
+                        "missing checkout recovery source",
+                    ))?)
+                    .await?
+            }
+            RestoreOutcome::Unchanged => {
+                self.checkpoints
+                    .finish_pending_binding(std::path::Path::new(&path.0))
+                    .await?
+            }
+            RestoreOutcome::ScratchCreated => {}
+        }
+        Ok(outcome == RestoreOutcome::CheckoutCreated)
+    }
 }
 
 impl OrchestrationAdapter {
@@ -243,6 +344,16 @@ impl OrchestrationAdapter {
             checkpoints.clone(),
             clock,
         );
+        #[cfg(feature = "workspace")]
+        {
+            ports.worktree_restore = Some(Arc::new(ThreadRestore {
+                database: StoreDatabase(context.database.clone()),
+                checkpoints: checkpoints.clone(),
+                authority: restore.authority,
+                leases: Arc::default(),
+                scratch: context.local.config.paths.base_dir.join("scratch"),
+            }));
+        }
         // Checkpoint rollback with its worktree recovery; without it every rollback is refused.
         // The managed folders are those at start: a recovery outside them is refused.
         ports.rollback_workspaces = Some(Arc::new(

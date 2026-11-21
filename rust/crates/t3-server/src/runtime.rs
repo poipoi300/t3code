@@ -11,7 +11,7 @@ pub struct RunningServer {
     /// The bound address; with `--port 0` this carries the port the OS chose.
     pub address: SocketAddr,
     pub pairing_credential: String,
-    /// RPC methods this server serves (registered, not `NotImplemented`), of the contract's 220.
+    /// RPC methods this server serves (registered, not `NotImplemented`), including Rust-only extensions.
     pub rpc_methods_served: usize,
     /// The contract methods this server answers with Effect's unknown-request-tag defect.
     pub unserved_methods: Vec<&'static str>,
@@ -79,6 +79,8 @@ impl Drop for RunningServer {
 /// What a host injects into the composition root beyond configuration.
 #[derive(Default, Clone)]
 pub struct StartOptions {
+    /// Admission shared by every host writer in this environment.
+    pub writer_gate: Option<Arc<crate::writers::FolderGate>>,
     #[cfg(feature = "providers")]
     pub provider_effects: Option<Arc<crate::adapters::providers::ProviderEffects>>,
     /// Provider adapters for the orchestration runtime's registry. The binary passes none until
@@ -390,7 +392,7 @@ async fn start_domains(
     domains.insert_runtime(crate::adapters::host::HostAdapter::start(&context).await?)?;
     // Terminals, setup scripts, file writes and Git actions wait while a restore holds their
     // folder (t3-git H-2).
-    let writer_gate = Arc::new(crate::writers::FolderGate::default());
+    let writer_gate = options.writer_gate.clone().unwrap_or_default();
     domains.insert(writer_gate.clone())?;
     #[cfg(feature = "workspace")]
     let workspaces = crate::workspaces::EnvironmentWorkspaces::new(&context);
@@ -504,7 +506,8 @@ async fn start_domains(
                 as Arc<dyn t3_orchestration::api::ThreadWriters>
         });
     #[cfg(all(feature = "orchestration", not(feature = "terminal")))]
-    let writers = None;
+    let writers = Some(Arc::new(crate::writers::RpcWriters(writer_gate.clone()))
+        as Arc<dyn t3_orchestration::api::ThreadWriters>);
     #[cfg(all(feature = "orchestration", feature = "workspace"))]
     let managed_worktrees = authority.managed_directories().await;
     #[cfg(all(feature = "orchestration", not(feature = "workspace")))]
@@ -527,11 +530,22 @@ async fn start_domains(
             crate::adapters::orchestration::RestorePorts {
                 writers,
                 managed_worktrees,
+                #[cfg(feature = "workspace")]
+                authority: authority.clone(),
             },
             attachment_port,
         )
         .await?,
     )?;
+    #[cfg(all(feature = "workspace", feature = "orchestration", feature = "terminal"))]
+    if let (Some(terminal), Some(runtime)) = (
+        domains.get::<crate::adapters::terminal::TerminalAdapter>(),
+        domains
+            .get::<crate::adapters::orchestration::OrchestrationAdapter>()
+            .and_then(|adapter| adapter.composed().cloned()),
+    ) {
+        terminal.bind_worktree_recovery(&runtime);
+    }
     #[cfg(all(feature = "workspace", feature = "orchestration"))]
     if let (Some(attachments), Some(runtime)) = (
         &attachments,

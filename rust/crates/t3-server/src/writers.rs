@@ -191,3 +191,23 @@ fn plain(path: &Path) -> PathBuf {
         _ => text.into(),
     }
 }
+
+/// File and Git RPCs still write when the terminal feature is disabled.
+#[cfg(all(feature = "orchestration", not(feature = "terminal")))]
+pub(crate) struct RpcWriters(pub Arc<FolderGate>);
+
+#[cfg(all(feature = "orchestration", not(feature = "terminal")))]
+#[async_trait::async_trait]
+impl t3_orchestration::api::ThreadWriters for RpcWriters {
+    async fn hold(
+        &self,
+        thread: t3_orchestration::api::ThreadId,
+        cwd: PathBuf,
+    ) -> t3_orchestration::error::Result<t3_orchestration::api::WriterHold> {
+        let (guard, running) = self.0.hold(&thread.0, &cwd);
+        Ok(t3_orchestration::api::WriterHold {
+            guard: Box::new(guard),
+            running,
+        })
+    }
+}

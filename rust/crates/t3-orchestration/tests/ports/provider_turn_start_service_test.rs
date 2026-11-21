@@ -87,6 +87,7 @@ pub fn execution(h: &Harness) -> Arc<RunExecutionService> {
 
 pub fn service(h: &Harness, sessions: Arc<dyn SessionDirectory>) -> ProviderTurnStartService {
     ProviderTurnStartService {
+        worktree_restore: None,
         projections: h.reader.clone(),
         committer: h.sink.clone(),
         sessions,
@@ -423,6 +424,56 @@ async fn completed_runs_are_read_from_the_turn_start_snapshot_without_using_lega
     );
     assert!(calls.try_recv().is_err());
     service.execution.shutdown().await
+}
+
+#[tokio::test]
+async fn a_turn_moved_while_waiting_must_reserve_its_new_folder() -> Result<()> {
+    use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::{
+        CoordinatedTurnStart, ReservationKind, WorkspaceCoordination, WorkspaceReservations,
+    };
+    let h = Harness::new().await?;
+    seed(&h).await?;
+    let dir = tempfile::tempdir()?;
+    let old = dir.path().join("old");
+    let new = dir.path().join("new");
+    let id = ThreadId("thread:test".into());
+    let run = RunId("run:test".into());
+    let mut context = h.reader.turn_start_context(id.clone(), run.clone()).await?;
+    context.projection.runs[0].status = OrchestrationV2RunStatus::Completed;
+    let mut first = context.projection.thread.clone();
+    first.worktree_path = Some(decode(json!(old)));
+    context.projection.thread.worktree_path = Some(decode(json!(new)));
+    let reader = Arc::new(FakeProjectionReader::default());
+    reader.thread.push(Ok(Some(first)));
+    reader
+        .thread
+        .push(Ok(Some(context.projection.thread.clone())));
+    reader.turn_start_context.push(Ok(context.clone()));
+    reader.turn_start_context.push(Ok(context));
+    let reservations = Arc::new(WorkspaceReservations::default());
+    let cancellation = CancellationToken::new();
+    let held = reservations
+        .reserve(&new, ReservationKind::Restore, &cancellation)
+        .await?;
+    let (adapter, _calls) = h.fake();
+    let mut inner = service(&h, sessions(Arc::new(adapter)));
+    inner.projections = reader.clone();
+    let start = CoordinatedTurnStart::new(
+        inner,
+        reader,
+        h.database.stores.clone(),
+        WorkspaceCoordination::new(reservations.clone(), Arc::default()),
+    );
+    let policy = FixedRuntimePolicy::new(policy());
+    let turn = start.start_resolving(id, run, &policy, false, cancellation);
+    tokio::pin!(turn);
+    tokio::select! {
+        waited = reservations.waiting_on(&new) => waited?,
+        result = &mut turn => panic!("startup proceeded without reserving the new workspace: {:?}", result.is_ok()),
+    }
+    drop(held);
+    assert!(turn.await?.is_none());
+    Ok(())
 }
 
 #[tokio::test]
