@@ -9,7 +9,6 @@ use t3_contracts::{
     project::*,
 };
 use t3_workspace::{
-    attachments,
     entries::WorkspaceEntries,
     filesystem::WorkspaceFileSystem,
     paths::{self, InternalPaths, KnownWorkspaces},
@@ -161,6 +160,8 @@ async fn short_path(path: &Path) -> PathBuf {
 #[cfg(windows)]
 #[tokio::test]
 async fn upload_resolution_rejects_a_real_short_alias() {
+    use t3_workspace::attachments;
+
     let tmp = tempfile::tempdir().expect("temp");
     let id = attachments::pending_id(None);
     let path = tmp.path().join(format!("{id}.png"));
