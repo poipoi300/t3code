@@ -3,7 +3,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use t3_workspace::restore::WorktreeRestore;
+use t3_workspace::restore::{RestoreOutcome, WorktreeRestore};
+
+async fn source(root: &Path) -> t3_workspace::Result<(t3_git::Git, t3_git::RepositoryBinding)> {
+    let git = t3_git::Git::new(root);
+    let binding = git.bind_repository().await?.expect("fixture repository");
+    Ok((git, binding))
+}
 async fn git(root: &Path, args: &[&str]) {
     let mut options = t3_process::ProcessOptions::new("git").args(args.iter().copied());
     options.cwd = Some(root.into());
@@ -65,12 +71,42 @@ async fn missing_managed_checkout_and_leftover_folders_restore_once_under_the_sh
     fs::create_dir_all(path.join("node_modules/cache")).expect("leftovers");
     fs::create_dir(path.join(".next")).expect("next");
     let restore = fixture(&root);
-    let (a, b) = tokio::join!(
-        restore.restore(Some(&repo), Some(&path), Some("saved")),
-        restore.restore(Some(&repo), Some(&path), Some("saved"))
+    let other = root.join("other");
+    fs::create_dir(&other).expect("second project");
+    git(&other, &["init", "-b", "main"]).await;
+    let (_, other_binding) = source(&other).await.expect("second binding");
+    let refused = restore
+        .restore(Some(&repo), Some(&path), Some("saved"), async {
+            Ok((t3_git::Git::new(&repo), other_binding))
+        })
+        .await;
+    assert!(matches!(
+        refused,
+        Err(t3_workspace::Error::Git(
+            t3_git::GitError::RepositoryChanged { .. }
+        ))
+    ));
+    assert!(path.join("node_modules/cache").is_dir());
+    let changed = restore
+        .restore(Some(&repo), Some(&path), Some("saved"), async {
+            fs::write(path.join("notes"), "keep").expect("concurrent file");
+            source(&repo).await
+        })
+        .await
+        .expect("recheck leftovers");
+    assert_eq!(changed, RestoreOutcome::Unchanged);
+    assert_eq!(
+        fs::read_to_string(path.join("notes")).expect("notes"),
+        "keep"
     );
-    a.expect("restore a");
-    b.expect("restore b");
+    fs::remove_file(path.join("notes")).expect("reset fixture");
+    let (a, b) = tokio::join!(
+        restore.restore(Some(&repo), Some(&path), Some("saved"), source(&repo)),
+        restore.restore(Some(&repo), Some(&path), Some("saved"), source(&repo))
+    );
+    let outcomes = [a.expect("restore a"), b.expect("restore b")];
+    assert!(outcomes.contains(&RestoreOutcome::CheckoutCreated));
+    assert!(outcomes.contains(&RestoreOutcome::Unchanged));
     assert_eq!(
         fs::read_to_string(path.join("tracked.txt")).expect("restored"),
         "restored"
@@ -78,10 +114,13 @@ async fn missing_managed_checkout_and_leftover_folders_restore_once_under_the_sh
     assert!(path.join(".git").is_file());
     assert!(!path.join("node_modules").exists());
     fs::remove_dir_all(&path).expect("remove fixture checkout");
-    restore
-        .restore(Some(&repo), Some(&path), Some("saved"))
-        .await
-        .expect("missing restore");
+    assert_eq!(
+        restore
+            .restore(Some(&repo), Some(&path), Some("saved"), source(&repo))
+            .await
+            .expect("missing restore"),
+        RestoreOutcome::CheckoutCreated
+    );
     assert!(path.join("tracked.txt").is_file());
 }
 #[tokio::test]
@@ -91,10 +130,18 @@ async fn branchless_restore_only_recreates_a_direct_child_of_the_projects_verifi
     let restore = fixture(&root);
     fs::create_dir(&restore.scratch_root).expect("scratch");
     let direct = restore.scratch_root.join("thread");
-    restore
-        .restore(Some(&restore.scratch_root), Some(&direct), None)
-        .await
-        .expect("scratch restore");
+    assert_eq!(
+        restore
+            .restore(
+                Some(&restore.scratch_root),
+                Some(&direct),
+                None,
+                source(&restore.scratch_root)
+            )
+            .await
+            .expect("scratch restore"),
+        RestoreOutcome::ScratchCreated
+    );
     assert!(direct.is_dir());
     for (project, path) in [
         (restore.scratch_root.clone(), root.join("outside")),
@@ -107,10 +154,13 @@ async fn branchless_restore_only_recreates_a_direct_child_of_the_projects_verifi
             restore.scratch_root.join("wrong-project"),
         ),
     ] {
-        restore
-            .restore(Some(&project), Some(&path), None)
-            .await
-            .expect("no-op");
+        assert_eq!(
+            restore
+                .restore(Some(&project), Some(&path), None, source(&project))
+                .await
+                .expect("no-op"),
+            RestoreOutcome::Unchanged
+        );
         assert!(!path.exists());
     }
 }
@@ -125,30 +175,37 @@ async fn leaves_user_files_and_unmanaged_paths_alone_and_surfaces_missing_base()
     let user = root.join("worktrees/repo/user");
     fs::create_dir_all(&user).expect("user");
     fs::write(user.join("notes"), "keep").expect("notes");
-    restore
-        .restore(Some(&repo), Some(&user), Some("user"))
-        .await
-        .expect("user no-op");
+    assert_eq!(
+        restore
+            .restore(Some(&repo), Some(&user), Some("user"), source(&repo))
+            .await
+            .expect("user no-op"),
+        RestoreOutcome::Unchanged
+    );
     assert_eq!(
         fs::read_to_string(user.join("notes")).expect("notes"),
         "keep"
     );
     let outside = root.join("external/thread");
-    restore
-        .restore(Some(&repo), Some(&outside), Some("branch"))
-        .await
-        .expect("unmanaged no-op");
+    assert_eq!(
+        restore
+            .restore(Some(&repo), Some(&outside), Some("branch"), source(&repo))
+            .await
+            .expect("unmanaged no-op"),
+        RestoreOutcome::Unchanged
+    );
     assert!(!outside.exists());
-    assert!(
+    assert!(matches!(
         restore
             .restore(
                 Some(&repo),
                 Some(&root.join("worktrees/repo/missing")),
-                Some("missing")
+                Some("missing"),
+                source(&repo)
             )
-            .await
-            .is_err()
-    );
+            .await,
+        Err(t3_workspace::Error::WorktreeRecreateNoBase { .. })
+    ));
 }
 
 #[tokio::test]
@@ -206,7 +263,12 @@ async fn recreates_deleted_branches_from_pushed_refs_before_the_current_project_
     let restore = fixture(&root);
     let published = root.join("worktrees/repo/published");
     restore
-        .restore(Some(&repo), Some(&published), Some("published"))
+        .restore(
+            Some(&repo),
+            Some(&published),
+            Some("published"),
+            source(&repo),
+        )
         .await
         .expect("published restore");
     assert_eq!(
@@ -215,7 +277,7 @@ async fn recreates_deleted_branches_from_pushed_refs_before_the_current_project_
     );
     let fresh = root.join("worktrees/repo/fresh");
     restore
-        .restore(Some(&repo), Some(&fresh), Some("fresh"))
+        .restore(Some(&repo), Some(&fresh), Some("fresh"), source(&repo))
         .await
         .expect("fresh restore");
     assert_eq!(
