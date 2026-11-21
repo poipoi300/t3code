@@ -161,15 +161,36 @@ mod host {
     /// The Android Keystore or the iOS Keychain.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
-        // Supply NSH's process VM before opening the Keystore. The NDK lookup needs API 31.
+        let open = || {
+            mobile_config(
+                || NativeConfig::mobile(dir.clone()).map_err(|error| error.to_string()),
+                || in_memory_config(&dir),
+            )
+        };
         #[cfg(target_os = "android")]
-        if let Some(vm) = nsh::java_vm() {
-            t3_platform::set_android_vm(vm);
+        return with_process_vm(
+            nsh::java_vm(),
+            |vm| {
+                t3_platform::set_android_vm(vm);
+            },
+            open,
+        );
+        #[cfg(not(target_os = "android"))]
+        open()
+    }
+
+    /// Registers the host's process VM, then opens the key store. On Android 8 to 11 (API 26 to
+    /// 30) the Keystore reaches Java only through this VM: the NDK lookup needs API 31.
+    #[cfg(any(target_os = "android", test))]
+    fn with_process_vm<V, T>(
+        vm: Option<V>,
+        register: impl FnOnce(V),
+        open: impl FnOnce() -> T,
+    ) -> T {
+        if let Some(vm) = vm {
+            register(vm);
         }
-        mobile_config(
-            || NativeConfig::mobile(dir.clone()).map_err(|error| error.to_string()),
-            || in_memory_config(&dir),
-        )
+        open()
     }
 
     /// Keys in process memory, over a directory of its own emptied first: what a run without a
@@ -257,7 +278,37 @@ mod host {
     }
     #[cfg(test)]
     mod tests {
-        use super::{fresh_in_memory_dir, mobile_config};
+        use super::{fresh_in_memory_dir, mobile_config, with_process_vm};
+        use std::cell::RefCell;
+
+        // NSH fork review R1: nothing failed when the VM was registered after the key store
+        // opened, which leaves Android 8 to 11 with keys in memory only.
+        #[test]
+        fn the_process_vm_is_registered_before_the_key_store_opens() {
+            let events = RefCell::new(Vec::new());
+            let opened = with_process_vm(
+                Some("vm"),
+                |vm| events.borrow_mut().push(format!("register {vm}")),
+                || {
+                    events.borrow_mut().push("open".to_owned());
+                    "key store"
+                },
+            );
+            assert_eq!(opened, "key store");
+            assert_eq!(*events.borrow(), ["register vm", "open"]);
+
+            events.borrow_mut().clear();
+            with_process_vm(
+                None::<&str>,
+                |vm| events.borrow_mut().push(format!("register {vm}")),
+                || events.borrow_mut().push("open".to_owned()),
+            );
+            assert_eq!(
+                *events.borrow(),
+                ["open"],
+                "no VM: the key store still opens"
+            );
+        }
 
         // Platform re-review 2, B2: the fallback shared the persistent directory and discarded the
         // rows a run with the Keystore had saved.
