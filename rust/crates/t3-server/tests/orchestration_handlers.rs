@@ -259,6 +259,21 @@ fn served_methods_are_registered_and_the_rest_stay_unimplemented_with_or_without
 }
 
 #[tokio::test]
+async fn descriptor_contains_linked_refresh_capability_before_domains_start() {
+    let fixture = Fixture::new().await;
+    assert_eq!(
+        fixture
+            .services
+            .local
+            .environment
+            .capabilities
+            .linked_thread_refreshes,
+        cfg!(feature = "pull-requests").then_some(true)
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn thread_projection_serves_the_seeded_thread_and_types_a_missing_one() {
     let fixture = Fixture::new().await;
     fixture.seed().await;

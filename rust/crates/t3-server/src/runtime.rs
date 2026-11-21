@@ -172,7 +172,7 @@ async fn start_configured(
     };
     let address = listener.local_addr()?;
     let (account_home, environment) = (inputs.home.clone(), inputs.env.clone());
-    let mut local = LocalServices::open(config, address.port(), policy).await?;
+    let local = LocalServices::open(config, address.port(), policy).await?;
     // Dev mode is `--dev-url` / `VITE_DEV_SERVER_URL`, as in TypeScript; it keeps the free
     // Replay (dev) provider (`seedDevReplayInstance` in ProviderInstanceRegistryHydration.ts).
     #[cfg(feature = "orchestration")]
@@ -218,9 +218,12 @@ async fn start_configured(
             )));
         }
     };
-    local.environment.capabilities.linked_thread_refreshes = handlers
-        .disposition("pullRequests.subscribeLinkedThreadRefreshes")
-        .filter(|served| *served);
+    debug_assert_eq!(
+        local.environment.capabilities.linked_thread_refreshes,
+        handlers
+            .disposition("pullRequests.subscribeLinkedThreadRefreshes")
+            .filter(|served| *served)
+    );
     let unserved_methods: Vec<&'static str> = t3_contracts::rpc::WS_METHODS
         .iter()
         .filter(|method| handlers.disposition(method.tag) != Some(true))
@@ -759,7 +762,8 @@ async fn start_domains(
                     "Pull request subscriptions require the orchestration event stream.".into(),
                 )
             })?;
-        adapter.follow_linked_threads(events);
+        let thread_port = domains.get::<t3_orchestration::ports::thread_project::thread_pull_request_service::ThreadPullRequestService>();
+        adapter.follow_linked_threads(thread_port.as_deref(), events);
         #[cfg(feature = "textgen-native")]
         if let Some(guides) = guides {
             if let Some(sender) = &options.review_guide_cleanups {

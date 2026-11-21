@@ -69,13 +69,18 @@ impl LocalServices {
             .map_err(service_error)?;
         let auth =
             AuthService::new(&config, id.0.clone(), database.clone(), policy.clone()).await?;
-        let environment = serde_json::from_value(json!({
+        let mut environment: ExecutionEnvironmentDescriptor = serde_json::from_value(json!({
             "environmentId": id, "label": config.cwd.file_name().and_then(|s| s.to_str()).unwrap_or("T3 Code"),
             "platform": {"os": if cfg!(windows) {"windows"} else if cfg!(target_os="macos") {"darwin"} else {"linux"},
                 "arch": if cfg!(target_arch="aarch64") {"arm64"} else {"x64"}},
             "serverVersion": env!("CARGO_PKG_VERSION"), "orchestrationProtocolVersion":2,
             "capabilities": {"repositoryIdentity": false, "connectionProbe": true, "environmentThemes": true}
         })).map_err(service_error)?;
+        // pull-requests brings the forge, workspace authority and project runtime together.
+        // Publish the capability before cloud and peer services copy the descriptor.
+        environment.capabilities.linked_thread_refreshes =
+            cfg!(feature = "pull-requests").then_some(true);
+        environment.capabilities.usage_limit_sources = cfg!(feature = "providers").then_some(true);
         let settings =
             SettingsService::with_database(config.paths.settings(), Some(database.clone()));
         let keybindings = KeybindingsService::new(config.paths.keybindings());

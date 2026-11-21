@@ -1095,10 +1095,12 @@ async fn usage_rates_refresh_over_the_shared_transport_within_its_bounds() {
     let again = admin.call("server.refreshUsageRates", json!({})).await;
     assert_eq!(value(&again)["status"], "fresh", "{again}");
     assert_eq!(effects.requests(), [t3_usage::service::RATES_URL]);
-    // Still unserved: their global usage-source branch has no binding yet.
-    for method in ["server.refreshProviders", "provider.consumeResetCredit"] {
-        assert!(server.unserved_methods.contains(&method), "{method}");
-    }
+    assert!(!server.unserved_methods.contains(&"server.refreshProviders"));
+    assert!(
+        server
+            .unserved_methods
+            .contains(&"provider.consumeResetCredit")
+    );
     drop(admin);
     server.shutdown().await.unwrap();
 }

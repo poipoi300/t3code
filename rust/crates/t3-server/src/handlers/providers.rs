@@ -36,7 +36,7 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     if let Some(adapter) = domains.get::<crate::adapters::providers::ProvidersAdapter>() {
         register_status(registry, adapter.clone())?;
         register_mutations(registry, adapter)?;
-        return register_blocked(registry);
+        return registry.unimplemented::<WsProviderConsumeResetCreditRpc>();
     }
     let _ = domains;
     registry.unimplemented::<WsProviderAuthSubscribeRpc>()?;
@@ -76,6 +76,76 @@ fn register_status(
     adapter: std::sync::Arc<crate::adapters::providers::ProvidersAdapter>,
 ) -> crate::Result<()> {
     use crate::registry::Failure;
+    let a = adapter.clone();
+    registry.register::<WsServerRefreshProvidersRpc, _, _>(move |ctx, input| {
+        let a = a.clone();
+        async move {
+            let id = input.instance_id.clone().flatten();
+            let scan = if input.model_catalog_only.flatten() != Some(true)
+                && id.is_some()
+                && let Some(cwd) = input.cwd.as_ref().and_then(Option::as_ref)
+            {
+                Some(
+                    a.workspace_scan_directory(&ctx.services, &cwd.0)
+                        .await
+                        .map_err(|error| {
+                            Failure::Defect(crate::registry::ServerDefect::Internal {
+                                message: error.to_string(),
+                            })
+                        })?,
+                )
+            } else {
+                None
+            };
+            a.domain
+                .refresh_providers_at(input, scan.as_deref())
+                .await
+                .map_err(|failure| {
+                    use t3_provider::service::RefreshProvidersError;
+                    match failure {
+                        RefreshProvidersError::Models { instance_id, error } => {
+                            Failure::Typed(WsServerRefreshProvidersError::ProviderSetupError(
+                                crate::adapters::providers::setup_error(
+                                    &instance_id,
+                                    "refresh-models",
+                                    &error.to_string(),
+                                ),
+                            ))
+                        }
+                        RefreshProvidersError::Service(error) => {
+                            Failure::Defect(crate::registry::ServerDefect::Internal {
+                                message: error.to_string(),
+                            })
+                        }
+                    }
+                })
+        }
+    })?;
+    let a = adapter.clone();
+    registry.register_stream::<WsChatGptHandoffSubscribeRpc, _, _, _>(move |ctx, input| {
+        let a = a.clone();
+        async move {
+            // The destination instance belongs to the other environment. The host creates an
+            // isolated controller with this socket's session and keeps its profiles in memory.
+            let id = input.instance_id.clone();
+            let typed = move |error| {
+                Failure::Typed(ProviderSetupRpcError::ProviderSetupError(
+                    crate::adapters::providers::auth_error(&id, "handoff", error),
+                ))
+            };
+            let mut handoff = a
+                .domain
+                .handoff
+                .subscribe(input, &ctx.session_id.0)
+                .await
+                .map_err(&typed)?;
+            Ok(async_stream::try_stream! {
+                while let Some(state) = handoff.next().await.map_err(&typed)? {
+                    yield state.into_inner();
+                }
+            })
+        }
+    })?;
     let a = adapter.clone();
     registry.register::<WsChatGptReconnectProfileRpc, _, _>(move |_, input| {
         let a = a.clone();

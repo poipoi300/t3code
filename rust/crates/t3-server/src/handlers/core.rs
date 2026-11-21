@@ -40,6 +40,8 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
                     ctx.services,
                     ctx.secret_references,
                     input.environment_themes.flatten() == Some(true),
+                    input.usage_limit_sources.flatten() == Some(true),
+                    input.usage_limits_command.flatten() == Some(true),
                 )
                 .map(|v| v.map_err(Failure::Typed)));
                 #[cfg(not(feature = "providers"))]

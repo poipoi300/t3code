@@ -103,11 +103,9 @@ async fn session(origin: &str, credential: &Value) -> (String, Value) {
 const UNSERVED: &[&str] = &[
     "guestShare.create",
     "orchestration.getNativeChildWork",
-    "provider.chatgpt.handoff.subscribe",
     "provider.consumeResetCredit",
     "server.commitDesktopUpdate",
     "server.getStorageCleanupReport",
-    "server.refreshProviders",
     "server.runStorageCleanup",
     "server.updateServer",
     "server.updateServerWithProgress",

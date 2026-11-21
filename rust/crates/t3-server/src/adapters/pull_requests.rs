@@ -318,17 +318,19 @@ impl PullRequestAdapter {
     /// Follow committed changes even while no clients are subscribed, so a reconnect gets the current revision.
     pub fn follow_linked_threads(
         &self,
+        composed: Option<&t3_orchestration::ports::thread_project::thread_pull_request_service::ThreadPullRequestService>,
         events: tokio::sync::broadcast::Receiver<
             Arc<t3_contracts::application_event::ApplicationStoredEvent>,
         >,
     ) {
         let service = self.service.clone();
-        self.maintenance
-            .spawn(t3_pull_request::linked::follow_changes(
-                events,
-                self.stop.clone(),
-                move || service.notify_linked_threads_changed(),
-            ));
+        t3_pull_request::orchestration::start_standalone_follower(
+            composed,
+            &self.maintenance,
+            events,
+            self.stop.clone(),
+            move || service.notify_linked_threads_changed(),
+        );
     }
 
     /// `pullRequests.linkedThreads` (`ws.ts`, `resolvePullRequestSyncKey`): a reference naming

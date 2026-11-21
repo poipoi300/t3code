@@ -33,6 +33,7 @@ pub struct ProviderEffects {
 }
 pub struct ProvidersAdapter {
     pub domain: Arc<ProviderDomain>,
+    sources: Arc<super::usage::provider_sources::Sources>,
     /// The environment's outbound HTTP transport, shared with the usage rate fetcher.
     pub http: Arc<dyn HttpTransport>,
     settings: Arc<t3_config::settings::SettingsService>,
@@ -190,12 +191,40 @@ impl ProvidersAdapter {
         )
         .await
         .map_err(start_error)?;
+        let platform = if cfg!(windows) {
+            "win32"
+        } else if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let sources = super::usage::provider_sources::Sources::new(
+            context.local.settings.clone(),
+            domain.secrets.clone(),
+            effects.http.clone(),
+            effects.clock.clone(),
+            platform,
+            arch,
+        );
+        domain.providers.set_global_sources(sources.clone()).await;
         acp_host.bind(&domain);
-        #[cfg(feature = "host")]
-        let host = domains.get::<crate::adapters::host::HostAdapter>();
-        #[cfg(feature = "host")]
+        let host = domains
+            .get::<crate::adapters::host::HostAdapter>()
+            .ok_or_else(|| {
+                crate::Error::Service(
+                    "Provider services require the client activity policy.".into(),
+                )
+            })?;
+        let usage_host = host.clone();
         let activity_settings = context.local.settings.clone();
-        let task = tokio::spawn(async move {
+        let usage_sources = sources.clone();
+        let usage_policy = background.subscribe();
+        let ready = async move {
             loop {
                 tokio::select! {biased;_=cancel.cancelled()=>return,event=lifecycle.next()=>{
                     let Some(event)=event else{return};
@@ -206,8 +235,7 @@ impl ProvidersAdapter {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 tokio::select! {biased;_=cancel.cancelled()=>break,_=interval.tick()=>{
-                    #[cfg(feature="host")]
-                    if let Some(host)=&host {
+                    {
                         let mut demanded=false;
                         if let Ok(settings)=activity_settings.snapshot().await {
                             let settings=t3_host::background::ActivitySettings::resolve(&settings);
@@ -221,9 +249,18 @@ impl ProvidersAdapter {
                     }
                 }}
             }
+        };
+        let stop = context.shutdown.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {},
+                _ = ready => {},
+                _ = usage_sources.follow(usage_policy, usage_host) => {},
+            }
         });
         Ok(Arc::new(Self {
             domain,
+            sources,
             http: effects.http.clone(),
             settings: context.local.settings.clone(),
             clock: effects.clock.clone(),
@@ -552,6 +589,42 @@ impl ProvidersAdapter {
                 cause: None,
             })
     }
+    pub async fn workspace_scan_directory(
+        &self,
+        services: &crate::services::ServiceRegistry,
+        cwd: &str,
+    ) -> ServiceResult<String> {
+        let path = Path::new(cwd);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(ServiceError::Unavailable);
+        }
+        t3_workspace::paths::validate_host_path(path).map_err(|_| ServiceError::Unavailable)?;
+        #[cfg(feature = "project")]
+        if t3_workspace::paths::canonicalize(path)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            && let Some(projects) = services.domain::<crate::adapters::project::ProjectAdapter>()
+            && let Some(managed) = self
+                .authority
+                .managed_directories()
+                .await
+                .into_iter()
+                .find(|dir| path != dir && t3_workspace::paths::within(path, dir))
+        {
+            let scan = projects
+                .service()
+                .workspace_scan_directory(cwd, &managed)
+                .await;
+            self.workspace(&scan).await?;
+            return Ok(scan);
+        }
+        let _ = services;
+        self.workspace(cwd).await?;
+        Ok(cwd.to_owned())
+    }
     pub async fn workspace(&self, cwd: &str) -> ServiceResult<()> {
         let known = t3_workspace::paths::KnownWorkspaces::new(self.authority.roots().await)
             .map_err(|_| ServiceError::Unavailable)?;
@@ -632,48 +705,105 @@ pub async fn config_for(
     }
     Ok(config)
 }
+fn usage_sources_event(
+    sources: Vec<t3_contracts::provider_usage_limits::UsageLimitSourceSnapshot>,
+) -> ServerConfigStreamEvent {
+    ServerConfigStreamEvent::UsageLimitSourcesUpdated(
+        ServerConfigStreamUsageLimitSourcesUpdatedEvent {
+            version: t3_contracts::resource_telemetry::WireLiteral,
+            r#type: ServerConfigStreamUsageLimitSourcesUpdatedType::UsageLimitSourcesUpdated,
+            payload: ServerConfigUsageLimitSourcesUpdatedPayload {
+                sources: t3_contracts::provider_usage_limits::UsageLimitSourceSnapshots(sources),
+            },
+        },
+    )
+}
+
 pub fn config_stream_for(
     services: Arc<crate::services::ServiceRegistry>,
     secret_references: bool,
     environment_themes: bool,
+    usage_limit_sources: bool,
+    usage_limits_command: bool,
 ) -> futures::stream::BoxStream<
     'static,
     Result<ServerConfigStreamEvent, t3_contracts::rpc::WsServerGetConfigError>,
 > {
-    async_stream::try_stream! {
-        use futures::future::Either;
-        let adapter=services.domain::<ProvidersAdapter>();
-        let mut changes=adapter.as_ref().map(|adapter|adapter.domain.providers.subscribe());
-        let mut existing=crate::adapters::config::config_stream_for(services.clone(),secret_references,environment_themes);
-        let Some(first)=existing.next().await else {return;};
-        let mut first=first.map_err(|_|config_error(&services))?;
-        if let ServerConfigStreamEvent::Snapshot(snapshot)=&mut first && let Some(adapter)=&adapter {snapshot.config.providers=adapter.domain.config_providers().await;}
-        // As TypeScript's `changesWith` seeded with the snapshot's providers: a status update goes
-        // out only when the providers differ from the last ones the client received.
-        let mut last_sent=match &first {
-            ServerConfigStreamEvent::Snapshot(snapshot)=>serde_json::to_value(&snapshot.config.providers).ok(),
-            _=>None,
+    use t3_contracts::provider_usage_limits::UsageLimitSourceSnapshot;
+    enum Change {
+        Config(Option<crate::Result<ServerConfigStreamEvent>>),
+        Providers,
+        Sources(Vec<UsageLimitSourceSnapshot>),
+        Closed,
+    }
+    async fn changed<T: Clone>(rx: &mut Option<watch::Receiver<T>>) -> Option<T> {
+        let Some(rx) = rx else {
+            return std::future::pending().await;
         };
+        rx.changed().await.ok()?;
+        Some(rx.borrow_and_update().clone())
+    }
+    let decorate = move |providers: ServerProviders, sources: &[UsageLimitSourceSnapshot]| {
+        if usage_limits_command {
+            ServerCompatibleArray(t3_shared::usage_limits::with_usage_limits_commands(
+                &providers.0,
+                sources,
+            ))
+        } else {
+            providers
+        }
+    };
+    async_stream::try_stream! {
+        let adapter = services.domain::<ProvidersAdapter>();
+        let mut changes = adapter.as_ref().map(|a| a.domain.providers.subscribe());
+        let mut sources = adapter.as_ref().filter(|_| usage_limit_sources || usage_limits_command)
+            .map(|a| a.sources.snapshots.subscribe());
+        let mut coverage = sources.as_mut().map(|rx| rx.borrow_and_update().clone()).unwrap_or_default();
+        let mut existing = crate::adapters::config::config_stream_for(services.clone(), secret_references, environment_themes);
+        let Some(first) = existing.next().await else { return };
+        let mut first = first.map_err(|_| config_error(&services))?;
+        let mut last_sent = None;
+        if let ServerConfigStreamEvent::Snapshot(snapshot) = &mut first
+            && let Some(a) = &adapter
+        {
+            snapshot.config.providers = decorate(a.domain.config_providers().await, &coverage);
+            last_sent = Some(snapshot.config.providers.clone());
+        }
         yield first;
+        if usage_limit_sources && sources.is_some() {
+            yield usage_sources_event(coverage.clone());
+        }
         loop {
-            let next=tokio::select! {
-                event=existing.next()=>Either::Left(event),
-                changed=async {match changes.as_mut(){Some(changes)=>changes.changed().await.is_ok(),None=>std::future::pending().await}}=>Either::Right(changed),
+            let change = tokio::select! {
+                event = existing.next() => Change::Config(event),
+                rows = changed(&mut sources) => rows.map_or(Change::Closed, Change::Sources),
+                update = changed(&mut changes) => if update.is_some() { Change::Providers } else { Change::Closed },
             };
-            match next {
-                Either::Left(Some(event))=>{yield event.map_err(|_|config_error(&services))?;},
-                Either::Right(true)=>{
-                    if let Some(adapter)=&adapter {
-                        let providers=serde_json::to_value(adapter.domain.config_providers().await).map_err(|_|config_error(&services))?;
-                        if last_sent.as_ref()!=Some(&providers) {
-                            last_sent=Some(providers.clone());
-                            let event=serde_json::from_value(serde_json::json!({"version":1,"type":"providerStatuses","payload":{"providers":providers}}))
-                                .map_err(|_|config_error(&services))?;
-                            yield event;
-                        }
+            match change {
+                Change::Closed | Change::Config(None) => break,
+                Change::Config(Some(event)) => {
+                    yield event.map_err(|_| config_error(&services))?;
+                    continue;
+                }
+                Change::Sources(rows) => {
+                    coverage = rows;
+                    if usage_limit_sources {
+                        yield usage_sources_event(coverage.clone());
                     }
-                },
-                _=>break,
+                    if !usage_limits_command { continue; }
+                }
+                Change::Providers => {}
+            }
+            if let Some(a) = &adapter {
+                let providers = decorate(a.domain.config_providers().await, &coverage);
+                if last_sent.as_ref() != Some(&providers) {
+                    last_sent = Some(providers.clone());
+                    yield ServerConfigStreamEvent::ProviderStatuses(ServerConfigStreamProviderStatusesEvent {
+                        version: t3_contracts::resource_telemetry::WireLiteral,
+                        r#type: ServerConfigStreamProviderStatusesType::ProviderStatuses,
+                        payload: ServerConfigProviderStatusesPayload { providers },
+                    });
+                }
             }
         }
     }.boxed()

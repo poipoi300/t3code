@@ -455,15 +455,16 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
     let not_implemented = unary(
         &mut scoped_socket,
         &mut scoped_client,
-        "server.refreshProviders",
+        "server.getStorageCleanupReport",
         json!({}),
     )
     .await;
     assert_eq!(
         serde_json::to_value(not_implemented).unwrap()["cause"][0]["defect"],
-        "Unknown request tag: server.refreshProviders"
+        "Unknown request tag: server.getStorageCleanupReport"
     );
-    let mut request = t3_rpc::Request::new(101u64.into(), "server.refreshProviders", json!({}));
+    let mut request =
+        t3_rpc::Request::new(101u64.into(), "server.getStorageCleanupReport", json!({}));
     request.discard = Some(t3_rpc::True);
     scoped_client
         .start_request(request, CallKind::Unary)
@@ -471,7 +472,7 @@ async fn real_http_pairing_effect_rpc_scopes_revocation_static_and_shutdown() {
     match event(&mut scoped_socket, &mut scoped_client).await {
         CallEvent::Exit { exit, .. } => assert_eq!(
             serde_json::to_value(exit).unwrap()["cause"][0]["defect"],
-            "Unknown request tag: server.refreshProviders"
+            "Unknown request tag: server.getStorageCleanupReport"
         ),
         other => panic!("unexpected unimplemented discard {other:?}"),
     }

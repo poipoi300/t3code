@@ -270,6 +270,8 @@ struct Effects {
     registry_failure: AtomicBool,
     updated: AtomicBool,
     now: AtomicI64,
+    handoff_token: std::sync::Mutex<Option<String>>,
+    hub_calls: std::sync::atomic::AtomicUsize,
 }
 impl Default for Effects {
     fn default() -> Self {
@@ -277,6 +279,8 @@ impl Default for Effects {
             registry_failure: AtomicBool::new(false),
             updated: AtomicBool::new(false),
             now: AtomicI64::new(1_800_000_000_000),
+            handoff_token: Default::default(),
+            hub_calls: Default::default(),
         }
     }
 }
@@ -299,6 +303,24 @@ impl HttpTransport for Effects {
     async fn send(&self, request: HttpRequest) -> ServiceResult<HttpResponse> {
         assert!(!format!("{request:?}").contains("private-generator-key"));
         let body = match request.url.as_str() {
+            "https://hub.invalid/v0/management/auth-files" => {
+                assert_eq!(
+                    request.headers["authorization"].expose(),
+                    "Bearer fixture-key"
+                );
+                self.hub_calls.fetch_add(1, Ordering::SeqCst);
+                json!({"files":[]})
+            }
+            "https://auth.openai.com/oauth/token" => {
+                let token = self
+                    .handoff_token
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or(ServiceError::Identity)?;
+                json!({"access_token":"fixture-transfer","refresh_token":"fixture-refresh","id_token":token,
+                    "token_type":"Bearer","expires_in":3600,"scope":"chatgpt.tokens.use.direct"})
+            }
             "https://trusted.invalid/v1/models" => json!({"data":[{"id":"fixture-model"}]}),
             "https://auth.openai.com/.well-known/openid-configuration" => {
                 json!({"issuer":"https://auth.openai.com","authorization_endpoint":"https://auth.openai.com/api/accounts/authorize","token_endpoint":"https://auth.openai.com/oauth/token","jwks_uri":"https://auth.openai.com/.well-known/jwks.json","revocation_endpoint":"https://auth.openai.com/oauth/revoke"})
@@ -336,7 +358,13 @@ impl ExecutableProbe for Effects {
         _: &Path,
     ) -> ServiceResult<VersionProbe> {
         if !binary.ends_with("fixture-codex.exe") {
-            return Err(ServiceError::Unavailable);
+            return Ok(VersionProbe {
+                installed: false,
+                version: None,
+                status: t3_contracts::server::ServerProviderState::Error,
+                message: Some(format!("{binary} is not installed or not on PATH.")),
+                resolved_executable: None,
+            });
         }
         Ok(VersionProbe {
             installed: true,
@@ -389,6 +417,207 @@ fn effects_for(effects: Arc<Effects>) -> Arc<t3_server::adapters::providers::Pro
         registry_commands: Some(effects.clone()),
         registry_downloads: Some(effects),
     })
+}
+
+#[tokio::test]
+async fn global_refresh_returns_typed_providers_and_publishes_the_refreshed_sources() {
+    let mut server = Server::start().await;
+    ok(server
+        .call(
+            "server.updateSettings",
+            json!({"patch":{"usageLimitSources":{"fixture":{
+                "kind":"cliproxy","url":"https://hub.invalid","managementKey":"fixture-key"
+            }}}}),
+        )
+        .await);
+    server.reconnect_with(&["orchestration:read"]).await;
+    server
+        .client
+        .start(
+            "subscribeServerConfig",
+            json!({"usageLimitSources":true}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let snapshot = server.chunk().await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert!(snapshot["config"].get("usageLimitSources").is_none());
+    assert_eq!(
+        snapshot["config"]["environment"]["capabilities"]["usageLimitSources"],
+        true
+    );
+    let next_source = |event: &Value| {
+        event["type"] == "usageLimitSourcesUpdated"
+            && event["payload"]["sources"][0]["id"] == "fixture"
+    };
+    let initial_check = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = server.chunk().await;
+            if next_source(&event) {
+                break event["payload"]["sources"][0]["checkedAt"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            }
+        }
+    })
+    .await
+    .expect("changing settings refreshes the hub without a manual call");
+    server.effects.now.fetch_add(1_000, Ordering::SeqCst);
+    let before = server.effects.hub_calls.load(Ordering::SeqCst);
+    for input in [
+        json!({"refreshModels":true,"reloadSecrets":true}),
+        json!({}),
+    ] {
+        let value = ok(server.call("server.refreshProviders", input).await);
+        let typed: t3_contracts::server::ServerProviderUpdatedPayload =
+            serde_json::from_value(value).unwrap();
+        assert!(typed.providers.0.iter().any(|p| p.instance_id.0 == "codex"));
+    }
+    assert!(server.effects.hub_calls.load(Ordering::SeqCst) >= before + 2);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = server.chunk().await;
+            if next_source(&event) && event["payload"]["sources"][0]["checkedAt"] != initial_check {
+                assert!(!event.to_string().contains("fixture-key"));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("manual refresh publishes the new check time");
+    let config = ok(server.call("server.getConfig", json!({})).await);
+    assert!(config.get("usageLimitSources").is_none());
+    server.socket.close(None).await.unwrap();
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_runtime_accepts_activity_for_periodic_usage_refresh() {
+    let mut server = Server::start().await;
+    let config = ok(server.call("server.getConfig", json!({})).await);
+    ok(server.call("server.reportClientActivity", json!({
+        "environmentId":config["environment"]["environmentId"],"clientId":"fixture","clientKind":"web",
+        "visible":true,"focused":true,"recentlyInteracted":true,"appState":"active",
+        "scopes":[{"type":"provider-status"}],"ttlMs":45000,"observedAt":"2027-01-15T08:00:00.000Z"
+    })).await);
+    server.socket.close(None).await.unwrap();
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn usage_command_subscriber_follows_source_coverage_without_requesting_source_events() {
+    let mut server = Server::start().await;
+    server
+        .client
+        .start(
+            "subscribeServerConfig",
+            json!({"usageLimitsCommand":true}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let snapshot = server.chunk().await;
+    let has_command = |providers: &Value| {
+        providers.as_array().unwrap().iter().any(|provider| {
+            provider["slashCommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|cmd| cmd["name"] == "usage-limits")
+        })
+    };
+    assert!(!has_command(&snapshot["config"]["providers"]));
+    // An unreadable source advertises the command so that its error can be inspected.
+    ok(server
+        .call(
+            "server.updateSettings",
+            json!({"patch":{"usageLimitSources":{"offline":{
+                "kind":"cliproxy","url":"https://offline.invalid","managementKey":"fixture"
+            }}}}),
+        )
+        .await);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = server.chunk().await;
+            assert_ne!(event["type"], "usageLimitSourcesUpdated");
+            if event["type"] == "providerStatuses" && has_command(&event["payload"]["providers"]) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("source coverage changed the provider commands");
+    server.socket.close(None).await.unwrap();
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_destination_handoff_runs_on_the_authenticated_oauth_host() {
+    let mut server = Server::start().await;
+    server.reconnect_with(&["providers:manage"]).await;
+    server.client.start("provider.chatgpt.handoff.subscribe", json!({
+        "instanceId":"destination-only","environmentId":"destination-environment",
+        "attemptId":"destination-attempt","returnUrl":"https://app.t3.codes/settings","profile":null
+    }), CallKind::Stream).unwrap();
+    loop {
+        let event = server.chunk().await;
+        assert_eq!(event["phase"], "auth");
+        let state = &event["state"];
+        assert_ne!(state["phase"], "failed", "{state}");
+        if state["phase"] == "waiting" {
+            assert_eq!(state["instanceId"], "destination-only");
+            let url = url::Url::parse(state["authorizationUrl"].as_str().unwrap()).unwrap();
+            let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(
+                params["ext_agent_host_id"],
+                "urn:uuid:destination-environment"
+            );
+            let mut callback = url::Url::parse(&params["redirect_uri"]).unwrap();
+            assert_eq!(callback.host_str(), Some("127.0.0.1"));
+            callback
+                .query_pairs_mut()
+                .append_pair("code", "fixture-code")
+                .append_pair("client_id", "oaiapp_fixture")
+                .append_pair("state", &params["state"]);
+            *server.effects.handoff_token.lock().unwrap() = Some(sign_claims(json!({
+                "iss":"https://auth.openai.com","aud":"oaiapp_fixture","sub":"fixture-subject",
+                "exp":1_800_003_600_u64,"nonce":params["nonce"]
+            })));
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .get(callback)
+                .send()
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    loop {
+        let event = server.chunk().await;
+        if event["phase"] == "finished" {
+            assert_eq!(
+                event["profile"]["registration"]["clientId"],
+                "oaiapp_fixture"
+            );
+            assert_eq!(
+                event["profile"]["credentials"]["accessToken"],
+                "fixture-transfer"
+            );
+            break;
+        }
+        assert_ne!(event["state"]["phase"], "failed", "{event}");
+    }
+    assert!(matches!(
+        server.event().await,
+        CallEvent::Exit {
+            exit: Exit::Success { .. },
+            ..
+        }
+    ));
+    server.socket.close(None).await.unwrap();
+    server.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1064,13 +1293,20 @@ fn fixture_jwk() -> Value {
     json!({"kty":"EC","crv":"P-256","kid":"fixture","alg":"ES256","use":"sig",
         "x":t3_auth::utils::b64(point.x().unwrap()),"y":t3_auth::utils::b64(point.y().unwrap())})
 }
-fn transferred_signed_profile() -> Value {
+fn sign_claims(claims: Value) -> String {
     use p256::ecdsa::signature::Signer;
-    let input = format!("{}.{}",
+    let input = format!(
+        "{}.{}",
         t3_auth::utils::b64(json!({"alg":"ES256","kid":"fixture"}).to_string()),
-        t3_auth::utils::b64(json!({"iss":"https://auth.openai.com","aud":"fixture","sub":"fixture-subject","exp":1_800_003_600_u64}).to_string()));
+        t3_auth::utils::b64(claims.to_string())
+    );
     let signature: p256::ecdsa::Signature = fixture_signing_key().sign(input.as_bytes());
-    let token = format!("{input}.{}", t3_auth::utils::b64(signature.to_bytes()));
+    format!("{input}.{}", t3_auth::utils::b64(signature.to_bytes()))
+}
+fn transferred_signed_profile() -> Value {
+    let token = sign_claims(
+        json!({"iss":"https://auth.openai.com","aud":"fixture","sub":"fixture-subject","exp":1_800_003_600_u64}),
+    );
     json!({"registration":{"clientId":"fixture","subject":"fixture-subject","idTokenHint":"private-import-hint"},
         "credentials":{"clientId":"fixture","accessToken":"private-transfer-access","refreshToken":null,"idToken":token,
         "issuer":"https://auth.openai.com","expiresAt":1_800_003_600_000_u64,"earliestRefreshAt":null,
