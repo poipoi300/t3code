@@ -820,7 +820,7 @@ fn queued_runs(key: ThreadKey) -> impl IntoElement {
     use t3_contracts::{chat_attachment::ChatAttachment, orchestration_v2_id_table::IdOrIndex};
 
     let projection = crate::runtime::rt().store.thread(key);
-    let queued = computed(move || {
+    let rows = computed(move || {
         let Some(view) = projection.get() else {
             return Vec::new();
         };
@@ -828,38 +828,23 @@ fn queued_runs(key: ThreadKey) -> impl IntoElement {
             .queued_runs
             .into_iter()
             .map(|row| {
-                let message = view
-                    .messages
+                let prompt = row.message.map_or_else(
+                    || Text::from("Queued message"),
+                    |message| Text::content(queued_message_preview(message)),
+                );
+                let attachments = row
+                    .message
                     .iter()
-                    .find(|message| message.id == row.run.user_message_id);
-                (
-                    row.run.id.clone(),
-                    message.cloned().map(crate::runtime::Shared),
-                )
+                    .flat_map(|message| &message.attachments)
+                    .filter_map(|attachment| match attachment {
+                        ChatAttachment::Image(image) => Some(image.name.clone()),
+                        ChatAttachment::File(file) => Some(file.name.clone()),
+                        ChatAttachment::Unknown(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                (row.run.id.clone(), prompt, attachments)
             })
             .collect::<Vec<_>>()
-    });
-    let rows = computed(move || {
-        queued.with(|rows| {
-            rows.iter()
-                .map(|(run, message)| {
-                    let prompt = message.as_ref().map_or_else(
-                        || Text::from("Queued message"),
-                        |message| Text::content(queued_message_preview(message)),
-                    );
-                    let attachments = message
-                        .iter()
-                        .flat_map(|message| &message.attachments)
-                        .filter_map(|attachment| match attachment {
-                            ChatAttachment::Image(image) => Some(image.name.clone()),
-                            ChatAttachment::File(file) => Some(file.name.clone()),
-                            ChatAttachment::Unknown(_) => None,
-                        })
-                        .collect::<Vec<_>>();
-                    (run.clone(), prompt, attachments)
-                })
-                .collect::<Vec<_>>()
-        })
     });
     let expanded = signal(false);
     let count = computed(move || rows.with(Vec::len));

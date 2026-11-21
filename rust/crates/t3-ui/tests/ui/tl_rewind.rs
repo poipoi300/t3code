@@ -12,9 +12,14 @@ use t3_client::thread_views::messages_timeline::{
 };
 use t3_client::types::{EnvironmentId, ThreadId, ThreadKey};
 use t3_client::view_logic::session::TimelineEntry;
-use t3_contracts::base_schemas::RunId;
+use t3_contracts::{
+    base_schemas::{RunId, TurnItemId},
+    orchestration_v2_id_table::IdOrIndex,
+};
+use t3_ui::runtime::tasks::TaskOwner;
 use t3_ui::screens::thread::{
     rewind::*,
+    rows::assistant::ForkRequest,
     rows::user::{UserRowContext, UserRowState, user_message_row},
     timeline::TimelineServices,
 };
@@ -117,6 +122,22 @@ fn control(id: &'static str, action: impl Fn() + 'static) -> impl IntoElement {
         .on_press(action)
 }
 
+fn fork_control(rewind: TimelineRewind) -> impl IntoElement {
+    let owner = TaskOwner::here();
+    control("fork", move || {
+        if let Some(fork) = rewind.fork_action() {
+            let answer = fork(ForkRequest {
+                source_thread_id: IdOrIndex::Id(key("ancestor").thread),
+                source_item_id: IdOrIndex::Id(TurnItemId("response".into())),
+                run_id: IdOrIndex::Id(RunId("run".into())),
+            });
+            owner.spawn(async move {
+                let _ = answer.await;
+            });
+        }
+    })
+}
+
 #[component]
 fn RewindFixture() -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
@@ -160,12 +181,7 @@ fn RewindFixture() -> impl IntoElement {
         .child(control("restore-files", move || {
             rewind.request_revert(target.clone())
         }))
-        .child(control("fork", move || {
-            rewind.on_fork_from_run(
-                t3_contracts::base_schemas::TurnItemId("response".into()),
-                RunId("run".into()),
-            )
-        }))
+        .child(fork_control(rewind))
         .child(text(move || {
             SharedString::from(format!("Calls: {}", calls.get().len()))
         }))
@@ -216,12 +232,7 @@ fn MissingServiceFixture() -> impl IntoElement {
         .child(control("direct-rewind", move || {
             rewind.request_revert(target.clone())
         }))
-        .child(control("fork", move || {
-            rewind.on_fork_from_run(
-                t3_contracts::base_schemas::TurnItemId("response".into()),
-                RunId("run".into()),
-            )
-        }))
+        .child(fork_control(rewind))
         .child(text(move || SharedString::from(nav.top().path())))
         .child(text(move || {
             SharedString::from(format!("Busy: {}", rewind.reverting.get()))

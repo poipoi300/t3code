@@ -267,14 +267,6 @@ impl TimelineRewind {
         });
     }
 
-    pub fn on_fork_from_run(self, response: TurnItemId, run_id: RunId) {
-        let source = self.key.get().thread;
-        let fork = self.fork_thread(source, response, run_id);
-        self.owner.spawn(async move {
-            let _ = fork.await;
-        });
-    }
-
     fn fork_thread(
         self,
         source: ThreadId,
