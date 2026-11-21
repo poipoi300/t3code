@@ -66,7 +66,7 @@ hyper client would mean owning connection and TLS setup code.
 | Windows | Credential Manager (`keyring`, `windows-native`) | Electron's `safeStorage` uses DPAPI; both are bound to the user account. |
 | macOS | Keychain (`keyring`, `apple-native`) | Same facility `safeStorage` uses. Not built on this machine. |
 | Linux | Secret Service over D-Bus (`keyring`, `async-secret-service`, pure-Rust zbus) | Like `safeStorage`, it refuses to open when no secret service is running instead of falling back to `basic_text`. Not built on this machine. |
-| Android | `AndroidKeystoreStore` (`NativeConfig::mobile`): the storage key wrapped by an AES-GCM key in the Android Keystore, the wrapped form fsynced beside the data | The Java VM comes from `set_android_vm` or, on API 31+, the NDK's `JNI_GetCreatedJavaVMs`. Never run on a device. |
+| Android | `AndroidKeystoreStore` (`NativeConfig::mobile`): the storage key wrapped by an AES-GCM key in the Android Keystore, the wrapped form fsynced beside the data | On API 26 and later the NSH shell passes its process VM to `set_android_vm`. Other hosts can also discover the VM through the NDK's `JNI_GetCreatedJavaVMs` on API 31 and later. Device verification is pending. |
 | iOS | `KeychainStore` (`NativeConfig::mobile`): a generic password item | Defaults only; see the shell requirement below. Not built on this machine. |
 
 Only the storage key lives in the OS store (service `T3 Code client storage`, account

@@ -158,11 +158,14 @@ mod host {
         presentation::desktop(std::env::consts::OS, APP_VERSION.unwrap_or("0.0.0"))
     }
 
-    /// The Android Keystore or the iOS Keychain. Android below API 31 has no Keystore store yet:
-    /// t3-platform finds the Java VM itself only from API 31, and NSH does not hand its VM to app
-    /// code (request in client-seam-requests.md, "CONN lane: the Java VM on Android 26 to 30").
+    /// The Android Keystore or the iOS Keychain.
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn config(dir: std::path::PathBuf) -> (NativeConfig, bool) {
+        // Supply NSH's process VM before opening the Keystore. The NDK lookup needs API 31.
+        #[cfg(target_os = "android")]
+        if let Some(vm) = nsh::java_vm() {
+            t3_platform::set_android_vm(vm);
+        }
         mobile_config(
             || NativeConfig::mobile(dir.clone()).map_err(|error| error.to_string()),
             || in_memory_config(&dir),
