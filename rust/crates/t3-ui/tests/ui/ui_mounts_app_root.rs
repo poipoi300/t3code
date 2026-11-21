@@ -484,9 +484,9 @@ fn TerminalWorkspace() -> impl IntoElement {
                     assert_eq!(
                         writes
                             .iter()
-                            .map(|write| write["data"].as_str().unwrap())
+                            .map(|write| write["data"].as_str())
                             .collect::<Vec<_>>(),
-                        ["o", "k", "\r", "p"]
+                        [Some("o"), Some("k"), Some("\r"), Some("p")]
                     );
                     assert!(writes.iter().all(|write| write["terminalId"] == "term-1"));
                     outputs[1]
