@@ -518,25 +518,36 @@ async fn every_preview_method_refuses_a_session_missing_its_scope_and_frames_req
 
 #[tokio::test]
 async fn discovered_servers_stream_starts_and_updates_from_a_real_local_http_listener() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/", listener.local_addr().unwrap());
-    let (received, mut probes) = tokio::sync::mpsc::unbounded_channel();
-    let web = tokio::spawn(async move {
-        loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 8192];
-            let _ = socket.read(&mut request).await.unwrap();
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
-            let _ = received.send(());
-        }
-    });
-    // Probe the explicitly configured URL. Scanning agent processes would attribute the
-    // test listener to the outer T3 thread when the runner itself is an agent process.
-    let mut s = Server::start_with(true, |_, env| {
-        env.insert("T3CODE_PORT_DISCOVERY".into(), "0".into());
-    })
-    .await;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    // Discovery reads each listener's process environment. Only this HTTP fixture
+    // should lose the outer runner's thread attribution.
+    let mut web = tokio::process::Command::new(node())
+        .args([
+            "-e",
+            r#"
+const http = require('node:http');
+const server = http.createServer((_req, res) => {
+    res.writeHead(200, {'content-type': 'text/html'});
+    res.end('ok');
+});
+server.listen(0, '127.0.0.1', () => console.log(server.address().port));
+"#,
+        ])
+        .env_remove("T3CODE_THREAD_ID")
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(web.stdout.take().unwrap()).lines();
+    let port: u16 = tokio::time::timeout(std::time::Duration::from_secs(10), stdout.next_line())
+        .await
+        .expect("fixture listener did not start")
+        .unwrap()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let url = format!("http://127.0.0.1:{port}/");
+    let mut s = Server::start(true).await;
     s.client
         .start(
             "subscribeDiscoveredLocalServers",
@@ -545,12 +556,20 @@ async fn discovered_servers_stream_starts_and_updates_from_a_real_local_http_lis
         )
         .unwrap();
     let initial = s.chunk().await;
-    assert_eq!(initial["servers"][0]["url"], url);
-    probes.recv().await.unwrap();
+    let listener = initial["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["url"] == url)
+        .unwrap_or_else(|| panic!("listener missing: {initial}"));
+    assert_eq!(listener["url"], url);
+    // Linux runners have procfs. Other supported hosts may provide HTTP probing
+    // without the optional process enumeration tool.
+    #[cfg(target_os = "linux")]
+    assert_eq!(listener["pid"], web.id().unwrap(), "{listener}");
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
-    web.abort();
-    assert!(web.await.unwrap_err().is_cancelled());
+    web.kill().await.unwrap();
 }
 
 fn install_fake_browser(s: &Server) {

@@ -243,6 +243,43 @@ async fn stop(child: &mut tokio::process::Child, runtime_file: &Path) {
     }
 }
 
+async fn rpc_socket(http: &reqwest::Client, origin: &str, cookie: &str) -> Socket {
+    let ticket: Value = http
+        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ws_origin = origin.replacen("http://", "ws://", 1);
+    tokio_tungstenite::connect_async(format!(
+        "{ws_origin}/ws?orchestrationProtocol=2&wsTicket={}",
+        ticket["ticket"].as_str().unwrap()
+    ))
+    .await
+    .unwrap()
+    .0
+}
+
+async fn assert_closed(mut socket: Socket) {
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(frame)) if !matches!(frame, Message::Close(_)) => continue,
+                terminal => break terminal,
+            }
+        }
+    })
+    .await
+    .expect("server kept the WebSocket open");
+    assert!(
+        matches!(terminal, Some(Ok(Message::Close(_))) | None),
+        "{terminal:?}"
+    );
+}
+
 #[tokio::test]
 async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its_home() {
     let temp = tempfile::tempdir().unwrap();
@@ -314,22 +351,7 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
         .next()
         .unwrap()
         .to_owned();
-    let ticket: Value = http
-        .post(format!("{origin}/api/auth/websocket-ticket/rpc"))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let ws_origin = origin.replacen("http://", "ws://", 1);
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
-        "{ws_origin}/ws?orchestrationProtocol=2&wsTicket={}",
-        ticket["ticket"].as_str().unwrap()
-    ))
-    .await
-    .unwrap();
+    let mut socket = rpc_socket(&http, &origin, &cookie).await;
     let mut client = Client::new(0, Default::default());
     success(call(&mut socket, &mut client, "server.probe", CallKind::Unary).await);
     let config = success(
@@ -403,16 +425,32 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
     );
 
     // Stop with a live WebSocket and an open subscription.
+    #[cfg(unix)]
+    tokio::join!(stop(&mut child, &runtime_file), assert_closed(socket));
+    #[cfg(not(unix))]
     stop(&mut child, &runtime_file).await;
-    // Config changes and heartbeats queued before SIGTERM precede the closing frame.
-    while let Some(Ok(message)) = socket.next().await {
-        if matches!(message, Message::Close(_)) {
-            break;
-        }
-    }
     // Ownership and the database were released: the same home starts again.
     let restarted = t3_server::runtime::start(inputs(home)).await.unwrap();
+    #[cfg(unix)]
     restarted.shutdown().await.unwrap();
+    #[cfg(not(unix))]
+    {
+        // The binary has to be force-terminated on Windows. Exercise the graceful
+        // close on the same home's in-process server with a live subscription.
+        let mut socket = rpc_socket(&http, &format!("http://{}", restarted.address), &cookie).await;
+        assert!(matches!(
+            call(
+                &mut socket,
+                &mut Client::new(0, Default::default()),
+                "subscribeServerConfig",
+                CallKind::Stream
+            )
+            .await,
+            CallEvent::Chunk { .. }
+        ));
+        let (stopped, ()) = tokio::join!(restarted.shutdown(), assert_closed(socket));
+        stopped.unwrap();
+    }
 }
 
 #[tokio::test]
