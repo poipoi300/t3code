@@ -72,8 +72,7 @@ impl RuntimeImportStore {
 
     /// `ProviderSessionRuntimeRepository.list`: every row's runtime payload.
     async fn payloads(&self) -> Result<Vec<Option<String>>> {
-        Ok(self
-            .database
+        self.database
             .read(|db| {
                 let mut statement = db.prepare(
                     "SELECT runtime_payload_json FROM provider_session_runtime
@@ -88,7 +87,7 @@ impl RuntimeImportStore {
             .map_err(|_| Error::Operation {
                 operation: "read-projects",
                 detail: "unavailable".into(),
-            })?)
+            })
     }
 }
 
