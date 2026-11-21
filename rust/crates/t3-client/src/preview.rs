@@ -1,4 +1,5 @@
 //! Browser preview protocol policy. The host owns JPEG decoding and presentation.
+pub mod annotation;
 pub mod browser;
 pub mod file_path;
 pub mod gesture;

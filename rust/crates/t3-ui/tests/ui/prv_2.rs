@@ -132,7 +132,11 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
         });
     });
     let server = FakeEnvironment::new("stream-host", run.clone());
-    server.set_permissions(&["orchestration:read", "preview:operate"]);
+    server.set_permissions(&[
+        "orchestration:read",
+        "orchestration:operate",
+        "preview:operate",
+    ]);
     for method in ["preview.list", "preview.open"] {
         server.register(method, CallKind::Unary);
     }
@@ -203,7 +207,9 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
     provide_context(Navigator::new(Route::Home));
     let paired = signal(false);
     let pair = client.pair(server.pairing());
+    let drafts = client.composer_drafts();
     run(async move {
+        drafts.load().await.expect("load composer drafts");
         pair.await.expect("pair stream host");
         paired.set(true);
     }
@@ -283,6 +289,22 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
         );
     });
     let mobile = t3_ui::state::layout::pointer() == t3_ui::state::layout::Pointer::Coarse;
+    let verified_annotation = signal(false);
+    let drafts = client.composer_drafts();
+    let annotation_wire = browser.clone();
+    on_key("f1", move |_| {
+        let target = key.get();
+        let document = drafts.document();
+        let draft = &document.borrow()["draftsByThreadKey"][drafts.thread_draft_key(&target)];
+        verify_region_draft(draft);
+        assert!(
+            !annotation_wire
+                .sent()
+                .iter()
+                .any(|input| input["type"] == "mouse" || input["type"] == "wheel")
+        );
+        verified_annotation.set(true);
+    });
     let verified = signal(false);
     on_key("f9", move |_| {
         let requests = browser.requests();
@@ -380,6 +402,9 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
                 .child(text("Open browser"))
         }))
         .child(when(verified, || text("Verified browser viewer requests")))
+        .child(when(verified_annotation, || {
+            text("Verified preview annotation")
+        }))
         .child(right_panel_tabs(host, key.get(), registry, view()))
 }
 
@@ -523,4 +548,176 @@ fn desktop_shows_the_node_requirement_and_retries() {
 #[test]
 fn phone_shows_the_node_requirement_and_retries() {
     retry_after_installing_node(PHONE);
+}
+
+fn verify_region_draft(draft: &serde_json::Value) {
+    let annotation = &draft["previewAnnotations"][0];
+    let image = &draft["images"][0];
+    assert_eq!(annotation["id"], image["id"]);
+    assert_eq!(annotation["pageUrl"], "https://example.test/");
+    assert!(
+        annotation["comment"]
+            .as_str()
+            .expect("annotation note")
+            .contains("Check this region")
+    );
+    let rect = &annotation["regions"][0]["rect"];
+    assert!(rect["width"].as_f64().expect("region width") > 0.0);
+    assert!(rect["height"].as_f64().expect("region height") > 0.0);
+    assert_eq!(image["mimeType"], "image/jpeg");
+    assert!(
+        image["previewUrl"]
+            .as_str()
+            .expect("image source")
+            .starts_with("data:image/jpeg;base64,")
+    );
+}
+
+fn highlight_preview_region(width: (f32, f32), live: bool) {
+    let root = if live {
+        Root::of::<LiveAnnotationFixture>()
+    } else {
+        Root::of::<StreamFixture>()
+    };
+    let mut app = app_at(width, root);
+    app.wait_for("role:button[Open browser]").expect("paired");
+    app.press("role:button[Open browser]")
+        .expect("open browser");
+    app.type_text("label:Search or enter URL", "https://example.test/")
+        .expect("address");
+    app.press_key("Enter").expect("open viewer");
+    if live {
+        app.wait_for("role:button[Take control]")
+            .expect("real viewer connected");
+        app.press("role:button[Take control]")
+            .expect("take control");
+    }
+    app.wait_for("You have control").expect("viewer control");
+    if !live {
+        app.press_key("f8").expect("stream a JPEG");
+    }
+    app.wait_for("id:preview-jpeg")
+        .expect("stream frame visible");
+    app.press("role:button[Annotate preview]")
+        .expect("open annotation controls");
+    app.drag("id:preview-region-picker", point(px(40.0), px(30.0)))
+        .expect("highlight part of the frame");
+    app.wait_for("id:preview-region-mark")
+        .expect("show the highlighted region");
+    app.type_text("label:Annotation note", "Check this region")
+        .expect("type an annotation note");
+    app.press("role:button[Attach annotation]")
+        .expect("add the region and capture to the thread draft");
+    app.press_key("f1").expect("verify draft transport");
+    app.wait_for("Verified preview annotation")
+        .expect("draft owns capture and region");
+}
+
+#[test]
+fn annotation_highlights_the_stream_at_desktop_width() {
+    highlight_preview_region(DESKTOP, false);
+}
+
+#[test]
+fn annotation_highlights_the_stream_at_phone_width() {
+    highlight_preview_region(PHONE, false);
+}
+
+// A private server harness supplies a pairing URL written to a mode-0600 file.
+// Each ignored test uses its own server and ephemeral client key store.
+#[component]
+fn LiveAnnotationFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let info_path = std::env::var_os("T3_PREVIEW_TEST_INFO").expect("private fixture info file");
+    let info: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(info_path).expect("read fixture info"))
+            .expect("fixture info JSON");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("test network runtime");
+    let native = runtime
+        .block_on(t3_platform::NativePlatform::open(
+            t3_platform::NativeConfig::new(
+                info["clientDir"]
+                    .as_str()
+                    .expect("private client directory"),
+                Box::<t3_platform::EphemeralSecretStore>::default(),
+            ),
+        ))
+        .expect("open test native platform");
+    let _runtime = stored(runtime);
+    let owner = Owner::current();
+    let run: Spawner = Rc::new(move |task| {
+        owner.run(|| {
+            spawn(task);
+        });
+    });
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        native,
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        run.clone(),
+    );
+    provide_context(Rt::new(store, Rc::new(client.clone()), Choice::Client));
+    provide_context(Navigator::new(Route::Home));
+    provide_client_services(&client);
+    let registry = use_context::<PanelRegistry>().expect("app panel registry");
+    let host = panel_host();
+    let paired = signal(None::<ThreadKey>);
+    let pair = client.pair(t3_client::connection::PairingInput {
+        pairing_url: Some(info["pairingUrl"].as_str().expect("pairing URL").into()),
+        ..Default::default()
+    });
+    let drafts = client.composer_drafts();
+    let loading = drafts.clone();
+    run(async move {
+        loading.load().await.expect("load real composer drafts");
+        let environment = pair.await.expect("pair real preview host");
+        paired.set(Some(ThreadKey {
+            environment,
+            thread: ThreadId("thread".into()),
+        }));
+    }
+    .boxed_local());
+    let verified = signal(false);
+    on_key("f1", move |_| {
+        let key = paired.get_untracked().expect("paired test environment");
+        let document = drafts.document();
+        verify_region_draft(&document.borrow()["draftsByThreadKey"][drafts.thread_draft_key(&key)]);
+        verified.set(true);
+    });
+    view()
+        .w_full()
+        .h_full()
+        .child(when(
+            move || paired.with(Option::is_some),
+            move || {
+                let key = stored(paired.get().expect("paired fixture"));
+                view()
+                    .flex_1()
+                    .child(
+                        nsh_base::button()
+                            .accessibility_label("Open browser")
+                            .on_press(move || registry.open(SurfaceKind::Browser, &key.get()))
+                            .child(text("Open browser")),
+                    )
+                    .child(right_panel_tabs(host, key.get(), registry, view()))
+            },
+        ))
+        .child(when(verified, || text("Verified preview annotation")))
+}
+
+#[test]
+#[ignore = "requires a private real preview server and worker"]
+fn annotation_highlights_live_viewer_at_desktop_width() {
+    highlight_preview_region(DESKTOP, true);
+}
+
+#[test]
+#[ignore = "requires a private real preview server and worker"]
+fn annotation_highlights_live_viewer_at_phone_width() {
+    highlight_preview_region(PHONE, true);
 }

@@ -370,10 +370,13 @@ fn preview_panel<P: Platform + Clone + 'static>(
                                 })
                             });
                             dynamic(move || match runtime.get() {
-                                Some(PreviewRuntime::Server) => {
-                                    server_browser_surface(service.get(), tab_id.get(), stream)
-                                        .into_element()
-                                }
+                                Some(PreviewRuntime::Server) => server_browser_surface(
+                                    service.get(),
+                                    tab_id.get(),
+                                    stream,
+                                    snapshot,
+                                )
+                                .into_element(),
                                 Some(PreviewRuntime::Desktop) => {
                                     panel_message(t("Browser unavailable")).into_element()
                                 }

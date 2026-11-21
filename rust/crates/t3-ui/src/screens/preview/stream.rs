@@ -1,6 +1,6 @@
 //! Port of ServerBrowserSurface.tsx, using the managed browser's JPEG stream.
 
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use futures::channel::mpsc;
 use nsh_core::{
@@ -23,7 +23,9 @@ use t3_client::{
     },
     workspace::project_files::assets::preview_data_url,
 };
-use t3_contracts::preview::{PreviewStreamHostSetup, PreviewTabId};
+use t3_contracts::preview::{
+    PreviewNavStatus, PreviewSessionSnapshot, PreviewStreamHostSetup, PreviewTabId,
+};
 
 use crate::{
     i18n::t,
@@ -32,6 +34,8 @@ use crate::{
     theme::tw,
     ui::button::{ButtonContent, ButtonSize, ButtonVariant, button},
 };
+
+use super::annotation::{self, Annotation, Capture};
 
 const RESIZE_DELAY: Duration = Duration::from_millis(150);
 const SEND_DEADLINE: Duration = Duration::from_secs(5);
@@ -176,12 +180,14 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
     service: BrowserPreview<P>,
     tab: PreviewTabId,
     controls: StreamControls,
+    snapshot: Memo<Option<PreviewSessionSnapshot>>,
 ) -> impl IntoElement {
     let service = stored(service);
     let tab = stored(tab);
     let size = signal((0.0_f32, 0.0_f32));
     let page = signal(None::<Viewport>);
-    let frame = signal(None::<SharedString>);
+    let frame = signal_with(None::<Capture>, SignalEquals::Never);
+    let annotation = signal_with(None::<Rc<Annotation>>, SignalEquals::Never);
     let failed = signal(None::<StreamFailure>);
     let tasks = TaskOwner::here();
     let motion = Motion {
@@ -231,6 +237,7 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
         let tab = tab.get();
         let bounds = untracked(window);
         frame.set(None);
+        annotation.set(None);
         page.set(None);
         failed.set(None);
         controls.control.set(None);
@@ -272,8 +279,8 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
                                     }
                                 }
                                 PreviewEvent::Frame(bytes) => {
-                                    if let Some(jpeg) = jpeg_source(&bytes) {
-                                        frame.set(Some(SharedString::from(jpeg)));
+                                    if let Some(capture) = jpeg_capture(bytes) {
+                                        frame.set(Some(capture));
                                     }
                                 }
                                 PreviewEvent::Clipboard { request_id, text } => {
@@ -352,160 +359,215 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
             }
         };
 
+    let surface = move || {
+        when(
+            move || failed.with(Option::is_some),
+            move || {
+                dynamic(move || match failed.get() {
+                    Some(failure) => stream_failure(failure, revision).into_element(),
+                    None => view().into_element(),
+                })
+            },
+        )
+        .otherwise(move || {
+            view()
+                .element_ref(&focus)
+                .focusable(move || controls.controls_page())
+                .capture_keys(move || {
+                    if controls.controls_page() && !entry_focused.get() {
+                        KeyCapture::All
+                    } else {
+                        KeyCapture::None
+                    }
+                })
+                .test_id("preview-page")
+                .on_blur(move || clipboard.reset())
+                .label(t("Streamed browser page"))
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    size.set((bounds.size.width.0, bounds.size.height.0))
+                })
+                .on_press(move |event: &PressEvent| {
+                    if coarse
+                        && controlled(&controls.control.get_untracked())
+                        && let Some(at) = position(event.position)
+                    {
+                        focus.focus();
+                        mouse(at, MouseAction::Down, MouseButton::Left, 1, 1, 0);
+                        mouse(at, MouseAction::Up, MouseButton::Left, 0, 1, 0);
+                        pending_probe.set(Some((at.x, at.y)));
+                        controls.send(BrowserInput::Probe { x: at.x, y: at.y });
+                    }
+                })
+                .on_touch(move |event: &TouchEvent| {
+                    if coarse && controlled(&controls.control.get_untracked()) {
+                        scroll_touch(touch, position, motion, event);
+                    }
+                })
+                .on_press_down(move |event: &PressEvent| {
+                    if coarse || !controlled(&controls.control.get_untracked()) {
+                        return;
+                    }
+                    if let Some(at) = position(event.position) {
+                        if web_hardware_keyboard {
+                            entry_ref.focus();
+                        } else {
+                            focus.focus();
+                        }
+                        let clicks = event.clicks.max(1);
+                        down.set(Some((at, clicks)));
+                        mouse(
+                            at,
+                            MouseAction::Down,
+                            MouseButton::Left,
+                            MouseButton::Left.mask(),
+                            clicks,
+                            mods(event.modifiers),
+                        );
+                    }
+                })
+                .on_press_up(move |event: &PressEvent| {
+                    if let Some((start, clicks)) = down.get_untracked() {
+                        down.set(None);
+                        let at = position(event.position).unwrap_or(start);
+                        mouse(
+                            at,
+                            MouseAction::Up,
+                            MouseButton::Left,
+                            0,
+                            clicks,
+                            mods(event.modifiers),
+                        );
+                    }
+                })
+                .on_mouse_move(move |event: &MouseEvent| {
+                    if controlled(&controls.control.get_untracked())
+                        && let Some(at) = position(event.position)
+                    {
+                        let button = if down.get_untracked().is_some() {
+                            MouseButton::Left
+                        } else {
+                            MouseButton::None
+                        };
+                        mouse(
+                            at,
+                            MouseAction::Move,
+                            button,
+                            button.mask(),
+                            0,
+                            mods(event.modifiers),
+                        );
+                    }
+                })
+                .on_wheel(move |event: &WheelEvent| {
+                    if controlled(&controls.control.get_untracked())
+                        && let Some(at) = position(event.position)
+                    {
+                        let delta = event.delta.points(px(16.0));
+                        motion.wheel(WheelMotion {
+                            at,
+                            delta_x: f64::from(delta.x.0) / at.scale,
+                            delta_y: f64::from(delta.y.0) / at.scale,
+                            modifiers: mods(event.modifiers),
+                        });
+                    }
+                })
+                .on_key_down(move |event: &KeyEvent| {
+                    if event.key.as_str() == "Escape" && event.modifiers.shift {
+                        focus.blur();
+                    } else if !entry_focused.get_untracked() {
+                        clipboard.forward(KeyAction::Down, event);
+                    }
+                })
+                .on_key_up(move |event: &KeyEvent| {
+                    if !entry_focused.get_untracked() {
+                        clipboard.forward(KeyAction::Up, event);
+                    }
+                })
+                .app_class(tw(
+                    "relative flex min-h-0 flex-1 items-center justify-center overflow-hidden",
+                ))
+                .child((coarse || web_text_field).then(|| {
+                    browser_entry(clipboard, entry_ref, entry_focused, web_hardware_keyboard)
+                }))
+                .child(
+                    when(
+                        move || frame.with(Option::is_some),
+                        move || {
+                            image(move || {
+                                ImageSrc::from(frame.with(|capture| {
+                                    capture
+                                        .as_ref()
+                                        .map(|capture| capture.source.clone())
+                                        .unwrap_or_default()
+                                }))
+                            })
+                            .object_fit(ResizeMode::Contain)
+                            .pointer_events(PointerEvents::None)
+                            .w_full()
+                            .h_full()
+                            .test_id("preview-jpeg")
+                        },
+                    )
+                    .otherwise(|| {
+                        text(t("Connecting to browser…"))
+                            .app_class(tw("text-sm text-muted-foreground"))
+                    }),
+                )
+        })
+    };
+    let annotate = move || {
+        let (Some(capture), Some(snapshot)) = (frame.get_untracked(), snapshot.get_untracked())
+        else {
+            return;
+        };
+        if !matches!(snapshot.nav_status, PreviewNavStatus::Success { .. })
+            || !service.get().can_annotate()
+        {
+            return;
+        }
+        focus.blur();
+        annotation.set(Some(Rc::new(Annotation { capture, snapshot })));
+    };
     view()
         .app_class(tw("flex min-h-0 flex-1 flex-col"))
         .child(when(
-            move || controls.control.get().is_some(),
+            move || controls.control.get().is_some() && annotation.with(Option::is_none),
             move || control_bar(controls),
+        ))
+        .child(when(
+            move || {
+                frame.with(Option::is_some)
+                    && annotation.with(Option::is_none)
+                    && service.get().can_annotate()
+            },
+            move || {
+                button(
+                    ButtonContent::Label(t("Annotate preview")),
+                    ButtonVariant::Ghost,
+                    ButtonSize::Sm,
+                    move || {
+                        !snapshot.with(|snapshot| {
+                            snapshot.as_ref().is_some_and(|snapshot| {
+                                matches!(snapshot.nav_status, PreviewNavStatus::Success { .. })
+                            })
+                        })
+                    },
+                    annotate,
+                )
+            },
         ))
         .child(
             when(
-                move || failed.with(Option::is_some),
+                move || annotation.with(Option::is_some),
                 move || {
-                    dynamic(move || match failed.get() {
-                        Some(failure) => stream_failure(failure, revision).into_element(),
-                        None => view().into_element(),
-                    })
+                    let Some(current) = annotation.get_untracked() else {
+                        return view().into_element();
+                    };
+                    annotation::editor(service.get(), current, move || annotation.set(None))
+                        .into_element()
                 },
             )
-            .otherwise(move || {
-                view()
-                    .element_ref(&focus)
-                    .focusable(move || controls.controls_page())
-                    .capture_keys(move || {
-                        if controls.controls_page() && !entry_focused.get() {
-                            KeyCapture::All
-                        } else {
-                            KeyCapture::None
-                        }
-                    })
-                    .test_id("preview-page")
-                    .on_blur(move || clipboard.reset())
-                    .label(t("Streamed browser page"))
-                    .on_layout(move |bounds: &Bounds<Points>| {
-                        size.set((bounds.size.width.0, bounds.size.height.0))
-                    })
-                    .on_press(move |event: &PressEvent| {
-                        if coarse
-                            && controlled(&controls.control.get_untracked())
-                            && let Some(at) = position(event.position)
-                        {
-                            focus.focus();
-                            mouse(at, MouseAction::Down, MouseButton::Left, 1, 1, 0);
-                            mouse(at, MouseAction::Up, MouseButton::Left, 0, 1, 0);
-                            pending_probe.set(Some((at.x, at.y)));
-                            controls.send(BrowserInput::Probe { x: at.x, y: at.y });
-                        }
-                    })
-                    .on_touch(move |event: &TouchEvent| {
-                        if coarse && controlled(&controls.control.get_untracked()) {
-                            scroll_touch(touch, position, motion, event);
-                        }
-                    })
-                    .on_press_down(move |event: &PressEvent| {
-                        if coarse || !controlled(&controls.control.get_untracked()) {
-                            return;
-                        }
-                        if let Some(at) = position(event.position) {
-                            if web_hardware_keyboard {
-                                entry_ref.focus();
-                            } else {
-                                focus.focus();
-                            }
-                            let clicks = event.clicks.max(1);
-                            down.set(Some((at, clicks)));
-                            mouse(
-                                at,
-                                MouseAction::Down,
-                                MouseButton::Left,
-                                MouseButton::Left.mask(),
-                                clicks,
-                                mods(event.modifiers),
-                            );
-                        }
-                    })
-                    .on_press_up(move |event: &PressEvent| {
-                        if let Some((start, clicks)) = down.get_untracked() {
-                            down.set(None);
-                            let at = position(event.position).unwrap_or(start);
-                            mouse(
-                                at,
-                                MouseAction::Up,
-                                MouseButton::Left,
-                                0,
-                                clicks,
-                                mods(event.modifiers),
-                            );
-                        }
-                    })
-                    .on_mouse_move(move |event: &MouseEvent| {
-                        if controlled(&controls.control.get_untracked())
-                            && let Some(at) = position(event.position)
-                        {
-                            let button = if down.get_untracked().is_some() {
-                                MouseButton::Left
-                            } else {
-                                MouseButton::None
-                            };
-                            mouse(
-                                at,
-                                MouseAction::Move,
-                                button,
-                                button.mask(),
-                                0,
-                                mods(event.modifiers),
-                            );
-                        }
-                    })
-                    .on_wheel(move |event: &WheelEvent| {
-                        if controlled(&controls.control.get_untracked())
-                            && let Some(at) = position(event.position)
-                        {
-                            let delta = event.delta.points(px(16.0));
-                            motion.wheel(WheelMotion {
-                                at,
-                                delta_x: f64::from(delta.x.0) / at.scale,
-                                delta_y: f64::from(delta.y.0) / at.scale,
-                                modifiers: mods(event.modifiers),
-                            });
-                        }
-                    })
-                    .on_key_down(move |event: &KeyEvent| {
-                        if event.key.as_str() == "Escape" && event.modifiers.shift {
-                            focus.blur();
-                        } else if !entry_focused.get_untracked() {
-                            clipboard.forward(KeyAction::Down, event);
-                        }
-                    })
-                    .on_key_up(move |event: &KeyEvent| {
-                        if !entry_focused.get_untracked() {
-                            clipboard.forward(KeyAction::Up, event);
-                        }
-                    })
-                    .app_class(tw(
-                        "relative flex min-h-0 flex-1 items-center justify-center overflow-hidden",
-                    ))
-                    .child((coarse || web_text_field).then(|| {
-                        browser_entry(clipboard, entry_ref, entry_focused, web_hardware_keyboard)
-                    }))
-                    .child(
-                        when(
-                            move || frame.with(Option::is_some),
-                            move || {
-                                image(move || ImageSrc::from(frame.get().unwrap_or_default()))
-                                    .object_fit(ResizeMode::Contain)
-                                    .pointer_events(PointerEvents::None)
-                                    .w_full()
-                                    .h_full()
-                                    .test_id("preview-jpeg")
-                            },
-                        )
-                        .otherwise(|| {
-                            text(t("Connecting to browser…"))
-                                .app_class(tw("text-sm text-muted-foreground"))
-                        }),
-                    )
-            }),
+            .otherwise(surface),
         )
 }
 
@@ -716,13 +778,16 @@ fn scroll_touch(
     }
 }
 
-fn jpeg_source(bytes: &[u8]) -> Option<String> {
-    if image_mime(bytes) != Some("image/jpeg") {
+fn jpeg_capture(bytes: Vec<u8>) -> Option<Capture> {
+    if image_mime(&bytes) != Some("image/jpeg") {
         return None;
     }
-    let (width, height) = image_size(bytes)?;
-    Viewport::from_page(f64::from(width), f64::from(height))?;
-    Some(preview_data_url("image/jpeg", bytes))
+    let (width, height) = image_size(&bytes)?;
+    Some(Capture {
+        pixels: Viewport::from_page(f64::from(width), f64::from(height))?,
+        source: preview_data_url("image/jpeg", &bytes).into(),
+        jpeg: Rc::new(bytes),
+    })
 }
 
 fn mods(modifiers: Modifiers) -> u8 {
@@ -948,10 +1013,10 @@ mod tests {
 
     #[test]
     fn jpeg_rejects_untrusted_formats_and_excessive_dimensions() {
-        assert!(jpeg_source(b"<svg></svg>").is_none());
-        assert!(jpeg_source(&[0xff, 0xd8, 0xff]).is_none());
+        assert!(jpeg_capture(b"<svg></svg>".to_vec()).is_none());
+        assert!(jpeg_capture(vec![0xff, 0xd8, 0xff]).is_none());
         let mut jpeg = include_bytes!("../../../tests/ui/prv_2.jpg").to_vec();
-        assert!(jpeg_source(&jpeg).is_some());
+        assert!(jpeg_capture(jpeg.clone()).is_some());
         let sof = jpeg
             .windows(2)
             .position(|bytes| bytes == [0xff, 0xc0])
@@ -959,11 +1024,14 @@ mod tests {
         jpeg[sof + 5..sof + 7].copy_from_slice(&3840_u16.to_be_bytes());
         jpeg[sof + 7..sof + 9].copy_from_slice(&3840_u16.to_be_bytes());
         assert!(
-            jpeg_source(&jpeg).is_none(),
+            jpeg_capture(jpeg.clone()).is_none(),
             "JPEG exceeds the viewport area"
         );
         jpeg[sof + 5..sof + 7].copy_from_slice(&1_u16.to_be_bytes());
         jpeg[sof + 7..sof + 9].copy_from_slice(&4096_u16.to_be_bytes());
-        assert!(jpeg_source(&jpeg).is_none(), "JPEG exceeds the side limit");
+        assert!(
+            jpeg_capture(jpeg.clone()).is_none(),
+            "JPEG exceeds the side limit"
+        );
     }
 }
