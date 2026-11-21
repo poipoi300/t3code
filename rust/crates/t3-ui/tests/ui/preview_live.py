@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run the two live preview tests on private servers with a deterministic CDP edge."""
+"""Run the live annotation tests (`prv_2::annotation_highlights_live_viewer_at_*_width`) against a
+private server with a deterministic CDP edge. See preview_live.md for the command."""
 
 import argparse
 import base64

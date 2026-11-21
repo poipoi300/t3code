@@ -27,6 +27,10 @@ log = "0.4"
 # TL-BLOCKS-2's code tokenizer: the versions and features nsh-base's `highlight` already builds.
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
+# PRV annotation: crop the viewer's JPEG frame to the marked region and encode it as PNG, the
+# format the web annotation contract attaches. Versions already in nsh's dependency tree.
+zune-jpeg = "0.5"
+png = "0.17"
 
 # The client's network and storage runtime on native hosts (`runtime/client.rs`).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

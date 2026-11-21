@@ -5267,6 +5267,7 @@ dependencies = [
  "nsh-platform-android",
  "nsh-testing",
  "percent-encoding",
+ "png",
  "qrcodegen",
  "serde_json",
  "syntect",
@@ -5277,6 +5278,7 @@ dependencies = [
  "t3-theme",
  "tokio",
  "two-face",
+ "zune-jpeg",
 ]
 
 [[package]]

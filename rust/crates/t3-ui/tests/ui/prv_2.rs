@@ -305,6 +305,20 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
         );
         verified_annotation.set(true);
     });
+    let empty_annotation = signal(false);
+    let drafts = client.composer_drafts();
+    on_key("f2", move |_| {
+        let target = key.get();
+        let document = drafts.document();
+        let draft = &document.borrow()["draftsByThreadKey"][drafts.thread_draft_key(&target)];
+        assert!(
+            draft["previewAnnotations"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+        assert!(draft["images"].as_array().is_none_or(Vec::is_empty));
+        empty_annotation.set(true);
+    });
     let verified = signal(false);
     on_key("f9", move |_| {
         let requests = browser.requests();
@@ -405,6 +419,7 @@ fn stream_fixture_content(node_required: bool) -> impl IntoElement {
         .child(when(verified_annotation, || {
             text("Verified preview annotation")
         }))
+        .child(when(empty_annotation, || text("Draft has no annotation")))
         .child(right_panel_tabs(host, key.get(), registry, view()))
 }
 
@@ -561,19 +576,56 @@ fn verify_region_draft(draft: &serde_json::Value) {
             .expect("annotation note")
             .contains("Check this region")
     );
+    // The fixture frame is 8 x 6 pixels of an 800 x 600 CSS page, so one frame pixel is 100 CSS
+    // pixels each way. The crop is the marked region of the frame.
     let rect = &annotation["regions"][0]["rect"];
-    assert!(rect["width"].as_f64().expect("region width") > 0.0);
-    assert!(rect["height"].as_f64().expect("region height") > 0.0);
-    assert_eq!(image["mimeType"], "image/jpeg");
+    let screenshot = &annotation["screenshot"];
+    assert_eq!(&screenshot["cropRect"], rect);
+    let (crop_w, crop_h) = (
+        screenshot["width"].as_f64().expect("crop width"),
+        screenshot["height"].as_f64().expect("crop height"),
+    );
+    assert!((1.0..=8.0).contains(&crop_w) && (1.0..=6.0).contains(&crop_h));
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let number = |name: &str| rect[name].as_f64().expect("rect number");
+    assert!(close(number("width"), crop_w * 100.0));
+    assert!(close(number("height"), crop_h * 100.0));
+    let (frame_x, frame_y) = (number("x") / 100.0, number("y") / 100.0);
+    assert!(close(frame_x, frame_x.round()) && close(frame_y, frame_y.round()));
+    assert!(frame_x + crop_w <= 8.0 + 1e-9 && frame_y + crop_h <= 6.0 + 1e-9);
+    assert!(
+        screenshot["dataUrl"]
+            .as_str()
+            .expect("screenshot data")
+            .starts_with("data:image/png;base64,")
+    );
+    assert!(
+        annotation["createdAt"]
+            .as_str()
+            .expect("created at")
+            .ends_with('Z')
+    );
+    assert_eq!(image["mimeType"], "image/png");
     assert!(
         image["previewUrl"]
             .as_str()
             .expect("image source")
-            .starts_with("data:image/jpeg;base64,")
+            .starts_with("data:image/png;base64,")
     );
 }
 
 fn highlight_preview_region(width: (f32, f32), live: bool) {
+    mark_preview_region(width, live, Finish::Button);
+}
+
+#[derive(Clone, Copy)]
+enum Finish {
+    Button,
+    EnterInNote,
+    EscapeInNote,
+}
+
+fn mark_preview_region(width: (f32, f32), live: bool, finish: Finish) {
     let root = if live {
         Root::of::<LiveAnnotationFixture>()
     } else {
@@ -606,8 +658,28 @@ fn highlight_preview_region(width: (f32, f32), live: bool) {
         .expect("show the highlighted region");
     app.type_text("label:Annotation note", "Check this region")
         .expect("type an annotation note");
-    app.press("role:button[Attach annotation]")
-        .expect("add the region and capture to the thread draft");
+    match finish {
+        Finish::Button => app
+            .press("role:button[Attach annotation]")
+            .expect("add the region and capture to the thread draft"),
+        Finish::EnterInNote => app
+            .press_key("Enter")
+            .expect("Enter attaches from the note"),
+        Finish::EscapeInNote => {
+            app.press_key("escape").expect("Escape leaves the editor");
+            app.wait_for("role:button[Annotate preview]")
+                .expect("back on the stream");
+            assert!(
+                !app.screen()
+                    .matches("id:preview-region-picker")
+                    .expect("picker selector")
+            );
+            app.press_key("f2").expect("verify the draft is untouched");
+            app.wait_for("Draft has no annotation")
+                .expect("an escaped editor attaches nothing");
+            return;
+        }
+    }
     app.press_key("f1").expect("verify draft transport");
     app.wait_for("Verified preview annotation")
         .expect("draft owns capture and region");
@@ -621,6 +693,16 @@ fn annotation_highlights_the_stream_at_desktop_width() {
 #[test]
 fn annotation_highlights_the_stream_at_phone_width() {
     highlight_preview_region(PHONE, false);
+}
+
+#[test]
+fn enter_in_the_note_attaches_like_the_web_editor() {
+    mark_preview_region(DESKTOP, false, Finish::EnterInNote);
+}
+
+#[test]
+fn escape_in_the_note_leaves_without_attaching() {
+    mark_preview_region(DESKTOP, false, Finish::EscapeInNote);
 }
 
 // A private server harness supplies a pairing URL written to a mode-0600 file.

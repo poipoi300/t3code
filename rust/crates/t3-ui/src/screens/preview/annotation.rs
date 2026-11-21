@@ -1,17 +1,24 @@
 //! Region selection on a frozen frame from the managed browser viewer.
+//!
+//! The web editor (`PickPreload.ts`) is pointer-driven: it has no keyboard way to choose a
+//! region, so this editor has none either. Escape cancels and Enter in the note attaches, as on
+//! the web.
 
-use std::rc::Rc;
+use std::{future::Future, pin::pin, rc::Rc, time::Duration};
 
-use nsh_core::{TouchEvent, TouchPhase, element::ImageSrc, prelude::*};
+use futures::future::{AbortHandle, Either, abortable, select};
+use nsh_core::{
+    TouchEvent, TouchPhase, element::ImageSrc, keymap::When, prelude::*, time::unix_ms,
+};
 use t3_client::{
     platform::Platform,
     preview::{
-        annotation::AnnotationRegion,
+        annotation::{AnnotationRegion, AnnotationRequest, NOTE_MAX_UTF16},
         browser::BrowserPreview,
-        socket::{PagePoint, Viewport},
+        socket::Viewport,
     },
+    time::iso_from_epoch_ms,
 };
-use t3_contracts::preview::PreviewSessionSnapshot;
 
 use crate::{
     i18n::t,
@@ -20,21 +27,46 @@ use crate::{
     ui::button::{ButtonContent, ButtonSize, ButtonVariant, button},
 };
 
+use super::crop::crop_png;
+
+/// How long an attach may take before the editor reports a failure.
+const SAVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The page a frame was captured from, read when the frame arrived.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PageIdentity {
+    pub thread_id: String,
+    pub url: String,
+    pub title: Option<String>,
+    /// The page viewport in CSS pixels at that moment.
+    pub viewport: Viewport,
+}
+
 #[derive(Clone)]
 pub(super) struct Capture {
     pub source: SharedString,
     pub jpeg: Rc<Vec<u8>>,
     pub pixels: Viewport,
+    /// `None` until the page and its viewport were known when the frame arrived.
+    pub page: Option<PageIdentity>,
 }
 
 pub(super) struct Annotation {
     pub capture: Capture,
-    pub snapshot: PreviewSessionSnapshot,
+    pub page: PageIdentity,
 }
 
 type CapturePoint = (f64, f64);
 
+/// The region between two points, in frame pixels. `None` for a tap, a line, or a point that is
+/// not a finite number.
 fn region(start: CapturePoint, end: CapturePoint) -> Option<AnnotationRegion> {
+    if ![start.0, start.1, end.0, end.1]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return None;
+    }
     let x = start.0.min(end.0).floor() as u32;
     let y = start.1.min(end.1).floor() as u32;
     let width = start.0.max(end.0).ceil() as u32 - x;
@@ -47,75 +79,174 @@ fn region(start: CapturePoint, end: CapturePoint) -> Option<AnnotationRegion> {
     })
 }
 
-pub(super) fn editor<P: Platform + Clone + 'static>(
-    service: BrowserPreview<P>,
-    annotation: Rc<Annotation>,
-    close: impl Fn() + Copy + 'static,
-) -> impl IntoElement {
-    let pixels = annotation.capture.pixels;
-    let annotation = stored(annotation);
-    let service = stored(service);
-    let tasks = TaskOwner::here();
-    let bounds = signal((0.0_f32, 0.0_f32));
-    let selected = signal(None::<AnnotationRegion>);
-    let drag = signal(None::<(u32, CapturePoint)>);
-    let note = signal(String::new());
-    let saving = signal(false);
-    let failed = signal(false);
-    let start = move |id, at: Point<Points>| {
-        if saving.get_untracked() || drag.get_untracked().is_some() {
-            return;
-        }
-        if let Some(PagePoint { x, y, .. }) =
-            pixels.project(bounds.get_untracked(), (at.x.0, at.y.0))
-        {
-            selected.set(None);
-            drag.set(Some((id, (x, y))));
-        }
-    };
-    let update = move |id, at: Point<Points>, done| {
-        let Some((held, origin)) = drag.get_untracked() else {
+/// A pointer position as a frame pixel, pinned to the frame edge when it is outside the image
+/// (or in the letterbox bars). `bounds` is the picker's size.
+fn clamped_point(pixels: Viewport, bounds: (f32, f32), at: (f32, f32)) -> Option<CapturePoint> {
+    let (frame_w, frame_h) = (f64::from(pixels.width), f64::from(pixels.height));
+    let scale = (f64::from(bounds.0) / frame_w).min(f64::from(bounds.1) / frame_h);
+    if !scale.is_finite() || scale <= 0.0 || !at.0.is_finite() || !at.1.is_finite() {
+        return None;
+    }
+    let x = (f64::from(at.0) - (f64::from(bounds.0) - frame_w * scale) / 2.0) / scale;
+    let y = (f64::from(at.1) - (f64::from(bounds.1) - frame_h * scale) / 2.0) / scale;
+    Some((x.clamp(0.0, frame_w), y.clamp(0.0, frame_h)))
+}
+
+/// The drag in progress and the region it has chosen.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Picker {
+    drag: Option<(u32, CapturePoint)>,
+    selected: Option<AnnotationRegion>,
+}
+
+impl Picker {
+    /// A new press always begins a fresh drag: a drag whose `End` never arrived (pointer released
+    /// outside the element, window blur) must not block the next one.
+    fn start(&mut self, id: u32, at: CapturePoint) {
+        self.selected = None;
+        self.drag = Some((id, at));
+    }
+
+    fn update(&mut self, id: u32, at: CapturePoint, done: bool) {
+        let Some((held, origin)) = self.drag else {
             return;
         };
         if held != id {
             return;
         }
-        if let Some(PagePoint { x, y, .. }) =
-            pixels.project(bounds.get_untracked(), (at.x.0, at.y.0))
-        {
-            selected.set(region(origin, (x, y)));
-        }
+        self.selected = region(origin, at);
         if done {
-            drag.set(None);
+            self.drag = None;
+        }
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+
+    fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveFailure {
+    Rejected,
+    TimedOut,
+}
+
+/// Run `work` until it finishes or `deadline` does. The losing future is dropped, which is what
+/// rolls back a half-finished attach.
+async fn within<T, E>(
+    work: impl Future<Output = Result<T, E>>,
+    deadline: impl Future<Output = ()>,
+) -> Result<T, SaveFailure> {
+    match select(pin!(work), pin!(deadline)).await {
+        Either::Left((result, _)) => result.map_err(|_| SaveFailure::Rejected),
+        Either::Right(_) => Err(SaveFailure::TimedOut),
+    }
+}
+
+pub(super) fn editor<P: Platform + Clone + 'static>(
+    service: BrowserPreview<P>,
+    annotation: Rc<Annotation>,
+    // The owner of the stream surface, which outlives the editor: a save started here must reach
+    // its rollback or its commit even when the editor is closed or rebuilt under it.
+    tasks: TaskOwner,
+    close: impl Fn() + Copy + 'static,
+) -> impl IntoElement {
+    let pixels = annotation.capture.pixels;
+    let annotation = stored(annotation);
+    let service = stored(service);
+    let bounds = signal((0.0_f32, 0.0_f32));
+    let picker = signal_with(Picker::default(), SignalEquals::Never);
+    let note = signal(String::new());
+    let saving = signal(false);
+    let failure = signal(None::<SaveFailure>);
+    let save = signal_with(None::<AbortHandle>, SignalEquals::Never);
+    let selected = move || picker.with(|picker| picker.selected);
+    let note_fits = move || note.with(|note| note.encode_utf16().count() <= NOTE_MAX_UTF16);
+    let start = move |id: u32, at: Point<Points>| {
+        if saving.get_untracked() {
+            return;
+        }
+        // A press has to land on the image; only the drag may leave it.
+        if pixels
+            .project(bounds.get_untracked(), (at.x.0, at.y.0))
+            .is_none()
+        {
+            return;
+        }
+        if let Some(point) = clamped_point(pixels, bounds.get_untracked(), (at.x.0, at.y.0)) {
+            picker.update(|picker| picker.start(id, point));
         }
     };
+    let update = move |id: u32, at: Point<Points>, done: bool| {
+        if let Some(point) = clamped_point(pixels, bounds.get_untracked(), (at.x.0, at.y.0)) {
+            picker.update(|picker| picker.update(id, point, done));
+        } else if done {
+            picker.update(|picker| picker.cancel());
+        }
+    };
+    // Leaving mid-save ends the save: the dropped future removes what it staged.
+    let cancel = move || {
+        if let Some(handle) = save.get_untracked() {
+            handle.abort();
+        }
+        close();
+    };
+    // NSH's raw key listener is not cross-platform; its focused keymap handles Escape.
+    let note_focused = signal(false);
+    effect(move || {
+        if note_focused.get() {
+            on_key_with(
+                "escape",
+                KeyOptions {
+                    when: When::Always,
+                    ..Default::default()
+                },
+                move |_| cancel(),
+            );
+        }
+    });
     let attach = move || {
-        let Some(region) = selected.get_untracked() else {
+        let Some(region) = selected() else {
             return;
         };
-        if saving.get_untracked() || drag.get_untracked().is_some() {
+        if saving.get_untracked() || picker.with_untracked(Picker::dragging) || !note_fits() {
             return;
         }
         let annotation = annotation.get();
         let service = service.get();
-        let note = note.get_untracked();
+        let Some(png) = crop_png(annotation.capture.jpeg.as_ref(), region) else {
+            failure.set(Some(SaveFailure::Rejected));
+            return;
+        };
+        let request = AnnotationRequest {
+            thread_id: annotation.page.thread_id.clone(),
+            url: annotation.page.url.clone(),
+            title: annotation.page.title.clone(),
+            page: annotation.page.viewport,
+            frame: annotation.capture.pixels,
+            region,
+            note: note.get_untracked(),
+            png,
+            created_at: iso_from_epoch_ms(unix_ms() as u64),
+        };
         saving.set(true);
-        failed.set(false);
+        failure.set(None);
+        let (work, handle) = abortable(async move {
+            within(service.attach_annotation(request), timer(SAVE_TIMEOUT)).await
+        });
+        save.set(Some(handle));
         tasks.spawn(async move {
-            let result = service
-                .attach_annotation(
-                    &annotation.snapshot,
-                    annotation.capture.pixels,
-                    region,
-                    &note,
-                    annotation.capture.jpeg.as_ref().clone(),
-                )
-                .await;
-            if result.is_ok() {
-                close();
-            } else {
-                failed.set(true);
-                saving.set(false);
+            match work.await {
+                Ok(Ok(())) => close(),
+                Ok(Err(reason)) => {
+                    failure.try_set(Some(reason));
+                    saving.try_set(false);
+                }
+                Err(_aborted) => {}
             }
         });
     };
@@ -131,8 +262,7 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
                 })
                 .on_touch(move |event: &TouchEvent| {
                     if event.phase == TouchPhase::Cancel {
-                        drag.set(None);
-                        selected.set(None);
+                        picker.update(|picker| picker.cancel());
                         return;
                     }
                     for point in event.points.iter().filter(|point| point.changed) {
@@ -154,7 +284,7 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
                         .pointer_events(PointerEvents::None),
                 )
                 .child(dynamic(move || {
-                    let Some(region) = selected.get() else {
+                    let Some(region) = selected() else {
                         return view().into_element();
                     };
                     let (width, height) = bounds.get();
@@ -181,15 +311,27 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
                     nsh_base::input()
                         .label(t("Annotation note"))
                         .placeholder(t("Annotation note"))
-                        .max_length(1000)
                         .disabled(saving)
                         .on_change(move |value: &str| note.set(value.to_owned()))
+                        .submit_behavior(SubmitBehavior::Submit)
+                        .on_submit(move |_: &str| attach())
+                        .on_focus(move || note_focused.set(true))
+                        .on_blur(move || note_focused.set(false))
                         .app_class(tw("h-8 rounded-md border border-border px-2 text-sm")),
                 )
-                .child(when(failed, || {
-                    text(t("Could not attach the preview annotation."))
+                .child(when(
+                    move || failure.get().is_some(),
+                    move || {
+                        text(match failure.get() {
+                            Some(SaveFailure::TimedOut) => {
+                                t("Attaching the preview annotation timed out.")
+                            }
+                            _ => t("Could not attach the preview annotation."),
+                        })
+                        .role(AccessibilityRole::Alert)
                         .app_class(tw("text-sm text-destructive"))
-                }))
+                    },
+                ))
                 .child(
                     view()
                         .app_class(tw("flex items-center justify-end gap-2"))
@@ -197,46 +339,148 @@ pub(super) fn editor<P: Platform + Clone + 'static>(
                             ButtonContent::Label(t("Cancel")),
                             ButtonVariant::Ghost,
                             ButtonSize::Sm,
-                            move || saving.get(),
-                            close,
+                            || false,
+                            cancel,
                         ))
                         .child(button(
                             ButtonContent::Label(t("Attach annotation")),
                             ButtonVariant::Default,
                             ButtonSize::Sm,
                             move || {
-                                selected.get().is_none() || drag.get().is_some() || saving.get()
+                                selected().is_none()
+                                    || picker.with(Picker::dragging)
+                                    || saving.get()
+                                    || !note_fits()
                             },
                             attach,
                         )),
                 ),
         )
 }
-
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, future::pending, rc::Rc};
+
+    use futures::executor::block_on;
+
     use super::*;
+
+    const FRAME: Viewport = Viewport {
+        width: 200,
+        height: 100,
+    };
+
+    fn rect(x: u32, y: u32, width: u32, height: u32) -> Option<AnnotationRegion> {
+        Some(AnnotationRegion {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
 
     #[test]
     fn a_drag_in_any_direction_makes_the_same_region() {
         let forward = region((10.2, 20.7), (30.1, 40.0));
         let backward = region((30.1, 40.0), (10.2, 20.7));
         assert_eq!(forward, backward);
+        assert_eq!(forward, rect(10, 20, 21, 20));
+    }
+
+    #[test]
+    fn a_tap_a_line_or_a_non_number_selects_nothing() {
+        assert_eq!(region((5.0, 5.0), (5.0, 5.0)), None);
+        assert_eq!(region((5.0, 5.0), (50.0, 5.0)), None);
+        assert_eq!(region((5.0, 5.0), (5.0, 50.0)), None);
+        assert_eq!(region((f64::NAN, 5.0), (50.0, 50.0)), None);
+        assert_eq!(region((5.0, 5.0), (50.0, f64::NAN)), None);
+        assert_eq!(region((5.0, f64::INFINITY), (50.0, 50.0)), None);
+    }
+
+    #[test]
+    fn a_drag_past_the_image_edge_ends_on_the_edge() {
+        // A 400 x 200 picker over a 200 x 100 frame: scale 2, no letterbox.
+        let bounds = (400.0, 200.0);
         assert_eq!(
-            forward,
-            Some(AnnotationRegion {
-                x: 10,
-                y: 20,
-                width: 21,
-                height: 20
-            })
+            clamped_point(FRAME, bounds, (500.0, 250.0)),
+            Some((200.0, 100.0))
+        );
+        assert_eq!(
+            clamped_point(FRAME, bounds, (-30.0, -1.0)),
+            Some((0.0, 0.0))
+        );
+        let end = clamped_point(FRAME, bounds, (900.0, 90.0)).expect("point");
+        assert_eq!(region((100.0, 10.0), end), rect(100, 10, 100, 35));
+        // Letterbox bars (a taller picker) pin to the frame, not past it.
+        assert_eq!(
+            clamped_point(FRAME, (400.0, 400.0), (200.0, 0.0)),
+            Some((100.0, 0.0))
         );
     }
 
     #[test]
-    fn a_tap_or_a_line_selects_nothing() {
-        assert_eq!(region((5.0, 5.0), (5.0, 5.0)), None);
-        assert_eq!(region((5.0, 5.0), (50.0, 5.0)), None);
-        assert_eq!(region((5.0, 5.0), (5.0, 50.0)), None);
+    fn a_non_number_pointer_position_is_ignored() {
+        assert_eq!(clamped_point(FRAME, (400.0, 200.0), (f32::NAN, 1.0)), None);
+        assert_eq!(clamped_point(FRAME, (0.0, 0.0), (1.0, 1.0)), None);
+    }
+
+    #[test]
+    fn a_new_press_replaces_a_drag_whose_end_never_came() {
+        let mut picker = Picker::default();
+        picker.start(1, (10.0, 10.0));
+        picker.update(1, (50.0, 50.0), false);
+        assert!(picker.dragging());
+        // The release was missed. A second press must not be ignored.
+        picker.start(2, (100.0, 20.0));
+        assert!(picker.dragging());
+        assert_eq!(picker.selected, None);
+        // The first pointer's late events no longer move the selection.
+        picker.update(1, (60.0, 60.0), true);
+        assert_eq!(picker.selected, None);
+        picker.update(2, (150.0, 70.0), true);
+        assert_eq!(picker.selected, rect(100, 20, 50, 50));
+        assert!(!picker.dragging());
+    }
+
+    #[test]
+    fn cancel_clears_the_drag_and_the_selection() {
+        let mut picker = Picker::default();
+        picker.start(1, (10.0, 10.0));
+        picker.update(1, (50.0, 50.0), false);
+        picker.cancel();
+        assert_eq!(picker, Picker::default());
+    }
+
+    struct Dropped(Rc<Cell<bool>>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[test]
+    fn a_save_that_misses_its_deadline_fails_and_is_dropped() {
+        let dropped = Rc::new(Cell::new(false));
+        let guard = Dropped(dropped.clone());
+        let work = async move {
+            let _guard = guard;
+            pending::<Result<(), ()>>().await
+        };
+        let result = block_on(within(work, async {}));
+        assert_eq!(result, Err(SaveFailure::TimedOut));
+        assert!(
+            dropped.get(),
+            "the stalled save must be dropped to roll back"
+        );
+    }
+
+    #[test]
+    fn a_save_that_finishes_first_reports_its_own_outcome() {
+        assert_eq!(block_on(within(async { Ok::<_, ()>(7) }, pending())), Ok(7));
+        assert_eq!(
+            block_on(within(async { Err::<(), _>("no") }, pending())),
+            Err(SaveFailure::Rejected)
+        );
     }
 }

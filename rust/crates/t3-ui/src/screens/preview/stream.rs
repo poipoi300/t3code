@@ -35,7 +35,7 @@ use crate::{
     ui::button::{ButtonContent, ButtonSize, ButtonVariant, button},
 };
 
-use super::annotation::{self, Annotation, Capture};
+use super::annotation::{self, Annotation, Capture, PageIdentity};
 
 const RESIZE_DELAY: Duration = Duration::from_millis(150);
 const SEND_DEADLINE: Duration = Duration::from_secs(5);
@@ -279,7 +279,11 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
                                     }
                                 }
                                 PreviewEvent::Frame(bytes) => {
-                                    if let Some(capture) = jpeg_capture(bytes) {
+                                    if let Some(mut capture) = jpeg_capture(bytes) {
+                                        capture.page = page_identity(
+                                            page.get_untracked(),
+                                            snapshot.get_untracked(),
+                                        );
                                         frame.set(Some(capture));
                                     }
                                 }
@@ -516,17 +520,23 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
         })
     };
     let annotate = move || {
-        let (Some(capture), Some(snapshot)) = (frame.get_untracked(), snapshot.get_untracked())
+        let Some(capture) = frame.get_untracked() else {
+            return;
+        };
+        let current = snapshot.get_untracked();
+        // The frame has to belong to the page the snapshot names now.
+        let Some(page) = capture
+            .page
+            .clone()
+            .filter(|page| frame_matches(page, current.as_ref()))
         else {
             return;
         };
-        if !matches!(snapshot.nav_status, PreviewNavStatus::Success { .. })
-            || !service.get().can_annotate()
-        {
+        if !service.get().can_annotate() {
             return;
         }
         focus.blur();
-        annotation.set(Some(Rc::new(Annotation { capture, snapshot })));
+        annotation.set(Some(Rc::new(Annotation { capture, page })));
     };
     view()
         .app_class(tw("flex min-h-0 flex-1 flex-col"))
@@ -546,10 +556,13 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
                     ButtonVariant::Ghost,
                     ButtonSize::Sm,
                     move || {
-                        !snapshot.with(|snapshot| {
-                            snapshot.as_ref().is_some_and(|snapshot| {
-                                matches!(snapshot.nav_status, PreviewNavStatus::Success { .. })
-                            })
+                        !frame.with(|capture| {
+                            capture
+                                .as_ref()
+                                .and_then(|capture| capture.page.as_ref())
+                                .is_some_and(|page| {
+                                    snapshot.with(|current| frame_matches(page, current.as_ref()))
+                                })
                         })
                     },
                     annotate,
@@ -563,7 +576,7 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
                     let Some(current) = annotation.get_untracked() else {
                         return view().into_element();
                     };
-                    annotation::editor(service.get(), current, move || annotation.set(None))
+                    annotation::editor(service.get(), current, tasks, move || annotation.set(None))
                         .into_element()
                 },
             )
@@ -778,6 +791,32 @@ fn scroll_touch(
     }
 }
 
+/// The page a frame arriving now belongs to: the committed page of the snapshot, with the
+/// viewport the worker last reported.
+fn page_identity(
+    viewport: Option<Viewport>,
+    snapshot: Option<PreviewSessionSnapshot>,
+) -> Option<PageIdentity> {
+    let snapshot = snapshot?;
+    let PreviewNavStatus::Success { url, title } = &snapshot.nav_status else {
+        return None;
+    };
+    Some(PageIdentity {
+        thread_id: snapshot.thread_id.0.clone(),
+        url: url.0.clone(),
+        title: (!title.is_empty()).then(|| title.clone()),
+        viewport: viewport?,
+    })
+}
+
+/// Whether a frame tagged `page` still shows the page the snapshot reports.
+fn frame_matches(page: &PageIdentity, snapshot: Option<&PreviewSessionSnapshot>) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot.thread_id.0 == page.thread_id
+            && matches!(&snapshot.nav_status, PreviewNavStatus::Success { url, .. } if url.0 == page.url)
+    })
+}
+
 fn jpeg_capture(bytes: Vec<u8>) -> Option<Capture> {
     if image_mime(&bytes) != Some("image/jpeg") {
         return None;
@@ -787,6 +826,7 @@ fn jpeg_capture(bytes: Vec<u8>) -> Option<Capture> {
         pixels: Viewport::from_page(f64::from(width), f64::from(height))?,
         source: preview_data_url("image/jpeg", &bytes).into(),
         jpeg: Rc::new(bytes),
+        page: None,
     })
 }
 
@@ -986,7 +1026,80 @@ fn control_bar(controls: StreamControls) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    fn snapshot(thread: &str, nav: serde_json::Value) -> PreviewSessionSnapshot {
+        serde_json::from_value(json!({
+            "threadId": thread, "tabId": "tab", "runtime": "server",
+            "updatedAt": "2026-01-01T00:00:00.000Z",
+            "canGoBack": false, "canGoForward": false, "navStatus": nav,
+        }))
+        .expect("snapshot")
+    }
+
+    fn success(url: &str, title: &str) -> serde_json::Value {
+        json!({"_tag": "Success", "url": url, "title": title})
+    }
+
+    const VIEWPORT: Viewport = Viewport {
+        width: 800,
+        height: 600,
+    };
+
+    #[test]
+    fn a_frame_carries_the_page_it_arrived_on() {
+        let page = page_identity(
+            Some(VIEWPORT),
+            Some(snapshot("thread", success("https://a.test/", "A"))),
+        )
+        .expect("identity");
+        assert_eq!(page.url, "https://a.test/");
+        assert_eq!(page.title.as_deref(), Some("A"));
+        assert_eq!(page.viewport, VIEWPORT);
+        let untitled = page_identity(
+            Some(VIEWPORT),
+            Some(snapshot("thread", success("https://a.test/", ""))),
+        )
+        .expect("identity");
+        assert_eq!(untitled.title, None);
+    }
+
+    #[test]
+    fn a_frame_without_a_committed_page_or_viewport_has_no_identity() {
+        let loading = json!({"_tag": "Loading", "url": "https://a.test/", "title": ""});
+        assert_eq!(
+            page_identity(Some(VIEWPORT), Some(snapshot("thread", loading))),
+            None
+        );
+        assert_eq!(
+            page_identity(
+                None,
+                Some(snapshot("thread", success("https://a.test/", "A")))
+            ),
+            None
+        );
+        assert_eq!(page_identity(Some(VIEWPORT), None), None);
+    }
+
+    #[test]
+    fn a_frame_from_the_previous_page_cannot_be_annotated_after_navigation() {
+        let page = page_identity(
+            Some(VIEWPORT),
+            Some(snapshot("thread", success("https://a.test/", "A"))),
+        )
+        .expect("identity");
+        let same = snapshot("thread", success("https://a.test/", "A (renamed)"));
+        assert!(frame_matches(&page, Some(&same)));
+        let moved = snapshot("thread", success("https://b.test/", "B"));
+        assert!(!frame_matches(&page, Some(&moved)));
+        let loading = json!({"_tag": "Loading", "url": "https://a.test/", "title": ""});
+        assert!(!frame_matches(&page, Some(&snapshot("thread", loading))));
+        let other_thread = snapshot("other", success("https://a.test/", "A"));
+        assert!(!frame_matches(&page, Some(&other_thread)));
+        assert!(!frame_matches(&page, None));
+    }
 
     #[test]
     fn a_saturated_queue_reserves_room_for_releases_and_stays_open() {
