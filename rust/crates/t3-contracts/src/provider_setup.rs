@@ -323,6 +323,7 @@ pub struct ProviderSetupError {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatGptReconnectProfile {
+    #[serde(deserialize_with = "reconnect_client_id")]
     pub client_id: String,
     #[serde(
         default,
@@ -339,7 +340,7 @@ pub struct ChatGptReconnectProfile {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::wire::optional"
+        deserialize_with = "reconnect_redirect"
     )]
     pub redirect_uri: Option<String>,
     #[serde(
@@ -357,7 +358,7 @@ pub struct ChatGptReconnectProfile {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::wire::optional"
+        deserialize_with = "id_token_hint"
     )]
     pub id_token_hint: Option<String>,
 }
@@ -365,9 +366,11 @@ pub struct ChatGptReconnectProfile {
 #[serde(rename_all = "camelCase")]
 pub struct ChatGptTransferredCredentials {
     pub client_id: String,
+    #[serde(deserialize_with = "nonempty_token")]
     pub access_token: String,
-    #[serde(with = "crate::wire::nullable")]
+    #[serde(deserialize_with = "refresh_token")]
     pub refresh_token: Option<String>,
+    #[serde(deserialize_with = "nonempty_token")]
     pub id_token: String,
     pub issuer: String,
     pub expires_at: JsNumber,
@@ -401,7 +404,9 @@ pub struct ChatGptImportProfileInput {
 pub struct ChatGptHandoffInput {
     pub instance_id: ProviderInstanceId,
     pub environment_id: EnvironmentId,
+    #[serde(deserialize_with = "bounded_string::<_, 128>")]
     pub attempt_id: String,
+    #[serde(deserialize_with = "bounded_string::<_, 4096>")]
     pub return_url: String,
     #[serde(with = "crate::wire::nullable")]
     pub profile: Option<ChatGptReconnectProfile>,
@@ -415,6 +420,66 @@ pub enum ChatGptHandoffState {
 
 crate::redacted_debug!(ChatGptReconnectProfile { client_id, subject, email, redirect_uri, connection_label, sharing_enabled } redact { id_token_hint });
 crate::redacted_debug!(ChatGptTransferredCredentials { client_id, issuer, expires_at, earliest_refresh_at, scopes, subject, email } redact { access_token, refresh_token, id_token });
+
+fn bounded_string<'de, D: serde::Deserializer<'de>, const MAX: usize>(
+    d: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    if value.encode_utf16().count() > MAX {
+        return Err(serde::de::Error::custom("string exceeds maximum length"));
+    }
+    Ok(value)
+}
+
+fn nonempty_token<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let token = bounded_string::<_, 16384>(d)?;
+    if token.is_empty() {
+        return Err(serde::de::Error::custom("token must not be empty"));
+    }
+    Ok(token)
+}
+
+fn refresh_token<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let token = Option::<String>::deserialize(d)?;
+    if token
+        .as_ref()
+        .is_some_and(|s| s.encode_utf16().count() > 16384)
+    {
+        return Err(serde::de::Error::custom("token exceeds maximum length"));
+    }
+    Ok(token)
+}
+
+fn id_token_hint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    bounded_string::<_, 16384>(d).map(Some)
+}
+
+fn reconnect_client_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let id = String::deserialize(d)?;
+    if !id.strip_prefix("oaiapp_").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    }) {
+        return Err(serde::de::Error::custom("invalid reconnect client ID"));
+    }
+    Ok(id)
+}
+
+fn reconnect_redirect<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let uri = String::deserialize(d)?;
+    let port = uri
+        .strip_prefix("http://localhost:")
+        .or_else(|| uri.strip_prefix("http://127.0.0.1:"))
+        .and_then(|path| path.strip_suffix("/auth/callback"));
+    if !port.is_some_and(|p| {
+        (1..=5).contains(&p.len()) && !p.starts_with('0') && p.bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return Err(serde::de::Error::custom("invalid reconnect redirect URI"));
+    }
+    Ok(Some(uri))
+}
 
 #[derive(Deserialize)]
 #[serde(try_from = "TrimmedNonEmptyString")]
