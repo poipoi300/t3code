@@ -8,6 +8,8 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsoncError;
 
+const MAX_NESTING: usize = 128;
+
 struct Parser<'a> {
     text: &'a str,
     pos: usize,
@@ -17,7 +19,7 @@ struct Parser<'a> {
 pub fn parse_jsonc(text: &str) -> Result<Value, JsoncError> {
     let mut parser = Parser { text, pos: 0 };
     parser.skip_trivia()?;
-    let value = parser.value()?;
+    let value = parser.value(0)?;
     parser.skip_trivia()?;
     if parser.pos != text.len() {
         return Err(JsoncError);
@@ -56,10 +58,11 @@ impl Parser<'_> {
         }
     }
 
-    fn value(&mut self) -> Result<Value, JsoncError> {
+    fn value(&mut self, depth: usize) -> Result<Value, JsoncError> {
         match self.peek().ok_or(JsoncError)? {
-            '{' => self.object(),
-            '[' => self.array(),
+            '{' | '[' if depth >= MAX_NESTING => Err(JsoncError),
+            '{' => self.object(depth + 1),
+            '[' => self.array(depth + 1),
             '"' => self.string().map(Value::String),
             't' => self.literal("true", Value::Bool(true)),
             'f' => self.literal("false", Value::Bool(false)),
@@ -105,7 +108,7 @@ impl Parser<'_> {
         serde_json::from_str::<String>(&self.text[start..self.pos]).map_err(|_| JsoncError)
     }
 
-    fn array(&mut self) -> Result<Value, JsoncError> {
+    fn array(&mut self, depth: usize) -> Result<Value, JsoncError> {
         self.bump();
         let mut items = Vec::new();
         loop {
@@ -114,7 +117,7 @@ impl Parser<'_> {
                 self.bump();
                 return Ok(Value::Array(items));
             }
-            items.push(self.value()?);
+            items.push(self.value(depth)?);
             self.skip_trivia()?;
             match self.bump() {
                 Some(',') => {}
@@ -124,7 +127,7 @@ impl Parser<'_> {
         }
     }
 
-    fn object(&mut self) -> Result<Value, JsoncError> {
+    fn object(&mut self, depth: usize) -> Result<Value, JsoncError> {
         self.bump();
         let mut map = Map::new();
         loop {
@@ -142,7 +145,7 @@ impl Parser<'_> {
                 return Err(JsoncError);
             }
             self.skip_trivia()?;
-            let value = self.value()?;
+            let value = self.value(depth)?;
             map.insert(key, value);
             self.skip_trivia()?;
             match self.bump() {
@@ -163,6 +166,19 @@ mod tests {
         let value = parse_jsonc("{ // c\n \"a\": [1, 2,], /* b */ \"b\": null, }").expect("parses");
         assert_eq!(value["a"][1], 2);
         assert!(value["b"].is_null());
+    }
+
+    #[test]
+    fn rejects_excessive_nesting_as_invalid_jsonc() {
+        let nested = |depth| format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(parse_jsonc(&nested(128)).is_ok());
+        assert_eq!(parse_jsonc(&nested(129)), Err(JsoncError));
+        let file = "[".repeat(256 * 1024);
+        assert_eq!(parse_jsonc(&file), Err(JsoncError));
+        let error = crate::import::parse_theme_import(&file).expect_err("invalid theme");
+        assert_eq!(error.to_string(), "That theme file is not valid JSON.");
+        let object = format!("{}null{}", r#"{"x":"#.repeat(129), "}".repeat(129));
+        assert_eq!(parse_jsonc(&object), Err(JsoncError));
     }
 
     #[test]
