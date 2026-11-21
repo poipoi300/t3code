@@ -190,6 +190,10 @@ mod tests {
             "ftp:21",
             "file:///tmp/example",
             "mailto:alice@example.com",
+            "javascript:alert(1)",
+            "data:text/plain,a",
+            "view-source:https://example.test/",
+            "chrome://settings/",
         ] {
             assert_eq!(resolve_address(input, &settings), None);
         }

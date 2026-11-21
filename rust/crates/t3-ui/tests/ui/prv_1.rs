@@ -24,6 +24,7 @@ use t3_ui::{
     runtime::{Rt, host::Choice},
     screens::panel::{PanelRegistry, SurfaceKind, panel_host, right_panel_tabs},
     state::nav::{Navigator, Route},
+    ui::toast::{Position, toast_provider},
 };
 
 #[component]
@@ -45,7 +46,11 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
         });
     });
     let server = FakeEnvironment::new("preview-host", run.clone());
-    server.set_permissions(&["orchestration:read", "preview:operate"]);
+    server.set_permissions(&[
+        "orchestration:read",
+        "orchestration:operate",
+        "preview:operate",
+    ]);
     for method in ["preview.list", "preview.open", "preview.close"] {
         server.register(method, CallKind::Unary);
     }
@@ -65,6 +70,12 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
     };
     let list = json!({"sessions": sessions, "serverEpoch": "preview-epoch", "revision": 1});
     if existing {
+        server.reply(
+            "preview.close",
+            Err(json!({
+                "_tag":"PreviewControlRequiredError", "tabId":"persisted-browser"
+            })),
+        );
         let reply = stored(Some(server.defer_reply("preview.list")));
         let list = stored(list.clone());
         let mut early = sessions[0].clone();
@@ -74,6 +85,12 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
             vec![json!({
                 "type":"opened", "threadId":"thread", "tabId":"early-browser", "createdAt":NOW,
                 "serverEpoch":"preview-epoch", "revision":2, "snapshot":early
+            }), json!({
+                "type":"opened", "threadId":"another-thread", "tabId":"foreign-browser", "createdAt":NOW,
+                "serverEpoch":"preview-epoch", "revision":3, "snapshot": {
+                    "threadId":"another-thread","tabId":"foreign-browser","runtime":"server","updatedAt":NOW,
+                    "canGoBack":false,"canGoForward":false,"navStatus":{"_tag":"Success","url":"https://foreign.example/","title":"Foreign page"}
+                }
             })],
         );
         on_key("f8", move |_| {
@@ -130,12 +147,33 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
     }
     .boxed_local());
     provide_client_services(&client);
+    client
+        .thread_actions()
+        .bind_confirmation(Rc::new(|_, _| async { Ok(true) }.boxed_local()));
     let registry = use_context::<PanelRegistry>().expect("app panel registry");
     let host = panel_host();
     let key = stored(ThreadKey {
         environment: EnvironmentId("preview-host".into()),
         thread: ThreadId("thread".into()),
     });
+    let deleted = signal(false);
+    let thread_actions = stored(client.thread_actions());
+    on_key("f7", move |_| {
+        let deletion = thread_actions.get().delete_thread(key.get());
+        run(async move {
+            deletion.await.expect("delete fixture thread");
+            deleted.set(true);
+        }
+        .boxed_local());
+    });
+    if existing {
+        on_key("f6", move |_| {
+            host.apply(
+                &key.get(),
+                t3_ui::screens::panel::Action::OpenBrowser(Some("persisted-browser".into())),
+            );
+        });
+    }
     let verified = signal(false);
     on_key("f9", move |_| {
         let calls = server.calls("preview.open");
@@ -160,7 +198,7 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
         assert!(!server.calls("subscribeDiscoveredLocalServers").is_empty());
         verified.set(true);
     });
-    view()
+    let content = view()
         .w_full()
         .h_full()
         .child(when(paired, move || {
@@ -170,7 +208,9 @@ fn browser_fixture_content(existing: bool) -> impl IntoElement {
                 .child(text("Open browser"))
         }))
         .child(when(verified, || text("Verified preview requests")))
-        .child(right_panel_tabs(host, key.get(), registry, view()))
+        .child(when(deleted, || text("Fixture thread deleted")))
+        .child(right_panel_tabs(host, key.get(), registry, view()));
+    toast_provider(content, Position::BottomRight)
 }
 
 fn browse(width: (f32, f32)) {
@@ -186,8 +226,8 @@ fn browse(width: (f32, f32)) {
         .expect("open discovered server");
     app.wait_for("role:button[Close browser tab]")
         .expect("opened server tab");
-    app.press("role:button[Close browser tab]")
-        .expect("close server tab");
+    app.press("role:button[Close Browser]")
+        .expect("close from the panel tab strip");
     app.press("role:button[Open browser]")
         .expect("open a fresh browser surface");
     app.type_text("label:Search or enter URL", "https://refused.example/")
@@ -248,4 +288,47 @@ fn desktop_restores_the_hosts_existing_tab() {
 #[test]
 fn phone_restores_the_hosts_existing_tab() {
     restores_existing_browser(PHONE);
+}
+
+#[test]
+fn deleting_the_thread_discards_explicit_preview_recents() {
+    let mut app = app_at(DESKTOP, Root::of::<BrowserFixture>());
+    app.wait_for("role:button[Open browser]").expect("paired");
+    app.press("role:button[Open browser]")
+        .expect("open browser surface");
+    app.wait_for("Local servers")
+        .expect("scoped server discovery");
+    app.press("role:button[Open http://localhost:5173/]")
+        .expect("open discovered server");
+    app.wait_for("role:button[Close browser tab]")
+        .expect("open completed");
+    app.press("role:button[Close browser tab]")
+        .expect("close from address row");
+    app.press("role:button[Open browser]")
+        .expect("open new browser surface");
+    app.wait_for("Recently used")
+        .expect("explicit address is in recents");
+    app.press_key("f7").expect("delete the thread");
+    app.wait_for("Fixture thread deleted")
+        .expect("server accepted deletion");
+    app.press("role:button[Open browser]")
+        .expect("inspect the fixture scope");
+    app.wait_for("label:Search or enter URL")
+        .expect("replacement mounted");
+    assert!(!app.screen().shows("Recently used"));
+}
+
+#[test]
+fn a_refused_tab_close_restores_a_tab_before_its_snapshot_arrives() {
+    let mut app = app_at(DESKTOP, Root::of::<ExistingBrowserFixture>());
+    app.wait_for("role:button[Open browser]").expect("paired");
+    app.press_key("f6").expect("restore the persisted tab");
+    app.wait_for("role:button[Close Browser]")
+        .expect("persisted tab");
+    app.press("role:button[Close Browser]")
+        .expect("close the persisted tab");
+    app.wait_for("role:button[Close Browser]")
+        .expect("refused close restores the tab");
+    app.wait_for("Take control of this browser tab first.")
+        .expect("the refusal explains why the browser is still open");
 }

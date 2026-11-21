@@ -213,24 +213,37 @@ fn discovered_servers(
     configured: &[TrimmedNonEmptyString],
 ) -> Vec<DiscoveredLocalServer> {
     use std::collections::BTreeMap;
-    let mut configured_by_port = BTreeMap::new();
+    let mut configured_by_host = BTreeMap::new();
     for raw in configured {
         if let Ok(url) = url::Url::parse(&raw.0)
+            && let Some(host) = url.host_str()
             && let Some(port) = url.port_or_known_default()
         {
-            configured_by_port.entry(port).or_insert(raw);
+            configured_by_host
+                .entry(server_key(host, port))
+                .or_insert(raw);
         }
     }
     let mut servers = list.servers;
-    servers.sort_by_key(|server| (!configured_by_port.contains_key(&server.port), server.port));
+    let key = |server: &DiscoveredLocalServer| server_key(&server.host.0, server.port);
+    servers.sort_by_key(|server| (!configured_by_host.contains_key(&key(server)), server.port));
     if list.configured_url_probing.flatten().is_none() {
         for server in &mut servers {
-            if let Some(url) = configured_by_port.get(&server.port) {
+            if let Some(url) = configured_by_host.get(&key(server)) {
                 server.url = (*url).clone();
             }
         }
     }
     servers
+}
+
+fn server_key(host: &str, port: u16) -> (String, u16) {
+    let host = host.to_ascii_lowercase();
+    let host = match host.as_str() {
+        "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]" => "localhost".into(),
+        _ => host,
+    };
+    (host, port)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -270,5 +283,38 @@ impl From<RpcCallError> for BrowserCommandError {
             }
             error => Self::Client(error.into_client_error()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_matches_hosts_and_ports_and_normalizes_loopback() {
+        let row = |host: &str, url: &str| DiscoveredLocalServer {
+            host: TrimmedNonEmptyString(host.into()),
+            port: 5173,
+            url: TrimmedNonEmptyString(url.into()),
+            process_name: None,
+            pid: None,
+            terminal: None,
+            agent: None,
+        };
+        let list = DiscoveredLocalServerList {
+            servers: vec![
+                row("other.example", "http://other.example:5173/"),
+                row("127.0.0.1", "http://127.0.0.1:5173/"),
+            ],
+            scanned_at: String::new(),
+            configured_url_probing: None,
+        };
+        let servers = discovered_servers(
+            list,
+            &[TrimmedNonEmptyString("http://localhost:5173/app".into())],
+        );
+        assert_eq!(servers[0].host.0, "127.0.0.1");
+        assert_eq!(servers[0].url.0, "http://localhost:5173/app");
+        assert_eq!(servers[1].url.0, "http://other.example:5173/");
     }
 }

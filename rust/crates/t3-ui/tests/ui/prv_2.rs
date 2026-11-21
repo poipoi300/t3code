@@ -134,7 +134,25 @@ fn StreamFixture() -> impl IntoElement {
         "preview.list",
         Ok(json!({"sessions":[snapshot.clone()], "serverEpoch":"preview-epoch","revision":1})),
     );
-    server.reply("preview.open", Ok(snapshot));
+    server.reply("preview.open", Ok(snapshot.clone()));
+    let updates = [
+        server.stream_updates("subscribePreviewEvents"),
+        server.stream_updates("subscribePreviewEvents"),
+    ];
+    on_key("f6", move |_| {
+        let mut snapshot = snapshot.clone();
+        snapshot["navStatus"]["url"] = json!("https://redirect.example/");
+        snapshot["canGoBack"] = json!(true);
+        let event = json!({
+            "type":"navigated","threadId":"thread","tabId":"stream-tab","createdAt":NOW,
+            "serverEpoch":"preview-epoch","revision":2,"snapshot":snapshot
+        });
+        let delivered = updates
+            .iter()
+            .filter(|stream| stream.unbounded_send(event.clone()).is_ok())
+            .count();
+        assert!(delivered > 0);
+    });
 
     let browser = BrowserWire::default();
     assert!(browser.text(
@@ -174,6 +192,14 @@ fn StreamFixture() -> impl IntoElement {
     let fixture = browser.clone();
     on_key("f8", move |_| {
         assert!(fixture.binary(include_bytes!("prv_2.jpg").to_vec()));
+    });
+    let fixture = browser.clone();
+    on_key("f4", move |_| {
+        assert!(fixture.peer_close(1008, "policy"));
+    });
+    let fixture = browser.clone();
+    on_key("f5", move |_| {
+        assert!(fixture.text(json!({"type":"clipboard","text":"selected page text"})));
     });
     let fixture = browser.clone();
     on_key("f7", move |_| {
@@ -218,10 +244,12 @@ fn StreamFixture() -> impl IntoElement {
                 && input["key"] == key
                 && input["action"] == action));
         }
-        let resize = inputs
-            .iter()
-            .find(|input| input["type"] == "resize")
-            .expect("viewport");
+        let mut resizes = inputs.iter().filter(|input| input["type"] == "resize");
+        let resize = resizes.next().expect("viewport");
+        assert!(
+            resizes.next().is_none(),
+            "initial layout should send one resize"
+        );
         let (width, height) = (
             resize["width"].as_u64().expect("width"),
             resize["height"].as_u64().expect("height"),
@@ -242,11 +270,34 @@ fn StreamFixture() -> impl IntoElement {
             2
         );
         if mobile {
+            for action in ["down", "up"] {
+                assert!(inputs.iter().any(|input| input["type"] == "key"
+                    && input["key"] == "Backspace"
+                    && input["action"] == action));
+            }
             assert!(
                 inputs
                     .iter()
                     .any(|input| input["type"] == "text" && input["text"] == "b")
             );
+        }
+        if !mobile {
+            assert!(inputs.iter().any(
+                |input| input["type"] == "navigate" && input["url"] == "https://typed.example/"
+            ));
+            for contents in [
+                "local Ctrl paste",
+                "local Insert paste",
+                "local Command paste",
+            ] {
+                assert!(
+                    inputs
+                        .iter()
+                        .any(|input| input["type"] == "text" && input["text"] == contents)
+                );
+            }
+            assert!(!inputs.iter().any(|input| input["type"] == "key"
+                && matches!(input["key"].as_str(), Some("v" | "V" | "Insert"))));
         }
         verified.set(true);
     });
@@ -283,22 +334,76 @@ fn stream_at(width: (f32, f32)) {
     app.wait_for("id:preview-jpeg")
         .expect("display only the JPEG");
     app.press("id:preview-page").expect("click page");
+    app.wait(std::time::Duration::from_millis(160))
+        .expect("viewer layout");
     if width == PHONE {
         app.drag("id:preview-page", point(px(0.0), px(-24.0)))
             .expect("pan page");
         app.press_key("f7").expect("reply to the editability probe");
         app.press_key("b")
             .expect("input committed by the focused text field");
+        app.press_key("Backspace")
+            .expect("delete through the mobile field");
         app.press_key("Enter")
             .expect("submit through the mobile field");
     } else {
+        app.clear("label:Search or enter URL")
+            .expect("clear current address");
+        app.type_text("label:Search or enter URL", "https://typed.example/")
+            .expect("draft new address");
+        app.press_key("f6")
+            .expect("receive remote navigation while typing");
+        app.wait_until(
+            "navigation event applied while editing",
+            std::time::Duration::from_secs(2),
+            |screen| screen.enabled("role:button[Back]") == Ok(true),
+        )
+        .expect("remote navigation updated browser history");
+        app.press_key("Enter").expect("navigate to the draft");
+        app.press("id:preview-page").expect("focus browser surface");
         app.press_key("a").expect("forward hardware key");
+        app.set_clipboard(Some("local Ctrl paste".into()));
+        app.press_key("ctrl+v")
+            .expect("paste local text using Control");
+        app.set_clipboard(Some("local Insert paste".into()));
+        app.press_key("shift+Insert")
+            .expect("paste local text using Insert");
+        app.set_clipboard(Some("local Command paste".into()));
+        app.press_key("cmd+v")
+            .expect("paste local text using Command");
+        app.press_key("ctrl+c").expect("request a page copy");
+        app.clear("label:Search or enter URL")
+            .expect("leave the browser surface");
+        app.set_clipboard(Some("newer local text".into()));
+        app.press("id:preview-page").expect("return to the browser");
+        app.press_key("ctrl+c")
+            .expect("attempt a second copy before the first reply");
+        app.press_key("f5").expect("receive a stale copy reply");
+        assert_eq!(app.screen().clipboard(), Some("newer local text"));
+        app.press("id:preview-page").expect("focus before copying");
+        app.press_key("ctrl+c").expect("copy from page");
+        app.press_key("f5").expect("receive copied text from page");
+        assert_eq!(app.screen().clipboard(), Some("selected page text"));
         app.wheel("id:preview-page", point(px(0.0), px(24.0)))
             .expect("scroll page");
+    }
+    if width == DESKTOP {
+        app.press_keys(&["a"; 500])
+            .expect("deliver a 500-event input burst");
+        assert!(
+            app.screen()
+                .matches("id:preview-jpeg")
+                .expect("JPEG selector"),
+            "burst broke the stream"
+        );
     }
     app.press_key("f9").expect("verify socket");
     app.wait_for("Verified browser viewer requests")
         .expect("requests reached socket");
+    app.press_key("f4")
+        .expect("peer closes the socket for policy");
+    app.wait_for("Pair this client again with preview access to control browser previews.")
+        .expect("policy closure state");
 }
 
 #[test]

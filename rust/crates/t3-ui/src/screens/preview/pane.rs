@@ -1,6 +1,6 @@
 //! Port of PreviewPanel.tsx, PreviewChromeRow.tsx and PreviewEmptyState.tsx.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, rc::Rc};
 
 use futures::StreamExt;
 use nsh_core::prelude::*;
@@ -11,6 +11,8 @@ use t3_client::{
         browser::{BrowserAccess, BrowserCommandError, BrowserPreview},
         socket::BrowserInput,
     },
+    thread_views::thread_ops::deletion::DeletionEvent,
+    types::ThreadKey,
     view_logic::shell::preview_state::{PreviewStore, ThreadPreview},
 };
 use t3_contracts::{
@@ -30,6 +32,7 @@ use crate::{
     theme::tw,
     ui::button::{ButtonContent, ButtonSize, ButtonVariant, button},
     ui::icon::{Icon, icon_with_class},
+    ui::toast::{ToastOptions, Variant, toast_manager},
 };
 
 use super::stream::{StreamControls, server_browser_surface};
@@ -38,23 +41,82 @@ pub fn registration<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
     host: PanelHost,
 ) -> PanelRegistration {
-    let client = client.clone();
     let sessions = signal_with(PreviewStore::<()>::default(), SignalEquals::Never);
+    let mut deletions = client.thread_actions().deletion_events();
+    watch(async move {
+        while let Some(event) = deletions.next().await {
+            if let DeletionEvent::Accepted(keys) = event {
+                sessions.update(|store| {
+                    for key in keys.iter() {
+                        store.threads.remove(key);
+                    }
+                });
+            }
+        }
+    });
+
+    let closer = client.clone();
+    let tasks = TaskOwner::here();
+    let close: CloseBrowser = Rc::new(move |thread, tab| {
+        let snapshot = sessions
+            .with_untracked(|store| store.threads.get(&thread)?.sessions.get(&tab).cloned());
+        let mut started = false;
+        sessions.update(|store| {
+            started = store.update(thread.clone(), |state| state.begin_close(&tab));
+        });
+        if !started {
+            return;
+        }
+        let service = closer.browser_preview(thread.clone());
+        tasks.spawn(async move {
+            let Err(problem) = service.close(TrimmedNonEmptyString(tab.clone())).await else {
+                return;
+            };
+            if matches!(problem, BrowserCommandError::TabClosed) {
+                return;
+            }
+            let mut restored = false;
+            sessions.update(|store| {
+                if let Some(state) = store.threads.get_mut(&thread) {
+                    restored = state.cancel_close(&tab, snapshot);
+                }
+            });
+            if restored {
+                host.apply(&thread, Action::OpenBrowser(Some(tab)));
+                let description = match problem {
+                    BrowserCommandError::Client(_) => None,
+                    problem => Some(Text::content(command_error(problem))),
+                };
+                toast_manager().add(ToastOptions {
+                    variant: Variant::Error,
+                    title: Text::client_key("Unable to close browser"),
+                    description,
+                    ..Default::default()
+                });
+            }
+        });
+    });
+    let panel_close = close.clone();
+    let client = client.clone();
     PanelRegistration::new(
         SurfaceKind::Browser,
         Prop::new(None::<Text>),
         move |key| host.apply(&key, Action::OpenBrowser(None)),
         move |context| {
             let service = client.browser_preview(context.thread.clone());
-            preview_panel(context, service, sessions).into_element()
+            preview_panel(context, service, sessions, panel_close.clone()).into_element()
         },
     )
+    .with_browser_close(move |thread, tab| close(thread, tab))
 }
+
+type CloseBrowser = Rc<dyn Fn(ThreadKey, String)>;
 
 fn preview_panel<P: Platform + Clone + 'static>(
     context: SurfaceContext,
     service: BrowserPreview<P>,
     sessions: Signal<PreviewStore<()>>,
+    close_browser: CloseBrowser,
 ) -> impl IntoElement {
     let key = stored(context.thread);
     let surface = context.surface;
@@ -64,6 +126,7 @@ fn preview_panel<P: Platform + Clone + 'static>(
     let panel = host.panel(key.get());
     let service = stored(service);
     let tasks = TaskOwner::here();
+    let close_browser = stored(close_browser);
     let tab = computed(move || {
         surface.with(|surface| match surface.as_ref().map(|s| &s.content) {
             Some(SurfaceContent::Preview { resource_id }) => {
@@ -78,7 +141,6 @@ fn preview_panel<P: Platform + Clone + 'static>(
     let access = signal(service.get().access());
     let configured = signal(service.get().configured_urls());
     let servers = signal(Vec::<DiscoveredLocalServer>::new());
-    let address = signal(String::new());
     let snapshot = computed(move || {
         let tab = tab.get()?;
         sessions.with(|store| store.threads.get(&key.get())?.sessions.get(&tab.0).cloned())
@@ -95,7 +157,11 @@ fn preview_panel<P: Platform + Clone + 'static>(
                 })
         })
     });
-    effect(move || address.set(page_address.get()));
+    let address = AddressField {
+        page: page_address,
+        draft: signal(String::new()),
+        focused: signal(false),
+    };
 
     let mut changes = service.get().changes();
     watch(async move {
@@ -123,7 +189,9 @@ fn preview_panel<P: Platform + Clone + 'static>(
                 sessions.update(|store| {
                     store.update(thread.clone(), |state| state.reconcile(list));
                 });
-                synchronized.set(true);
+                if !synchronized.try_set(true) {
+                    return;
+                }
                 loop {
                     match events.next().await {
                         Some(Ok(event)) => sessions.update(|store| {
@@ -131,7 +199,9 @@ fn preview_panel<P: Platform + Clone + 'static>(
                         }),
                         Some(Err(t3_client::ClientError::InvalidPayload(_))) => {
                             // The RPC stream reports consumer overflow as invalid payload.
-                            synchronized.set(false);
+                            if !synchronized.try_set(false) {
+                                return;
+                            }
                             break;
                         }
                         _ => return,
@@ -208,13 +278,16 @@ fn preview_panel<P: Platform + Clone + 'static>(
         busy.set(true);
         error.set(None);
         tasks.spawn(async move {
-            let result = service.open(url).await;
+            let result = service.open(url.clone()).await;
             busy.set(false);
             match result {
                 Ok(snapshot) => {
                     let tab = snapshot.tab_id.0.clone();
                     sessions.update(|store| {
-                        store.update(thread.clone(), |state| state.apply_snapshot(Some(snapshot)));
+                        store.update(thread.clone(), |state| {
+                            state.remember_url(&url);
+                            state.apply_snapshot(Some(snapshot))
+                        });
                     });
                     host.apply(&thread, Action::OpenBrowser(Some(tab)));
                 }
@@ -222,14 +295,20 @@ fn preview_panel<P: Platform + Clone + 'static>(
             }
         });
     };
-    let submit = move || {
-        let draft = address.get_untracked();
-        if draft.trim().is_empty() {
+    let submit = move |value: &str| {
+        if value.trim().is_empty() {
             return;
         }
-        if let Some(url) = service.get().address(&draft) {
+        if let Some(url) = service.get().address(value) {
             if tab.get_untracked().is_some() {
-                stream.send(BrowserInput::Navigate { url });
+                if stream.try_send(BrowserInput::Navigate { url: url.clone() }) {
+                    sessions.update(|store| {
+                        store.update(key.get(), |state| {
+                            state.remember_url(&url);
+                            true
+                        });
+                    });
+                }
             } else {
                 open(url);
             }
@@ -238,29 +317,15 @@ fn preview_panel<P: Platform + Clone + 'static>(
         }
     };
     let close = move || {
-        let (Some(tab), Some(surface)) = (tab.get_untracked(), surface.get_untracked()) else {
-            return;
-        };
         if busy.get_untracked() {
             return;
         }
-        let service = service.get();
-        let thread = key.get();
-        busy.set(true);
-        error.set(None);
-        tasks.spawn(async move {
-            let result = service.close(tab.clone()).await;
-            busy.set(false);
-            match result {
-                Ok(()) | Err(BrowserCommandError::TabClosed) => {
-                    sessions.update(|store| {
-                        store.update(thread.clone(), |state| state.begin_close(&tab.0));
-                    });
-                    host.apply(&thread, Action::CloseSurface(surface.id));
-                }
-                Err(problem) => error.set(Some(command_error(problem))),
-            }
-        });
+        if let (Some(tab), Some(surface)) = (tab.get_untracked(), surface.get_untracked()) {
+            let thread = key.get();
+            let close_browser = close_browser.get();
+            host.apply(&thread, Action::CloseSurface(surface.id));
+            close_browser(thread, tab.0);
+        }
     };
 
     view()
@@ -332,13 +397,35 @@ fn command_error(error: BrowserCommandError) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AddressField {
+    page: Memo<String>,
+    draft: Signal<String>,
+    focused: Signal<bool>,
+}
+
+impl AddressField {
+    fn value(self) -> String {
+        if self.focused.get() {
+            self.draft.get()
+        } else {
+            self.page.get()
+        }
+    }
+
+    fn focus(self) {
+        self.draft.set(self.page.get_untracked());
+        self.focused.set(true);
+    }
+}
+
 fn preview_chrome_row(
-    address: Signal<String>,
+    address: AddressField,
     busy: Signal<bool>,
     snapshot: Memo<Option<PreviewSessionSnapshot>>,
     tab: Memo<Option<PreviewTabId>>,
     stream: StreamControls,
-    submit: impl Fn() + Copy + 'static,
+    submit: impl Fn(&str) + Copy + 'static,
     close: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
     view()
@@ -372,11 +459,13 @@ fn preview_chrome_row(
             nsh_base::input()
                 .label(t("Search or enter URL"))
                 .placeholder(t("Search or enter URL"))
-                .value(move || address.get())
+                .value(move || address.value())
                 .disabled(move || busy.get() || tab.get().is_some() && !stream.controls_page())
-                .on_change(move |value: &str| address.set(value.to_owned()))
+                .on_focus(move || address.focus())
+                .on_blur(move || address.focused.set(false))
+                .on_change(move |value: &str| address.draft.set(value.to_owned()))
                 .submit_behavior(SubmitBehavior::Submit)
-                .on_submit(move |_: &str| submit())
+                .on_submit(submit)
                 .app_class(tw("h-7 min-w-0 flex-1 rounded-md px-2 text-sm")),
         )
         .child(when(move || tab.get().is_some(), move || {

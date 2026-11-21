@@ -47,13 +47,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
     pub fn desktop_overlay(&self) -> Option<&O> {
         self.active_tab.as_ref().and_then(|id| self.desktop.get(id))
     }
-    fn remember(&mut self, snapshot: &Snapshot) {
-        if let Nav::Loading { url, .. } | Nav::Success { url, .. } | Nav::LoadFailed { url, .. } =
-            &snapshot.nav_status
-        {
-            self.remember_url(&url.0);
-        }
-    }
     pub fn remember_url(&mut self, url: &str) {
         if url.js_trim().is_empty() {
             return;
@@ -112,7 +105,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
         {
             return false;
         }
-        self.remember(&snapshot);
         self.active_tab = Some(snapshot.tab_id.0.clone());
         self.insert(snapshot);
         *self != before
@@ -127,7 +119,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
             return false;
         }
         let before = self.clone();
-        self.remember(&snapshot);
         let id = snapshot.tab_id.0.clone();
         self.insert(snapshot);
         if self
@@ -179,7 +170,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
             | PreviewEvent::Navigated { snapshot, .. }
             | PreviewEvent::Resized { snapshot, .. } => {
                 if !self.suppressed.contains(&snapshot.tab_id.0) {
-                    self.remember(&snapshot);
                     let id = snapshot.tab_id.0.clone();
                     self.insert(snapshot);
                     if opened || self.active_tab.is_none() {
@@ -246,7 +236,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
             } else {
                 snapshot
             };
-            self.remember(&next);
             if !sessions.contains_key(&id) {
                 order.push(id.clone());
             }
@@ -297,7 +286,6 @@ impl<O: Clone + PartialEq> ThreadPreview<O> {
             return false;
         }
         if let Some(snapshot) = snapshot {
-            self.remember(&snapshot);
             self.active_tab = Some(snapshot.tab_id.0.clone());
             self.insert(snapshot);
         }

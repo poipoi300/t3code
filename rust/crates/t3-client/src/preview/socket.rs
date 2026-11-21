@@ -1,8 +1,7 @@
 //! Transport for the server browser's JPEG and input channel.
 
 use futures::{
-    StreamExt,
-    channel::mpsc,
+    Future, Stream, StreamExt,
     future::{Either, select},
 };
 use serde::Serialize;
@@ -11,12 +10,10 @@ use t3_contracts::preview::{
 };
 use t3_rpc::Frame;
 
-const MAX_EVENT_BYTES: usize = 256 * 1024;
-
 use crate::{
     ClientError,
     authorization::AuthorizationError,
-    platform::{Platform, PlatformError, WebSocket},
+    platform::{Platform, PlatformError, SocketClose, WebSocket},
 };
 
 use super::{PreviewEvent, PreviewSession, browser::BrowserPreview};
@@ -31,6 +28,44 @@ pub enum BrowserTransportError {
     Network(#[from] PlatformError),
     #[error("Browser unavailable")]
     Closed,
+    #[error("Browser socket send timed out")]
+    Stalled,
+}
+
+impl BrowserTransportError {
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(
+            self,
+            Self::Access(ClientError::PermissionDenied { .. })
+                | Self::Authorization(
+                    AuthorizationError::CredentialMissing
+                        | AuthorizationError::CredentialRejected
+                        | AuthorizationError::HttpStatus(401 | 403)
+                        | AuthorizationError::Remote {
+                            status: 401 | 403,
+                            ..
+                        },
+                )
+                | Self::Network(
+                    PlatformError::Denied(_)
+                        | PlatformError::SocketHandshakeClosed {
+                            close: SocketClose { code: 1006, .. },
+                            http_status: None,
+                        }
+                        | PlatformError::SocketHandshakeClosed {
+                            close: SocketClose {
+                                code: 1008 | 4401,
+                                ..
+                            },
+                            ..
+                        }
+                        | PlatformError::SocketHandshakeClosed {
+                            http_status: Some(401 | 403),
+                            ..
+                        },
+                )
+        )
+    }
 }
 
 pub struct BrowserSocket {
@@ -68,9 +103,10 @@ impl<P: Platform + Clone + 'static> BrowserPreview<P> {
 }
 
 impl BrowserSocket {
-    pub async fn run(
+    pub async fn run<F: Future<Output = ()>>(
         mut self,
-        mut inputs: mpsc::Receiver<BrowserInput>,
+        mut inputs: impl Stream<Item = BrowserInput> + Unpin,
+        send_deadline: impl Fn() -> F,
         mut on_event: impl FnMut(PreviewEvent),
     ) -> Result<(), BrowserTransportError> {
         let generation = self.protocol.generation();
@@ -83,12 +119,19 @@ impl BrowserSocket {
                 Either::Right((input, _)) => Either::Right(input),
             };
             let events = match event {
-                Either::Left(Some(Frame::Text(text))) if text.len() <= MAX_EVENT_BYTES => {
-                    self.protocol.text(generation, &text)
-                }
-                Either::Left(Some(Frame::Text(_))) => continue,
+                Either::Left(Some(Frame::Text(text))) => self.protocol.text(generation, &text),
                 Either::Left(Some(Frame::Binary(bytes))) => self.protocol.binary(generation, bytes),
-                Either::Left(None) => return Err(BrowserTransportError::Closed),
+                Either::Left(None) => {
+                    if let Some(close) = self.socket.close_info() {
+                        for event in self
+                            .protocol
+                            .closed(generation, close.code, &close.reason, 0)
+                        {
+                            on_event(event);
+                        }
+                    }
+                    return Err(BrowserTransportError::Closed);
+                }
                 Either::Right(Some(input)) => {
                     if !input.valid() {
                         continue;
@@ -103,7 +146,15 @@ impl BrowserSocket {
             };
             for event in events {
                 if let PreviewEvent::Send(value) = event {
-                    self.socket.send(Frame::Text(value.to_string())).await?;
+                    match select(
+                        self.socket.send(Frame::Text(value.to_string())),
+                        Box::pin(send_deadline()),
+                    )
+                    .await
+                    {
+                        Either::Left((sent, _)) => sent?,
+                        Either::Right(_) => return Err(BrowserTransportError::Stalled),
+                    }
                 } else {
                     on_event(event);
                 }
@@ -296,6 +347,113 @@ impl BrowserInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handshake_abnormal_close_is_unauthorized_unless_http_explains_it() {
+        let close = |code, http_status| {
+            BrowserTransportError::Network(PlatformError::SocketHandshakeClosed {
+                close: SocketClose {
+                    code,
+                    reason: String::new(),
+                },
+                http_status,
+            })
+        };
+        assert!(close(1006, None).is_unauthorized());
+        assert!(close(1006, Some(403)).is_unauthorized());
+        assert!(!close(1006, Some(404)).is_unauthorized());
+    }
+
+    #[cfg(feature = "testing")]
+    fn test_socket(wire: &crate::preview::test_support::BrowserWire) -> BrowserSocket {
+        use crate::{platform::SocketRequest, preview::PreviewTarget};
+        BrowserSocket {
+            socket: wire
+                .connect(SocketRequest {
+                    url: "wss://example.test/api/preview-stream/ws".into(),
+                    protocols: vec![],
+                })
+                .expect("fixture socket"),
+            protocol: PreviewSession::new(PreviewTarget {
+                access: Default::default(),
+                thread_id: "thread".into(),
+                tab_id: "tab".into(),
+                max_width: 800.0,
+                max_height: 600.0,
+                interactive: true,
+            }),
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn read_socket_reports_peer_close_codes() {
+        use crate::preview::test_support::BrowserWire;
+        use futures::{executor::block_on, future::pending, stream};
+
+        for (code, expected) in [
+            (1008, PreviewEvent::Unauthorized),
+            (4401, PreviewEvent::Unauthorized),
+            (4404, PreviewEvent::Gone),
+            (1006, PreviewEvent::RetryAt(500)),
+        ] {
+            let wire = BrowserWire::default();
+            assert!(wire.peer_close(code, ""));
+            let mut events = Vec::new();
+            let result = block_on(test_socket(&wire).run(stream::pending(), pending, |event| {
+                events.push(event);
+            }));
+            assert!(matches!(result, Err(BrowserTransportError::Closed)));
+            assert!(events.contains(&expected), "{code}: {events:?}");
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn send_deadline_only_aborts_a_pending_write() {
+        use crate::preview::test_support::BrowserWire;
+        use futures::{executor::block_on, future::ready, stream};
+
+        for stalls in [false, true] {
+            let wire = BrowserWire::default();
+            assert!(wire.text(serde_json::json!({
+                "type": "control", "controller": "unclaimed", "generation": 1,
+                "canOperate": true, "dialog": null
+            })));
+            if stalls {
+                wire.stall_sends();
+            }
+            let result = block_on(test_socket(&wire).run(
+                stream::iter([BrowserInput::TakeControl]),
+                || ready(()),
+                |_| {},
+            ));
+            if stalls {
+                assert!(matches!(result, Err(BrowserTransportError::Stalled)));
+                assert!(wire.sent().is_empty());
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(wire.sent(), [serde_json::json!({"type":"takeControl"})]);
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_input_only_accepts_http_and_https() {
+        for url in ["http://localhost:3000/", "https://example.test/"] {
+            assert!(BrowserInput::Navigate { url: url.into() }.valid());
+        }
+        for url in [
+            "/relative",
+            "file:///tmp/example",
+            "javascript:alert(1)",
+            "data:text/plain,x",
+            "view-source:https://example.test/",
+            "chrome://settings/",
+        ] {
+            assert!(!BrowserInput::Navigate { url: url.into() }.valid(), "{url}");
+        }
+    }
 
     #[test]
     fn viewer_resize_is_bounded_before_serialization() {

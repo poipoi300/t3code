@@ -171,3 +171,17 @@ fn discovered_ports_match_terminal_or_agent_owner_and_require_a_thread() {
     );
     assert!(thread_discovered_ports(&servers, None).is_empty());
 }
+
+#[test]
+fn preview_recents_record_explicit_addresses_without_recording_snapshots() {
+    let mut state = ThreadPreview::<()>::default();
+    state.remember_url("https://user.example/");
+    state.apply_snapshot(Some(snapshot("explicit", 0)));
+    state.apply_event(event("opened", "agent", 1));
+    state.apply_event(event("navigated", "explicit", 2));
+    state.update_snapshot(snapshot("explicit", 3));
+    state.reconcile(list("a", 4, vec![snapshot("restored", 4)]));
+    state.begin_close("restored");
+    state.cancel_close("restored", Some(snapshot("restored", 4)));
+    assert_eq!(state.recent_urls, ["https://user.example/"]);
+}
