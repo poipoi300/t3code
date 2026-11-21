@@ -1883,3 +1883,51 @@ fn settings_diagnosis_sanitizes_the_rendered_snapshot_and_copied_facts() {
         assert!(report.contains("Route: Direct"));
     }
 }
+
+#[test]
+fn access_only_host_blocks_readiness_on_pair_and_reconnect() {
+    for advertised_access_only in [true, false] {
+        let mut h = Harness::new(ENV);
+        if advertised_access_only {
+            h.server().state.borrow_mut().permissions =
+                Some(vec!["access:read".into(), "access:write".into()]);
+        }
+        // A stale advertised grant must yield the same result as an accurate one.
+        let denied = serde_json::json!({"_tag":"EnvironmentAuthorizationError",
+            "requiredScope":"orchestration:read","message":"Permission denied."});
+        h.server().state.borrow_mut().rpc_script.insert(
+            "server.getConfig".into(),
+            [Err(denied.clone()), Err(denied)].into(),
+        );
+        let client = runtime(&h);
+        let id = h.run(client.pair(pairing())).unwrap();
+        for attempt in 0..2 {
+            if attempt == 1 {
+                h.run(client.reconnect(&id)).unwrap();
+            }
+            h.settle();
+            let state = &client.environments()[0].state;
+            assert_eq!(state.phase, Phase::Blocked, "{state:?}");
+            assert_eq!(
+                state.last_failure.as_ref().unwrap().kind,
+                t3_client::connection::FailureKind::Permission
+            );
+            let failure = state.last_failure.as_ref().unwrap();
+            assert_eq!(failure.detail, "Permission denied.");
+            assert_eq!(
+                failure.hop,
+                Some(t3_client::connection::ConnectionHop::Server)
+            );
+            assert!(client.store().shared_shell(&id).is_none());
+        }
+        let reads = h
+            .server()
+            .state
+            .borrow()
+            .rpc_calls
+            .iter()
+            .filter(|(tag, _)| tag == "server.getConfig")
+            .count();
+        assert_eq!(reads, 2);
+    }
+}

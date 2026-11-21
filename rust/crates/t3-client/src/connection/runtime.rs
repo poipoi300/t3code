@@ -472,6 +472,11 @@ fn auth_failure(error: crate::authorization::AuthorizationError) -> ClientError 
     ClientError::InvalidPayload(error.to_string())
 }
 pub(crate) fn session_failure(error: &ClientError) -> ConnectionFailure {
+    if let ClientError::ServerPermissionDenied(detail) = error {
+        let mut failure = ConnectionFailure::new(FailureKind::Permission, detail);
+        failure.hop = Some(super::ConnectionHop::Server);
+        return failure;
+    }
     let kind = match error {
         ClientError::PermissionDenied { .. } | ClientError::Platform(PlatformError::Denied(_)) => {
             FailureKind::Permission

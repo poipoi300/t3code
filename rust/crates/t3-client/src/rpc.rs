@@ -249,11 +249,19 @@ impl SessionEndpoint {
             .map_or(client_ms, |clock| clock.to_server_clock(client_ms))
     }
     pub async fn initial_config(&self) -> Result<t3_contracts::server::ServerConfig, ClientError> {
-        let config = self
-            .call::<ConfigWire<t3_contracts::rpc::WsServerGetConfigRpc>>(
-                t3_contracts::rpc::Empty {},
-            )
-            .await?;
+        type Config = ConfigWire<t3_contracts::rpc::WsServerGetConfigRpc>;
+        let call = self.start::<Config>(t3_contracts::rpc::Empty {}, CallKind::Unary);
+        let config: ConfigReply<t3_contracts::rpc::WsServerGetConfigRpc> =
+            unary(call).await.map_err(|error| {
+                if let RpcCallError::Rejected(causes) = &error
+                    && let Some(denial) = causes.iter().find_map(|cause| {
+                        <t3_contracts::auth::EnvironmentAuthorizationError as serde::Deserialize>::deserialize(cause).ok()
+                    })
+                {
+                    return ClientError::ServerPermissionDenied(denial.message);
+                }
+                error.into_client_error()
+            })?;
         if config.value.environment.environment_id != self.environment() {
             self.invalidate();
             return Err(ClientError::EnvironmentMismatch);

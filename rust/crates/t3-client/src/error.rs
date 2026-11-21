@@ -7,6 +7,8 @@ pub enum ClientError {
     Disconnected,
     #[error("authorization denied for {method}")]
     PermissionDenied { method: String },
+    #[error("{0}")]
+    ServerPermissionDenied(String),
     #[error("unexpected environment identity")]
     EnvironmentMismatch,
     #[error("invalid payload: {0}")]
