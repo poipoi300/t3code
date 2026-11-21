@@ -17,6 +17,9 @@ use super::host::{Choice, Started};
 
 use crate::runtime::tasks::watch;
 
+#[derive(Clone)]
+pub(crate) struct DesktopEnvironmentId(pub t3_client::types::EnvironmentId);
+
 /// Set once the client's storage opened with a key store that outlives the process.
 static SAVED_SERVERS_LAST: AtomicBool = AtomicBool::new(false);
 
@@ -49,6 +52,10 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
                 };
             }
         };
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Ok(Some(id)) = blocking(t3_platform::desktop_environment_id).await {
+            owner.run(|| provide_context(DesktopEnvironmentId(id)));
+        }
         owner.run(|| crate::theme::bind_platform(platform.clone()));
         let (runtime, paired) = start_on(platform, store, host::SOURCE, spawner).await;
         Started {

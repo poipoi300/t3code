@@ -207,7 +207,8 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
         diff, files, git_panel, navigation, shell, terminal, thread_ops,
     };
     use crate::screens::panel::{self, PanelRegistry};
-    theme::bind(client, None);
+    let host = use_context::<crate::runtime::client::DesktopEnvironmentId>().map(|id| id.0);
+    theme::bind(client, host);
     provide_context(crate::screens::pull_requests::list::bind(client));
     thread_ops::bind_confirmation(client);
     provide_context(git_panel::git_actions(client.git_panel()));
