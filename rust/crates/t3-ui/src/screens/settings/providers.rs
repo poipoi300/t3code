@@ -23,7 +23,7 @@ use t3_client::{
 use t3_contracts::{
     acp_registry::{
         AcpRegistryDeleteSessionInput, AcpRegistryImportSessionInput, AcpRegistryListSessionsInput,
-        AcpRegistryListSessionsResult,
+        AcpRegistryListSessionsResult, AcpRegistryManagedBinaryUninstallInput,
     },
     auth::AuthEnvironmentScope as Scope,
     base_schemas::ProjectId,
@@ -62,6 +62,8 @@ use crate::{
 
 enum Command {
     Update(SettingsPatch),
+    ModelPreferences(SettingsPatch),
+    UninstallRegistryBinary(AcpRegistryManagedBinaryUninstallInput),
     UpdateDevice(SettingsPatch),
     SetLoadWeight(t3_contracts::base_schemas::TrimmedNonEmptyString, i64),
     Instance(ProviderInstanceMutation),
@@ -136,6 +138,14 @@ impl Services {
                 async move {
                     match command {
                         Command::Update(patch) => settings.update(&environment, patch).await,
+                        Command::ModelPreferences(patch) => {
+                            settings.update_model_preferences(&environment, patch).await
+                        }
+                        Command::UninstallRegistryBinary(input) => {
+                            settings
+                                .uninstall_registry_binary(&environment, input)
+                                .await
+                        }
                         Command::UpdateDevice(patch) => client_settings.update_client(patch).await,
                         Command::SetLoadWeight(id, weight) => {
                             settings.set_load_weight(id, weight).await
@@ -270,7 +280,7 @@ pub fn screen() -> AnyElement {
                         .decode_utf8()
                         .ok()?;
                     (key == "instanceId" && !value.trim().is_empty())
-                        .then(|| ProviderInstanceId(value.into_owned()))
+                        .then(|| ProviderInstanceId(value.trim().to_owned()))
                 })
         })
     };
@@ -284,11 +294,20 @@ pub fn screen() -> AnyElement {
         })
     });
     let target = computed(target);
+    let environment = computed(move || {
+        context
+            .view()?
+            .selected
+            .representative
+            .as_ref()
+            .map(|environment| environment.environment_id.clone())
+    });
     let terminal = page.as_ref().map(|page| {
         let selected = page.selected;
         let setup = page.terminal;
         let page = page.clone();
         effect(move || {
+            environment.get();
             target.get();
             selected.set(None);
         });
@@ -300,25 +319,12 @@ pub fn screen() -> AnyElement {
     settings_page_container(
         view()
             .child(region(
-                move || (context.view(), target.get()),
-                move |(scope, target)| {
-                    let (Some(page), Some(scope)) = (page.clone(), scope) else {
+                move || (environment.get(), target.get()),
+                move |(env, target)| {
+                    let (Some(page), Some(env)) = (page.clone(), env) else {
                         return empty("Connect an environment to set up its providers.");
                     };
-                    let Some(environment) = scope.selected.representative.as_ref() else {
-                        return empty("Connect an environment to set up its providers.");
-                    };
-                    let Some(config) = environment.config.as_ref() else {
-                        return empty("Loading provider settings");
-                    };
-                    environment_panel(
-                        page,
-                        context,
-                        &scope,
-                        environment.environment_id.clone(),
-                        config.clone(),
-                        target,
-                    )
+                    environment_panel(page, context, env, target)
                 },
             ))
             .child(terminal),
@@ -357,43 +363,97 @@ fn project_ids(
         .collect()
 }
 
+#[derive(Clone)]
+struct ProviderEnvironment {
+    id: EnvironmentId,
+    config: Memo<Option<Rc<ServerConfig>>>,
+    can_manage: Memo<bool>,
+    can_write: Memo<bool>,
+}
+
 fn environment_panel(
     page: Rc<Page>,
     context: SettingsContext,
-    scope: &SettingsScopeView,
     env: EnvironmentId,
-    config: Rc<ServerConfig>,
     target: Option<ProviderInstanceId>,
 ) -> AnyElement {
-    let projects = project_ids(scope, &env, &config);
-    let mut acp_projects = Vec::new();
-    for group in &scope.groups {
-        for member in group.members.iter().filter(|member| {
-            member.environment_id == env
-                && (!scope.scope.is_project_scope()
-                    || scope
-                        .scope
-                        .members
-                        .iter()
-                        .any(|scoped| scoped.id == member.id))
-        }) {
-            acp_projects.push((member.id.clone(), group.display_name.clone()));
+    let config = computed({
+        let env = env.clone();
+        move || {
+            let scope = context.view()?;
+            let environment = scope.selected.representative.as_ref()?;
+            (environment.environment_id == env)
+                .then(|| environment.config.clone())
+                .flatten()
         }
-    }
-    let acp_projects = Rc::new(acp_projects);
-    let rows = Rc::new(provider_settings_rows(&config, &projects, target.as_ref()));
-    let can_manage = (page.services.grants)(&env, Scope::ProvidersManage);
-    let can_write = (page.services.grants)(&env, Scope::SettingsWrite);
-    let can_refresh = (page.services.grants)(&env, Scope::OrchestrationRead);
+    });
+    let projects = computed({
+        let env = env.clone();
+        move || match (context.view(), config.get()) {
+            (Some(scope), Some(config)) => project_ids(&scope, &env, &config),
+            _ => Vec::new(),
+        }
+    });
+    let acp_projects = computed({
+        let env = env.clone();
+        move || {
+            let mut projects = Vec::new();
+            if let Some(scope) = context.view() {
+                for group in &scope.groups {
+                    for member in group.members.iter().filter(|member| {
+                        member.environment_id == env
+                            && (!scope.scope.is_project_scope()
+                                || scope
+                                    .scope
+                                    .members
+                                    .iter()
+                                    .any(|scoped| scoped.id == member.id))
+                    }) {
+                        projects.push((member.id.clone(), group.display_name.clone()));
+                    }
+                }
+            }
+            projects
+        }
+    });
+    let rows = computed({
+        let target = target.clone();
+        move || {
+            config.get().map_or_else(Vec::new, |config| {
+                provider_settings_rows(&config, &projects.get(), target.as_ref())
+            })
+        }
+    });
+    let permissions = computed({
+        let (page, env) = (page.clone(), env.clone());
+        move || {
+            context.revision();
+            let grants = &page.services.grants;
+            (
+                grants(&env, Scope::ProvidersManage),
+                grants(&env, Scope::SettingsWrite),
+                grants(&env, Scope::OrchestrationRead),
+            )
+        }
+    });
+    let can_manage = computed(move || permissions.get().0);
+    let can_write = computed(move || permissions.get().1);
+    let environment = ProviderEnvironment {
+        id: env.clone(),
+        config,
+        can_manage,
+        can_write,
+    };
     let selected = page.selected;
     let current = computed({
-        let rows = rows.clone();
         let target = target.clone();
         move || {
             let id = selected.get().or_else(|| target.clone());
+            let rows = rows.get();
             rows.iter()
-                .position(|row| Some(&row.id) == id.as_ref())
-                .or_else(|| (target.is_none() && !rows.is_empty()).then_some(0))
+                .find(|row| Some(&row.id) == id.as_ref())
+                .or_else(|| target.is_none().then(|| rows.first()).flatten())
+                .map(|row| row.id.clone())
         }
     });
     let changing = page.refreshing;
@@ -410,136 +470,178 @@ fn environment_panel(
                 let result = future.await;
                 changing.set(false);
                 if let Err(error) = result {
-                    show_error("Could not refresh provider status", error);
+                    log::warn!("Could not refresh provider status: {error}");
                 }
             });
         }
     };
+    let allowed_drivers = computed(move || {
+        config
+            .get()?
+            .managed_policy
+            .as_ref()?
+            .limits
+            .as_ref()?
+            .providers
+            .as_ref()?
+            .allowed_drivers
+            .clone()
+    });
     let list = {
-        let (page, rows, env, projects, config) = (
-            page.clone(),
-            rows.clone(),
-            env.clone(),
-            projects.clone(),
-            config.clone(),
-        );
+        let (page, env) = (page.clone(), env.clone());
+        let environment_config = config;
         region(
-            move || current.get(),
-            move |current| {
+            move || {
+                (
+                    rows.get(),
+                    current.get(),
+                    permissions.get(),
+                    projects.get(),
+                    allowed_drivers.get(),
+                )
+            },
+            move |(rows, current, (can_manage, can_write, _), projects, _)| {
                 let mut list = view().app_class(tw("flex flex-col bg-muted/10"));
-                for (index, row) in rows.iter().enumerate() {
-                    list = list.child(instance_row(
-                        page.clone(),
-                        &env,
-                        &config,
-                        &projects,
-                        row,
-                        current == Some(index),
-                        can_manage,
-                        can_write,
-                        index > 0,
-                    ));
+                if let Some(config) = config.get_untracked() {
+                    for (index, row) in rows.iter().enumerate() {
+                        list = list.child(instance_row(
+                            page.clone(),
+                            &env,
+                            environment_config,
+                            &config,
+                            &projects,
+                            row,
+                            current.as_ref() == Some(&row.id),
+                            can_manage,
+                            can_write,
+                            index > 0,
+                        ));
+                    }
                 }
                 list
             },
         )
     };
     let details = {
-        let (page, env, config) = (page.clone(), env.clone(), config.clone());
+        let page = page.clone();
+        let environment = environment.clone();
         region(
-            move || current.get(),
-            move |current| {
-                current
-                    .and_then(|index| rows.get(index))
-                    .map(|row| {
-                        instance_detail(
-                            page.clone(),
-                            context,
-                            &env,
-                            &config,
-                            &acp_projects,
-                            row,
-                            can_manage,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        empty(if target.is_some() {
-                            "This provider instance is no longer available on this device."
-                        } else {
-                            "No providers configured."
-                        })
-                    })
+            move || (current.get(), config.with(|config| config.is_some())),
+            move |(current, loaded)| {
+                let Some(id) = current else {
+                    return empty(if !loaded {
+                        "Loading provider settings"
+                    } else if target.is_some() {
+                        "This provider instance is no longer available on this device."
+                    } else {
+                        "No providers configured."
+                    });
+                };
+                let row_id = id.clone();
+                let row = computed(move || {
+                    rows.with(|rows| rows.iter().find(|row| row.id == row_id).cloned())
+                });
+                instance_detail(
+                    page.clone(),
+                    context,
+                    environment.clone(),
+                    acp_projects,
+                    id,
+                    row,
+                )
             },
         )
     };
-    let add = can_manage
-        .then(|| add_provider(page.clone(), env.clone(), &config))
-        .flatten();
-    let settings = view()
-        .app_class(tw("flex flex-col gap-2.5"))
-        .child(
-            view()
-                .app_class(tw(
-                    "flex min-h-7 flex-row items-center justify-between gap-2 px-3 sm:px-4",
-                ))
-                .child(
-                    text(t("Providers"))
-                        .role(AccessibilityRole::Header)
-                        .app_class(tw("text-base font-semibold")),
-                )
-                .child(button(
-                    ButtonContent::Icon {
-                        icon: Icon::RefreshCw,
-                        label: t("Refresh provider status"),
-                    },
-                    ButtonVariant::GhostMuted,
-                    ButtonSize::IconXs,
-                    move || !can_refresh || changing.get(),
-                    refresh,
-                )),
-        )
-        .child((!can_manage).then(|| {
-            settings_group(settings_row(
+    let add = add_provider(page.clone(), environment.clone());
+    let settings =
+        view()
+            .app_class(tw("flex flex-col gap-2.5"))
+            .child(
+                view()
+                    .app_class(tw(
+                        "flex min-h-7 flex-row items-center justify-between gap-2 px-3 sm:px-4",
+                    ))
+                    .child(
+                        text(t("Providers"))
+                            .role(AccessibilityRole::Header)
+                            .app_class(tw("text-base font-semibold")),
+                    )
+                    .child(button(
+                        ButtonContent::Icon {
+                            icon: Icon::RefreshCw,
+                            label: t("Refresh provider status"),
+                        },
+                        ButtonVariant::GhostMuted,
+                        ButtonSize::IconXs,
+                        move || !permissions.get().2 || changing.get(),
+                        refresh,
+                    )),
+            )
+            .child(region(
+                move || can_manage.get(),
+                |can_manage| {
+                    (!can_manage).then(|| {
+                        settings_group(settings_row(
                 SettingsRowProps::titled("", "Limited permissions".into()).description(move || {
                     "This session can view providers but can't change their settings.".into()
                 }),
             ))
-        }))
-        .child(settings_group(
-            view()
-                .app_class(move || {
-                    tw(if context.content_width.get() >= 768.0 {
-                        "flex flex-row overflow-hidden"
-                    } else {
-                        "flex flex-col overflow-hidden"
                     })
-                })
-                .child(
-                    view()
-                        .app_class(move || {
-                            tw(if context.content_width.get() >= 768.0 {
-                                "w-68 shrink-0 border-r border-border/60"
-                            } else {
-                                "border-b border-border/60"
-                            })
+                },
+            ))
+            .child(settings_group(
+                view()
+                    .app_class(move || {
+                        tw(if context.content_width.get() >= 768.0 {
+                            "flex flex-row overflow-hidden"
+                        } else {
+                            "flex flex-col overflow-hidden"
                         })
-                        .child(list)
-                        .child(add),
-                )
-                .child(view().app_class(tw("min-w-0 flex-1")).child(details)),
-        ));
+                    })
+                    .child(
+                        view()
+                            .app_class(move || {
+                                tw(if context.content_width.get() >= 768.0 {
+                                    "w-68 shrink-0 border-r border-border/60"
+                                } else {
+                                    "border-b border-border/60"
+                                })
+                            })
+                            .child(list)
+                            .child(add),
+                    )
+                    .child(view().app_class(tw("min-w-0 flex-1")).child(details)),
+            ));
+    let default_choices = computed(move || {
+        let (config, scope) = (config.get()?, context.view()?);
+        Some(default_model_choices(&config, &scope))
+    });
+    let machines = computed(move || {
+        context.view().map_or_else(Vec::new, |scope| {
+            scope
+                .all_environments
+                .iter()
+                .map(|entry| (entry.environment_id.clone(), entry.label.clone()))
+                .collect()
+        })
+    });
+    let environment_page = page.clone();
+    let balancing = region(
+        move || machines.get(),
+        move |machines| load_balancing(page.clone(), context, &machines, &env),
+    );
     view()
         .app_class(tw("flex flex-col gap-8"))
         .child(settings)
-        .child(default_model(context, &config, scope, can_write))
-        .child(usage_sources(page.clone(), &env, &config, can_manage))
-        .child({
-            let (scope, env) = (scope.clone(), env.clone());
-            region(
-                move || context.client_settings(),
-                move |_| load_balancing(page.clone(), context, &scope, &env),
-            )
-        })
+        .child(region(
+            move || (default_choices.get(), can_write.get()),
+            move |(choices, can_write)| {
+                choices
+                    .map(|(choices, selected)| default_model(context, choices, selected, can_write))
+            },
+        ))
+        .child(usage_sources(environment_page, environment))
+        .child(balancing)
         .into_element()
 }
 
@@ -547,6 +649,7 @@ fn environment_panel(
 fn instance_row(
     page: Rc<Page>,
     env: &EnvironmentId,
+    current_config: Memo<Option<Rc<ServerConfig>>>,
     config: &ServerConfig,
     projects: &[ProjectId],
     row: &ProviderSettingsRow,
@@ -579,16 +682,23 @@ fn instance_row(
             }
         });
     let clear = if row.project_override.is_some() {
-        let patch = provider_override_patch(&config.settings, projects, &id, None);
-        let (page, env) = (page.clone(), env.clone());
+        let (page, env, projects, id) = (page.clone(), env.clone(), projects.to_vec(), id.clone());
         Some(action(
             "Reset to the device setting",
             ButtonVariant::GhostMuted,
             blocked,
             move || {
+                let Some(config) = current_config.get_untracked() else {
+                    return;
+                };
                 page.request(
                     env.clone(),
-                    Command::Update(patch.clone()),
+                    Command::Update(provider_override_patch(
+                        &config.settings,
+                        &projects,
+                        &id,
+                        None,
+                    )),
                     "Could not update provider instance",
                 );
             },
@@ -597,12 +707,8 @@ fn instance_row(
         None
     };
     let env = env.clone();
-    let options = (!projects.is_empty()).then(|| {
-        (
-            provider_override_patch(&config.settings, projects, &id, Some(false)),
-            provider_override_patch(&config.settings, projects, &id, Some(true)),
-        )
-    });
+    let projects = projects.to_vec();
+    let policy_blocked = !enabled && !provider_driver_allowed(config, &row.driver);
     view().app_class(tw(&cn([
         Some("relative flex min-h-18 flex-row items-center gap-3 px-3 py-3 sm:px-4"),
         selected.then_some("bg-foreground/[0.06]"),
@@ -621,12 +727,15 @@ fn instance_row(
                     .child(status_dot(tone))
                     .child(text(headline).app_class(tw("text-xs leading-normal text-muted-foreground/80"))))))
         .child(clear)
+        .child(policy_blocked.then(|| text(t("Disabled by policy")).app_class(tw("text-xs text-muted-foreground"))))
         .child(switch(enable_label, ControlState {
             checked: enabled.into(), disabled: enable_blocked.into(), ..Default::default()
         }, SwitchSize::Default, move |enabled| {
-            let command = match &options {
-                Some((off, on)) => Command::Update(if enabled { on } else { off }.clone()),
-                None => Command::Enable(id.clone(), enabled),
+            let command = if projects.is_empty() {
+                Command::Enable(id.clone(), enabled)
+            } else {
+                let Some(config) = current_config.get_untracked() else { return; };
+                Command::Update(provider_override_patch(&config.settings, &projects, &id, Some(enabled)))
             };
             page.request(env.clone(), command, "Could not update provider instance");
         }))
@@ -666,51 +775,69 @@ fn action(
     .into_element()
 }
 
-fn default_model(
-    context: SettingsContext,
+fn default_model_choices(
     config: &ServerConfig,
     scope: &SettingsScopeView,
-    can_write: bool,
-) -> AnyElement {
+) -> (Vec<(Option<ModelSelection>, String)>, usize) {
     let settings = scope.server_settings();
     let model_settings = models::Settings {
         server: &settings,
         legacy_preferences: None,
     };
     let project = scope.target().and_then(|target| target.project_id.as_ref());
-    let mut selections = vec![None];
-    let mut items = vec![SelectItem::new("0", t("Automatic"))];
+    let mut choices = vec![(None, String::new())];
     for entry in models::entries_for(&config.providers.0, &settings, project) {
         if !entry.enabled || !entry.is_available {
             continue;
         }
         for model in models::options_for(&model_settings, entry.snapshot, None) {
-            items.push(SelectItem::new(selections.len().to_string(), model.name));
-            selections.push(Some(ModelSelection {
-                instance_id: entry.snapshot.instance_id.clone(),
-                model: model.slug,
-                options: None,
-            }));
+            choices.push((
+                Some(ModelSelection {
+                    instance_id: entry.snapshot.instance_id.clone(),
+                    model: model.slug,
+                    options: None,
+                }),
+                model.name,
+            ));
         }
     }
     let selected = settings
         .default_model_selection
         .as_ref()
         .map_or(0, |saved| {
-            selections
+            choices
                 .iter()
-                .position(|option| {
+                .position(|(option, _)| {
                     option.as_ref().is_some_and(|choice| {
                         choice.instance_id == saved.instance_id && choice.model == saved.model
                     })
                 })
                 .unwrap_or_else(|| {
-                    let index = selections.len();
-                    selections.push(Some(saved.clone()));
-                    items.push(SelectItem::new(index.to_string(), saved.model.clone()));
+                    let index = choices.len();
+                    choices.push((Some(saved.clone()), saved.model.clone()));
                     index
                 })
         });
+    (choices, selected)
+}
+
+fn default_model(
+    context: SettingsContext,
+    choices: Vec<(Option<ModelSelection>, String)>,
+    selected: usize,
+    can_write: bool,
+) -> AnyElement {
+    let (selections, labels): (Vec<_>, Vec<_>) = choices.into_iter().unzip();
+    let items = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| {
+            SelectItem::new(
+                index.to_string(),
+                if index == 0 { t("Automatic") } else { label },
+            )
+        })
+        .collect::<Vec<_>>();
     settings_group(settings_row(
         SettingsRowProps::titled("provider-default-model", "Default model".into())
             .server(&["defaultModelSelection"])
@@ -737,11 +864,135 @@ fn default_model(
 fn instance_detail(
     page: Rc<Page>,
     context: SettingsContext,
+    environment: ProviderEnvironment,
+    projects: Memo<Vec<(ProjectId, String)>>,
+    id: ProviderInstanceId,
+    row: Memo<Option<ProviderSettingsRow>>,
+) -> AnyElement {
+    let config = environment.config;
+    let can_manage = environment.can_manage;
+    let can_write = environment.can_write;
+    let instance = computed(move || {
+        let id = row.get()?.id;
+        config.get()?.settings.provider_instances.get(&id).cloned()
+    });
+    let policy = computed(move || {
+        config
+            .get()
+            .and_then(|config| config.managed_policy.clone())
+    });
+    let name_draft = signal(None);
+    let info = {
+        let (page, env) = (page.clone(), environment.id.clone());
+        region(
+            move || (row.get(), instance.get(), policy.get(), can_manage.get()),
+            move |(row, base, policy, can_manage)| {
+                row.map(|row| {
+                    instance_info(
+                        page.clone(),
+                        &env,
+                        config,
+                        &row,
+                        base,
+                        policy
+                            .as_ref()
+                            .and_then(|policy| policy.limits.as_ref())
+                            .and_then(|limits| limits.providers.as_ref())
+                            .and_then(|providers| providers.locked_instance_fields.as_ref())
+                            .and_then(|locked| {
+                                locked.iter().find(|(driver, _)| driver.0 == row.driver)
+                            })
+                            .is_some_and(|(_, paths)| {
+                                paths.iter().any(|path| path == "displayName")
+                            }),
+                        can_manage,
+                        name_draft,
+                    )
+                })
+            },
+        )
+    };
+    let setup = setup_section(page.clone(), environment.clone(), id, row);
+    let sessions = {
+        let (page, env) = (page.clone(), environment.id.clone());
+        let instance = computed(move || {
+            let row = row.get()?;
+            (row.driver == "acpRegistry"
+                && row
+                    .provider
+                    .as_ref()
+                    .and_then(|provider| provider.native_sessions.as_ref().and_then(Option::as_ref))
+                    .is_some_and(|sessions| sessions.can_list))
+            .then_some(row.id)
+        });
+        region(
+            move || (instance.get(), projects.get()),
+            move |(instance, projects)| {
+                instance.map(|id| acp_sessions(page.clone(), env.clone(), id, &projects))
+            },
+        )
+    };
+    let models = {
+        let env = environment.id;
+        let filter = signal(String::new());
+        let custom = signal(false);
+        let draft = signal(String::new());
+        let model_settings = computed(move || {
+            config.get().map(|config| {
+                (
+                    config.settings.favorites.clone(),
+                    config.settings.provider_model_preferences.clone(),
+                    instance.get(),
+                )
+            })
+        });
+        region(
+            move || {
+                (
+                    row.get(),
+                    model_settings.get(),
+                    can_manage.get(),
+                    can_write.get(),
+                    context.client_settings(),
+                )
+            },
+            move |(row, _, can_manage, can_write, legacy)| {
+                row.zip(config.get_untracked()).map(|(row, config)| {
+                    models_section(
+                        page.clone(),
+                        &env,
+                        &config,
+                        &row,
+                        &legacy,
+                        can_manage,
+                        can_write,
+                        filter,
+                        custom,
+                        draft,
+                    )
+                })
+            },
+        )
+    };
+    view()
+        .app_class(tw("flex flex-col gap-6 py-4"))
+        .child(info)
+        .child(setup)
+        .child(sessions)
+        .child(models)
+        .into_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instance_info(
+    page: Rc<Page>,
     env: &EnvironmentId,
-    config: &ServerConfig,
-    projects: &[(ProjectId, String)],
+    current_config: Memo<Option<Rc<ServerConfig>>>,
     row: &ProviderSettingsRow,
+    base: Option<ProviderInstanceConfig>,
+    name_locked: bool,
     can_manage: bool,
+    draft: Signal<Option<String>>,
 ) -> AnyElement {
     let state = provider_settings_status(row.provider.as_ref(), row.enabled);
     let headline = status_headline(&state);
@@ -749,8 +1000,6 @@ fn instance_detail(
         .detail
         .map(str::to_owned)
         .or_else(|| state.fallback_detail.map(t));
-    let mut section = view().app_class(tw("flex flex-col gap-6 py-4"));
-    let base = config.settings.provider_instances.get(&row.id).cloned();
     let remove = can_manage
         .then(|| {
             base.as_ref().map(|instance| {
@@ -765,6 +1014,16 @@ fn instance_detail(
                 } else {
                     "Delete provider instance"
                 };
+                let cleanup = (!default && instance.driver.0 == "acpRegistry")
+                    .then_some(instance.config.as_ref())
+                    .flatten()
+                    .filter(|config| config.get("source").and_then(Value::as_str) != Some("local"))
+                    .and_then(|config| config.get("agentId").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(|id| AcpRegistryManagedBinaryUninstallInput {
+                        agent_id: t3_contracts::base_schemas::TrimmedNonEmptyString(id.to_owned()),
+                    });
                 action(label, ButtonVariant::GhostMuted, false, move || {
                     let message = tr(
                         if default {
@@ -779,11 +1038,12 @@ fn instance_detail(
                         ..Default::default()
                     };
                     if let Some(confirmation) = request_confirm_dialog(message, Some(options)) {
-                        let (page, env, id) = (page.clone(), env.clone(), id.clone());
+                        let (page, env, id, cleanup) =
+                            (page.clone(), env.clone(), id.clone(), cleanup.clone());
                         page.tasks.spawn(async move {
                             if confirmation.await {
                                 if let Err(error) = (page.services.command)(
-                                    env,
+                                    env.clone(),
                                     Command::Instance(ProviderInstanceMutation::Remove {
                                         instance_id: id,
                                     }),
@@ -793,6 +1053,22 @@ fn instance_detail(
                                     show_error("Could not update provider instance", error);
                                 } else {
                                     let _ = page.selected.try_set(None);
+                                    if let Some(input) = cleanup
+                                        && let Err(error) = (page.services.command)(
+                                            env,
+                                            Command::UninstallRegistryBinary(input),
+                                        )
+                                        .await
+                                    {
+                                        toast_manager().add(ToastOptions {
+                                            variant: Variant::Warning,
+                                            title: Text::from(
+                                                "Provider deleted, but managed files remain",
+                                            ),
+                                            description: Some(Text::content(error.to_string())),
+                                            ..Default::default()
+                                        });
+                                    }
                                 }
                             }
                         });
@@ -801,15 +1077,7 @@ fn instance_detail(
             })
         })
         .flatten();
-    let can_edit_name = can_manage
-        && !config
-            .managed_policy
-            .as_ref()
-            .and_then(|policy| policy.limits.as_ref())
-            .and_then(|limits| limits.providers.as_ref())
-            .and_then(|providers| providers.locked_instance_fields.as_ref())
-            .and_then(|locked| locked.iter().find(|(driver, _)| driver.0 == row.driver))
-            .is_some_and(|(_, paths)| paths.iter().any(|path| path == "displayName"));
+    let can_edit_name = can_manage && !name_locked;
     let name_row = base.map(|instance| {
         let (page, env, id) = (page.clone(), env.clone(), row.id.clone());
         let old = instance
@@ -819,28 +1087,33 @@ fn instance_detail(
             .cloned()
             .unwrap_or_default();
         settings_row(
-            SettingsRowProps::titled("provider-display-name", "Display name".into()).control(
-                move || {
-                    let name = signal(old.clone());
-                    let (page, env, id, instance, old) = (
-                        page.clone(),
-                        env.clone(),
-                        id.clone(),
-                        instance.clone(),
-                        old.clone(),
-                    );
+            SettingsRowProps::titled("provider-display-name", "Display name".into())
+                .description(move || {
+                    if name_locked {
+                        "The display name is locked by policy.".into()
+                    } else {
+                        Text::content("")
+                    }
+                })
+                .control(move || {
+                    let (page, env, id, old) = (page.clone(), env.clone(), id.clone(), old.clone());
+                    let initial = old.clone();
                     nsh_base::input()
                         .app_class(tw(
                             "min-w-0 flex-1 rounded-md border border-input px-2 text-sm",
                         ))
                         .label(t("Display name"))
                         .disabled(!can_edit_name)
-                        .value(move || name.get())
-                        .on_change(move |value: &str| name.set(value.to_owned()))
+                        .value(move || draft.get().unwrap_or_else(|| initial.clone()))
+                        .on_change(move |value: &str| draft.set(Some(value.to_owned())))
                         .on_submit(move |value: &str| {
                             let value = value.trim();
-                            if value != old {
-                                let mut instance = instance.clone();
+                            if value != old
+                                && let Some(mut instance) =
+                                    current_config.get_untracked().and_then(|config| {
+                                        config.settings.provider_instances.get(&id).cloned()
+                                    })
+                            {
                                 instance.display_name =
                                     Some((!value.is_empty()).then(|| value.to_owned()));
                                 page.request(
@@ -853,11 +1126,10 @@ fn instance_detail(
                                 );
                             }
                         })
-                },
-            ),
+                }),
         )
     });
-    section = section.child(settings_section(
+    settings_section(
         "",
         Text::content(row.name.clone()),
         view()
@@ -869,34 +1141,8 @@ fn instance_detail(
             ))
             .child(name_row)
             .child(remove),
-    ));
-    if let Some(provider) = &row.provider {
-        section = section.child(setup_section(
-            page.clone(),
-            env,
-            config,
-            row,
-            provider,
-            can_manage,
-        ));
-        if row.driver == "acpRegistry"
-            && provider
-                .native_sessions
-                .as_ref()
-                .and_then(Option::as_ref)
-                .is_some_and(|sessions| sessions.can_list)
-        {
-            section = section.child(acp_sessions(
-                page.clone(),
-                env.clone(),
-                row.id.clone(),
-                projects,
-            ));
-        }
-    }
-    section
-        .child(models_section(page, context, env, config, row, can_manage))
-        .into_element()
+    )
+    .into_element()
 }
 
 #[derive(Clone, PartialEq)]
@@ -910,32 +1156,150 @@ struct SetupTerminal {
 
 fn setup_section(
     page: Rc<Page>,
+    environment: ProviderEnvironment,
+    id: ProviderInstanceId,
+    row: Memo<Option<ProviderSettingsRow>>,
+) -> AnyElement {
+    let can_manage = environment.can_manage;
+    let provider = computed(move || row.get().and_then(|row| row.provider));
+    let config = environment.config;
+    let managed = computed(move || {
+        row.get().is_some_and(|row| {
+            row.driver == "codex"
+                && config
+                    .get()
+                    .and_then(|config| {
+                        config
+                            .settings
+                            .provider_instances
+                            .get(&row.id)
+                            .and_then(|instance| instance.config.as_ref())
+                            .and_then(|config| config.get("setupMode"))
+                            .and_then(Value::as_str)
+                            .map(|mode| mode == "managed")
+                    })
+                    .unwrap_or(false)
+        })
+    });
+    let auth = computed(move || {
+        provider.get().is_some_and(|provider| {
+            provider
+                .setup
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|setup| setup.can_authenticate)
+                || (provider.driver.0 == "acpRegistry" && provider.installed)
+        })
+    });
+    let install = computed(move || {
+        provider.get().is_some_and(|provider| {
+            provider
+                .setup
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|setup| setup.can_install)
+        })
+    });
+    let terminal = computed({
+        let (page, env) = (page.clone(), environment.id.clone());
+        move || match (config.get(), row.get(), provider.get()) {
+            (Some(config), Some(row), Some(provider)) if can_manage.get() => setup_terminal_action(
+                &page,
+                &env,
+                &config,
+                &row,
+                &provider,
+                auth.get(),
+                install.get(),
+            ),
+            _ => None,
+        }
+    });
+    let available = computed(move || {
+        can_manage.get() && (auth.get() || install.get() || terminal.with(Option::is_some))
+    });
+    region(
+        move || available.get(),
+        move |available| {
+            available.then(|| {
+                let (page, env) = (page.clone(), environment.id.clone());
+                let target = ProviderSetupInput {
+                    instance_id: id.clone(),
+                };
+                let account = Account::new(page.clone(), env.clone(), target.clone());
+                let state = account.state;
+                let query_error = account.query_error;
+                let auth_active =
+                    computed(move || auth.get() && auth_running(state.get().as_ref()));
+                let auth_error = computed(move || auth.get().then(|| query_error.get()).flatten());
+                let enabled = computed(move || row.get().is_some_and(|row| row.enabled));
+                let name = computed(move || row.get().map_or_else(String::new, |row| row.name));
+                let runtime = region(move || install.get(), {
+                    let page = page.clone();
+                    let env = env.clone();
+                    move |can_install: bool| {
+                        can_install.then(|| {
+                            install_row(
+                                page.clone(),
+                                env.clone(),
+                                target.clone(),
+                                auth_active,
+                                auth_error,
+                            )
+                        })
+                    }
+                });
+                let account_ui = region(
+                    move || auth.get(),
+                    move |can_auth: bool| {
+                        can_auth.then(|| {
+                            account.follow();
+                            auth_row(account.clone(), provider, enabled, name, managed)
+                        })
+                    },
+                );
+                let active = page.terminal;
+                let terminal_ui = region(
+                    move || terminal.get(),
+                    move |terminal| {
+                        terminal.map(|(title, label, terminal)| {
+                            settings_row(SettingsRowProps::titled("", title.into()).control(
+                                move || {
+                                    let terminal = terminal.clone();
+                                    action(label, ButtonVariant::Outline, false, move || {
+                                        active.set(Some(terminal.clone()))
+                                    })
+                                },
+                            ))
+                        })
+                    },
+                );
+                settings_section(
+                    "",
+                    "Setup".into(),
+                    view().child(runtime).child(terminal_ui).child(account_ui),
+                )
+            })
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn setup_terminal_action(
+    page: &Page,
     env: &EnvironmentId,
     config: &ServerConfig,
     row: &ProviderSettingsRow,
     provider: &ServerProvider,
-    can_manage: bool,
-) -> Option<AnyElement> {
-    let setup = provider.setup.as_ref().and_then(Option::as_ref);
-    let has_auth = can_manage
-        && (setup.is_some_and(|setup| setup.can_authenticate)
-            || (provider.driver.0 == "acpRegistry" && provider.installed));
-    let has_install = can_manage && setup.is_some_and(|setup| setup.can_install);
+    has_auth: bool,
+    has_install: bool,
+) -> Option<(&'static str, &'static str, SetupTerminal)> {
     let os = config.environment.platform.os.clone();
     let key = ThreadKey {
         environment: env.clone(),
         thread: ThreadId("onboarding-agent-setup".into()),
     };
-    let managed = row.driver == "codex"
-        && config
-            .settings
-            .provider_instances
-            .get(&row.id)
-            .and_then(|instance| instance.config.as_ref())
-            .and_then(|config| config.get("setupMode"))
-            .and_then(Value::as_str)
-            == Some("managed");
-    let terminal = if can_manage && row.enabled && page.services.terminals.0.can_operate(&key) {
+    if row.enabled && page.services.terminals.0.can_operate(&key) {
         provider_readiness::onboarding_install_command(&row.driver, os.clone())
             .and_then(|command| {
                 if !provider.installed && !has_install {
@@ -972,45 +1336,7 @@ fn setup_section(
             })
     } else {
         None
-    };
-    if !has_auth && !has_install && terminal.is_none() {
-        return None;
     }
-    let target = ProviderSetupInput {
-        instance_id: row.id.clone(),
-    };
-    let mut content = view();
-    if has_install {
-        content = content.child(install_row(
-            page.clone(),
-            env.clone(),
-            target.clone(),
-            row.enabled,
-        ));
-    }
-    if let Some((title, label, terminal)) = terminal {
-        let active = page.terminal;
-        content = content.child(settings_row(
-            SettingsRowProps::titled("", title.into()).control(move || {
-                let terminal = terminal.clone();
-                action(label, ButtonVariant::Outline, false, move || {
-                    active.set(Some(terminal.clone()))
-                })
-            }),
-        ));
-    }
-    if has_auth {
-        content = content.child(auth_row(
-            page,
-            env.clone(),
-            target,
-            provider.clone(),
-            row.enabled,
-            row.name.clone(),
-            managed,
-        ));
-    }
-    Some(settings_section("", "Setup".into(), content).into_element())
 }
 
 fn setup_terminal_dialog(page: Rc<Page>, terminal: SetupTerminal) -> AnyElement {
@@ -1095,11 +1421,51 @@ struct Account {
     state: Signal<Option<ProviderAuthState>>,
     pending: Signal<bool>,
     error: Signal<Option<String>>,
+    query_error: Signal<Option<String>>,
     method: Signal<Option<t3_contracts::base_schemas::TrimmedNonEmptyString>>,
 }
 
 impl Account {
+    fn new(page: Rc<Page>, env: EnvironmentId, target: ProviderSetupInput) -> Rc<Self> {
+        Rc::new(Self {
+            state: signal(None),
+            pending: signal(false),
+            error: signal(None),
+            query_error: signal(None),
+            method: signal(None),
+            page,
+            env,
+            target,
+        })
+    }
+
+    fn follow(&self) {
+        let mut events = (self.page.services.auth_state)(&self.env, self.target.clone());
+        let state = self.state;
+        let error = self.query_error;
+        watch(async move {
+            while let Some(event) = events.next().await {
+                match event {
+                    Ok(value) => {
+                        error.set(None);
+                        state.set(Some(value));
+                    }
+                    Err(reason) => error.set(Some(reason.to_string())),
+                }
+            }
+        });
+    }
+
     fn run(&self, command: AuthCommand, confirmation: Option<crate::ui::confirm::Confirmation>) {
+        self.run_after(command, confirmation, || {});
+    }
+
+    fn run_after(
+        &self,
+        command: AuthCommand,
+        confirmation: Option<crate::ui::confirm::Confirmation>,
+        success: impl FnOnce() + 'static,
+    ) {
         if self.pending.get_untracked() {
             return;
         }
@@ -1115,6 +1481,9 @@ impl Account {
             }
             match (account.page.services.auth)(account.env.clone(), command).await {
                 Ok(value) => {
+                    if value.phase != ProviderAuthPhase::Failed {
+                        success();
+                    }
                     let _ = account.state.try_set(Some(value));
                 }
                 Err(error) => {
@@ -1143,58 +1512,61 @@ impl Account {
     }
 }
 
+fn auth_running(state: Option<&ProviderAuthState>) -> bool {
+    state.is_some_and(|state| {
+        matches!(
+            state.phase,
+            ProviderAuthPhase::Starting | ProviderAuthPhase::Waiting | ProviderAuthPhase::Verifying
+        )
+    })
+}
+
 fn auth_row(
-    page: Rc<Page>,
-    env: EnvironmentId,
-    target: ProviderSetupInput,
-    provider: ServerProvider,
-    enabled: bool,
-    name: String,
-    managed: bool,
+    account: Rc<Account>,
+    provider: Memo<Option<ServerProvider>>,
+    enabled: Memo<bool>,
+    name: Memo<String>,
+    managed: Memo<bool>,
 ) -> AnyElement {
-    let local_sign_in = (page.services.local_sign_in)(&env);
-    let account = Rc::new(Account {
-        state: signal(None),
-        pending: signal(false),
-        error: signal(None),
-        method: signal(None),
-        page,
-        env,
-        target,
-    });
-    let mut events = (account.page.services.auth_state)(&account.env, account.target.clone());
+    let local_sign_in = (account.page.services.local_sign_in)(&account.env);
     let state = account.state;
-    let error = account.error;
-    watch(async move {
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(value) => state.set(Some(value)),
-                Err(reason) => error.set(Some(reason.to_string())),
-            }
-        }
-    });
     let pending = account.pending;
-    region(
-        move || (state.get(), pending.get(), error.get()),
-        move |(state, pending, error)| {
-            let signed_in = state.as_ref().map_or_else(
-                || provider.auth.status == ServerProviderAuthStatus::Authenticated,
-                |value| match value.phase {
-                    ProviderAuthPhase::Succeeded => {
-                        value.credential_owner.is_some()
-                            || provider.auth.status == ServerProviderAuthStatus::Authenticated
-                    }
-                    _ => provider.auth.status == ServerProviderAuthStatus::Authenticated,
-                },
-            );
-            let active = state.as_ref().is_some_and(|s| {
-                matches!(
-                    s.phase,
-                    ProviderAuthPhase::Starting
-                        | ProviderAuthPhase::Waiting
-                        | ProviderAuthPhase::Verifying
-                )
+    let error = account.error;
+    let query_error = account.query_error;
+    let status = computed(move || {
+        provider.get().map(|provider| {
+            let can_sign_out = provider.auth.can_logout.flatten().unwrap_or_else(|| {
+                provider
+                    .setup
+                    .flatten()
+                    .is_some_and(|setup| setup.can_authenticate)
             });
+            (provider.auth.status, provider.installed, can_sign_out)
+        })
+    });
+    let interaction = auth_interaction_view(account.clone());
+    let account_row = region(
+        move || {
+            (
+                state.get(),
+                pending.get(),
+                error.get().or_else(|| query_error.get()),
+                status.get(),
+                enabled.get(),
+                name.get(),
+                managed.get(),
+            )
+        },
+        move |(state, pending, error, status, enabled, name, managed)| {
+            let Some((status, installed, can_sign_out)) = status else {
+                return view().into_element();
+            };
+            let signed_in = status == ServerProviderAuthStatus::Authenticated
+                || (status == ServerProviderAuthStatus::Unknown
+                    && state
+                        .as_ref()
+                        .is_some_and(|state| state.phase == ProviderAuthPhase::Succeeded));
+            let active = auth_running(state.as_ref());
             let interaction = state
                 .as_ref()
                 .and_then(|s| s.interaction.as_ref())
@@ -1202,25 +1574,20 @@ fn auth_row(
             let desc = if active {
                 match interaction {
                     Some(ProviderAuthInteraction::Terminal { .. }) => {
-                        "Complete sign-in in the terminal below."
+                        "Terminal sign-in is unavailable here."
                     }
                     Some(ProviderAuthInteraction::Credentials { .. }) => {
                         "Enter your credentials below."
                     }
                     _ => "Finish signing in in your browser.",
                 }
+            } else if managed && !local_sign_in {
+                "ChatGPT sign-in is unavailable on this remote connection."
             } else if signed_in {
                 "Signed in."
             } else {
                 "Sign in"
             };
-            let can_sign_out = provider.auth.can_logout.flatten().unwrap_or_else(|| {
-                provider
-                    .setup
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .is_some_and(|s| s.can_authenticate)
-            });
             let flow = state.as_ref().and_then(|s| s.flow_id.clone());
             let message = error.or_else(|| {
                 state
@@ -1277,7 +1644,7 @@ fn auth_row(
                             }));
                     } else {
                         buttons = buttons.child(action(if signed_in { "Change account" } else { "Sign in" },
-                            ButtonVariant::Outline, pending || !enabled || !provider.installed || state.is_none(), move || {
+                            ButtonVariant::Outline, pending || !enabled || !installed || state.is_none(), move || {
                                 start.run(AuthCommand::Start(ProviderAuthStartInput {
                                     instance_id: start.target.instance_id.clone(), method_id: start.method.get_untracked(),
                                     return_url: None, callback_mode: None,
@@ -1299,20 +1666,70 @@ fn auth_row(
                     buttons
                 }
             });
-            view()
-                .child(settings_row(row))
-                .child(flow.as_ref().zip(interaction).map(|(flow, interaction)| {
-                    auth_interaction(account.clone(), flow.clone(), interaction.clone(), pending)
-                }))
+            settings_row(row).into_element()
+        },
+    );
+    view().child(account_row).child(interaction).into_element()
+}
+
+fn auth_interaction_view(account: Rc<Account>) -> AnyElement {
+    let state = account.state;
+    let pending = account.pending;
+    // A credential draft belongs to the auth interaction. Provider status, name and
+    // pending changes can update the account row independently.
+    region(
+        move || {
+            let state = state.get()?;
+            auth_running(Some(&state)).then(|| {
+                (
+                    state.flow_id.zip(state.interaction.flatten()),
+                    state.authorization_url,
+                )
+            })
+        },
+        move |active| {
+            active.and_then(|(interaction, browser)| match interaction {
+                Some((flow, interaction)) => Some(auth_interaction(
+                    account.clone(),
+                    flow,
+                    interaction,
+                    pending,
+                )),
+                None => browser.map(|url| {
+                    browser_action("Open browser", url, pending, |opener, url| opener.open(url))
+                }),
+            })
         },
     )
+}
+
+fn browser_action(
+    label: &'static str,
+    url: String,
+    pending: Signal<bool>,
+    open: impl Fn(crate::runtime::services::links::LinkOpener, String) + 'static,
+) -> AnyElement {
+    let opener = link_opener_here();
+    let allowed = t3_client::persistence::external_links::is_web_url(&url);
+    button(
+        ButtonContent::Label(t(label)),
+        ButtonVariant::Outline,
+        ButtonSize::Xs,
+        move || pending.get() || !allowed,
+        move || {
+            if allowed {
+                open(opener.clone(), url.clone());
+            }
+        },
+    )
+    .into_element()
 }
 
 fn auth_interaction(
     account: Rc<Account>,
     flow: t3_contracts::base_schemas::TrimmedNonEmptyString,
     interaction: ProviderAuthInteraction,
-    pending: bool,
+    pending: Signal<bool>,
 ) -> AnyElement {
     use crate::ui::input::{InputSize, masked_text_field, text_field};
     let panel = view().app_class(tw("flex flex-col gap-2 px-3 py-2 sm:px-4"));
@@ -1322,69 +1739,44 @@ fn auth_interaction(
             url,
             requires_consent,
             ..
-        } => {
-            let opener = link_opener_here();
-            panel
-                .child(action(
-                    "Open sign-in page",
-                    ButtonVariant::Outline,
-                    pending,
-                    move || {
-                        if requires_consent {
-                            account.respond(
-                                &flow,
-                                &id,
-                                ProviderAuthResponse::Browser {
+        } => panel
+            .child(browser_action(
+                "Open sign-in page",
+                url.0,
+                pending,
+                move |opener, url| {
+                    if requires_consent {
+                        account.run_after(
+                            AuthCommand::Respond(ProviderAuthRespondInput {
+                                instance_id: account.target.instance_id.clone(),
+                                flow_id: flow.clone(),
+                                interaction_id: id.clone(),
+                                response: ProviderAuthResponse::Browser {
                                     action: ProviderBrowserAuthAction::Accept,
                                 },
-                            );
-                        }
-                        opener.open(url.0.clone());
-                    },
-                ))
-                .into_element()
-        }
-        ProviderAuthInteraction::DeviceCode { url, user_code, .. } => {
-            let opener = link_opener_here();
-            panel
-                .child(text(tr(
-                    "Enter code {code} in your browser.",
-                    &[("code", MsgValue::Text(user_code.0))],
-                )))
-                .child(action(
-                    "Open sign-in page",
-                    ButtonVariant::Outline,
-                    pending,
-                    move || opener.open(url.0.clone()),
-                ))
-                .into_element()
-        }
-        ProviderAuthInteraction::Terminal { id, output, .. } => {
-            let input = signal(String::new());
-            let submit = move || {
-                let line = input.get_untracked();
-                input.set(String::new());
-                account.respond(
-                    &flow,
-                    &id,
-                    ProviderAuthResponse::Terminal {
-                        data: format!("{line}\r"),
-                        size: None,
-                    },
-                );
-            };
-            panel
-                .child(text(output).app_class(tw("font-mono text-xs")))
-                .child(
-                    nsh_base::input()
-                        .label(t("Terminal input"))
-                        .disabled(pending)
-                        .value(move || input.get())
-                        .on_change(move |value: &str| input.set(value.to_owned()))
-                        .on_submit(move |_: &str| submit()),
-                )
-                .into_element()
-        }
+                            }),
+                            None,
+                            move || opener.open(url),
+                        );
+                    } else {
+                        opener.open(url);
+                    }
+                },
+            ))
+            .into_element(),
+        ProviderAuthInteraction::DeviceCode { url, user_code, .. } => panel
+            .child(text(tr(
+                "Enter code {code} in your browser.",
+                &[("code", MsgValue::Text(user_code.0))],
+            )))
+            .child(browser_action(
+                "Open sign-in page",
+                url.0,
+                pending,
+                |opener, url| opener.open(url),
+            ))
+            .into_element(),
+        ProviderAuthInteraction::Terminal { .. } => panel.into_element(),
         ProviderAuthInteraction::Credentials { id, fields } => {
             let mut controls = panel;
             let mut values = Vec::new();
@@ -1400,7 +1792,7 @@ fn auth_interaction(
                         value,
                         String::new(),
                         label,
-                        move || pending,
+                        move || pending.get(),
                         || {},
                     ))
                 } else {
@@ -1414,10 +1806,11 @@ fn auth_interaction(
                 };
             }
             controls
-                .child(action(
-                    "Connect",
+                .child(button(
+                    ButtonContent::Label(t("Connect")),
                     ButtonVariant::Outline,
-                    pending,
+                    ButtonSize::Xs,
+                    move || pending.get(),
                     move || {
                         account.respond(
                             &flow,
@@ -1440,97 +1833,163 @@ fn install_row(
     page: Rc<Page>,
     env: EnvironmentId,
     target: ProviderSetupInput,
-    enabled: bool,
+    auth_active: Memo<bool>,
+    auth_error: Memo<Option<String>>,
 ) -> AnyElement {
     let state = signal(None::<ProviderInstallState>);
     let pending = signal(false);
-    let error = signal(None::<String>);
+    let query_error = signal(None::<String>);
+    let request_error = signal(None::<String>);
     let mut events = (page.services.install_state)(&env, target.clone());
     watch(async move {
         while let Some(event) = events.next().await {
             match event {
-                Ok(next) => state.set(Some(next)),
-                Err(reason) => error.set(Some(reason.to_string())),
+                Ok(next) => {
+                    query_error.set(None);
+                    state.set(Some(next));
+                }
+                Err(reason) => query_error.set(Some(reason.to_string())),
             }
         }
     });
+    let run = Rc::new(
+        move |op: InstallCommand, confirmation: Option<crate::ui::confirm::Confirmation>| {
+            if pending.get_untracked() {
+                return;
+            }
+            pending.set(true);
+            request_error.set(None);
+            let (page, env) = (page.clone(), env.clone());
+            page.tasks.spawn({
+                let call = page.services.install.clone();
+                async move {
+                    if let Some(confirmation) = confirmation
+                        && !confirmation.await
+                    {
+                        let _ = pending.try_set(false);
+                        return;
+                    }
+                    match call(env, op).await {
+                        Ok(result) => {
+                            let _ = state.try_set(Some(result));
+                        }
+                        Err(reason) => {
+                            let _ = request_error.try_set(Some(reason.to_string()));
+                        }
+                    }
+                    let _ = pending.try_set(false);
+                }
+            });
+        },
+    );
     region(
-        move || (state.get(), pending.get(), error.get()),
-        move |(state_value, busy, message)| {
-            let command = match state_value.as_ref() {
-                Some(current)
-                    if matches!(
-                        current.phase,
-                        ProviderInstallPhase::Downloading
-                            | ProviderInstallPhase::Extracting
-                            | ProviderInstallPhase::Verifying
-                    ) =>
-                {
-                    current.operation_id.clone().map(|operation_id| {
-                        (
-                            "Cancel",
-                            InstallCommand::Cancel(ProviderInstallCancelInput {
-                                instance_id: target.instance_id.clone(),
-                                operation_id,
-                            }),
-                        )
-                    })
-                }
-                Some(current) if current.can_remove => {
-                    Some(("Remove runtime", InstallCommand::Remove(target.clone())))
-                }
-                Some(_) => Some((
-                    "Install managed runtime",
-                    InstallCommand::Start(target.clone()),
-                )),
-                None => None,
-            };
-            let message = message.or_else(|| state_value.and_then(|state| state.message));
+        move || {
+            (
+                state.get(),
+                pending.get(),
+                query_error.get().or_else(|| auth_error.get()),
+                request_error.get(),
+                auth_active.get(),
+            )
+        },
+        move |(state, pending, query_error, request_error, auth_active)| {
+            let active = state.as_ref().is_some_and(|state| {
+                matches!(
+                    state.phase,
+                    ProviderInstallPhase::Downloading
+                        | ProviderInstallPhase::Extracting
+                        | ProviderInstallPhase::Verifying
+                )
+            });
+            let blocked = pending || query_error.is_some();
+            let status = installation_status(state.as_ref());
+            let message = request_error.or(query_error).or_else(|| {
+                state
+                    .as_ref()
+                    .filter(|_| !active)
+                    .and_then(|state| state.message.clone())
+            });
             settings_row(
                 SettingsRowProps::titled("provider-runtime", "Runtime".into())
+                    .description(move || Text::content(status.clone()))
                     .status(move || message.clone().map(Text::content))
                     .control({
-                        let (page, env) = (page.clone(), env.clone());
-                        let command = Rc::new(command);
+                        let run = run.clone();
+                        let target = target.clone();
                         move || {
-                            command
-                                .as_ref()
-                                .as_ref()
-                                .map(|(label, op)| {
-                                    let (page, env, op) = (page.clone(), env.clone(), op.clone());
-                                    action(
-                                        label,
-                                        ButtonVariant::Outline,
-                                        busy || !enabled,
-                                        move || {
-                                            if pending.get_untracked() {
-                                                return;
+                            let mut row = view().app_class(tw("flex flex-row flex-wrap items-center gap-1.5"));
+                            if let Some(state) = &state {
+                                if active {
+                                    if let Some(operation_id) = &state.operation_id {
+                                        let op = InstallCommand::Cancel(ProviderInstallCancelInput {
+                                            instance_id: target.instance_id.clone(),
+                                            operation_id: operation_id.clone(),
+                                        });
+                                        let run = run.clone();
+                                        row = row.child(action("Cancel installation", ButtonVariant::Outline, blocked, move || run(op.clone(), None)));
+                                    }
+                                } else {
+                                    let start_label = match (&state.installed_version, &state.version, &state.phase) {
+                                        (Some(installed), Some(version), _) if version != installed => "Update runtime",
+                                        (Some(_), _, _) => "Reinstall runtime",
+                                        (_, _, ProviderInstallPhase::Failed | ProviderInstallPhase::Cancelled) => "Retry installation",
+                                        _ => "Install managed runtime",
+                                    };
+                                    let start = InstallCommand::Start(target.clone());
+                                    let start_run = run.clone();
+                                    row = row.child(action(start_label, ButtonVariant::Outline, blocked || auth_active, move || start_run(start.clone(), None)));
+                                    if state.can_remove {
+                                        let remove = InstallCommand::Remove(target.clone());
+                                        let run = run.clone();
+                                        row = row.child(action("Remove runtime", ButtonVariant::Ghost, blocked || auth_active, move || {
+                                            if let Some(confirmation) = request_confirm_dialog(
+                                                t("Remove the downloaded runtime? Sign-in and thread history are kept."),
+                                                Some(ConfirmDialogOptions { variant: ConfirmDialogVariant::Destructive, ..Default::default() }),
+                                            ) {
+                                                run(remove.clone(), Some(confirmation));
                                             }
-                                            pending.set(true);
-                                            error.set(None);
-                                            let future =
-                                                (page.services.install)(env.clone(), op.clone());
-                                            page.tasks.spawn(async move {
-                                                match future.await {
-                                                    Ok(result) => {
-                                                        let _ = state.try_set(Some(result));
-                                                    }
-                                                    Err(reason) => {
-                                                        let _ =
-                                                            error.try_set(Some(reason.to_string()));
-                                                    }
-                                                }
-                                                let _ = pending.try_set(false);
-                                            });
-                                        },
-                                    )
-                                })
-                                .unwrap_or_else(|| view().into_element())
+                                        }));
+                                    }
+                                }
+                            }
+                            row
                         }
                     }),
             )
         },
     )
+}
+
+fn installation_status(state: Option<&ProviderInstallState>) -> String {
+    let Some(state) = state else {
+        return t("Checking the runtime.");
+    };
+    match state.phase {
+        ProviderInstallPhase::Downloading => {
+            let downloaded = format!("{:.1}", state.downloaded_bytes as f64 / 1_000_000.0);
+            if let Some(total) = state.total_bytes {
+                tr(
+                    "Downloading {downloaded} MB of {total} MB.",
+                    &[
+                        ("downloaded", MsgValue::Text(downloaded)),
+                        (
+                            "total",
+                            MsgValue::Text(format!("{:.1}", total as f64 / 1_000_000.0)),
+                        ),
+                    ],
+                )
+            } else {
+                tr(
+                    "Downloading {downloaded} MB.",
+                    &[("downloaded", MsgValue::Text(downloaded))],
+                )
+            }
+        }
+        ProviderInstallPhase::Extracting => t("Extracting the runtime."),
+        ProviderInstallPhase::Verifying => t("Checking the downloaded runtime."),
+        _ if state.installed_version.is_some() => t("Installed."),
+        _ => t("Not installed."),
+    }
 }
 
 fn icon_action(icon: Icon, label: String, disabled: bool, run: impl Fn() + 'static) -> AnyElement {
@@ -1544,25 +2003,30 @@ fn icon_action(icon: Icon, label: String, disabled: bool, run: impl Fn() + 'stat
     .into_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn models_section(
     page: Rc<Page>,
-    context: SettingsContext,
     env: &EnvironmentId,
     config: &ServerConfig,
     row: &ProviderSettingsRow,
+    legacy: &t3_contracts::settings::ClientSettingsSchema,
     can_manage: bool,
+    can_write: bool,
+    filter: Signal<String>,
+    custom: Signal<bool>,
+    draft: Signal<String>,
 ) -> AnyElement {
-    let can_write = (page.services.grants)(env, Scope::SettingsWrite);
     let preferences = config
         .settings
         .provider_model_preferences
         .as_ref()
-        .and_then(|values| values.get(&row.id));
+        .unwrap_or(&legacy.provider_model_preferences)
+        .get(&row.id);
     let favorites = config
         .settings
         .favorites
         .as_ref()
-        .unwrap_or(&context.client_settings().favorites)
+        .unwrap_or(&legacy.favorites)
         .iter()
         .filter(|favorite| favorite.provider == row.id)
         .map(|favorite| favorite.model.0.clone())
@@ -1608,13 +2072,12 @@ fn models_section(
             if let Value::Object(patch) = patch {
                 page.request(
                     env.clone(),
-                    Command::Update(patch),
+                    Command::ModelPreferences(patch),
                     "Could not update model preferences",
                 );
             }
         }
     };
-    let filter = signal(String::new());
     let mut content = view();
     if reported.len() > 8 {
         use crate::ui::input::{InputSize, text_field};
@@ -1645,7 +2108,6 @@ fn models_section(
                     environment: None,
                 })
         });
-    let custom = signal(false);
     if custom_rows && let Some(configured) = configured {
         let (page, env, id) = (page.clone(), env.clone(), instance.clone());
         let names = reported
@@ -1657,13 +2119,15 @@ fn models_section(
                 "Add custom model",
                 ButtonVariant::Outline,
                 false,
-                move || custom.set(true),
+                move || {
+                    draft.set(String::new());
+                    custom.set(true);
+                },
             )))
             .child(region(
                 move || custom.get(),
                 move |open| {
                     open.then(|| {
-                        let draft = signal(String::new());
                         let (page, env, id, configured, names) = (
                             page.clone(),
                             env.clone(),
@@ -1820,13 +2284,52 @@ fn models_section(
     settings_section("provider-models", "Models".into(), content.child(rows)).into_element()
 }
 
-fn usage_sources(
+type UsageLimitSources = std::collections::BTreeMap<
+    t3_contracts::usage_limit_source_id::UsageLimitSourceId,
+    t3_contracts::settings::UsageLimitSourceConfig,
+>;
+
+fn usage_sources(page: Rc<Page>, environment: ProviderEnvironment) -> AnyElement {
+    let config = environment.config;
+    let can_manage = environment.can_manage;
+    let sources = computed(move || {
+        config
+            .get()
+            .map(|config| config.settings.usage_limit_sources.clone())
+            .unwrap_or_default()
+    });
+    let list = {
+        let (page, env) = (page.clone(), environment.id.clone());
+        region(
+            move || (sources.get(), can_manage.get()),
+            move |(sources, can_manage)| {
+                usage_source_rows(page.clone(), &env, &sources, can_manage)
+            },
+        )
+    };
+    let hub = region(
+        move || can_manage.get(),
+        move |can_manage| {
+            can_manage.then(|| {
+                let (page, env) = (page.clone(), environment.id.clone());
+                add_usage_source(page, env, sources)
+            })
+        },
+    );
+    settings_section(
+        "usage-providers",
+        "Usage providers".into(),
+        view().child(list).child(hub),
+    )
+    .into_element()
+}
+
+fn usage_source_rows(
     page: Rc<Page>,
     env: &EnvironmentId,
-    config: &ServerConfig,
+    sources: &UsageLimitSources,
     can_manage: bool,
 ) -> AnyElement {
-    let sources = Rc::new(config.settings.usage_limit_sources.clone());
     let mut list = view();
     for (id, source) in sources.iter() {
         let label = source
@@ -1895,56 +2398,122 @@ fn usage_sources(
             "No hubs configured.".into(),
         )));
     }
-    if can_manage {
-        use crate::ui::dialog::{MaxWidth, PopupOptions, dialog, dialog_popup, dialog_title};
-        let env = env.clone();
-        list = list.child(dialog(signal(false), move |dialog_state| {
-            view().child(view().app_class(tw("px-3 py-2 sm:px-4"))
-                .child(action("Add hub", ButtonVariant::Outline, false, move || dialog_state.show())))
-                .child(dialog_popup(dialog_state, PopupOptions { max_width: MaxWidth::Md, ..Default::default() }, move || {
-                use crate::ui::input::{InputSize, masked_text_field, text_field};
-                let url = signal(String::new());
-                let key = signal(String::new());
-                let label = signal(String::new());
-                let (page, env, sources) = (page.clone(), env.clone(), sources.clone());
-                let save = move || {
-                    let (raw_url, raw_key, raw_label) = (url.get_untracked(), key.get_untracked(), label.get_untracked());
-                    let (url, key, label) = (raw_url.trim(), raw_key.trim(), raw_label.trim());
-                    if url.is_empty() || key.is_empty() { return; }
-                    let id = t3_client::services::providers::usage_source_id(url, &sources);
-                    let mut config = json!({"kind":"cliproxy","url":url,"managementKey":key,"enabled":true});
-                    if !label.is_empty() {
-                        config["label"] = json!(label);
-                    }
-                    dialog_state.close();
-                    page.request(env.clone(), Command::Update(SettingsPatch::from_iter([
-                        ("usageLimitSources".into(), json!({id.0:config})),
-                    ])), "Could not update usage providers");
-                };
-                view().app_class(tw("flex flex-col gap-2 px-3 py-3 sm:px-4"))
-                    .child(dialog_title(dialog_state, || "Add a CLIProxyAPI hub".into()))
-                    .child(text_field(url, "https://hub.example.ts.net:8318".into(), t("Hub URL"), InputSize::Default, save.clone()))
-                    .child(masked_text_field(key, String::new(), t("Management key"), || false, save.clone()))
-                    .child(text_field(label, t("Defaults to the hub's host name"), t("Label (optional)"), InputSize::Default, save.clone()))
-                    .child(view().app_class(tw("flex flex-row gap-2"))
-                        .child(action("Cancel", ButtonVariant::Outline, false, move || dialog_state.close()))
-                        .child(button(ButtonContent::Label(t("Add hub")), ButtonVariant::Default, ButtonSize::Xs, move || url.get().trim().is_empty() || key.get().trim().is_empty(), save)))
-            }))
-        }));
-    }
-    settings_section("usage-providers", "Usage providers".into(), list).into_element()
+    list.into_element()
+}
+
+fn add_usage_source(
+    page: Rc<Page>,
+    env: EnvironmentId,
+    sources: Memo<UsageLimitSources>,
+) -> AnyElement {
+    use crate::ui::dialog::{MaxWidth, PopupOptions, dialog, dialog_popup, dialog_title};
+    dialog(signal(false), move |dialog_state| {
+        view()
+            .child(view().app_class(tw("px-3 py-2 sm:px-4")).child(action(
+                "Add hub",
+                ButtonVariant::Outline,
+                false,
+                move || dialog_state.show(),
+            )))
+            .child(dialog_popup(
+                dialog_state,
+                PopupOptions {
+                    max_width: MaxWidth::Md,
+                    ..Default::default()
+                },
+                move || {
+                    use crate::ui::input::{InputSize, masked_text_field, text_field};
+                    let url = signal(String::new());
+                    let key = signal(String::new());
+                    let label = signal(String::new());
+                    let (page, env, sources) = (page.clone(), env.clone(), sources);
+                    let save = move || {
+                        let (raw_url, raw_key, raw_label) = (
+                            url.get_untracked(),
+                            key.get_untracked(),
+                            label.get_untracked(),
+                        );
+                        let (url, key, label) = (raw_url.trim(), raw_key.trim(), raw_label.trim());
+                        if url.is_empty() || key.is_empty() {
+                            return;
+                        }
+                        let id = t3_client::services::providers::usage_source_id(
+                            url,
+                            &sources.get_untracked(),
+                        );
+                        let mut config =
+                            json!({"kind":"cliproxy","url":url,"managementKey":key,"enabled":true});
+                        if !label.is_empty() {
+                            config["label"] = json!(label);
+                        }
+                        dialog_state.close();
+                        page.request(
+                            env.clone(),
+                            Command::Update(SettingsPatch::from_iter([(
+                                "usageLimitSources".into(),
+                                json!({id.0:config}),
+                            )])),
+                            "Could not update usage providers",
+                        );
+                    };
+                    view()
+                        .app_class(tw("flex flex-col gap-2 px-3 py-3 sm:px-4"))
+                        .child(dialog_title(dialog_state, || {
+                            "Add a CLIProxyAPI hub".into()
+                        }))
+                        .child(text_field(
+                            url,
+                            "https://hub.example.ts.net:8318".into(),
+                            t("Hub URL"),
+                            InputSize::Default,
+                            save.clone(),
+                        ))
+                        .child(masked_text_field(
+                            key,
+                            String::new(),
+                            t("Management key"),
+                            || false,
+                            save.clone(),
+                        ))
+                        .child(text_field(
+                            label,
+                            t("Defaults to the hub's host name"),
+                            t("Label (optional)"),
+                            InputSize::Default,
+                            save.clone(),
+                        ))
+                        .child(
+                            view()
+                                .app_class(tw("flex flex-row gap-2"))
+                                .child(action("Cancel", ButtonVariant::Outline, false, move || {
+                                    dialog_state.close()
+                                }))
+                                .child(button(
+                                    ButtonContent::Label(t("Add hub")),
+                                    ButtonVariant::Default,
+                                    ButtonSize::Xs,
+                                    move || {
+                                        url.get().trim().is_empty() || key.get().trim().is_empty()
+                                    },
+                                    save,
+                                )),
+                        )
+                },
+            ))
+    })
+    .into_element()
 }
 
 fn load_balancing(
     page: Rc<Page>,
     context: SettingsContext,
-    scope: &SettingsScopeView,
+    machines: &[(EnvironmentId, String)],
     env: &EnvironmentId,
 ) -> Option<AnyElement> {
-    if scope.all_environments.len() < 2 {
+    if machines.len() < 2 {
         return None;
     }
-    let enabled = context.client_settings().load_balancing_enabled;
+    let enabled = computed(move || context.client_settings().load_balancing_enabled);
     let enabled_write = {
         let (page, env) = (page.clone(), env.clone());
         move |enabled| {
@@ -1961,20 +2530,15 @@ fn load_balancing(
     let mut entries = view()
         .child(settings_row(SettingsRowProps::titled("", "Automatically balance load".into())
             .description(|| "New threads in shared projects start on the machine with the most free CPU and memory, weighted by each machine's preference.".into())
-            .control(move || switch("Automatically balance load", ControlState { checked: enabled.into(), ..Default::default() }, SwitchSize::Default, enabled_write.clone()))));
-    for other in &scope.all_environments {
-        let (page, env, id) = (page.clone(), env.clone(), other.environment_id.0.clone());
-        let name = other.label.clone();
+            .control(move || switch("Automatically balance load", ControlState { checked: Prop::bind(move || enabled.get()), ..Default::default() }, SwitchSize::Default, enabled_write.clone()))));
+    for (other, name) in machines {
+        let (page, env, id) = (page.clone(), env.clone(), other.0.clone());
+        let name = name.clone();
+        let weight_id = t3_contracts::base_schemas::TrimmedNonEmptyString(id.clone());
         entries = entries.child(settings_row(
             SettingsRowProps::titled("", Text::content(name.clone())).control(move || {
                 let (page, env, id) = (page.clone(), env.clone(), id.clone());
-                let weight = context
-                    .client_settings()
-                    .load_balancing_weights
-                    .get(&t3_contracts::base_schemas::TrimmedNonEmptyString(
-                        id.clone(),
-                    ))
-                    .copied();
+                let weight_id = weight_id.clone();
                 let mut props = SelectProps::new(Text::content(tr(
                     "{label} load preference",
                     &[("label", MsgValue::Text(name.clone()))],
@@ -1989,11 +2553,17 @@ fn load_balancing(
                 .map(|(value, label)| SelectItem::new(value, t(label)))
                 .collect::<Vec<_>>()
                 .into();
-                props.value = SelectValue::Controlled(Some(
-                    t3_client::services::providers::load_preference(weight).into(),
-                ))
-                .into();
-                props.disabled = (!enabled).into();
+                props.value = Prop::bind(move || {
+                    let weight = context
+                        .client_settings()
+                        .load_balancing_weights
+                        .get(&weight_id)
+                        .copied();
+                    SelectValue::Controlled(Some(
+                        t3_client::services::providers::load_preference(weight).into(),
+                    ))
+                });
+                props.disabled = Prop::bind(move || !enabled.get());
                 props.size = SelectSize::Xs;
                 select(props, move |value| {
                     let Some(weight) = value.and_then(|value| value.parse::<i64>().ok()) else {
@@ -2277,23 +2847,35 @@ fn acp_sessions(
     view().child(row).child(body).into_element()
 }
 
-fn add_provider(page: Rc<Page>, env: EnvironmentId, config: &ServerConfig) -> Option<AnyElement> {
+fn add_provider(page: Rc<Page>, environment: ProviderEnvironment) -> AnyElement {
+    use t3_contracts::model::PROVIDER_DISPLAY_NAMES;
+    let config = environment.config;
+    let can_manage = environment.can_manage;
+    let drivers = computed(move || match (config.get(), can_manage.get()) {
+        (Some(config), true) => PROVIDER_DISPLAY_NAMES
+            .iter()
+            .filter(|(driver, _)| {
+                *driver != "acpRegistry" && provider_driver_allowed(&config, driver)
+            })
+            .copied()
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
+    region(
+        move || drivers.get(),
+        move |drivers| add_provider_form(page.clone(), environment.id.clone(), config, drivers),
+    )
+}
+
+fn add_provider_form(
+    page: Rc<Page>,
+    env: EnvironmentId,
+    config: Memo<Option<Rc<ServerConfig>>>,
+    drivers: Vec<(&'static str, &'static str)>,
+) -> Option<AnyElement> {
     use crate::ui::input::{InputSize, text_field};
     use t3_contracts::{model::PROVIDER_DISPLAY_NAMES, provider_instance::ProviderDriverKind};
-    let drivers: Vec<_> = PROVIDER_DISPLAY_NAMES
-        .iter()
-        .filter(|(driver, _)| *driver != "acpRegistry" && provider_driver_allowed(config, driver))
-        .copied()
-        .collect();
     let first_driver = drivers.first()?.0;
-    let used = config
-        .settings
-        .provider_instances
-        .keys()
-        .chain(config.providers.0.iter().map(|row| &row.instance_id))
-        .map(|id| id.0.clone())
-        .chain(PROVIDER_DISPLAY_NAMES.iter().map(|(id, _)| id.to_string()))
-        .collect::<BTreeSet<_>>();
     let open = signal(false);
     let opening = action(
         "Add provider",
@@ -2323,14 +2905,22 @@ fn add_provider(page: Rc<Page>, env: EnvironmentId, config: &ServerConfig) -> Op
                         props.value =
                             Prop::bind(move || SelectValue::Controlled(Some(driver.get().into())));
                         props.size = SelectSize::Sm;
-                        let used = Rc::new(used.clone());
                         let error = computed(move || {
                             let id = id.get();
-                            t3_client::services::providers::provider_instance_id_error(
-                                id.trim(),
-                                used.contains(id.trim()),
-                            )
-                            .map(|message| (message, id))
+                            let key = ProviderInstanceId(id.trim().to_owned());
+                            let used = PROVIDER_DISPLAY_NAMES
+                                .iter()
+                                .any(|(driver, _)| *driver == key.0)
+                                || config.get().is_some_and(|config| {
+                                    config.settings.provider_instances.contains_key(&key)
+                                        || config
+                                            .providers
+                                            .0
+                                            .iter()
+                                            .any(|provider| provider.instance_id == key)
+                                });
+                            t3_client::services::providers::provider_instance_id_error(&key.0, used)
+                                .map(|message| (message, id))
                         });
                         let (page, env) = (page.clone(), env.clone());
                         let save = move || {

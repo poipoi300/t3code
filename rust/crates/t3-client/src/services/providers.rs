@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use t3_contracts::{
     acp_registry::{
         AcpRegistryDeleteSessionInput, AcpRegistryImportSessionInput, AcpRegistryListSessionsInput,
-        AcpRegistryListSessionsResult,
+        AcpRegistryListSessionsResult, AcpRegistryManagedBinaryUninstallInput,
     },
     auth::AuthEnvironmentScope as Scope,
     base_schemas::ProjectId,
@@ -23,7 +23,8 @@ use t3_contracts::{
         WsProviderInstallRemoveRpc, WsProviderInstallStartRpc, WsProviderInstallSubscribeRpc,
         WsServerDeleteAcpRegistrySessionRpc, WsServerImportAcpRegistrySessionRpc,
         WsServerListAcpRegistrySessionsRpc, WsServerRefreshProvidersRpc,
-        WsServerUpdateSettingsPayload, WsServerUpdateSettingsRpc,
+        WsServerUninstallAcpRegistryManagedBinaryRpc, WsServerUpdateSettingsPayload,
+        WsServerUpdateSettingsRpc,
     },
     server::{ServerConfig, ServerProvider, ServerProviderAuthStatus, ServerProviderState},
 };
@@ -257,7 +258,7 @@ impl<P: Platform + Clone + 'static> ProviderSettings<P> {
         mutation: Option<ProviderInstanceMutation>,
     ) -> Result<(), ClientError> {
         let session = self.session(environment)?;
-        let mut scopes = if patch.is_empty() {
+        let mut scopes = if patch.is_empty() && mutation.is_some() {
             Vec::new()
         } else {
             required_scopes_for_server_settings_patch(&patch)
@@ -290,6 +291,42 @@ impl<P: Platform + Clone + 'static> ProviderSettings<P> {
         patch: SettingsPatch,
     ) -> Result<(), ClientError> {
         self.save(environment, patch, None).await
+    }
+
+    /// Seed server model preferences from this device before the first edit, as in the composer.
+    pub async fn update_model_preferences(
+        &self,
+        environment: &EnvironmentId,
+        mut patch: SettingsPatch,
+    ) -> Result<(), ClientError> {
+        let snapshot = self.0.store().snapshot();
+        let settings = &snapshot
+            .environments
+            .get(environment)
+            .and_then(|env| env.config.as_ref())
+            .ok_or(ClientError::Disconnected)?
+            .settings;
+        if settings.favorites.is_none() || settings.provider_model_preferences.is_none() {
+            let preferences = self.0.composer_preferences();
+            preferences.load().await?;
+            let legacy = preferences.snapshot();
+            let mut migration = SettingsPatch::default();
+            if settings.favorites.is_none() && !legacy.favorites.is_empty() {
+                migration.insert("favorites".into(), serde_json::to_value(&legacy.favorites)?);
+            }
+            if settings.provider_model_preferences.is_none()
+                && !legacy.provider_model_preferences.is_empty()
+            {
+                migration.insert(
+                    "providerModelPreferences".into(),
+                    serde_json::to_value(&legacy.provider_model_preferences)?,
+                );
+            }
+            if !migration.is_empty() {
+                patch.insert("migrateModelPreferences".into(), Value::Object(migration));
+            }
+        }
+        self.update(environment, patch).await
     }
 
     pub async fn mutate_instance(
@@ -394,7 +431,7 @@ pub fn provider_driver_allowed(config: &ServerConfig, driver: &str) -> bool {
 
 pub fn provider_settings_enabled(instance: &ProviderInstanceConfig) -> bool {
     t3_shared::project_settings::provider_instance_enabled(
-        &serde_json::to_value(instance).unwrap_or_default(),
+        &json!({"driver": instance.driver.0, "enabled": instance.enabled, "config": instance.config}),
     )
 }
 
@@ -503,14 +540,14 @@ pub fn provider_settings_status(
     }
 }
 
-/// Port of buildProviderInstanceOverridePatch. An empty provider map clears the stored map.'"
+/// Port of buildProviderInstanceOverridePatch. An empty provider map clears the stored map.
 pub fn provider_override_patch(
     settings: &t3_contracts::settings::ServerSettings,
     projects: &[t3_contracts::base_schemas::ProjectId],
     id: &ProviderInstanceId,
     enabled: Option<bool>,
 ) -> SettingsPatch {
-    let stored = serde_json::to_value(&settings.project_settings_overrides).unwrap_or_default();
+    let stored = json!(settings.project_settings_overrides);
     let entries = projects
         .iter()
         .map(|project| {
@@ -730,6 +767,17 @@ impl<P: Platform + Clone + 'static> ProviderSettings<P> {
         Ok(result.thread_id)
     }
 
+    pub async fn uninstall_registry_binary(
+        &self,
+        environment: &EnvironmentId,
+        input: AcpRegistryManagedBinaryUninstallInput,
+    ) -> Result<(), ClientError> {
+        self.manage(environment)?
+            .call::<WsServerUninstallAcpRegistryManagedBinaryRpc>(input)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn delete_session(
         &self,
         environment: &EnvironmentId,
@@ -768,6 +816,25 @@ pub struct ProviderSettingsRow {
     pub enabled: bool,
     pub project_override: Option<bool>,
     pub provider: Option<ServerProvider>,
+}
+
+impl PartialEq for ProviderSettingsRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.driver == other.driver
+            && self.name == other.name
+            && self.enabled == other.enabled
+            && self.project_override == other.project_override
+            && match (&self.provider, &other.provider) {
+                (Some(previous), Some(current)) if previous.checked_at != current.checked_at => {
+                    // A timestamp-only status check does not change the settings view.
+                    let mut previous = previous.clone();
+                    previous.checked_at = current.checked_at.clone();
+                    &previous == current
+                }
+                (previous, current) => previous == current,
+            }
+    }
 }
 
 pub fn provider_settings_rows(
@@ -882,6 +949,144 @@ mod provider_settings_tests {
         .expect("server config")
     }
 
+    fn with_paired_provider(
+        permissions: &[&str],
+        check: impl FnOnce(
+            ProviderSettings<crate::testing::environment::EnvironmentPlatform>,
+            EnvironmentId,
+            crate::testing::environment::FakeEnvironment,
+        ) -> futures::future::LocalBoxFuture<'static, ()>,
+    ) {
+        use futures::task::LocalSpawnExt;
+        use std::rc::Rc;
+        use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+        let mut tasks = futures::executor::LocalPool::new();
+        let local = tasks.spawner();
+        let spawn: crate::composition::Spawner = Rc::new(move |future| {
+            local.spawn_local(future).expect("schedule the fixture");
+        });
+        let server = crate::testing::environment::FakeEnvironment::new("fixture", spawn.clone());
+        let mut scopes = vec!["orchestration:read"];
+        scopes.extend_from_slice(permissions);
+        server.set_permissions(&scopes);
+        server.edit_config(|config| {
+            config["settings"]["textGenerationModelSelection"] =
+                json!({"instanceId":"fixture-codex","model":"fixture-model"});
+            config["settings"]["providerInstances"]["fixture-codex"] = json!({"driver":"codex"});
+            config["providers"] = json!([{
+                "instanceId":"fixture-codex", "driver":"codex", "enabled":true, "installed":true,
+                "version":"1.0.0","status":"ready","auth":{"status":"authenticated"},
+                "checkedAt":"2026-11-21T00:00:00.000Z",
+                "models":[{"slug":"fixture-model","name":"Fixture Model","capabilities":null,"isCustom":false}],
+                "slashCommands":[],"skills":[]
+            }]);
+        });
+        server.reply("server.updateSettings", Ok(json!(config().settings)));
+        let store = crate::ClientStore::default();
+        let client = ClientRuntime::new(
+            server.platform(),
+            store.clone(),
+            OrchestrationV2CreationSource::Web,
+            spawn,
+        );
+        let environment = EnvironmentId("fixture".into());
+        tasks.run_until(async {
+            let mut ready = store.subscribe_environment(&environment);
+            client
+                .pair(server.pairing())
+                .await
+                .expect("pair the fixture");
+            while store
+                .snapshot()
+                .environments
+                .get(&environment)
+                .and_then(|entry| entry.config.as_ref())
+                .is_none()
+            {
+                ready.next().await.expect("config publication");
+            }
+            check(ProviderSettings::new(&client), environment, server).await;
+        });
+    }
+
+    #[test]
+    fn save_checks_the_scopes_required_by_patch_and_mutation() {
+        use futures::FutureExt;
+        for (scopes, patch, mutation) in [
+            (
+                vec!["providers:manage"],
+                json!({"defaultModelSelection":null}),
+                None,
+            ),
+            (vec!["providers:manage"], json!({}), None),
+            (
+                vec!["settings:write"],
+                json!({}),
+                Some(ProviderInstanceMutation::Remove {
+                    instance_id: ProviderInstanceId("fixture-codex".into()),
+                }),
+            ),
+            (
+                vec!["settings:write"],
+                json!({"defaultModelSelection":null}),
+                Some(ProviderInstanceMutation::Remove {
+                    instance_id: ProviderInstanceId("fixture-codex".into()),
+                }),
+            ),
+        ] {
+            with_paired_provider(&scopes, move |settings, env, server| {
+                async move {
+                let error = settings.save(&env, serde_json::from_value(patch).unwrap(), mutation).await;
+                assert!(matches!(error, Err(ClientError::PermissionDenied { method }) if method == "server.updateSettings"));
+                assert!(server.calls("server.updateSettings").is_empty());
+            }.boxed_local()
+            });
+        }
+    }
+
+    #[test]
+    fn disabling_the_text_generation_provider_resets_selection_with_settings_access() {
+        use futures::FutureExt;
+        for can_write in [true, false] {
+            let scopes = if can_write {
+                vec!["providers:manage", "settings:write"]
+            } else {
+                vec!["providers:manage"]
+            };
+            with_paired_provider(&scopes, move |settings, env, server| {
+                async move {
+                    settings
+                        .set_enabled(&env, ProviderInstanceId("fixture-codex".into()), false)
+                        .await
+                        .expect("disable provider");
+                    let calls = server.calls("server.updateSettings");
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(
+                        calls[0]["providerInstanceMutation"]["instance"]["enabled"],
+                        false
+                    );
+                    assert_eq!(
+                        calls[0]["providerInstanceMutation"]["instanceId"],
+                        "fixture-codex"
+                    );
+                    if can_write {
+                        assert_eq!(
+                            calls[0]["patch"]["textGenerationModelSelection"],
+                            json!(
+                                t3_contracts::settings::ServerSettings::default()
+                                    .text_generation_model_selection
+                            )
+                        );
+                    } else {
+                        assert_eq!(calls[0]["patch"], json!({}));
+                    }
+                }
+                .boxed_local()
+            });
+        }
+    }
+
     #[test]
     fn setup_lists_implicit_defaults_and_honors_a_project_override() {
         let mut config = config();
@@ -923,3 +1128,8 @@ mod provider_settings_tests {
         );
     }
 }
+
+/// Wire frames for the Providers UI's scripted transport fixture.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub use t3_rpc::{CallKind as TestCallKind, Frame as TestFrame};
