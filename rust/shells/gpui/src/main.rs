@@ -8,7 +8,7 @@ fn main() {
         .filter(|dir| dir.is_dir())
         .map(platform::AssetBase::Directory);
     platform::run_app(
-        platform::AppSource::Rust(platform::Root::of::<t3_ui::App>()),
+        platform::AppSource::Rust(platform::Root::of::<t3_ui::App>().url_schemes(["t3code-dev"])),
         platform::AppOptions {
             title: "T3 Code Dev / GPUI".into(),
             app_id: "codes.t3.dev".into(),

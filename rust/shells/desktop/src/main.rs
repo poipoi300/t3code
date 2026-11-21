@@ -15,7 +15,7 @@ fn asset_base() -> Option<platform::AssetBase> {
 fn main() -> impl std::process::Termination {
     platform::set_ui_sets(t3_ui::registries());
     platform::run_app(
-        platform::AppSource::Rust(platform::Root::of::<t3_ui::App>()),
+        platform::AppSource::Rust(platform::Root::of::<t3_ui::App>().url_schemes(["t3code-dev"])),
         platform::AppOptions {
             title: "T3 Code Dev".into(),
             app_id: "codes.t3.dev".into(),
