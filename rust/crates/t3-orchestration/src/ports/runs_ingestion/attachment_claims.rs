@@ -358,10 +358,8 @@ impl AttachmentClaimService {
                 self.0.copy_file.copy(from,to).await?;
                 paths.push(destination.clone());
                 if cancellation.is_cancelled() { return Err(Error::Cancelled); }
-                if sidecar(&current).exists() {
-                    let from=sidecar(&current); let to=sidecar(&destination);
-                    if self.0.copy_file.copy(from,to.clone()).await.is_ok() { paths.push(to); }
-                } else if let Some(extracted) = self.0.documents.ensure(destination).await? { paths.push(extracted); }
+                // Extract from the verified copy; the pending text sibling has no signed provenance.
+                if let Some(extracted) = self.0.documents.ensure(destination).await? { paths.push(extracted); }
                 if cancellation.is_cancelled() { return Err(Error::Cancelled); }
                 claimed.push(attachment);
             }

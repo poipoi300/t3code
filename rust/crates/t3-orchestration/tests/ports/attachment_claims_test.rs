@@ -103,8 +103,7 @@ async fn copies_uploads_preserving_retry_sources_normalizes_metadata_and_tracks_
 }
 
 #[tokio::test]
-async fn pending_document_extraction_is_copied_without_reparsing_and_sidecars_are_released()
--> Result<()> {
+async fn pending_document_extraction_uses_only_the_claimed_payload() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let upload = pending(
         directory.path(),
@@ -120,12 +119,9 @@ async fn pending_document_extraction_is_copied_without_reparsing_and_sidecars_ar
     let claimed = service
         .claim_pending(ThreadId("thread".into()), vec![upload])
         .await?;
-    assert_eq!(documents.0.load(Ordering::Relaxed), 0);
-    assert_eq!(claimed.claimed_paths.len(), 2);
-    assert_eq!(
-        std::fs::read_to_string(&claimed.claimed_paths[1])?,
-        "already extracted"
-    );
+    assert_eq!(documents.0.load(Ordering::Relaxed), 1);
+    assert_eq!(claimed.claimed_paths.len(), 1);
+    assert!(!PathBuf::from(format!("{}.txt", claimed.claimed_paths[0].display())).exists());
     assert!(source.exists());
     service
         .release_claimed_paths(claimed.claimed_paths.clone())
