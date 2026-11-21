@@ -179,6 +179,7 @@ pub fn terminal_viewport(
     terminal: String,
     label: String,
     launch: TerminalLaunch,
+    focus: Memo<bool>,
     on_session_exited: Rc<dyn Fn()>,
 ) -> impl IntoElement {
     let lease = services.0.session(&key, &terminal, &launch);
@@ -283,7 +284,19 @@ pub fn terminal_viewport(
             }
         });
     }
-    terminal_surface(surface, label)
+    let terminal = terminal_surface(surface.clone(), label);
+    effect(move || {
+        if focus.get() {
+            let surface = surface.clone();
+            // The input belongs to the Terminal component, which mounts in this commit.
+            after_answer(move || {
+                if focus.get_untracked() {
+                    surface.focus();
+                }
+            });
+        }
+    });
+    terminal
 }
 
 #[cfg(test)]

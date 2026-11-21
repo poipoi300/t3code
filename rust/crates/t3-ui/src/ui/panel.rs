@@ -1,16 +1,7 @@
 //! Port of apps/web/src/components/RightPanelSheet.tsx RightPanelSheet.
 //!
-//! [`panel`] takes controlled `open`, `animation_duration_ms`, `on_close`, and one `children`
-//! non-lazy `Prop<Children>` slot. It returns a pane on Wide, [`right_panel_sheet`] on Medium,
-//! and a native navigation page on Compact. Put the compact result directly in the shell's `nav_stack`,
-//! alongside its thread page; `on_close` must remove that page from the caller's route stack.
-//! The inline pane's width and resize handle belong to its host (PNL-HOST / UI-RESIZE).
-//! Neither TSX component declares variants or sizes, so there are no `Variant` / `Size` enums.
-//!
-//! The host declares `children: Prop<Children>` without `#[prop(lazy)]` and passes that slot
-//! here. It owns the content even while the surface leaves it detached; changing presentation
-//! reparents the same nodes. Keep that host mounted across layout changes and use [`panel_layout`]
-//! to unplace old wrappers before placing new ones. A builder closure would recreate the content.
+//! The inline pane's width and resize handle belong to its host. The host owns
+//! its non-lazy child slot across opens, closes and presentation changes.
 
 use std::rc::Rc;
 
@@ -18,58 +9,54 @@ use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
-use crate::state::layout::{LayoutClass, layout_class};
 use crate::theme::tw;
 
 use crate::runtime::tasks::watch;
 
-/// The adaptive container; the caller owns visibility, route changes and the content's state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PanelLayout {
+    Inline,
+    Sheet,
+}
+
+impl PanelLayout {
+    /// `rightPanelLayout.ts` and ChatRightPanel's maximized override.
+    pub fn of(width: f32, maximized: bool) -> Self {
+        if width <= 980.0 && !maximized {
+            Self::Sheet
+        } else {
+            Self::Inline
+        }
+    }
+}
+
+/// The adaptive container; the caller owns visibility and the content's state.
 pub fn panel(
+    presentation: Memo<Option<PanelLayout>>,
     open: impl Fn() -> bool + 'static,
     animation_duration_ms: u32,
     on_close: impl Fn() + 'static,
     children: Prop<Children>,
 ) -> impl IntoElement {
     let open = computed(open);
-    let presentation = panel_layout();
     let on_close = Rc::new(on_close);
     dynamic(move || {
         let presentation = presentation.get()?;
         let on_close = on_close.clone();
         // Only the presentation changes these wrappers; the host owns their child slot.
         Some(untracked(|| match presentation {
-            LayoutClass::Wide => when(open, move || {
+            PanelLayout::Inline => when(open, move || {
                 view()
                     .app_class(tw("flex min-h-0 min-w-0 h-full flex-col"))
                     .child(children)
             })
             .into_element(),
-            LayoutClass::Medium => right_panel_sheet(
+            PanelLayout::Sheet => right_panel_sheet(
                 move || open.get(),
                 animation_duration_ms,
                 move || on_close(),
                 children,
             )
-            .into_element(),
-            // Adaptive departure: the outer navigation stack pushes this page over the thread.
-            LayoutClass::Compact => when(open, move || {
-                let on_back = on_close.clone();
-                let on_dismiss = on_close.clone();
-                nsh_base::nav_page()
-                    .title(move || SharedString::from(t("Workspace panel")))
-                    .pop_on_back(false)
-                    .on_back_press(move || on_back())
-                    .on_dismiss(move || {
-                        if open.get_untracked() {
-                            on_dismiss();
-                        }
-                    })
-                    .child(
-                        view()
-                            .app_class(tw("flex min-h-0 min-w-0 flex-1 flex-col"))
-                            .child(children),
-                    )
-            })
             .into_element(),
         }))
     })
@@ -178,8 +165,8 @@ pub fn right_panel_sheet(
 
 /// The host's layout placement. `None` unplaces the old wrappers for one commit on a change;
 /// the next answer places new wrappers without destroying their non-lazy child slots.
-pub fn panel_layout() -> Memo<Option<LayoutClass>> {
-    let desired = computed(layout_class);
+pub fn panel_layout(maximized: impl Fn() -> bool + 'static) -> Memo<Option<PanelLayout>> {
+    let desired = computed(move || PanelLayout::of(window().width.0, maximized()));
     let placed = signal(Some(desired.get_untracked()));
     effect(move || {
         let next = desired.get();

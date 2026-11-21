@@ -1,11 +1,10 @@
-//! UI-PANEL: the primitive in a host; PNL-HOST has not wired it into App yet.
+//! UI-PANEL: the adaptive panel primitive in a host.
 
 use crate::support::{DESKTOP, PHONE};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_ui::i18n::t;
-use t3_ui::state::layout::LayoutClass;
 use t3_ui::ui::panel::{panel, panel_layout, right_panel_sheet};
 
 #[derive(Clone, PartialEq, Props)]
@@ -22,36 +21,18 @@ enum HostFrameEvent {
 
 #[component]
 fn HostFrame(props: HostFrameProps, cx: Scope<HostFrameEvent>) -> impl IntoElement {
-    let placement = panel_layout();
-    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
-        let placement = placement.get()?;
-        Some(untracked(|| {
-            let surface = panel(
-                move || props.open.get(),
-                0,
-                move || cx.emit(HostFrameEvent::Close),
-                props.children,
-            );
-            if placement == LayoutClass::Compact {
-                nsh_base::nav_stack()
-                    .flex_1()
-                    .child(
-                        nsh_base::nav_page()
-                            .title(t("Thread"))
-                            .child(view().flex_1().slot(props.base, |slot| slot)),
-                    )
-                    .child(surface)
-                    .into_element()
-            } else {
-                view()
-                    .flex_1()
-                    .flex_row()
-                    .child(view().flex_1().slot(props.base, |slot| slot))
-                    .child(surface)
-                    .into_element()
-            }
-        }))
-    }))
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex_row()
+        .child(view().flex_1().slot(props.base, |slot| slot))
+        .child(panel(
+            panel_layout(|| false),
+            move || props.open.get(),
+            0,
+            move || cx.emit(HostFrameEvent::Close),
+            props.children,
+        ))
 }
 
 #[component]
@@ -215,16 +196,12 @@ fn wide_panel_is_beside_the_thread_and_close_is_reversible() {
 }
 
 #[test]
-fn compact_panel_is_a_pushed_page_and_native_back_closes_it() {
+fn phone_panel_is_a_sheet_and_native_back_closes_it() {
     let mut app = start_host(PHONE);
     app.wait_for("Open panel").expect("thread page");
-    app.press("role:button[Open panel]").expect("push");
-    app.wait_for("Panel content").expect("panel page");
-    assert!(
-        !app.screen()
-            .matches("role:dialog[Workspace panel]")
-            .expect("dialog selector")
-    );
+    app.press("role:button[Open panel]").expect("open");
+    app.wait_for("role:dialog[Workspace panel]")
+        .expect("phone sheet");
     app.back().expect("native back");
     app.wait_for("text:requests:1")
         .expect("route owner hears dismissal");
@@ -320,36 +297,18 @@ enum RetentionFrameEvent {
 
 #[component]
 fn RetentionFrame(props: RetentionFrameProps, cx: Scope<RetentionFrameEvent>) -> impl IntoElement {
-    let placement = panel_layout();
-    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
-        let placement = placement.get()?;
-        Some(untracked(|| {
-            let surface = panel(
-                move || props.open.get(),
-                0,
-                move || cx.emit(RetentionFrameEvent::Close),
-                props.children,
-            );
-            if placement == LayoutClass::Compact {
-                nsh_base::nav_stack()
-                    .flex_1()
-                    .child(
-                        nsh_base::nav_page()
-                            .title(t("Thread"))
-                            .child(text(t("Thread content"))),
-                    )
-                    .child(surface)
-                    .into_element()
-            } else {
-                view()
-                    .flex_1()
-                    .flex_row()
-                    .child(view().flex_1().child(text(t("Thread content"))))
-                    .child(surface)
-                    .into_element()
-            }
-        }))
-    }))
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex_row()
+        .child(view().flex_1().child(text(t("Thread content"))))
+        .child(panel(
+            panel_layout(|| false),
+            move || props.open.get(),
+            0,
+            move || cx.emit(RetentionFrameEvent::Close),
+            props.children,
+        ))
 }
 
 #[component]

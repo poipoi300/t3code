@@ -25,12 +25,11 @@ pub use t3_client::view_logic::shell::panels::{
 };
 
 use crate::i18n::{Text as I18nText, Value, t, tr};
-use crate::state::layout::LayoutClass;
 use crate::theme::{cn, palette, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
 use crate::ui::icon::{Icon, icon, icon_with_class};
 use crate::ui::menu::{self, ItemOptions, MenuOptions};
-use crate::ui::panel::{panel, panel_layout};
+use crate::ui::panel::{PanelLayout, panel, panel_layout};
 use crate::ui::tabs::{panel_tab_close_button, tab, tabs};
 
 /// TERM-1 provides its controlled drawer and content under the workspace owner.
@@ -580,7 +579,7 @@ pub struct SurfaceContext {
     pub host: PanelHost,
     pub thread: ThreadKey,
     pub surface: Memo<Option<Surface>>,
-    /// Owners suspend input, subscriptions and shortcuts while their retained view is hidden.
+    /// Whether the surface is selected and its panel is open.
     pub visible: Memo<bool>,
 }
 
@@ -701,7 +700,10 @@ fn chat_right_panel_frame(
     let state = props.host.panel(props.thread.clone());
     let thread = stored(props.thread);
     let width_changed = stored(props.width_changed);
-    let placement = panel_layout();
+    let maximized = computed(move || state.with(|panel| panel.maximized == Some(true)));
+    let placement = panel_layout(move || maximized.get());
+    let inline = move || placement.get() == Some(PanelLayout::Inline);
+    let open = move || state.with(|panel| panel.is_open);
     let chosen_width = signal(None::<f32>);
     let drag_start = signal(0.0);
     let width = computed(move || {
@@ -711,49 +713,82 @@ fn chat_right_panel_frame(
             props.row_width.get(),
         )
     });
-    view().flex_1().min_h(px(0.0)).child(dynamic(move || {
-        let placement = placement.get()?;
-        Some(untracked(|| {
-            let surface = panel(
-                move || state.with(|p| p.is_open),
-                props.animation_duration_ms,
-                move || props.host.apply(&thread.get(), Action::Close),
-                slots.children,
-            );
-            if placement == LayoutClass::Compact {
-                // The panel's page must be a direct stack child; an owning wrapper is a phantom page.
-                nsh_base::nav_stack().flex_1()
-                    .child(nsh_base::nav_page().header_visible(false).title(t("Thread")).child(view().flex_1().slot(slots.workspace, |slot| slot)))
-                    .child(surface).into_element()
-            } else {
-                view().flex_1().flex_row().min_h(px(0.0))
-                    .child(view().flex_1().min_w(px(0.0))
-                        .app_class(move || Some(tw(if placement == LayoutClass::Wide && state.with(|p| p.is_open && p.maximized == Some(true)) { "hidden" } else { "flex" })))
-                        .slot(slots.workspace, |slot| slot))
-                    .child(view().h_full().min_h(px(0.0)).test_id("workspace-panel-host")
-                        .app_class(move || Some(tw(if placement == LayoutClass::Wide && state.with(|p| p.maximized != Some(true)) { "relative shrink-0 border-l border-border" } else { "relative" })))
-                        .w(move || if placement == LayoutClass::Wide && state.with(|p| p.is_open) {
-                            px(if state.with(|p| p.maximized == Some(true)) { props.row_width.get() } else { width.get() })
-                        } else { px(0.0) })
-                        .child(surface)
-                        .child(when(move || placement == LayoutClass::Wide && state.with(|p| p.is_open && p.maximized != Some(true)), move || {
-                            // UI-RESIZE is not implemented yet; NSH supplies native pointer capture.
-                            nsh_base::resize_handle()
-                                .test_id("workspace-panel-resize")
-                                .edge(Some(nsh_base::HandleEdge::Leading))
-                                .accessibility_label(Some(SharedString::from(t("Resize workspace panel"))))
-                                .on_drag_start(move || drag_start.set(width.get_untracked()))
-                                .on_drag_move(move |offset: &Points| chosen_width.set(Some(inline_width(drag_start.get_untracked() - offset.0, window().width.0, props.row_width.get_untracked()))))
-                                .on_drag_end(move |offset: &Points| {
-                                    let next = inline_width(drag_start.get_untracked() - offset.0, window().width.0, props.row_width.get_untracked());
-                                    chosen_width.set(Some(next));
-                                    if next != drag_start.get_untracked() { (width_changed.get())(next); }
-                                })
-                                .child(view().app_class(tw("pointer-events-none h-full w-px bg-transparent group-hover:bg-border group-focus-visible:bg-primary/60 group-active:bg-primary/60")))
-                        }))).into_element()
-            }
-        }))
-    }))
+    view()
+        .flex_1()
+        .flex_row()
+        .min_h(px(0.0))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .app_class(move || {
+                    tw(if inline() && open() && maximized.get() {
+                        "hidden"
+                    } else {
+                        "flex"
+                    })
+                })
+                .slot(slots.workspace, |slot| slot),
+        )
+        .child(
+            view()
+                .h_full()
+                .min_h(px(0.0))
+                .test_id("workspace-panel-host")
+                .app_class(move || {
+                    tw(if inline() && !maximized.get() {
+                        "relative shrink-0 border-l border-border"
+                    } else {
+                        "relative"
+                    })
+                })
+                .w(move || {
+                    px(if !inline() || !open() {
+                        0.0
+                    } else if maximized.get() {
+                        props.row_width.get()
+                    } else {
+                        width.get()
+                    })
+                })
+                .child(panel(
+                    placement,
+                    open,
+                    props.animation_duration_ms,
+                    move || props.host.apply(&thread.get(), Action::Close),
+                    slots.children,
+                ))
+                .child(when(
+                    move || inline() && open() && !maximized.get(),
+                    move || {
+                        // NSH supplies pointer capture for the inline resize handle.
+                        nsh_base::resize_handle()
+                            .test_id("workspace-panel-resize")
+                            .edge(Some(nsh_base::HandleEdge::Leading))
+                            .accessibility_label(Some(SharedString::from(t("Resize workspace panel"))))
+                            .on_drag_start(move || drag_start.set(width.get_untracked()))
+                            .on_drag_move(move |offset: &Points| {
+                                chosen_width.set(Some(inline_width(
+                                    drag_start.get_untracked() - offset.0,
+                                    window().width.0,
+                                    props.row_width.get_untracked(),
+                                )));
+                            })
+                            .on_drag_end(move |offset: &Points| {
+                                let next = inline_width(
+                                    drag_start.get_untracked() - offset.0,
+                                    window().width.0,
+                                    props.row_width.get_untracked(),
+                                );
+                                chosen_width.set(Some(next));
+                                if next != drag_start.get_untracked() {
+                                    (width_changed.get())(next);
+                                }
+                            })
+                            .child(view().app_class(tw("pointer-events-none h-full w-px bg-transparent group-hover:bg-border group-focus-visible:bg-primary/60 group-active:bg-primary/60")))
+                    },
+                )),
+        )
 }
 
 /// usePreviewPanelInlineSize.ts: retain a 360px sibling and the 70% viewport cap.
@@ -892,32 +927,25 @@ pub fn right_panel_tabs(
             ))
             .child(add),
     );
-    // SH-TITLEBAR's native window controls (the app header reserves the same geometry): the
-    // pane's header always reaches the window's right edge (Windows/Linux caption buttons), and
-    // its left edge in the compact page or a maximized pane with the sidebar closed (macOS
-    // traffic lights). Without native controls (web, mobile) this is the source's pl-2 pr-3.
+    // An inline pane reaches the caption buttons. A sheet opens below the titlebar.
     let native_window = nsh_core::element::desktop::current_window();
     let geometry =
         computed(move || crate::screens::titlebar::workspace_titlebar_geometry(&native_window));
-    let sidebar_open = use_context::<crate::state::panels::Panels>().map(|panels| panels.sidebar_open);
-    let placement = panel_layout();
-    let at_left_edge = computed(move || match placement.get() {
-        Some(LayoutClass::Compact) => true,
-        Some(LayoutClass::Wide) => {
-            state.with(|p| p.maximized == Some(true))
-                && !sidebar_open.is_some_and(|open| open.get())
-        }
-        _ => false,
-    });
+    let sidebar_open =
+        use_context::<crate::state::panels::Panels>().map(|panels| panels.sidebar_open);
+    let maximized = computed(move || state.with(|panel| panel.maximized == Some(true)));
+    let inline = move || PanelLayout::of(window().width.0, maximized.get()) == PanelLayout::Inline;
+    let at_left_edge =
+        move || inline() && maximized.get() && !sidebar_open.is_some_and(|open| open.get());
     let header = view().app_class(tw("flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-1"))
         .test_id("workspace-panel-header")
         .pl(move || {
             let reserved = geometry.get().native_controls_left;
-            if at_left_edge.get() && reserved.0 > 0.0 { reserved } else { px(8.0) }
+            if at_left_edge() && reserved.0 > 0.0 { reserved } else { px(8.0) }
         })
         .pr(move || {
             let reserved = geometry.get().native_controls_right;
-            if reserved.0 > 0.0 { reserved } else { px(12.0) }
+            if inline() && reserved.0 > 0.0 { reserved } else { px(12.0) }
         })
         // Native scroll owns touch/wheel gestures; CSS ScrollArea's DOM observer is unnecessary.
         .child(scroll().horizontal().flex_1().min_w(px(0.0)).test_id("panel-tabs-scroll")
@@ -933,7 +961,17 @@ pub fn right_panel_tabs(
             .child(button(ButtonContent::Icon { icon: Icon::ChevronRight, label: t("Scroll tabs right") }, ButtonVariant::Ghost, ButtonSize::IconXs,
                 move || scroll_offset.get() + viewport_width.get() >= strip_width.get() - 1.0,
                 move || strip_scroll.scroll_to_offset(px((scroll_offset.get_untracked() + (viewport_width.get_untracked() * 0.75).max(120.0)).min((strip_width.get_untracked() - viewport_width.get_untracked()).max(0.0))), !reduce_motion())))))
-        .child(layout_controls);
+        .child(
+            view()
+                .app_class(move || {
+                    tw(if state.with(|panel| panel.is_open) {
+                        "flex h-full shrink-0"
+                    } else {
+                        "hidden"
+                    })
+                })
+                .child(layout_controls),
+        );
     view()
         .app_class(tw(
             "relative flex h-full min-h-0 min-w-0 max-w-full flex-col self-stretch bg-background",

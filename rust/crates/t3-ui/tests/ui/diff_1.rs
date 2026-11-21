@@ -41,6 +41,7 @@ pub struct Inputs {
     pub repo: bool,
     pub patch: Option<&'static str>,
     pub pending: bool,
+    pub git_preview: bool,
     pub collapsed: BTreeSet<String>,
     pub layout: DiffLayout,
     pub file_tree_open: bool,
@@ -55,6 +56,7 @@ impl Default for Inputs {
             repo: true,
             patch: Some(PATCH),
             pending: false,
+            git_preview: false,
             collapsed: BTreeSet::new(),
             layout: DiffLayout::Stacked,
             file_tree_open: false,
@@ -71,10 +73,14 @@ pub fn snapshot(inputs: &Inputs) -> DiffPanelSnapshot {
         turn_count: 1,
         completed_at: "2026-11-14T10:00:00.000Z".into(),
     }];
-    let selection = Selection::Turn {
-        turn_id: RunId("r1".into()),
-        file_path: None,
-        reveal_request_id: 1,
+    let selection = if inputs.git_preview {
+        Selection::default()
+    } else {
+        Selection::Turn {
+            turn_id: RunId("r1".into()),
+            file_path: None,
+            reveal_request_id: 1,
+        }
     };
     let resolved = resolve_selection(&key(), &selection, &turns, None);
     let patch = inputs.patch.map(Rc::<str>::from);
@@ -137,8 +143,8 @@ pub fn snapshot(inputs: &Inputs) -> DiffPanelSnapshot {
         ignore_whitespace: false,
         hide_test_files: inputs.hide_test_files,
         file_tree_open: inputs.file_tree_open,
-        can_refresh: false,
-        refreshing: false,
+        can_refresh: inputs.git_preview,
+        refreshing: inputs.git_preview && inputs.pending,
         comparison: None,
         resolved,
     }
@@ -263,7 +269,9 @@ impl DiffPanelBackend for Fake {
         }
         self.publish();
     }
-    fn refresh(&self, _: &ThreadKey) {}
+    fn refresh(&self, _: &ThreadKey) {
+        record("refresh".into());
+    }
     fn draft_comment(
         &self,
         _: &DiffPanelSnapshot,
@@ -314,11 +322,100 @@ fn PanelFixture() -> impl IntoElement {
         .clone()
         .expect("inputs installed");
     let fake = Fake::new(inputs);
-    let visible = computed(|| true);
     view()
         .w_full()
         .h_full()
-        .child(diff_panel(DiffPanelRuntime(fake), key(), visible))
+        .child(diff_panel(DiffPanelRuntime(fake), key(), computed(|| true)))
+}
+
+#[component]
+fn PendingDiffFixture() -> impl IntoElement {
+    t3_ui::theme::install(&Default::default());
+    let shown = signal(true);
+    let fake = Fake::new(Inputs {
+        patch: None,
+        pending: true,
+        ..Inputs::default()
+    });
+    let reply = fake.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .child(text("Toggle test panel"))
+                .on_press(move || {
+                    shown.update(|shown| *shown = !*shown);
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .child(text("Complete diff request"))
+                .on_press(move || {
+                    let response = Rc::new(snapshot(&Inputs::default()));
+                    let requests = reply.sinks.borrow();
+                    let request = requests.first().expect("the panel requested the diff");
+                    let _ = request.unbounded_send(response);
+                }),
+        )
+        .child(
+            view()
+                .flex_1()
+                .app_class(move || t3_ui::theme::tw(if shown.get() { "flex" } else { "hidden" }))
+                .child(diff_panel(
+                    DiffPanelRuntime(fake),
+                    key(),
+                    computed(move || shown.get()),
+                )),
+        )
+}
+
+fn diff_reply_survives_hiding_the_panel(window: (f32, f32)) {
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<PendingDiffFixture>())
+    })
+    .expect("pending diff fixture");
+    app.wait_for("Loading checkpoint diff...")
+        .expect("initial request is pending");
+    app.press("role:button[Toggle test panel]")
+        .expect("hide the panel");
+    app.press("role:button[Complete diff request]")
+        .expect("answer while hidden");
+    app.press("role:button[Toggle test panel]")
+        .expect("show the panel");
+    app.wait_for("src/a.ts")
+        .expect("the answered patch is shown");
+    assert!(!app.screen().shows("Loading checkpoint diff..."));
+}
+
+#[test]
+fn panels_diff_reply_survives_hiding_the_phone_panel() {
+    diff_reply_survives_hiding_the_panel(PHONE);
+}
+
+#[test]
+fn panels_diff_reply_survives_hiding_the_desktop_panel() {
+    diff_reply_survives_hiding_the_panel(DESKTOP);
+}
+
+#[test]
+fn panels_diff_revalidates_a_cached_git_reply_of_unknown_age() {
+    let (mut app, _fixture) = start(
+        DESKTOP,
+        Inputs {
+            git_preview: true,
+            ..Inputs::default()
+        },
+    );
+    app.wait_for("src/a.ts").expect("cached patch is shown");
+    app.settle();
+    assert_eq!(
+        calls(),
+        ["refresh"],
+        "the cached answer still needs revalidation"
+    );
 }
 
 pub fn start(window: (f32, f32), inputs: Inputs) -> (Headless, MutexGuard<'static, ()>) {

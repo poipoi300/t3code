@@ -414,6 +414,138 @@ fn the_header_toggle_opens_and_closes_the_terminal_drawer() {
     );
 }
 
+#[component]
+fn TerminalWorkspace() -> impl IntoElement {
+    use t3_client::testing::environment::{FakeEnvironment, TerminalStream, shell};
+
+    let store = ClientStore::default();
+    let owner = Owner::current();
+    let spawner: t3_client::composition::Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("env", spawner.clone());
+    server.set_shell(shell(&[("t1", "Terminal test")]));
+    server.edit_config(|config| config["environment"]["capabilities"]["terminal"] = json!(true));
+    server.set_permissions(&["orchestration:read", "terminal:read", "terminal:operate"]);
+    let output = server.terminal_stream(TerminalStream::Attach);
+    output
+        .unbounded_send(json!({"type":"snapshot","snapshot":{
+            "threadId":"t1","terminalId":"term-1","cwd":"/workspace/project",
+            "worktreePath":null,"status":"running","pid":1,"history":"shell ready\r\n",
+            "exitCode":null,"exitSignal":null,"label":"","updatedAt":NOW
+        }}))
+        .expect("scripted snapshot");
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner,
+    );
+    let pairing = client.pair(server.pairing());
+    spawn(async move {
+        pairing.await.expect("paired");
+    });
+    let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
+    view().w_full().h_full().child(
+        nsh_base::button()
+            .child(text("Return shell output"))
+            .on_press(move || {
+                let writes = server.calls("terminal.write");
+                if !matches!(writes.as_slice(), [write] if write["terminalId"] == "term-1" && write["data"] == "\r") {
+                    return;
+                }
+                output.unbounded_send(json!({
+                    "type":"output","threadId":"t1","terminalId":"term-1",
+                    "data":"input received\r\n"
+                })).expect("attached output");
+            }),
+    ).child(t3_ui::app::app_tree(runtime, Route::Home, move || {
+        t3_ui::app::provide_client_services(&client);
+    }))
+}
+
+#[test]
+fn panels_terminal_drawer_opens_and_focuses_a_live_session() {
+    let mut app = Headless::start(config(DESKTOP, None, Root::of::<TerminalWorkspace>()))
+        .expect("paired workspace");
+    app.wait_for("Terminal test").expect("thread listed");
+    app.press("role:button[/^Terminal test/]")
+        .expect("open thread");
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("toggle terminal");
+    app.wait_for("id:thread-terminal-drawer")
+        .expect("drawer opened");
+    app.wait_for("text:shell ready")
+        .expect("attached snapshot rendered");
+    app.press_key("Enter")
+        .expect("send to the focused terminal");
+    app.settle();
+    app.press("role:button[Return shell output]")
+        .expect("shell replies");
+    app.wait_for("text:input received")
+        .expect("input reached the shell and its output rendered");
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("close drawer");
+    app.wait_for_gone("id:thread-terminal-drawer", Duration::from_secs(1))
+        .expect("drawer closed");
+}
+
+#[test]
+fn panels_phone_workspace_opens_a_dismissible_right_sheet() {
+    let root = Root::new::<ClientWorkspace>(|| WorkspaceProps {
+        terminal_open: false,
+        terminal_granted: false,
+    });
+    let mut config = config(PHONE, Some(Os::Android), root);
+    config.environment.reduce_motion = true;
+    let mut app = Headless::start(config).expect("Android workspace");
+    app.wait_for("role:button[Toggle right panel]")
+        .expect("workspace rendered");
+    app.press("role:button[Toggle right panel]")
+        .expect("open workspace panel");
+    app.wait_for("role:dialog[Workspace panel]")
+        .expect("right panel is a dialog on a phone");
+    let popup = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|node| node.test_id.as_deref() == Some("workspace-panel-popup"))
+        .expect("sheet popup");
+    // NSH rounds its layout to device pixels.
+    let expected_width = PHONE.0 * 0.88;
+    assert!(
+        (popup.bounds.size.width.0 - expected_width).abs() <= 1.0,
+        "expected a {expected_width}px phone sheet, got {:?}",
+        popup.bounds,
+    );
+    assert_eq!(popup.bounds.right(), px(PHONE.0));
+    app.press("role:button[Files]").expect("open Files");
+    app.wait_for("id:file-preview-panel")
+        .expect("Files is rendered in the sheet");
+    app.press_key("Escape").expect("dismiss sheet");
+    app.wait_for_gone("role:dialog[Workspace panel]", Duration::from_secs(1))
+        .expect("sheet dismissed");
+    app.wait_for("role:button[Toggle right panel]")
+        .expect("thread remains open");
+}
+
+#[test]
+fn panels_workspace_is_inline_above_the_web_sheet_breakpoint() {
+    let mut app = workspace((981.0, 800.0), false);
+    app.press("role:button[Toggle right panel]")
+        .expect("open workspace panel");
+    app.wait_for("id:workspace-panel-resize")
+        .expect("981 px uses the inline panel");
+    assert_eq!(
+        app.screen()
+            .count("role:button[Toggle right panel]")
+            .expect("panel toggle"),
+        1,
+    );
+}
+
 #[test]
 fn the_details_card_reads_project_scripts_from_the_client() {
     let mut app = workspace(DESKTOP, false);
@@ -1114,12 +1246,20 @@ fn the_sidebar_shelves_mount_their_markers_and_page_the_settled_tail() {
 
 // ---- The workspace panel's header and the native window controls (integration 4) ----
 
+#[derive(Clone, PartialEq, Props)]
+struct PanelHeaderProps {
+    open: bool,
+}
+
 #[component]
-fn PanelHeader() -> impl IntoElement {
+fn PanelHeader(props: PanelHeaderProps) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     provide_context(t3_ui::state::panels::Panels::new());
     let host =
         t3_ui::screens::panel::PanelHost::new(t3_ui::screens::panel::PanelStore::default(), |_| {});
+    if props.open {
+        host.apply(&key(), Action::ToggleVisibility);
+    }
     view()
         .w_full()
         .h_full()
@@ -1131,6 +1271,20 @@ fn PanelHeader() -> impl IntoElement {
         ))
 }
 
+#[test]
+fn panels_retained_header_yields_its_layout_controls_when_closed() {
+    // The sheet's tabs remain mounted until the exit animation finishes.
+    let root = Root::new::<PanelHeader>(|| PanelHeaderProps { open: false });
+    let mut app = Headless::start(config(PHONE, Some(Os::Android), root)).expect("retained tabs");
+    app.wait_for("id:workspace-panel-header")
+        .expect("the header is still mounted");
+    assert!(
+        !app.screen()
+            .matches("id:panel-layout-test")
+            .expect("layout controls selector")
+    );
+}
+
 fn start_panel_header(
     os: Os,
     window: (f32, f32),
@@ -1139,7 +1293,7 @@ fn start_panel_header(
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<PanelHeader>())
+        ..EngineConfig::new(Root::new::<PanelHeader>(|| PanelHeaderProps { open: true }))
     };
     config.environment.os = os;
     let mut app = Headless::start(config).expect("panel header");
@@ -1189,15 +1343,9 @@ fn the_panel_header_leaves_the_native_window_controls_free() {
             DESKTOP.0 - 138.0
         );
     }
-    // macOS, compact window (the panel is a full-width page): the traffic lights on the left.
-    let narrow = (600.0, 800.0);
-    let app = start_panel_header(Os::MacOs, narrow, edges(78.0, 0.0, 52.0));
-    let tabs = node_bounds(&app, "panel-tabs-scroll");
-    assert!(
-        tabs.origin.x.0 >= 78.0,
-        "the tab strip starts at {} under the traffic lights to 78",
-        tabs.origin.x.0
-    );
+    // A narrow sheet opens below the titlebar, so the tab strip uses its normal padding.
+    let app = start_panel_header(Os::MacOs, (600.0, 800.0), edges(78.0, 0.0, 52.0));
+    assert_eq!(node_bounds(&app, "panel-tabs-scroll").origin.x.0, 8.0);
     // Web and mobile: no native controls, the source's pl-2 pr-3.
     for os in [Os::Web, Os::Android] {
         let app = start_panel_header(os, DESKTOP, nsh_core::geometry::Edges::default());

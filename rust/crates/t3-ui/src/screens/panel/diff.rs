@@ -7,7 +7,7 @@
 //! per-frame budget. It is the panel's only scroll container. Selection, queries, file facts
 //! and preferences are the client's `workspace::diff_panel`.
 
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use nsh_base::{DiffFile, DiffInline, DiffView, DiffViewApi, DiffViewClasses};
@@ -188,28 +188,63 @@ fn with_tooltip(
         .child(control)
 }
 
-/// Port of DiffPanel.tsx DiffPanel. `visible` gates the queries, as the web's `visible` prop.
+fn git_diff_settled(snapshot: &DiffPanelSnapshot) -> bool {
+    snapshot.can_refresh
+        && !snapshot.refreshing
+        && !matches!(
+            snapshot.view.body,
+            DiffBody::CheckingAccess | DiffBody::AccessDenied(_)
+        )
+}
+
+/// Port of DiffPanel.tsx DiffPanel.
 pub fn diff_panel(
     runtime: DiffPanelRuntime,
     key: ThreadKey,
     visible: Memo<bool>,
 ) -> impl IntoElement {
     let snapshot = signal(None::<Shared<DiffPanelSnapshot>>);
+    let answered_at = stored(None);
+    // A retained tab keeps the in-flight query when it loses visibility.
+    let mut stream = runtime.0.watch(key.clone());
+    crate::runtime::tasks::watch(async move {
+        while let Some(next) = stream.next().await {
+            snapshot.with_untracked(|previous| {
+                let same_query = previous.as_ref().filter(|previous| {
+                    previous.resolved.query == next.resolved.query
+                        && previous.ignore_whitespace == next.ignore_whitespace
+                });
+                if same_query.is_none() {
+                    answered_at.replace(None);
+                } else if git_diff_settled(&next)
+                    && same_query.is_some_and(|previous| previous.refreshing)
+                {
+                    answered_at.replace(Some(nsh_core::time::now()));
+                }
+            });
+            if !snapshot.try_set(Some(Shared(next))) {
+                return;
+            }
+        }
+    });
     let service = runtime.0.clone();
     let watched = key.clone();
-    // oxlint-style reason: the client's stream is outside NSH; its task ends with this effect.
+    let settled = computed(move || {
+        snapshot.with(|value| value.as_ref().is_some_and(|value| git_diff_settled(value)))
+    });
     effect(move || {
-        if !visible.get() {
-            return;
+        // Keep the web's revalidation floor for an observed answer. A cached
+        // result can arrive already settled, without a timestamp in the UI.
+        if visible.get()
+            && settled.get()
+            && answered_at.with(|at| {
+                at.is_none_or(|at| {
+                    nsh_core::time::now().saturating_duration_since(at) >= Duration::from_secs(10)
+                })
+            })
+        {
+            untracked(|| service.refresh(&watched));
         }
-        let mut stream = untracked(|| service.watch(watched.clone()));
-        crate::runtime::tasks::watch(async move {
-            while let Some(next) = stream.next().await {
-                if !snapshot.try_set(Some(Shared(next))) {
-                    return;
-                }
-            }
-        });
     });
     let word_wrap_override = signal(None::<bool>);
     let word_wrap = computed(move || {

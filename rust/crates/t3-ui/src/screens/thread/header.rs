@@ -329,9 +329,12 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
     let has_project =
         computed(move || breadcrumb.with(|b| b.as_ref().is_some_and(|b| b.project.is_some())));
     let workspace_panel = use_context::<PanelHost>().map(|host| host.panel(key.clone()));
-    let reserve_controls = computed(move || {
-        !(layout_class() == crate::state::layout::LayoutClass::Wide
-            && workspace_panel.is_some_and(|panel| panel.with(|panel| panel.is_open)))
+    let open_panel_layout = computed(move || {
+        workspace_panel?.with(|panel| {
+            panel.is_open.then(|| {
+                crate::ui::panel::PanelLayout::of(window().width.0, panel.maximized == Some(true))
+            })
+        })
     });
     let controller = HeaderController::new(key.clone());
     let projection = runtime.store.thread(key.clone());
@@ -377,13 +380,16 @@ pub fn thread_header(key: ThreadKey) -> impl IntoElement {
             guest,
         )))
         // The web fixes this group to window chrome; the shared header is its native anchor.
-        .child(when(reserve_controls, move || {
-            titlebar_controls(panel_layout_controls(key.clone(), has_project))
-        }));
+        .child(when(
+            move || open_panel_layout.get().is_none(),
+            move || titlebar_controls(panel_layout_controls(key.clone(), has_project)),
+        ));
     view()
         .app_class(tw("relative bg-background shrink-0"))
         .child(workspace_page_header_with_reservation(
-            Prop::bind(move || reserve_controls.get()),
+            Prop::bind(move || {
+                open_panel_layout.get() != Some(crate::ui::panel::PanelLayout::Inline)
+            }),
             content,
         ))
 }

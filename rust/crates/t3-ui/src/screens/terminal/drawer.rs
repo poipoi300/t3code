@@ -720,6 +720,9 @@ fn terminal_split_panes(drawer: Drawer) -> impl IntoElement {
                     let terminal = terminal.clone();
                     Rc::new(move || drawer.close(&terminal)) as Rc<dyn Fn()>
                 };
+                let focus = computed(move || {
+                    pane.with(|pane| pane.active) && view_signal.with(|view| view.can_operate)
+                });
                 let content = match first.launch {
                     Some(launch) => terminal_viewport(
                         drawer.services.clone(),
@@ -727,6 +730,7 @@ fn terminal_split_panes(drawer: Drawer) -> impl IntoElement {
                         terminal.clone(),
                         first.label.clone(),
                         launch,
+                        focus,
                         exited,
                     )
                     .into_element(),
