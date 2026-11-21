@@ -930,6 +930,28 @@ async fn assert_missing_node_requirement(explicit: bool) {
         }
         result => panic!("expected HTTP launch refusal, got {result:?}"),
     }
+    let mut request = format!(
+        "ws://{}/api/preview-stream/ws?threadId=one&tabId={}&nodeRequirement=close",
+        s.runtime.address,
+        opened["tabId"].as_str().unwrap()
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("cookie", s.cookie.parse().unwrap());
+    let (mut viewer, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("authenticated viewer receives an upgraded socket");
+    let frame = match viewer.next().await.unwrap().unwrap() {
+        Message::Close(Some(frame)) => frame,
+        other => panic!("expected typed close, got {other:?}"),
+    };
+    assert_eq!(u16::from(frame.code), 1011);
+    assert_eq!(
+        serde_json::from_str::<Value>(&frame.reason).unwrap()["_tag"],
+        "PreviewStreamNodeRequired"
+    );
     s.socket.close(None).await.unwrap();
     s.runtime.shutdown().await.unwrap();
 }

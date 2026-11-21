@@ -53,3 +53,37 @@ test("initial appearance precedes goto and a pending initial navigation permits 
  await dispatch({command:"viewerInput",key,viewerId:"stop",input:{type:"stopLoading"}});assert.equal(tab.loading,false);
  tab.viewers.clear();page.navigation.resolve();await tab.initialNavigation;await dispatch({command:"close",key});
 });
+
+test("copy and cut reply to the requesting viewer with the gesture ID, including an empty selection",async t=>{
+ const f=fixture();
+ try {
+  const responses=[];
+  const original=process.stdout.write.bind(process.stdout);
+  t.mock.method(process.stdout,"write",(data,...args)=>{
+   if(typeof data!=="string" || !data.startsWith('{"event":"viewer"'))return original(data,...args);
+   responses.push(JSON.parse(data));
+   args.at(-1)();
+   return true;
+  });
+  f.tab.copyReads=Promise.resolve();
+  f.tab.viewers.get("viewer").pressedKeys=new Map();
+  let text="copied text";
+  const send=f.session.send;
+  f.session.send=async(method,input)=>{
+   if(method==="Page.getFrameTree")return {frameTree:{frame:{id:"root"}}};
+   if(method==="Runtime.evaluate")return {result:{value:text}};
+   return send(method,input);
+  };
+  for(const [key,requestId,selection] of [["c","first","copied text"],["x","second",""],["c",null,""],["c",null,"legacy"]]){
+   text=selection;
+   await f.send({type:"key",action:"down",key,modifiers:2,...(requestId?{requestId}:{})});
+   await f.tab.copyReads;
+  }
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(responses.map(({viewerId,output})=>[viewerId,output]),[
+   ["viewer",{type:"clipboard",text:"copied text",requestId:"first"}],
+   ["viewer",{type:"clipboard",text:"",requestId:"second"}],
+   ["viewer",{type:"clipboard",text:"legacy"}],
+  ]);
+ }finally{f.close();}
+});

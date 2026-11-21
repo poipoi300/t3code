@@ -335,34 +335,61 @@ mod viewer {
         } else {
             Err(t3_preview::Error::TabNotFound)
         };
-        if let Err(t3_preview::Error::NodeRequired) = &viewer {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({
+        let viewer = match viewer {
+            Ok(viewer) => Ok(viewer),
+            Err(t3_preview::Error::NodeRequired) => {
+                let reason = serde_json::json!({
                     "_tag": "PreviewStreamNodeRequired",
                     "message": t3_preview::Error::NodeRequired.to_string()
-                })),
-            )
-                .into_response();
-        }
-        if let Err(error) = &viewer
-            && !matches!(error, t3_preview::Error::TabNotFound)
-            && t3_preview::stream::host_setup(error).is_none()
-        {
-            return (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable").into_response();
-        }
-        upgrade.max_message_size(100*1024*1024).max_frame_size(100*1024*1024).write_buffer_size(0).max_write_buffer_size(t3_preview::stream::MAX_SOCKET_BUFFER_BYTES).on_upgrade(move|mut socket|async move {
-            let _guard=guard;
-            match viewer {
-                Ok(viewer)=>{tokio::select! {_=services.shutdown.cancelled()=>{},_=services.local.auth.invalidation(&session)=>{},_=pump(&mut socket,&viewer)=>{}}}
-                Err(error)=>{
-                    let (code,reason)=if let Some(setup)=t3_preview::stream::host_setup(&error){(t3_contracts::preview::PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,serde_json::to_string(&setup).unwrap_or_default())}else if matches!(error,t3_preview::Error::TabNotFound){(t3_preview::stream::TAB_GONE_CODE,"tab closed".into())}else{(1011,"Preview unavailable".into())};
-                    let _=tokio::time::timeout(Duration::from_secs(2),socket.send(Message::Close(Some(CloseFrame {code,reason:reason.into()})))).await;
-                    return;
+                });
+                if first("nodeRequirement") != Some("close") {
+                    return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(reason)).into_response();
                 }
+                Err((1011, reason.to_string()))
             }
-            let _=tokio::time::timeout(Duration::from_secs(2),socket.close()).await;
-        })
+            Err(t3_preview::Error::TabNotFound) => {
+                Err((t3_preview::stream::TAB_GONE_CODE, "tab closed".into()))
+            }
+            Err(error) => match t3_preview::stream::host_setup(&error) {
+                Some(setup) => Err((
+                    t3_contracts::preview::PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
+                    serde_json::to_string(&setup).unwrap_or_default(),
+                )),
+                None => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+                        .into_response();
+                }
+            },
+        };
+        upgrade
+            .max_message_size(100 * 1024 * 1024)
+            .max_frame_size(100 * 1024 * 1024)
+            .write_buffer_size(0)
+            .max_write_buffer_size(t3_preview::stream::MAX_SOCKET_BUFFER_BYTES)
+            .on_upgrade(move |mut socket| async move {
+                let _guard = guard;
+                match viewer {
+                    Ok(viewer) => {
+                        tokio::select! {
+                            _ = services.shutdown.cancelled() => {},
+                            _ = services.local.auth.invalidation(&session) => {},
+                            _ = pump(&mut socket, &viewer) => {},
+                        }
+                        let _ = tokio::time::timeout(Duration::from_secs(2), socket.close()).await;
+                    }
+                    Err((code, reason)) => {
+                        let frame = CloseFrame {
+                            code,
+                            reason: reason.into(),
+                        };
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            socket.send(Message::Close(Some(frame))),
+                        )
+                        .await;
+                    }
+                }
+            })
     }
     async fn pump(socket: &mut WebSocket, viewer: &PreviewViewer) -> Result<(), ()> {
         let mut flow = FrameFlow::default();

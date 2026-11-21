@@ -394,7 +394,19 @@ async function viewerInput(command) {
       const since=Date.now();
       await session.send("Input.dispatchKeyEvent",{type:text?"keyDown":"rawKeyDown",key,code,modifiers,...(text?{text,unmodifiedText:text}:{}),...command,windowsVirtualKeyCode:num(message.keyCode,key.length===1?key.toUpperCase().charCodeAt(0):0)});
       viewer.pressedKeys.set(code||key,{key,code});
-      if(copying){const until=Date.now();tab.copyKeyedUntil=until;tab.copyReads=tab.copyReads.then(async()=>{const copies=await Promise.all([tab.cdp,...tab.frameSessions.values()].map(cdp=>copied(cdp,since,until)));const text=copies.flat().find(Boolean);if(text)viewerEvent(tab,viewer.id,{type:"clipboard",text});}).catch(noop);return pendingWork(tab,tab.copyReads);}break;
+      if(copying){
+        const until=Date.now();
+        tab.copyKeyedUntil=until;
+        const requestId=typeof message.requestId==="string" && message.requestId.length>0 && message.requestId.length<=128
+          ? message.requestId : undefined;
+        tab.copyReads=tab.copyReads.then(async()=>{
+          const copies=await Promise.all([tab.cdp,...tab.frameSessions.values()].map(cdp=>copied(cdp,since,until)));
+          const text=copies.flat().find(Boolean)??"";
+          if(text || requestId)viewerEvent(tab,viewer.id,{type:"clipboard",text,requestId});
+        }).catch(noop);
+        return pendingWork(tab,tab.copyReads);
+      }
+      break;
     }
     case "text":if(typeof message.text==="string"&&message.text.length)await session.send("Input.insertText",{text:message.text.slice(0,10000)});break;
     case "resize": {
