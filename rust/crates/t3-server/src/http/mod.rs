@@ -8,6 +8,8 @@ mod body;
 mod cors;
 #[cfg(feature = "local-services")]
 mod error;
+#[cfg(all(feature = "cloud", feature = "orchestration"))]
+mod guest;
 #[cfg(feature = "mcp")]
 mod mcp;
 #[cfg(feature = "local-services")]
@@ -36,6 +38,8 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
         );
         let router = router.route("/ws", get(crate::ws::upgrade));
         let router = mcp_oauth::routes(auth::routes(router));
+        #[cfg(all(feature = "cloud", feature = "orchestration"))]
+        let router = guest::routes(router);
         #[cfg(feature = "pull-requests")]
         let router = router.route(
             "/api/pull-requests/diff",

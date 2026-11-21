@@ -4,6 +4,7 @@ pub mod cloud;
 pub mod core;
 pub mod device;
 pub mod git_actions;
+mod guest;
 pub mod host;
 pub mod host_leftovers;
 pub mod launch;
@@ -60,6 +61,7 @@ pub fn registry_with(domains: &Domains) -> crate::Result<HandlerRegistry> {
     mcp_apps::register_with(&mut registry, domains)?;
     git_actions::register_with(&mut registry, domains)?;
     launch::register_with(&mut registry, domains)?;
+    guest::register_with(&mut registry, domains)?;
     unsupported::register(&mut registry)?;
     registry.validate()?;
     Ok(registry)

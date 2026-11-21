@@ -27,6 +27,12 @@ pub struct CloudAdapter {
     pub http: Http,
     pub clock: SharedClock,
     origin: String,
+    #[cfg(feature = "orchestration")]
+    pub(crate) guest_settings: Arc<t3_config::settings::SettingsService>,
+    #[cfg(feature = "orchestration")]
+    pub(crate) guest_connector: Arc<dyn t3_cloud::managed::ManagedEndpoint>,
+    #[cfg(feature = "orchestration")]
+    pub(crate) guest_connect_allowed: bool,
 }
 
 impl CloudAdapter {
@@ -104,7 +110,7 @@ impl CloudAdapter {
         let service = CloudService::new(CloudServices {
             link,
             secrets: secrets.clone(),
-            runtime,
+            runtime: runtime.clone(),
             reachability,
             issuer: Arc::new(AuthCredentialIssuer::new(
                 local.auth.inner().clone(),
@@ -121,6 +127,12 @@ impl CloudAdapter {
             http,
             clock,
             origin: format!("http://{host}:{}", config.port),
+            #[cfg(feature = "orchestration")]
+            guest_settings: local.settings.clone(),
+            #[cfg(feature = "orchestration")]
+            guest_connector: runtime,
+            #[cfg(feature = "orchestration")]
+            guest_connect_allowed: connect,
         }))
     }
 

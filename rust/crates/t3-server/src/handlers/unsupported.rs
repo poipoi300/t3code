@@ -4,6 +4,5 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
     registry.unimplemented::<WsServerUpdateServerRpc>()?;
     registry.unimplemented::<WsServerUpdateServerWithProgressRpc>()?;
     registry.unimplemented::<WsServerCommitDesktopUpdateRpc>()?;
-    registry.unimplemented::<WsGuestShareCreateRpc>()?;
     Ok(())
 }

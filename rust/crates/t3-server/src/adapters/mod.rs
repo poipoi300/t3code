@@ -17,6 +17,8 @@ pub mod forge;
 pub mod git;
 #[cfg(feature = "git-actions")]
 pub mod git_actions;
+#[cfg(all(feature = "cloud", feature = "orchestration"))]
+pub(crate) mod guest;
 #[cfg(feature = "host")]
 pub mod host;
 #[cfg(feature = "host")]
