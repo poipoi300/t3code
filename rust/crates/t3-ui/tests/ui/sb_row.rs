@@ -86,6 +86,7 @@ fn RowFixture() -> impl IntoElement {
             title: "Port the row".into(),
             project: "t3code".into(),
             activity_at: Some("2026-11-13T12:00:00.000Z".into()),
+            active: nav.top().thread().is_some(),
             variant: variant.get(),
         })
     });
@@ -434,6 +435,7 @@ fn row_fixture_body(held: bool) -> impl IntoElement {
                             title: "Port the row".into(),
                             project: "Project".into(),
                             activity_at: None,
+                            active: nav.top().thread() == Some(&key),
                             variant: RowVariant::Card,
                         })
                     });

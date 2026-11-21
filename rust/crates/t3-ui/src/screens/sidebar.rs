@@ -62,6 +62,7 @@ pub struct SidebarItem {
     pub title: String,
     pub project: String,
     pub activity_at: Option<String>,
+    pub active: bool,
     pub variant: RowVariant,
 }
 
@@ -346,6 +347,7 @@ pub fn project_sidebar(
                     .or_else(|| project.as_ref().map(|project| project.title.0.clone()))
                     .unwrap_or_default(),
                 activity_at: activity(&source.thread),
+                active: source.active,
                 variant: match source.section {
                     Section::Pinned | Section::Active | Section::Working => RowVariant::Card,
                     Section::Snoozed | Section::Settled => RowVariant::Slim,
@@ -693,27 +695,28 @@ pub fn sidebar() -> impl IntoElement {
         model.with(|model| t3_client::workspace::sidebar::groups_span_environments(&model.groups))
     });
     let list = virtual_list(count, move |at| {
-        let entry = computed(move || {
+        // The list can move a cell to another shelf while its old row is resolving a memo.
+        // Publish its next kind and contents after the list bindings have settled. Reading
+        // this signal cannot pull the list layout and dispose the row halfway through a read.
+        let project_cell = move || {
             if searching.get() {
-                Some(SidebarListItem::Thread(at.index()))
-            } else {
-                shelf_items.with(|list| list.items.get(at.index()).copied())
+                return (
+                    None,
+                    results.with(|rows| rows.get(at.index()).cloned().map(Shared)),
+                );
             }
-        });
-        let kind = computed(move || match entry.get() {
-            Some(SidebarListItem::Thread(_)) | None => None,
-            other => other,
-        });
-        let data = computed(move || {
-            let Some(SidebarListItem::Thread(index)) = entry.get() else {
-                return None;
-            };
-            if searching.get() {
-                results.with(|rows| rows.get(index).cloned().map(Shared))
-            } else {
-                model.with(|model| model.rows.get(index).cloned().map(Shared))
+            match shelf_items.with(|list| list.items.get(at.index()).copied()) {
+                Some(SidebarListItem::Thread(index)) => (
+                    None,
+                    model.with(|model| model.rows.get(index).cloned().map(Shared)),
+                ),
+                marker => (marker, None),
             }
-        });
+        };
+        let cell = signal(untracked(project_cell));
+        effect(move || cell.set(project_cell()));
+        let kind = computed(move || cell.with(|(kind, _)| *kind));
+        let data = computed(move || cell.with(|(_, row)| row.clone()));
         let item = computed(move || data.with(|row| row.as_ref().map(|row| row.item.clone())));
         let thread = computed(move || {
             data.with(|row| row.as_ref().map(|row| Shared(row.source.thread.clone())))

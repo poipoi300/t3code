@@ -432,7 +432,7 @@ pub fn sidebar_thread_row(
         config.with(|config| row_providers(config.as_ref().map(|config| config.0.as_ref())))
     });
     let pending_request = computed(move || extras.with(|extras| extras.pending_subagent_request));
-    let model = computed(move || {
+    let project_thread = move || {
         thread.with(|thread| {
             thread.as_ref().and_then(|thread| {
                 key.get().map(|key| {
@@ -440,13 +440,15 @@ pub fn sidebar_thread_row(
                 })
             })
         })
-    });
-    let active = move || {
-        let current = nav
-            .stack
-            .with(|stack| stack.last().and_then(|r| r.thread().cloned()));
-        current.is_some() && current == key.get()
     };
+    // The model is shared by independent status, title, tooltip and provider bindings.
+    // Give them a settled snapshot: pulling stale shell memos here can retire this cell.
+    let model = signal(untracked(project_thread));
+    effect(move || model.set(project_thread()));
+    let model = model.read_only();
+    // A navigation can recycle this cell as a shelf marker. Read selection from the
+    // same projected row as its content so the retired row cannot react to navigation.
+    let active = move || item.with(|item| item.as_ref().is_some_and(|row| row.active));
     let is_selected = computed(move || extras.with(|extras| extras.selected));
     let has_draft = computed(move || extras.with(|extras| extras.unsent_draft) && !active());
     let observations = computed(move || {
@@ -741,7 +743,7 @@ fn woke_button(slim: bool) -> impl IntoElement {
 
 fn meta_line(
     thread: Thread,
-    model: Memo<Option<EnvironmentThreadShell>>,
+    model: ReadSignal<Option<EnvironmentThreadShell>>,
     extras: Memo<RowExtras>,
     providers: Memo<Vec<RowProvider>>,
 ) -> impl IntoElement {
@@ -783,7 +785,7 @@ fn meta_line(
 }
 
 fn sidebar_provider_stack(
-    model: Memo<Option<EnvironmentThreadShell>>,
+    model: ReadSignal<Option<EnvironmentThreadShell>>,
     providers: Memo<Vec<RowProvider>>,
 ) -> impl IntoElement {
     dynamic(move || {
@@ -855,7 +857,7 @@ fn project_favicon(project: Project, key: Memo<Option<ThreadKey>>) -> impl IntoE
 }
 
 fn sidebar_thread_tooltip(
-    model: Memo<Option<EnvironmentThreadShell>>,
+    model: ReadSignal<Option<EnvironmentThreadShell>>,
     project: impl Fn() -> String + 'static,
     extras: Memo<RowExtras>,
     providers: Memo<Vec<RowProvider>>,
