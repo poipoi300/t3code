@@ -1116,7 +1116,8 @@ pub fn list_targets(
         .filter(|env| named.is_none_or(|id| id == *env))
         .cloned()
         .collect::<Vec<_>>();
-    if let Some(project) = project {
+    if let Some(project) = resolve_project_scope(project.cloned(), projects, shells_known).as_ref()
+    {
         let known_owner = projects
             .iter()
             .any(|p| !p.is_scratch && &p.project.id == project);

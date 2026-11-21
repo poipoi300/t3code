@@ -436,8 +436,8 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
 
 #[derive(Clone)]
 pub struct PullRequestReviewSession {
-    endpoint: crate::rpc::SessionEndpoint,
-    http: crate::permissions::EnvironmentHttpClient,
+    connection: Rc<dyn Fn() -> Option<crate::connection::ConnectedClient>>,
+    changes: Rc<dyn Fn() -> crate::store::Subscription>,
     reference: PullRequestRef,
 }
 impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
@@ -445,30 +445,41 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
         &self,
         env: &EnvironmentId,
         reference: PullRequestRef,
-    ) -> Option<PullRequestReviewSession> {
-        let client = self.client(env)?;
-        Some(PullRequestReviewSession {
-            endpoint: client.session()?,
-            http: client.pull_request_http()?,
+    ) -> PullRequestReviewSession {
+        let runtime = self.clone();
+        let env = env.clone();
+        let watched = env.clone();
+        let store = self.store().clone();
+        PullRequestReviewSession {
+            connection: Rc::new(move || runtime.client(&env)),
+            changes: Rc::new(move || store.subscribe_environment(&watched)),
             reference,
-        })
+        }
     }
 }
 impl PullRequestReviewSession {
+    pub fn changes(&self) -> crate::store::Subscription {
+        (self.changes)()
+    }
+    fn endpoint(&self) -> Result<crate::rpc::SessionEndpoint, RpcCallError> {
+        (self.connection)()
+            .and_then(|c| c.session())
+            .ok_or(RpcCallError::NotSent(crate::ClientError::Disconnected))
+    }
     pub fn can_write(&self) -> bool {
-        self.endpoint
-            .grants_scope(t3_contracts::auth::AuthEnvironmentScope::SourceControlWrite)
-            == Some(true)
+        self.endpoint().ok().and_then(|e| {
+            e.grants_scope(t3_contracts::auth::AuthEnvironmentScope::SourceControlWrite)
+        }) == Some(true)
     }
     pub async fn activity(&self) -> Result<PullRequestActivity, RpcCallError> {
         use crate::rpc::RpcEndpoint;
-        self.endpoint
+        self.endpoint()?
             .command::<WsPullRequestsActivityRpc>(self.reference.clone())
             .await
     }
     pub async fn files_viewed(&self) -> Result<PullRequestFilesViewedResult, RpcCallError> {
         use crate::rpc::RpcEndpoint;
-        self.endpoint
+        self.endpoint()?
             .command::<WsPullRequestsFilesViewedRpc>(self.reference.clone())
             .await
     }
@@ -486,15 +497,21 @@ impl PullRequestReviewSession {
             cursor: cursor.map(Some),
             commit: None,
         };
+        let connection = (self.connection)().ok_or(super::diff_http::DiffLoadError::Cancelled)?;
+        let endpoint = connection
+            .session()
+            .ok_or(super::diff_http::DiffLoadError::Cancelled)?;
+        let http = connection
+            .pull_request_http()
+            .ok_or(super::diff_http::DiffLoadError::Cancelled)?;
         let authorized = || {
-            self.endpoint
-                .grants_scope(t3_contracts::auth::AuthEnvironmentScope::OrchestrationRead)
+            endpoint.grants_scope(t3_contracts::auth::AuthEnvironmentScope::OrchestrationRead)
                 == Some(true)
         };
         if !authorized() {
             return Err(super::diff_http::DiffLoadError::PermissionDenied);
         }
-        self.http.pull_request_diff(&input, authorized).await
+        http.pull_request_diff(&input, authorized).await
     }
     pub async fn thread_comments(
         &self,
@@ -503,7 +520,7 @@ impl PullRequestReviewSession {
     ) -> Result<PullRequestThreadCommentsResult, RpcCallError> {
         use crate::rpc::RpcEndpoint;
         let r = &self.reference;
-        self.endpoint
+        self.endpoint()?
             .command::<WsPullRequestsThreadCommentsRpc>(PullRequestThreadCommentsInput {
                 project_id: r.project_id.clone(),
                 host: r.host.clone(),
@@ -521,7 +538,7 @@ impl PullRequestReviewSession {
         file: PullRequestSetFilesViewedInputFiles,
     ) -> Result<(), RpcCallError> {
         use crate::rpc::RpcEndpoint;
-        self.endpoint
+        self.endpoint()?
             .command::<WsPullRequestsSetFilesViewedRpc>(PullRequestSetFilesViewedInput {
                 project_id: self.reference.project_id.clone(),
                 host: self.reference.host.clone(),
@@ -540,7 +557,7 @@ impl PullRequestReviewSession {
     ) -> Result<(), RpcCallError> {
         use crate::rpc::RpcEndpoint;
         if let Some(thread_id) = thread {
-            self.endpoint
+            self.endpoint()?
                 .command::<WsPullRequestsReplyToThreadRpc>(PullRequestThreadReplyInput {
                     project_id: self.reference.project_id.clone(),
                     host: self.reference.host.clone(),
@@ -553,7 +570,7 @@ impl PullRequestReviewSession {
                 })
                 .await
         } else {
-            self.endpoint
+            self.endpoint()?
                 .command::<WsPullRequestsCommentRpc>(PullRequestCommentInput {
                     project_id: self.reference.project_id.clone(),
                     host: self.reference.host.clone(),

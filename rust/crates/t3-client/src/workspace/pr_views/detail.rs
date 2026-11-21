@@ -991,6 +991,37 @@ pub fn repository_link(raw: &str, number: u64) -> Option<String> {
     Some(url.into())
 }
 
+/// Build the linked-threads key from the forge URL for this checkout and PR.
+pub fn linked_thread_reference(
+    detail: &PullRequestDetail,
+    reference: &PullRequestRef,
+) -> Option<PullRequestRef> {
+    let (parsed, _) = crate::state::pull_requests::parsed_key(&detail.url.0)?;
+    let url = url::Url::parse(&detail.url.0).ok()?;
+    let requested_host = reference.host.as_ref().and_then(Option::as_ref);
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || requested_host.is_some_and(|host| {
+            !host.0.eq_ignore_ascii_case(&parsed.host.0)
+                && !host.0.eq_ignore_ascii_case(url.authority())
+        })
+        || reference.project_id != detail.project_id
+        || reference.number != parsed.number
+        || detail.number != parsed.number
+        || !detail
+            .repository
+            .0
+            .eq_ignore_ascii_case(&reference.repository.0)
+    {
+        return None;
+    }
+    Some(PullRequestRef {
+        host: Some(Some(parsed.host)),
+        repository: parsed.repository,
+        ..reference.clone()
+    })
+}
+
 /// Object IDs for the exact file versions displayed in a whole-PR patch.
 /// Use the panel parser's file ranges and decoded paths, including rename destinations.
 pub fn diff_file_revisions(patch: &str) -> std::collections::BTreeMap<String, String> {

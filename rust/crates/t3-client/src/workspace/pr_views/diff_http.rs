@@ -43,6 +43,8 @@ pub enum DiffLoadError {
         status: u16,
         details: Option<Box<EnvironmentHttpCommonError>>,
     },
+    #[error("provider rate limit reached")]
+    RateLimited,
     #[error("invalid pull request diff response")]
     InvalidResponse,
     #[error("Pull request diff requires orchestration:read")]
@@ -152,6 +154,9 @@ impl DiffLoader<'_> {
                         cause,
                     });
                 }
+                if quota_response(response.status, &response.body) {
+                    return Err(DiffLoadError::RateLimited);
+                }
                 return Err(DiffLoadError::Http {
                     status: response.status,
                     details: serde_json::from_slice(&response.body).ok().map(Box::new),
@@ -167,6 +172,84 @@ impl DiffLoader<'_> {
         {
             Either::Left((result, _)) => result,
             Either::Right(_) => Err(DiffLoadError::Timeout),
+        }
+    }
+}
+
+fn quota_response(status: u16, body: &[u8]) -> bool {
+    status == 429
+        || serde_json::from_slice::<t3_contracts::pull_request::PullRequestOperationError>(body)
+            .is_ok_and(|error| quota_reason(&error.detail.0))
+}
+
+fn quota_reason(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    [
+        "rate limit",
+        "rate-limited",
+        "rate_limited",
+        "too many requests",
+    ]
+    .iter()
+    .any(|phrase| {
+        error.match_indices(phrase).any(|(at, found)| {
+            !error[..at].chars().next_back().is_some_and(word)
+                && !error[at + found.len()..].chars().next().is_some_and(word)
+        })
+    })
+}
+/// describePullRequestDiffError, also recognizing the typed HTTP quota answer.
+pub fn describe_diff_error(error: &DiffLoadError, provider: &str, term: &str) -> (String, String) {
+    if matches!(error, DiffLoadError::RateLimited)
+        || matches!(error, DiffLoadError::Platform(PlatformError::Network(reason)) if quota_reason(reason))
+    {
+        (
+            format!("{provider} rate limit reached"),
+            format!(
+                "{provider} is temporarily limiting requests, so this diff couldn't be loaded. Try again after the limit resets, or view the changes on {provider}."
+            ),
+        )
+    } else {
+        (
+            "Couldn't load the changes".into(),
+            format!(
+                "The environment couldn't load this {term}'s diff. Try again, or view the changes on {provider}."
+            ),
+        )
+    }
+}
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    #[test]
+    fn provider_quota_and_ordinary_transport_errors() {
+        for (why, quota) in [
+            (
+                "http://127.0.0.1/diff: requests are paused until the rate limit resets",
+                true,
+            ),
+            ("GitHub API rate limit exceeded.", true),
+            ("rate_limited", true),
+            ("Too many requests", true),
+            ("http://localhost/diff: Failed to fetch", false),
+            ("separate limitations", false),
+        ] {
+            let (title, detail) = describe_diff_error(
+                &DiffLoadError::Platform(PlatformError::Network(why.into())),
+                "GitHub",
+                "pull request",
+            );
+            assert_eq!(
+                title,
+                if quota {
+                    "GitHub rate limit reached"
+                } else {
+                    "Couldn't load the changes"
+                }
+            );
+            assert_eq!(detail.contains("after the limit resets"), quota);
+            assert!(!detail.contains("http://"));
         }
     }
 }
