@@ -11,19 +11,17 @@
 use crate::adapters::{git::GitAdapter, textgen::TextGenAdapter};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use t3_contracts::{
     base_schemas::ProjectId, model_selection::ModelSelection, pull_request::PullRequestDetail,
     pull_request_review_guide::PullRequestReviewGuideStop,
 };
-use t3_git::{ExecuteOptions, Git};
+use t3_git::{ExecuteOptions, Git, RepositoryBinding};
 use t3_pull_request::{
     Error, PullRequestService, Result,
     context::Context,
@@ -37,6 +35,9 @@ use t3_textgen::{
 
 const OPERATION: &str = "generateReviewGuide";
 const SETTLED_REMARK_CHARS: usize = 200;
+const REF_ROOT: &str = "refs/t3/review-guide/";
+const DIRECTORY_PREFIX: &str = "review-guide-";
+const BINDING_FILE: &str = "repository.json";
 
 pub struct ReviewGuideGenerator {
     textgen: Arc<TextGenAdapter>,
@@ -48,7 +49,7 @@ pub struct ReviewGuideGenerator {
     /// Test seam: each finished cleanup's run id (`StartOptions::review_guide_cleanups`).
     cleanups: OnceLock<tokio::sync::mpsc::UnboundedSender<String>>,
     runs: Mutex<HashMap<String, Run>>,
-    counter: AtomicU64,
+    startup: tokio::sync::OnceCell<()>,
     /// At most `CONCURRENT_RUNS` checkouts and agents at once; a run holds its slot from
     /// `prepare` until its cleanup, and later runs wait for one.
     slots: Arc<tokio::sync::Semaphore>,
@@ -60,11 +61,11 @@ const CONCURRENT_RUNS: usize = 2;
 /// What a run created, so `cleanup` (or a failed `prepare`) can remove exactly that.
 #[derive(Default)]
 struct Run {
-    workspace_root: PathBuf,
+    git: Option<Git>,
     refs: Vec<String>,
-    worktree: Option<PathBuf>,
-    /// `<worktrees>/review-guide-<runId>-<random>`, holding the checkout.
+    /// `<worktrees>/review-guide-<runId>`, holding the journal and checkout.
     directory: Option<PathBuf>,
+    git_attr_source: Option<String>,
     project: Option<ProjectId>,
     selection: Option<ModelSelection>,
     instructions: Option<String>,
@@ -83,17 +84,22 @@ impl ReviewGuideGenerator {
         git: Arc<GitAdapter>,
         projects: t3_project::ProjectService,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let worktrees = context.local.config.paths.worktrees();
+        let worktrees = t3_workspace::paths::canonicalize(&worktrees).unwrap_or(worktrees);
+        let generator = Arc::new(Self {
             textgen,
             git,
             projects,
-            worktrees: context.local.config.paths.worktrees(),
+            worktrees,
             service: OnceLock::new(),
             cleanups: OnceLock::new(),
             runs: Mutex::new(HashMap::new()),
-            counter: AtomicU64::new(0),
+            startup: tokio::sync::OnceCell::new(),
             slots: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_RUNS)),
-        })
+        });
+        let boot = generator.clone();
+        tokio::spawn(async move { boot.finish_startup().await });
+        generator
     }
 
     /// Reports every finished cleanup (tests wait on it instead of polling).
@@ -127,30 +133,148 @@ impl ReviewGuideGenerator {
         else {
             return;
         };
-        // Cleanup also runs while the server shuts down, when the environment's Git root is
-        // already cancelled; these commands are bounded by their own timeouts instead.
-        let git = self
-            .git
-            .at(&run.workspace_root)
-            .with_cancellation(CancellationToken::new());
-        if let Some(worktree) = &run.worktree
-            && !force_remove_worktree(&git, worktree).await
-        {
-            tracing::debug!("review guide worktree removal failed; pruning");
-        }
-        // Removes the folder even when Git never registered the worktree.
-        if let Some(directory) = &run.directory {
-            let directory = directory.clone();
-            let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(directory)).await;
-        }
-        let _ = git.execute(&["worktree", "prune"], options(60)).await;
-        for reference in &run.refs {
-            let _ = git
-                .execute(&["update-ref", "-d", reference], options(30))
-                .await;
+        // Cleanup also runs while the server shuts down. Keep the prepare-time identity
+        // while replacing the cancelled token with one bounded by the command timeouts.
+        if let (Some(git), Some(directory)) = (run.git, run.directory) {
+            let git = git.with_cancellation(CancellationToken::new());
+            finish_checkout(&git, &directory, &run.refs).await;
         }
         if let Some(sender) = self.cleanups.get() {
             let _ = sender.send(id.to_owned());
+        }
+    }
+
+    async fn finish_startup(&self) {
+        self.startup.get_or_init(|| self.sweep_leftovers()).await;
+    }
+
+    async fn sweep_leftovers(&self) {
+        let mut legacy = HashSet::new();
+        if let Ok(entries) = fs::read_dir(&self.worktrees) {
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(id) = name
+                    .to_str()
+                    .and_then(|name| name.strip_prefix(DIRECTORY_PREFIX))
+                else {
+                    continue;
+                };
+                let directory = entry.path();
+                if generated_uuid(id) {
+                    self.recover_checkout(id, &directory).await;
+                } else if legacy_directory(id) {
+                    legacy.insert(directory);
+                }
+            }
+        }
+        self.sweep_legacy(legacy).await;
+    }
+
+    async fn recover_checkout(&self, id: &str, directory: &Path) {
+        let journal = directory.join(BINDING_FILE);
+        if !fs::symlink_metadata(&journal).is_ok_and(|entry| entry.is_file()) {
+            // A crash before journaling can leave an empty run directory.
+            let _ = fs::remove_dir(directory);
+            return;
+        }
+        let Some(binding) = fs::read(journal)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RepositoryBinding>(&bytes).ok())
+        else {
+            return;
+        };
+        let Ok(git) = self
+            .git
+            .at(binding.top_level.clone())
+            .with_repository_binding(binding)
+            .await
+        else {
+            tracing::debug!("Could not rebind an interrupted review checkout");
+            return;
+        };
+        let prefix = format!("{REF_ROOT}{id}/");
+        if let Some(refs) = read_guide_refs(&git, &prefix).await {
+            finish_checkout(&git, directory, &refs).await;
+        }
+    }
+
+    /// Before review runs had journals, only the exact scratch directory and numeric ref
+    /// formats identified leftovers. Discover those registrations from saved project roots.
+    async fn sweep_legacy(&self, mut directories: HashSet<PathBuf>) {
+        let Ok(projects) = self
+            .projects
+            .database()
+            .read(|db| t3_orchestration::stores::projects::list_shells(db, None))
+            .await
+        else {
+            return;
+        };
+        let mut seen = HashSet::new();
+        let mut listings_complete = true;
+        for project in projects {
+            let root = self.git.at(project.workspace_root.0);
+            let Ok(Some(binding)) = root.bind_repository().await else {
+                continue;
+            };
+            if seen.contains(&binding.common_dir) {
+                continue;
+            }
+            let common_dir = binding.common_dir.clone();
+            let Ok(git) = root.with_repository_binding(binding).await else {
+                continue;
+            };
+            let Ok(worktrees) = git.list_worktrees().await else {
+                listings_complete = false;
+                continue;
+            };
+            seen.insert(common_dir);
+            for worktree in worktrees {
+                let Some(directory) = worktree.path.parent() else {
+                    continue;
+                };
+                if worktree
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name == "checkout")
+                    && directory.parent() == Some(self.worktrees.as_path())
+                    && directory
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| name.strip_prefix(DIRECTORY_PREFIX))
+                        .is_some_and(legacy_directory)
+                {
+                    // Leave any registered directory for which Git refuses targeted removal.
+                    directories.remove(directory);
+                    if (worktree.detached || worktree.locked.as_deref() == Some("initializing"))
+                        && directory_or_missing(directory)
+                        && directory_or_missing(&worktree.path)
+                        && contains_only_checkout(directory)
+                        && force_remove_worktree(&git, &worktree.path).await
+                    {
+                        remove_run_files(directory, false).await;
+                    }
+                }
+            }
+            if let Some(refs) = read_guide_refs(&git, REF_ROOT).await {
+                delete_refs(&git, &refs).await;
+            }
+        }
+        if listings_complete {
+            for directory in directories {
+                // An undiscovered linked checkout might belong to a removed or unavailable
+                // project. Leave its files when we cannot remove its Git registration safely.
+                let checkout = directory.join("checkout");
+                if directory_or_missing(&checkout)
+                    && fs::symlink_metadata(checkout.join(".git"))
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    && contains_only_checkout(&directory)
+                {
+                    remove_run_files(&directory, false).await;
+                }
+            }
         }
     }
 
@@ -233,7 +357,23 @@ impl ReviewGuideGenerator {
             .with_repository_binding(identity)
             .await
             .map_err(|_| failed("This project's checkout changed; trust the repository again."))?;
+        self.update(id, |run| run.git = Some(bound.clone()));
         let empty_tree = empty_tree(&bound).await?;
+        let directory = self.worktrees.join(format!("{DIRECTORY_PREFIX}{id}"));
+        fs::create_dir_all(&self.worktrees)
+            .and_then(|()| fs::create_dir(&directory))
+            .map_err(|_| failed("Could not create the review checkout."))?;
+        self.update(id, |run| run.directory = Some(directory.clone()));
+        // Journal the bound identity before the first ref or worktree is created so startup
+        // can recover even when a crash predated checkout or the project was since removed.
+        let binding = bound
+            .recorded_repository()
+            .flatten()
+            .ok_or_else(|| failed("Could not identify the review repository."))?;
+        let journal = serde_json::to_vec(binding)
+            .map_err(|_| failed("Could not record the review checkout."))?;
+        fs::write(directory.join(BINDING_FILE), journal)
+            .map_err(|_| failed("Could not record the review checkout."))?;
         let checkout = Checkout {
             generator: self,
             id,
@@ -246,7 +386,7 @@ impl ReviewGuideGenerator {
         let remote = checkout.remote(&remote_name, &remote_url).await?;
         let base_branch = detail_value["baseBranch"].as_str().unwrap_or_default();
         checkout.check_branch(base_branch).await?;
-        let base_ref = format!("refs/t3/review-guide/{id}/base");
+        let base_ref = format!("{REF_ROOT}{id}/base");
         self.update(id, |run| run.refs.push(base_ref.clone()));
         checkout
             .fetch(&remote, &format!("+refs/heads/{base_branch}:{base_ref}"))
@@ -284,17 +424,7 @@ impl ReviewGuideGenerator {
                 });
             }
         }
-        std::fs::create_dir_all(&self.worktrees)
-            .map_err(|_| failed("Could not create the review checkout."))?;
-        let directory = self.worktrees.join(format!(
-            "review-guide-{id}-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        self.update(id, |run| run.directory = Some(directory.clone()));
-        std::fs::create_dir(&directory)
-            .map_err(|_| failed("Could not create the review checkout."))?;
         let path = directory.join("checkout");
-        self.update(id, |run| run.worktree = Some(path.clone()));
         let path_text = path.to_string_lossy().into_owned();
         // A scratch checkout for reading the change: no repository hook runs, and no attribute
         // from the fork selects a filter, eol conversion or driver (git-lfs ships enabled on
@@ -339,11 +469,14 @@ impl ReviewGuideGenerator {
             .trim()
             .to_owned();
         let change = read_change(&worktree, &merge_base, &attr_source).await?;
+        strip_provider_files(&path)
+            .map_err(|_| failed("Could not isolate the review checkout."))?;
         self.update(id, |run| {
             run.project = Some(project);
             run.selection = Some(selection);
             run.instructions = instructions;
             run.stack = layers;
+            run.git_attr_source = Some(empty_tree);
         });
         Ok(PreparedGuide {
             change,
@@ -356,15 +489,183 @@ impl ReviewGuideGenerator {
     }
 }
 
-/// Removes a review worktree's registration and files.
-async fn force_remove_worktree(git: &Git, worktree: &std::path::Path) -> bool {
-    let path = worktree.to_string_lossy().into_owned();
+/// Codex discovers project layers in trusted linked worktrees. Remove the fork's
+/// provider config directories before either CLI starts.
+fn strip_provider_files(checkout: &Path) -> std::io::Result<()> {
+    for name in [
+        ".codex",
+        ".claude",
+        "CLAUDE.md",
+        "CLAUDE.local.md",
+        ".mcp.json",
+    ] {
+        remove_checkout_entry(&checkout.join(name))?;
+    }
+    Ok(())
+}
+
+fn remove_checkout_entry(path: &Path) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if metadata.file_type().is_symlink_dir() {
+            return fs::remove_dir(path);
+        }
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn generated_number(value: &str) -> bool {
+    value
+        .parse::<u64>()
+        .is_ok_and(|number| value == number.to_string())
+}
+
+fn generated_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value)
+        .is_ok_and(|uuid| uuid.get_version_num() == 4 && value == uuid.simple().to_string())
+}
+
+fn legacy_directory(suffix: &str) -> bool {
+    suffix
+        .split_once('-')
+        .is_some_and(|(id, random)| generated_number(id) && generated_uuid(random))
+}
+
+fn directory_or_missing(directory: &Path) -> bool {
+    match fs::symlink_metadata(directory) {
+        Ok(entry) => entry.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+fn contains_only_checkout(directory: &Path) -> bool {
+    match fs::read_dir(directory) {
+        Ok(mut entries) => {
+            entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() == "checkout"))
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+async fn read_guide_refs(git: &Git, prefix: &str) -> Option<Vec<String>> {
+    let output = git
+        .execute(
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(symref)",
+                "--",
+                prefix,
+            ],
+            options(30),
+        )
+        .await
+        .ok()?;
+    Some(
+        output
+            .stdout_text()
+            .lines()
+            .filter_map(|line| {
+                let (name, symref) = line.split_once('\0')?;
+                if !symref.is_empty() {
+                    return None;
+                }
+                let suffix = name.strip_prefix(prefix)?;
+                let leaf = if prefix == REF_ROOT {
+                    let (id, leaf) = suffix.split_once('/')?;
+                    if !generated_number(id) {
+                        return None;
+                    }
+                    leaf
+                } else {
+                    suffix
+                };
+                (leaf == "base" || leaf.strip_prefix("head-").is_some_and(generated_number))
+                    .then(|| name.to_owned())
+            })
+            .collect(),
+    )
+}
+
+async fn delete_refs(git: &Git, refs: &[String]) -> bool {
+    let mut removed = true;
+    for reference in refs {
+        if git
+            .execute(&["update-ref", "--no-deref", "-d", reference], options(30))
+            .await
+            .is_err()
+        {
+            removed = false;
+        }
+    }
+    removed
+}
+
+async fn finish_checkout(git: &Git, directory: &Path, refs: &[String]) {
+    let checkout = directory.join("checkout");
+    if directory_or_missing(directory)
+        && directory_or_missing(&checkout)
+        && force_remove_worktree(git, &checkout).await
+        && delete_refs(git, refs).await
+    {
+        remove_run_files(directory, true).await;
+    } else {
+        tracing::debug!("Could not remove a review checkout; kept its recovery journal");
+    }
+}
+
+async fn remove_run_files(directory: &Path, journaled: bool) {
+    let directory = directory.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        remove_checkout_entry(&directory.join("checkout"))?;
+        // Keep the journal until the checkout is gone, so a partial removal can be retried.
+        if journaled
+            && let Err(error) = fs::remove_file(directory.join(BINDING_FILE))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+        fs::remove_dir(directory)
+    })
+    .await;
+}
+
+/// Git can remove a registered worktree even if its directory has gone. An unregistered
+/// path is already gone from Git's perspective. Repository-wide prune could drop user state.
+async fn force_remove_worktree(git: &Git, worktree: &Path) -> bool {
+    let args = [
+        "worktree".as_ref(),
+        "remove".as_ref(),
+        "--force".as_ref(),
+        "--force".as_ref(),
+        "--".as_ref(),
+        worktree.as_os_str(),
+    ];
     git.execute(
-        &["worktree", "remove", "--force", "--force", "--", &path],
-        options(60),
+        &args,
+        ExecuteOptions {
+            allow_nonzero: true,
+            env: [("LC_ALL".into(), Some("C".into()))].into_iter().collect(),
+            ..options(60)
+        },
     )
     .await
-    .is_ok()
+    .is_ok_and(|output| {
+        output.code == Some(0)
+            || output
+                .stderr_text()
+                .trim_end()
+                .ends_with("is not a working tree")
+    })
 }
 
 fn options(seconds: u64) -> ExecuteOptions {
@@ -540,7 +841,7 @@ impl Checkout<'_> {
         {
             return Ok(commit);
         }
-        let head_ref = format!("refs/t3/review-guide/{}/head-{number}", self.id);
+        let head_ref = format!("{REF_ROOT}{}/head-{number}", self.id);
         self.generator
             .update(self.id, |run| run.refs.push(head_ref.clone()));
         if !branch.is_empty()
@@ -685,6 +986,7 @@ fn is_js_space(ch: char) -> bool {
 #[async_trait::async_trait]
 impl GuideGenerator for ReviewGuideGenerator {
     async fn check_enabled(&self, _: &Context) -> Result<()> {
+        self.finish_startup().await;
         let settings = self
             .textgen
             .settings()
@@ -705,14 +1007,11 @@ impl GuideGenerator for ReviewGuideGenerator {
         detail: PullRequestDetail,
         cancel: CancellationToken,
     ) -> Result<PreparedGuide> {
-        let id = self.counter.fetch_add(1, Ordering::AcqRel).to_string();
-        self.runs.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            id.clone(),
-            Run {
-                workspace_root: PathBuf::from(&context.project.workspace_root),
-                ..Default::default()
-            },
-        );
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), Run::default());
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(failed("Review guide generation canceled.")),
@@ -729,7 +1028,7 @@ impl GuideGenerator for ReviewGuideGenerator {
         input: &PreparedGuide,
         cancel: CancellationToken,
     ) -> Result<(Vec<PullRequestReviewGuideStop>, ModelSelection)> {
-        let (project, selection, instructions, stack) = {
+        let (project, selection, instructions, stack, git_attr_source) = {
             let runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
             let run = runs
                 .get(&input.cleanup_id)
@@ -741,6 +1040,7 @@ impl GuideGenerator for ReviewGuideGenerator {
                     .ok_or_else(|| failed("The review checkout is gone."))?,
                 run.instructions.clone(),
                 run.stack.clone(),
+                run.git_attr_source.clone(),
             )
         };
         let detail = serde_json::to_value(&input.detail).unwrap_or_default();
@@ -754,6 +1054,7 @@ impl GuideGenerator for ReviewGuideGenerator {
             settled_review: settled_review(&activity),
             instructions,
             stack,
+            git_attr_source,
         };
         let generated = self
             .textgen

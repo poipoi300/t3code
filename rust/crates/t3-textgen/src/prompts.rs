@@ -165,6 +165,8 @@ pub struct ReviewInput {
     pub instructions: Option<String>,
     #[serde(default)]
     pub stack: Vec<ReviewLayer>,
+    #[serde(skip)]
+    pub git_attr_source: Option<String>,
 }
 
 fn nonempty(value: Option<&str>) -> &str {

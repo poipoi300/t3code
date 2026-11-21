@@ -72,6 +72,8 @@ pub struct GenerationRequest {
     pub output_schema: Value,
     pub attachments: Vec<ChatAttachment>,
     pub investigation_timeout: Option<Duration>,
+    /// The checkout's empty Git tree, used for child Git commands during review.
+    pub review_git_attr_source: Option<String>,
 }
 
 #[async_trait]
@@ -423,6 +425,10 @@ impl TextGeneration {
         };
         let investigation =
             matches!(input, GenerationInput::Review(_)).then_some(Duration::from_secs(900));
+        let review_git_attr_source = match &input {
+            GenerationInput::Review(review) => review.git_attr_source.clone(),
+            _ => None,
+        };
         let request = GenerationRequest {
             operation: input.operation(),
             cwd: context.cwd,
@@ -431,6 +437,7 @@ impl TextGeneration {
             output_schema: output_schema(&input),
             attachments: input.attachments(),
             investigation_timeout: investigation,
+            review_git_attr_source,
         };
         let child = cancellation.child_token();
         struct CancelOnDrop(CancellationToken);

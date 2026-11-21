@@ -242,6 +242,7 @@ async fn cancellation_stops_a_request_in_flight() {
         output_schema: serde_json::Value::Null,
         attachments: Vec::new(),
         investigation_timeout: None,
+        review_git_attr_source: None,
     };
     let token = CancellationToken::new();
     let cancel = token.clone();

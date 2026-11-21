@@ -182,11 +182,29 @@ fn process(
     options
 }
 
+fn set_environment(environment: &mut Environment, name: &str, value: &str) {
+    #[cfg(windows)]
+    environment.retain(|key, _| !key.eq_ignore_ascii_case(name));
+    environment.insert(name.to_owned(), value.to_owned());
+}
+
+fn review_environment(environment: &Environment, request: &GenerationRequest) -> Environment {
+    let mut environment = environment.clone();
+    if request.operation == Operation::GenerateReviewGuide {
+        if let Some(source) = &request.review_git_attr_source {
+            set_environment(&mut environment, "GIT_ATTR_SOURCE", source);
+        }
+        set_environment(&mut environment, "GIT_LFS_SKIP_SMUDGE", "1");
+    }
+    environment
+}
+
 /// `listEnabledMcpServers`: any failure keeps the servers listed (none disabled by name), as
 /// TypeScript does; the exec still runs with plugins and apps off.
 async fn enabled_mcp_servers(
     run: &CodexRun,
     cwd: &std::path::Path,
+    environment: &Environment,
     cancellation: &CancellationToken,
 ) -> Vec<String> {
     let mut args = codex_mcp_list_launch_args(&run.launch_argv);
@@ -195,7 +213,7 @@ async fn enabled_mcp_servers(
     let mut options = process(
         &run.program,
         args,
-        &run.environment,
+        environment,
         cwd.to_path_buf(),
         cancellation,
     );
@@ -246,7 +264,8 @@ pub async fn run_codex(
         .await
         .map_err(|_| GenerationError::Provider)?;
     let work = async {
-        let enabled = enabled_mcp_servers(run, &request.cwd, &cancellation).await;
+        let environment = review_environment(&run.environment, request);
+        let enabled = enabled_mcp_servers(run, &request.cwd, &environment, &cancellation).await;
         let mut args = crate::codex::codex_exec_mcp_prefix(
             &codex_exec_launch_args(&run.launch_argv),
             &enabled,
@@ -271,6 +290,19 @@ pub async fn run_codex(
             args.push("--config".into());
             args.push(format!("service_tier=\"{tier}\""));
         }
+        // Codex can replace the launch environment for its shell tool. Pin the review
+        // overrides there too, including for user policies that inherit no variables.
+        if let Some(source) = &request.review_git_attr_source {
+            args.extend([
+                "--config".into(),
+                format!(
+                    "shell_environment_policy.set.GIT_ATTR_SOURCE={}",
+                    serde_json::Value::String(source.clone())
+                ),
+                "--config".into(),
+                "shell_environment_policy.set.GIT_LFS_SKIP_SMUDGE=\"1\"".into(),
+            ]);
+        }
         args.push("--output-schema".into());
         args.push(schema_path.to_string_lossy().into_owned());
         args.push("--output-last-message".into());
@@ -283,7 +315,7 @@ pub async fn run_codex(
         let mut options = process(
             &run.program,
             args,
-            &run.environment,
+            &environment,
             request.cwd.clone(),
             &cancellation,
         );
@@ -366,11 +398,13 @@ pub fn claude_args(
     }
     args.push("--settings".into());
     args.push(claude_settings(run).to_string());
-    // `-p` skips the workspace trust check, so a checkout's own `.claude/settings*.json` would
-    // load: its allow rules add to the read-only list and its `env` can redirect the user's
-    // credential. Only the user's own settings apply (a review checkout is a fork's tree, and a
-    // commit runs in a checkout that may be a clone of a hostile repository).
-    args.extend(["--setting-sources", "user"].map(str::to_owned));
+    // Headless Claude skips workspace trust. For review, even the user's standing Bash
+    // permissions would merge with the narrow Git allow list, so use the explicit launch
+    // environment and CLI settings alone. Ordinary generation still uses user settings.
+    args.extend([
+        "--setting-sources".to_owned(),
+        if investigate { "" } else { "user" }.to_owned(),
+    ]);
     if investigate {
         args.extend(
             [
@@ -447,11 +481,17 @@ pub async fn run_claude(
             || request.cwd.clone(),
             |directory| directory.path().to_path_buf(),
         );
+        let mut environment = review_environment(&run.environment, request);
+        if investigate {
+            // Workspace memory is loaded separately from settings sources, including on
+            // demand from subdirectories. In review it must be read as repository data.
+            set_environment(&mut environment, "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
+        }
         let attempt = |persistence: bool| {
             let mut options = process(
                 &run.program,
                 claude_args(run, &schema, investigate, persistence),
-                &run.environment,
+                &environment,
                 cwd.clone(),
                 &cancellation,
             );
@@ -595,9 +635,8 @@ mod tests {
         );
         // A checkout's own `.claude/settings*.json` never loads: `-p` skips the trust check, so
         // its allow rules and `env` would otherwise apply (review H1).
-        for args in [&args, &investigating] {
-            assert_eq!(value(args, "--setting-sources"), "user", "{args:?}");
-        }
+        assert_eq!(value(&args, "--setting-sources"), "user");
+        assert_eq!(value(&investigating, "--setting-sources"), "");
         assert_eq!(
             claude_structured_output(
                 br#"[{"type":"system"},{"type":"result","structured_output":{"title":"x"}}]"#
