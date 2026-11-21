@@ -1372,10 +1372,7 @@ async fn the_app_location_starts_at_the_launch_link_and_follows_opened_links_and
     let mut events = platform.events();
     platform
         .open_link("t3code://pair?pairingUrl=https%3A%2F%2Fhost.test%2Fpair%23token%3Dabc".into());
-    assert_eq!(
-        locations.next().await.unwrap().unwrap().path,
-        "/pair"
-    );
+    assert_eq!(locations.next().await.unwrap().unwrap().path, "/pair");
     let Some(PlatformEvent::OpenedLink(link)) = events.next().await else {
         panic!("the link is announced");
     };

@@ -60,6 +60,28 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
     .boxed_local()
 }
 
+/// A browser supplies its own page location. A native launch supplies an external link;
+/// only an accepted link can choose the backend or contribute a route.
+pub(crate) fn launch_inputs(address: Option<String>) -> (Option<String>, Choice) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if nsh_core::prelude::os() != nsh_core::platform::Os::Web {
+        let link = address.as_deref();
+        // The explicit demo launcher starts unpaired at its default screen. It has
+        // no credential and contributes no location to native history.
+        if link.is_some_and(|url| {
+            url.starts_with("t3code")
+                && t3_client::navigation::app_path(url).as_deref() == Some("/pair?backend=demo")
+        }) {
+            return (None, Choice::Demo);
+        }
+        let path = link.and_then(t3_platform::NativePlatform::launch_path);
+        let choice = super::host::launch_choice(link.filter(|_| path.is_some()));
+        return (path, choice);
+    }
+    let choice = super::host::launch_choice(address.as_deref());
+    (address, choice)
+}
+
 /// Filled by the native host during boot. The root consumes it after its link subscribers mount.
 #[cfg(not(target_arch = "wasm32"))]
 type PendingNativeLinks = Stored<Option<(t3_platform::NativePlatform, Option<String>)>>;

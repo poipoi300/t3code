@@ -30,13 +30,9 @@ pub fn App() -> impl IntoElement {
     let ready = signal(false);
     let slot = stored(None);
     watch(async move {
-        let launched = app_url().await;
-        #[cfg(not(target_arch = "wasm32"))]
-        let launched = launched
-            .as_deref()
-            .and_then(t3_platform::NativePlatform::launch_path);
+        let (launched, choice) = crate::runtime::client::launch_inputs(app_url().await);
         let store = ClientStore::default();
-        let started = host::start(store.clone(), host::launch_choice(launched.as_deref())).await;
+        let started = host::start(store.clone(), choice).await;
         let history = match started.backend.client() {
             Some(client) => {
                 UrlHistory::read(crate::runtime::services::navigation::url_client(&client)).await

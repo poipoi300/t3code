@@ -1001,21 +1001,19 @@ fn packaged_app_root() -> Root {
 }
 
 #[test]
-fn an_unknown_launch_address_uses_host_history_to_return_to_pairing() {
+fn unsupported_native_links_leave_the_unpaired_app_at_pairing() {
     let mut config = config(DESKTOP, Some(Os::Linux), packaged_app_root());
     config.data_dir = Some(fresh_data_dir());
-    let mut app = Headless::start_with_link(config, "t3code-dev://unknown-path")
+    let mut app = Headless::start_with_link(config, "t3code-dev://unknown-path?backend=demo")
         .expect("start from the cold link");
-    app.wait_for_within("Page not found", Duration::from_secs(30))
-        .expect("host kept the launch address");
-    app.press("role:button[Go home]")
-        .expect("replace the unknown address");
-    app.wait_for("Connect to T3 Code")
-        .expect("unpaired home resolves to Pair");
-    app.open_with_url("t3code-dev://another-unknown-path")
+    app.wait_for_within("Connect to T3 Code", Duration::from_secs(30))
+        .expect("rejected cold link leaves the default route");
+    assert!(!app.screen().shows("Fill in the demo server"));
+    app.open_with_url("t3code-dev://settings/general")
         .expect("deliver a warm link");
-    app.wait_for("Page not found")
-        .expect("the same history receives the warm link");
+    app.settle();
+    assert!(app.screen().shows("Connect to T3 Code"));
+    assert!(!app.screen().shows("Page not found"));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
