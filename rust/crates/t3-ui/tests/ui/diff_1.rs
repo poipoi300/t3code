@@ -328,13 +328,19 @@ fn PanelFixture() -> impl IntoElement {
         .child(diff_panel(DiffPanelRuntime(fake), key(), computed(|| true)))
 }
 
+#[derive(Clone, PartialEq, Props)]
+struct PendingDiffProps {
+    git_preview: bool,
+}
+
 #[component]
-fn PendingDiffFixture() -> impl IntoElement {
+fn PendingDiffFixture(props: PendingDiffProps) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let shown = signal(true);
     let fake = Fake::new(Inputs {
         patch: None,
         pending: true,
+        git_preview: props.git_preview,
         ..Inputs::default()
     });
     let reply = fake.clone();
@@ -352,7 +358,10 @@ fn PendingDiffFixture() -> impl IntoElement {
             nsh_base::button()
                 .child(text("Complete diff request"))
                 .on_press(move || {
-                    let response = Rc::new(snapshot(&Inputs::default()));
+                    let response = Rc::new(snapshot(&Inputs {
+                        git_preview: props.git_preview,
+                        ..Inputs::default()
+                    }));
                     let requests = reply.sinks.borrow();
                     let request = requests.first().expect("the panel requested the diff");
                     let _ = request.unbounded_send(response);
@@ -374,7 +383,9 @@ fn diff_reply_survives_hiding_the_panel(window: (f32, f32)) {
     let mut app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::of::<PendingDiffFixture>())
+        ..EngineConfig::new(Root::new::<PendingDiffFixture>(|| PendingDiffProps {
+            git_preview: false,
+        }))
     })
     .expect("pending diff fixture");
     app.wait_for("Loading checkpoint diff...")
@@ -416,6 +427,36 @@ fn panels_diff_revalidates_a_cached_git_reply_of_unknown_age() {
         ["refresh"],
         "the cached answer still needs revalidation"
     );
+}
+
+#[test]
+fn panels_diff_reopens_without_refresh_until_its_answer_is_ten_seconds_old() {
+    let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let mut app = Headless::start(EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        clock: nsh_engine::Clock::manual(std::time::UNIX_EPOCH),
+        ..EngineConfig::new(Root::new::<PendingDiffFixture>(|| PendingDiffProps {
+            git_preview: true,
+        }))
+    })
+    .expect("pending Git preview fixture");
+    app.wait_for("role:button[Toggle test panel]")
+        .expect("panel fixture mounted");
+    app.press("role:button[Toggle test panel]").expect("hide");
+    app.press("role:button[Complete diff request]")
+        .expect("answer the pending query");
+    app.fast_forward(std::time::Duration::from_secs(9))
+        .expect("advance the manual clock inside the revalidation floor");
+    app.press("role:button[Toggle test panel]").expect("reopen");
+    app.wait_for("src/a.ts").expect("reuse the observed patch");
+    assert!(calls().is_empty(), "a fresh answer should not refresh");
+    app.press("role:button[Toggle test panel]").expect("hide");
+    app.fast_forward(std::time::Duration::from_secs(1))
+        .expect("reach the revalidation floor");
+    app.press("role:button[Toggle test panel]").expect("reopen");
+    assert_eq!(calls(), ["refresh"], "the settled query is now stale");
 }
 
 pub fn start(window: (f32, f32), inputs: Inputs) -> (Headless, MutexGuard<'static, ()>) {
