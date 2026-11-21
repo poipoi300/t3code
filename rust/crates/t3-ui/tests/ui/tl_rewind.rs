@@ -486,7 +486,8 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
     active_session["id"] = json!("active-session");
     active_session["capabilities"]["threads"]["canForkThread"] = json!(false);
     active_session["capabilities"]["context"]["supportsFullThreadHandoff"] = json!(true);
-    active_session["capabilities"]["checkpointing"]["providerCanRollbackConversation"] = json!(true);
+    active_session["capabilities"]["checkpointing"]["providerCanRollbackConversation"] =
+        json!(true);
     projection["providerSessions"] = json!([active_session]);
     projection["thread"]["activeProviderThreadId"] = json!("active-pt");
     projection["providerThreads"] = json!([{
