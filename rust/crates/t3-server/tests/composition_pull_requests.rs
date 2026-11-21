@@ -272,8 +272,7 @@ impl Server {
     fn home(&self) -> &Path {
         self.temp.path()
     }
-    /// Replaces this connection with one whose session holds only `scopes`.
-    async fn scoped_cookie(&self, scopes: &[&str]) -> String {
+    async fn pairing_credential(&self, scopes: &[&str]) -> String {
         let http = reqwest::Client::new();
         let grant: Value = http
             .post(format!("{}/api/auth/pairing-token", self.origin))
@@ -285,9 +284,15 @@ impl Server {
             .json()
             .await
             .unwrap();
-        let paired = http
+        grant["credential"]
+            .as_str()
+            .expect("pairing credential")
+            .to_owned()
+    }
+    async fn scoped_cookie(&self, scopes: &[&str]) -> String {
+        let paired = reqwest::Client::new()
             .post(format!("{}/api/auth/browser-session", self.origin))
-            .json(&json!({"credential": grant["credential"]}))
+            .json(&json!({"credential": self.pairing_credential(scopes).await}))
             .send()
             .await
             .unwrap();
@@ -748,4 +753,73 @@ async fn http_diff_authenticates_and_pages_the_bound_checkout() {
         "PullRequestUnavailableError"
     );
     s.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_review_session_pages_the_bound_checkout() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = Server::start().await;
+            server.insert_project("bound", "github-app");
+            let credential = server.pairing_credential(&["orchestration:read"]).await;
+            let client_home = tempfile::tempdir().unwrap();
+            let platform = t3_platform::NativePlatform::open(t3_platform::NativeConfig::new(
+                client_home.path(),
+                Box::new(t3_platform::EphemeralSecretStore::default()),
+            ))
+            .await
+            .unwrap();
+            let client = t3_client::composition::ClientRuntime::new(
+                platform,
+                Default::default(),
+                t3_contracts::orchestration_v2::OrchestrationV2CreationSource::Web,
+                std::rc::Rc::new(|f| {
+                    tokio::task::spawn_local(f);
+                }),
+            );
+            let environment = client
+                .pair(t3_client::connection::PairingInput {
+                    host: Some(server.origin.clone()),
+                    pairing_code: Some(credential),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let connected = client.client(&environment).expect("paired client");
+            tokio::time::timeout(std::time::Duration::from_secs(15), connected.ready())
+                .await
+                .expect("connection startup")
+                .expect("read-only session connected");
+            let review =
+                client.pull_request_review_session(&environment, decode(reference("bound", 7)));
+            assert!(!review.can_write());
+            let first = review.diff(None).await.unwrap();
+            assert_eq!(first.patch, "patch one");
+            assert!(first.truncated);
+            let second = review.diff(first.next_cursor).await.unwrap();
+            assert_eq!(second.patch, "patch two");
+            assert!(second.next_cursor.is_none());
+            assert!(!second.truncated);
+            let error = review
+                .diff(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                    "unknown".into(),
+                )))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                t3_client::workspace::pr_views::diff_http::DiffLoadError::Http { status: 502, .. }
+            ));
+            assert_eq!(
+                server.checkout.calls(),
+                [
+                    "diff bound None None",
+                    "diff bound Some(\"opaque-2\") None",
+                    "diff bound Some(\"unknown\") None"
+                ]
+            );
+            assert!(server.public.calls().is_empty());
+            server.runtime.shutdown().await.unwrap();
+        })
+        .await;
 }

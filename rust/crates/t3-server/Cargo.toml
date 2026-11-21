@@ -105,6 +105,9 @@ tungstenite = { version = "0.29", default-features = false }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2", "service"] }
 [dev-dependencies]
+# Pair the production native review client with the server’s bound-checkout HTTP fixture.
+t3-client = { path = "../t3-client" }
+t3-platform = { path = "../t3-platform" }
 # Observe a blocked launch reservation in the socket race test.
 t3-orchestration = { path = "../t3-orchestration", features = ["testkit"] }
 # Turns the managed-policy overrides on for this crate's tests only (not for `cargo build`).
