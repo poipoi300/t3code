@@ -171,7 +171,7 @@ fn source(p: Page, row: HostRow, editing: Editor) -> AnyElement {
                     .child(menu_button(
                         t("More"),
                         move || !p.can_edit(),
-                        text("⋯"),
+                        text(t("⋯")),
                         Default::default(),
                         menu_popup_with(move || {
                             let mut entries = view();

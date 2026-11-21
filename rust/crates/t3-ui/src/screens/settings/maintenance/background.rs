@@ -256,7 +256,7 @@ fn interval(
     view()
         .app_class(tw("flex flex-row items-center gap-2"))
         .child(button(
-            ButtonContent::Label("−".into()),
+            ButtonContent::Label(t("−")),
             ButtonVariant::Ghost,
             ButtonSize::Xs,
             || false,
@@ -273,7 +273,7 @@ fn interval(
                 .app_class(tw("w-16 text-right")),
         )
         .child(button(
-            ButtonContent::Label("+".into()),
+            ButtonContent::Label(t("+")),
             ButtonVariant::Ghost,
             ButtonSize::Xs,
             || false,
