@@ -123,7 +123,7 @@ pub struct LinkableMachine {
 }
 
 /// `isLocalLoopbackHost` over a URL's host: `localhost`, `::1` or `127.0.0.0/8`.
-fn is_loopback_url(url: &str) -> bool {
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     match url::Url::parse(url)
         .ok()
         .and_then(|url| url.host().map(|host| host.to_owned()))

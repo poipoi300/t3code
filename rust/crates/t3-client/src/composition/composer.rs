@@ -154,6 +154,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         async move {
             let _lease = this.inner.registry.lock().await;
             let mut registry = this.load_registry().await?;
+            let was_enabled = registry
+                .get(&environment)
+                .ok_or(ClientError::EnvironmentMismatch)?
+                .registration()
+                .enabled;
             registry
                 .set_enabled_persisted(
                     &this.inner.platform,
@@ -162,8 +167,14 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     Time::from_platform(&this.inner.platform),
                 )
                 .await?;
-            if let Some(client) = this.client(&environment) {
-                client.set_enabled(enabled)?;
+            // Disabling ends the driver's event loop. A fresh supervisor reads the
+            // persisted registration when the user switches the machine back on.
+            if enabled && !was_enabled {
+                this.start_saved(&environment).await?;
+            } else if let Some(client) = this.client(&environment) {
+                if client.set_enabled(enabled).is_err() && enabled {
+                    this.start_saved(&environment).await?;
+                }
             } else if enabled {
                 this.start_saved(&environment).await?;
             }

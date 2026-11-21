@@ -54,6 +54,12 @@ pub trait Backend {
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>>;
 
+    fn connection_settings(
+        &self,
+    ) -> Option<Rc<dyn crate::screens::settings::connections::ConnectionSettings>> {
+        None
+    }
+
     fn palette(&self) -> Option<Rc<dyn PaletteClient>> {
         None
     }
@@ -96,6 +102,12 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>> {
         ClientRuntime::send_message(self, key, text)
+    }
+
+    fn connection_settings(
+        &self,
+    ) -> Option<Rc<dyn crate::screens::settings::connections::ConnectionSettings>> {
+        Some(Rc::new(self.clone()))
     }
 
     fn palette(&self) -> Option<Rc<dyn PaletteClient>> {

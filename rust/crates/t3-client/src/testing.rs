@@ -1,6 +1,8 @@
 //! Deterministic host and server scripts; no wall-clock sleeps or network.
 #[cfg(any(test, feature = "testing"))]
 pub mod environment;
+/// Wire method kind for registering scripted handlers on a fake environment.
+pub use t3_rpc::CallKind;
 #[cfg(test)]
 mod relay_tests;
 #[cfg(test)]

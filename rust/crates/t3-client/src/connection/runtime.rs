@@ -55,6 +55,8 @@ struct Owner {
     /// The current session's HTTP address: the paired address, the endpoint the relay named,
     /// or the local end of the SSH tunnel.
     http_base: RefCell<Option<String>>,
+    active_route: RefCell<Option<String>>,
+    settings_http: RefCell<Option<crate::permissions::EnvironmentHttpClient>>,
     store_session: Cell<Option<Generation>>,
     threads: Rc<super::threads::ThreadDemand>,
     abort: AbortHandle,
@@ -100,6 +102,21 @@ impl ConnectedClient {
     /// prepared connection `httpBaseUrl`; `None` while there is no session.
     pub fn http_base_url(&self) -> Option<String> {
         self.owner.http_base.borrow().clone()
+    }
+    /// The route of the installed session, including relay and SSH routes whose
+    /// prepared address differs from the saved route.
+    pub fn active_route_id(&self) -> Option<String> {
+        self.owner.active_route.borrow().clone()
+    }
+    /// The guarded HTTP client belongs to the same authorization generation as the
+    /// installed socket. Settings mutations resolve it again at submission.
+    pub(crate) fn access_http(&self) -> Option<crate::permissions::EnvironmentHttpClient> {
+        (self
+            .session()?
+            .grants_scope(t3_contracts::auth::AuthEnvironmentScope::AccessWrite)
+            == Some(true))
+        .then(|| self.owner.settings_http.borrow().clone())
+        .flatten()
     }
     pub fn state(&self) -> ConnectionState {
         self.store()
@@ -373,6 +390,8 @@ fn start<P: Platform + Clone + 'static>(
         events: events.clone(),
         endpoint: RefCell::new(None),
         http_base: RefCell::new(None),
+        active_route: RefCell::new(None),
+        settings_http: RefCell::new(None),
         store_session: Cell::new(None),
         threads: threads.clone(),
         abort,
@@ -581,6 +600,8 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         if let Some(owner) = self.owner.upgrade() {
             owner.endpoint.borrow_mut().take();
             owner.http_base.borrow_mut().take();
+            owner.active_route.borrow_mut().take();
+            owner.settings_http.borrow_mut().take();
             owner.store_session.set(None);
         }
     }
@@ -818,6 +839,20 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
         }
         if let Some(owner) = self.owner.upgrade() {
             owner.endpoint.replace(Some(context.session.endpoint()));
+            owner.active_route.replace(Some(context.route_id.clone()));
+            owner
+                .settings_http
+                .replace(Some(crate::permissions::EnvironmentHttpClient::new(
+                    Rc::new(self.platform.clone()),
+                    context.prepared.clone(),
+                    self.resolver.remote.dpop_signer(),
+                    Some(self.resolver.remote.clone()),
+                    handle
+                        .registration()
+                        .routes
+                        .iter()
+                        .any(|r| r.id == context.route_id && r.mode == ConnectionMode::Relay),
+                )));
             owner
                 .http_base
                 .replace(Some(context.prepared.http_base_url.clone()));

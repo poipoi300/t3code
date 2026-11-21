@@ -1408,7 +1408,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     .flatten()
                     .is_some_and(|url| url.to_ascii_lowercase().starts_with("https:"));
                 let mut registry = this.load_registry().await.ok()?;
-                registry
+                let routes = registry
                     .learn_routes(
                         &this.inner.platform,
                         &environment,
@@ -1418,7 +1418,18 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     )
                     .await
                     .ok()
-                    .flatten()
+                    .flatten()?;
+                if let Some(entry) = this
+                    .inner
+                    .environments
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|e| e.id == environment)
+                {
+                    entry.routes.clone_from(&routes);
+                }
+                this.notify();
+                Some(routes)
             }
             .boxed_local()
         })

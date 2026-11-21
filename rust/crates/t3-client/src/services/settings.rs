@@ -140,3 +140,54 @@ pub fn usage_scan_settings_key(settings: &ServerSettings) -> Result<String, Clie
         aliases,
     ))?)
 }
+
+/// An edit of the saved per-device routes, in preference order.
+pub enum SavedRouteEdit {
+    Order(Vec<String>),
+    Remove(String),
+}
+
+/// Display only the HTTP origin. A catalog imported from another client may
+/// include userinfo, a pairing fragment or a query bearing a token.
+pub fn saved_route_address(route: &crate::connection::Route) -> Option<String> {
+    if matches!(
+        route.mode,
+        crate::connection::ConnectionMode::Ssh | crate::connection::ConnectionMode::Relay
+    ) {
+        return None;
+    }
+    crate::connection::agent_consent::page_origin(&route.http_base)
+}
+
+pub fn saved_route_label(route: &crate::connection::Route) -> String {
+    use crate::connection::RouteKind;
+    match crate::connection::route_kind(route, false) {
+        RouteKind::Relay => "T3 Connect",
+        RouteKind::Loopback => "This device",
+        RouteKind::Lan => "LAN",
+        RouteKind::Tailnet => "Tailscale",
+        RouteKind::Vpn => "VPN",
+        RouteKind::Ssh => "SSH",
+        RouteKind::Public => {
+            return url::Url::parse(&route.http_base)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "Remote link".to_owned());
+        }
+    }
+    .to_owned()
+}
+
+/// A manual address never receives a pairing credential minted by this client.
+/// A catalog selection is resolved again by id when the user submits the form.
+pub enum PeerDestination {
+    Address(String),
+    Machine(EnvironmentId),
+}
+use crate::types::EnvironmentId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerLinkFailure {
+    Mint(crate::services::http::PeerPairingCodeError),
+    Unavailable,
+}
