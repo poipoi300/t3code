@@ -117,16 +117,14 @@ pub enum CellKind {
     Code,
     Raw,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputKind {
-    Text,
-    Image,
-    Html,
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotebookOutput {
-    pub kind: OutputKind,
-    pub text: String,
+pub enum NotebookOutput {
+    Text(String),
+    Image {
+        data_url: String,
+        fallback: Option<String>,
+    },
+    HiddenHtml,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotebookCell {
@@ -165,6 +163,63 @@ fn base64_image_syntax(base64: &str) -> bool {
         && (!base64.ends_with('=') || base64.len().is_multiple_of(4))
 }
 
+fn notebook_output(output: &Value) -> Result<Option<NotebookOutput>, NotebookError> {
+    let data = output.get("data");
+    let output_text = output
+        .get("text")
+        .or_else(|| data.and_then(|d| d.get("text/plain")))
+        .or_else(|| output.get("traceback"));
+    let plain =
+        notebook_text(output_text, 256_000).map(|text| (!text.trim().is_empty()).then_some(text));
+    let metadata = output.get("metadata");
+    let mut image_alt = None;
+    let mut saw_image = false;
+    for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+        let Some(value) = data.and_then(|d| d.get(mime)).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        saw_image = true;
+        let alt = if !matches!(&plain, Ok(Some(_))) {
+            let alt = metadata
+                .and_then(|m| {
+                    m.get(mime)
+                        .and_then(|info| info.get("alt"))
+                        .or_else(|| m.get("alt"))
+                })
+                .or_else(|| output.get("alt"));
+            notebook_text(alt, 256_000)
+                .ok()
+                .filter(|alt| !alt.trim().is_empty())
+        } else {
+            None
+        };
+        // An oversized or malformed encoded image can still have an inert fallback.
+        if let Ok(encoded) = notebook_text(Some(value), 4 * 1024 * 1024) {
+            let base64: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+            if !base64.is_empty() && base64_image_syntax(&base64) {
+                return Ok(Some(NotebookOutput::Image {
+                    data_url: format!("data:{mime};base64,{base64}"),
+                    fallback: plain.ok().flatten().or(alt),
+                }));
+            }
+        }
+        image_alt = image_alt.or(alt);
+    }
+    let hidden_html = data
+        .and_then(|d| d.get("text/html"))
+        .is_some_and(|v| !v.is_null());
+    // Raster and HTML fallbacks are optional. Preserve the text limit for standalone outputs.
+    let plain = if saw_image || hidden_html {
+        plain.ok().flatten()
+    } else {
+        plain?
+    };
+    if let Some(text) = plain.or(image_alt) {
+        return Ok(Some(NotebookOutput::Text(text)));
+    }
+    Ok(hidden_html.then_some(NotebookOutput::HiddenHtml))
+}
+
 /// `openNotebook`: version 4 notebooks of up to 500 cells and 100 outputs per cell. Saved
 /// outputs only; nothing runs.
 pub fn open_notebook(text: &str) -> Result<Notebook, NotebookError> {
@@ -192,7 +247,11 @@ pub fn open_notebook(text: &str) -> Result<Notebook, NotebookError> {
     let cells = cells
         .iter()
         .map(|cell| {
-            let outputs = cell.get("outputs").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+            let outputs = cell
+                .get("outputs")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if outputs.len() > 100 {
                 return Err("A notebook cell has too many outputs to preview.");
             }
@@ -202,36 +261,8 @@ pub fn open_notebook(text: &str) -> Result<Notebook, NotebookError> {
                 _ => CellKind::Raw,
             };
             let mut shown = Vec::new();
-            'outputs: for output in outputs {
-                let data = output.get("data");
-                for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
-                    if let Some(value) = data.and_then(|d| d.get(mime)).filter(|v| !v.is_null()) {
-                        let base64: String = notebook_text(Some(value), 4 * 1024 * 1024)?
-                            .chars()
-                            .filter(|c| !c.is_whitespace())
-                            .collect();
-                        if base64_image_syntax(&base64) {
-                            shown.push(NotebookOutput {
-                                kind: OutputKind::Image,
-                                text: format!("data:{mime};base64,{base64}"),
-                            });
-                            continue 'outputs;
-                        }
-                    }
-                }
-                let html = notebook_text(data.and_then(|d| d.get("text/html")), 256_000)?;
-                if !html.trim().is_empty() {
-                    shown.push(NotebookOutput { kind: OutputKind::Html, text: html });
-                    continue;
-                }
-                let source = output
-                    .get("text")
-                    .or_else(|| data.and_then(|d| d.get("text/plain")))
-                    .or_else(|| output.get("traceback"));
-                let text = notebook_text(source, 256_000)?;
-                if !text.trim().is_empty() {
-                    shown.push(NotebookOutput { kind: OutputKind::Text, text });
-                }
+            for output in outputs {
+                shown.extend(notebook_output(output)?);
             }
             Ok(NotebookCell {
                 kind,
@@ -301,10 +332,84 @@ mod tests {
         .unwrap();
         assert_eq!(notebook.language, "python3");
         assert_eq!(notebook.cells[0].source, "# Title\ntext");
-        assert_eq!(notebook.cells[1].outputs.len(), 2, "blank outputs are dropped");
-        assert_eq!(notebook.cells[1].outputs[1].text, "data:image/png;base64,iVBORw0K");
+        assert_eq!(
+            notebook.cells[1].outputs.len(),
+            2,
+            "blank outputs are dropped"
+        );
+        assert_eq!(
+            notebook.cells[1].outputs[1],
+            NotebookOutput::Image {
+                data_url: "data:image/png;base64,iVBORw0K".into(),
+                fallback: Some("<Figure>".into()),
+            }
+        );
         assert_eq!(notebook.cells[2].kind, CellKind::Raw);
         assert_eq!(notebook_cell_language("python"), "py");
+    }
+
+    #[test]
+    fn notebooks_keep_plain_fallbacks_and_discard_unsupported_mime_payloads() {
+        let notebook = open_notebook(&serde_json::json!({
+            "nbformat": 4,
+            "cells": [{"cell_type": "code", "outputs": [
+                {"data": {
+                    "application/vnd.jupyter.widget-view+json": {"model_id": "widget-id"},
+                    "application/javascript": "script payload",
+                    "text/html": "<script>raw HTML payload</script>",
+                    "text/plain": ["Saved", " text"]
+                }},
+                {"data": {"text/html": "<iframe src='https://invalid.test'>"}},
+                {"data": {"application/vnd.jupyter.widget-view+json": {"model_id": "widget-only"}}},
+                {"data": {"application/pdf": "encoded pdf"}},
+                {"data": {"text/plain": "Next plain output"}}
+            ]}]
+        }).to_string()).expect("valid notebook");
+        let outputs = &notebook.cells[0].outputs;
+        assert_eq!(
+            outputs.len(),
+            3,
+            "unsupported MIME bundles do not create outputs"
+        );
+        assert_eq!(
+            outputs,
+            &[
+                NotebookOutput::Text("Saved text".into()),
+                NotebookOutput::HiddenHtml,
+                NotebookOutput::Text("Next plain output".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_large_optional_fallback_does_not_refuse_an_image_or_the_notebook() {
+        let oversized = "x".repeat(256_001);
+        let notebook = open_notebook(
+            &serde_json::json!({
+                "nbformat": 4,
+                "cells": [{"cell_type": "code", "outputs": [
+                    {"data": {"image/png": "aGVsbG8=", "text/plain": oversized}},
+                    {"data": {"image/png": "aGVsbG8="}, "metadata": {"alt": oversized}},
+                    {"data": {"text/html": "<p>Saved markup</p>", "text/plain": oversized}},
+                    {"data": {"text/plain": "Other output"}}
+                ]}]
+            })
+            .to_string(),
+        )
+        .expect("image fallback is optional");
+        let image = NotebookOutput::Image {
+            data_url: "data:image/png;base64,aGVsbG8=".into(),
+            fallback: None,
+        };
+        assert_eq!(
+            notebook.cells[0].outputs,
+            [
+                image.clone(),
+                image,
+                NotebookOutput::HiddenHtml,
+                NotebookOutput::Text("Other output".into())
+            ]
+        );
     }
 
     #[test]
