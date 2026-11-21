@@ -208,6 +208,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     };
     use crate::screens::panel::{self, PanelRegistry};
     theme::bind(client, None);
+    provide_context(crate::screens::pull_requests::list::bind(client));
     thread_ops::bind_confirmation(client);
     provide_context(git_panel::git_actions(client.git_panel()));
     provide_context(git_panel::git_actions_registration(client.git_panel()));

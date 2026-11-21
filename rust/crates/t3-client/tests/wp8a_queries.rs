@@ -524,3 +524,88 @@ fn action_list_patches_honor_quoted_and_negated_draft_qualifiers_and_page_bounds
         ListPatch::Unchanged
     );
 }
+
+#[test]
+fn typed_list_search_splits_qualifiers_from_host_text() {
+    use t3_client::workspace::pr_views::queries::parse_list_search;
+    for (query, text, filters) in [
+        (
+            r#"label:"needs, design",wip -size:S,XS fix parser"#,
+            "fix parser",
+            json!({"labels":[["needs, design","wip"]],"excludedLabels":["size:S","size:XS"]}),
+        ),
+        (
+            "is:pr -repo:org/fork author:me author:@me DRAFT:false review:changes_requested status:failure",
+            "",
+            json!({"author":"me","draft":"hide","review":"changes-requested","checks":"failing"}),
+        ),
+        (
+            "author:alice author:bob -draft:true area:web draft:maybe",
+            "draft:maybe",
+            json!({"draft":"hide","labels":[["area:web"]]}),
+        ),
+        (
+            r#""size:XXL" https://github.com/org/repo/pull/1"#,
+            r#""size:XXL" https://github.com/org/repo/pull/1"#,
+            json!({}),
+        ),
+    ] {
+        let (rest, actual) = parse_list_search(query);
+        assert_eq!((rest.as_str(), json!(actual)), (text, filters), "{query}");
+    }
+}
+
+#[test]
+fn list_route_scopes_and_filters_survive_replacing_sort() {
+    use t3_client::workspace::pr_views::preferences::ListSearch;
+    let mut location = ListSearch::parse(
+        "?environmentId=work&projectId=ui&host=github.com&state=closed&labels=%5B%22triage%22%2C%22TRIAGE%22%5D&q=draft%3Atrue+fix&draft=hide&author=alice",
+    );
+    location.set("sort", "largest");
+    let query = location.href();
+    let restored = ListSearch::parse(query.split_once('?').unwrap().1);
+    assert_eq!(restored, location);
+    assert_eq!(
+        json!(restored.input(restored.value("q"))),
+        json!({
+            "projectId":"ui","host":"github.com","state":"closed","involvement":"all","limit":99,"query":"fix",
+            "filters":{"draft":"only","labels":[["triage"]],"author":"alice"}
+        })
+    );
+}
+
+#[test]
+fn list_continuations_regrow_only_to_the_web_cap_and_stop_on_a_repeated_cursor() {
+    use t3_client::workspace::pr_list::next_list_input;
+    let mut input: PullRequestListInput =
+        decode(json!({"state":"all","limit":495,"host":"forge.test"}));
+    let mut page: PullRequestListResult = decode(
+        json!({"entries":[],"providers":[],"errors":[],"viewers":{},"truncated":true,"nextCursors":{}}),
+    );
+    input = next_list_input(&input, &page).unwrap();
+    assert_eq!(
+        json!(input),
+        json!({"state":"all","limit":500,"host":"forge.test"})
+    );
+    assert!(next_list_input(&input, &page).is_none());
+    page.next_cursors = decode(json!({"project":"cursor"}));
+    let next = next_list_input(&input, &page).unwrap();
+    assert_eq!(next.cursors, Some(Some(page.next_cursors.clone())));
+    assert!(next_list_input(&next, &page).is_none());
+}
+
+#[test]
+fn changing_draft_in_the_menu_replaces_only_unquoted_draft_qualifiers() {
+    use t3_client::workspace::pr_views::preferences::ListSearch;
+    let mut search = ListSearch::parse("?q=draft%3Atrue+%22draft%3Afalse%22+fix");
+    search.set("draft", "hide");
+    assert_eq!(search.value("q"), r#""draft:false" fix"#);
+    assert_eq!(
+        json!(search.input(search.value("q")))["filters"],
+        json!({"draft":"hide"})
+    );
+    search.set("q", "draft:true");
+    search.set("draft", "");
+    assert_eq!(search.value("q"), "");
+    assert!(search.input("").filters.is_none());
+}

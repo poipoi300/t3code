@@ -213,19 +213,15 @@ fn copy_fields(value: &mut Value, reply: &Value, fields: &[&str]) {
         }
     }
 }
-fn query_draft_filter(query: &str) -> Option<PullRequestListFiltersDraft> {
-    let mut tail = query;
-    let mut draft = None;
+/// Tokenizer used by the web's QUERY_TOKEN and quoted comma-separated label lists.
+fn tokens(mut tail: &str, separator: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut result = Vec::new();
     while !tail.is_empty() {
-        tail = tail.trim_start_matches(is_js_whitespace);
-        if tail.is_empty() {
-            break;
-        }
         let mut length = 0;
         while length < tail.len() {
             let rest = &tail[length..];
             let Some(ch) = rest.chars().next() else { break };
-            if is_js_whitespace(ch) {
+            if separator(ch) {
                 break;
             }
             if ch == '"' {
@@ -238,36 +234,140 @@ fn query_draft_filter(query: &str) -> Option<PullRequestListFiltersDraft> {
             }
         }
         if length == 0 {
-            tail = &tail[tail.chars().next()?.len_utf8()..];
-            continue;
-        }
-        let token = &tail[..length];
-        tail = &tail[length..];
-        let negated = token.starts_with('-');
-        let token = token.strip_prefix('-').unwrap_or(token);
-        let Some((name, value)) = token.split_once(':') else {
-            continue;
-        };
-        if !name.eq_ignore_ascii_case("draft") {
-            continue;
-        }
-        let value = value.replace('"', "");
-        let value = value.js_trim();
-        let only = if value.eq_ignore_ascii_case("true") {
-            !negated
-        } else if value.eq_ignore_ascii_case("false") {
-            negated
+            tail = &tail[tail.chars().next().map_or(0, char::len_utf8)..];
         } else {
-            continue;
-        };
-        draft = Some(if only {
-            PullRequestListFiltersDraft::Only
-        } else {
-            PullRequestListFiltersDraft::Hide
-        });
+            result.push(&tail[..length]);
+            tail = &tail[length..];
+        }
     }
-    draft
+    result
 }
+
+pub(super) fn without_draft_qualifiers(query: &str) -> String {
+    tokens(query, is_js_whitespace)
+        .into_iter()
+        .filter(|token| parse_list_search(token).1.draft.is_none())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn bounded_name(value: &str) -> t3_contracts::base_schemas::TrimmedNonEmptyString {
+    let value = super::markdown::bound_utf16(value, 200, "");
+    t3_contracts::base_schemas::TrimmedNonEmptyString(value.js_trim().into())
+}
+
+/// Port of packages/client-runtime/src/pullRequestQuery.ts parsePullRequestQuery.
+pub fn parse_list_search(query: &str) -> (String, PullRequestListFilters) {
+    let mut filters = PullRequestListFilters {
+        author: None,
+        draft: None,
+        review: None,
+        checks: None,
+        labels: None,
+        excluded_labels: None,
+    };
+    let mut text = Vec::new();
+    let mut labels = Vec::new();
+    let mut excluded = Vec::new();
+    let mut authors = BTreeMap::new();
+    for token in tokens(query, is_js_whitespace) {
+        let negated = token.starts_with('-');
+        let qualified = token.strip_prefix('-').unwrap_or(token);
+        let Some((key, raw)) = qualified.split_once(':') else {
+            text.push(token);
+            continue;
+        };
+        let clean = raw.replace('"', "");
+        let value = clean.js_trim();
+        let valid_key = key.starts_with(|ch: char| ch.is_ascii_alphabetic())
+            && key
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_'));
+        if value.is_empty() || !valid_key {
+            text.push(token);
+            continue;
+        }
+        let lower = value.to_ascii_lowercase();
+        match key.to_ascii_lowercase().as_str() {
+            "author" if !negated => {
+                let login = bounded_name(value);
+                let lower = login.0.to_lowercase();
+                let identity = if lower == "@me" { "me".into() } else { lower };
+                authors.entry(identity).or_insert(login);
+            }
+            "draft" if matches!(lower.as_str(), "true" | "false") => {
+                filters.draft = Some(Some(if (lower == "true") != negated {
+                    PullRequestListFiltersDraft::Only
+                } else {
+                    PullRequestListFiltersDraft::Hide
+                }));
+            }
+            "review" if !negated => {
+                let decision = match lower.as_str() {
+                    "approved" => PullRequestListFiltersReview::Approved,
+                    "changes_requested" | "changes-requested" => {
+                        PullRequestListFiltersReview::ChangesRequested
+                    }
+                    "required" | "review-required" => PullRequestListFiltersReview::ReviewRequired,
+                    "none" => PullRequestListFiltersReview::None,
+                    _ => {
+                        text.push(token);
+                        continue;
+                    }
+                };
+                filters.review = Some(Some(decision));
+            }
+            "status" | "checks" if !negated => {
+                let checks = match lower.as_str() {
+                    "success" | "passing" => PullRequestListFiltersChecks::Passing,
+                    "failure" | "failing" => PullRequestListFiltersChecks::Failing,
+                    _ => {
+                        text.push(token);
+                        continue;
+                    }
+                };
+                filters.checks = Some(Some(checks));
+            }
+            "is" | "archived" | "state" | "repo" | "org" | "user" | "sort" => {}
+            "author" | "draft" | "review" | "status" | "checks" => text.push(token),
+            name if name == "label" || !value.starts_with('/') => {
+                let names: Vec<_> = tokens(raw, |ch| ch == ',')
+                    .into_iter()
+                    .map(|part| part.replace('"', ""))
+                    .filter(|part| !part.js_trim().is_empty())
+                    .take(10)
+                    .map(|part| {
+                        let part = part.js_trim();
+                        if name == "label" || part.contains(':') {
+                            bounded_name(part)
+                        } else {
+                            bounded_name(&format!("{key}:{part}"))
+                        }
+                    })
+                    .collect();
+                if names.is_empty() {
+                    text.push(token);
+                } else if negated {
+                    excluded.extend(names.into_iter().take(10 - excluded.len()));
+                } else if labels.len() < 10 {
+                    labels.push(names);
+                }
+            }
+            _ => text.push(token),
+        }
+    }
+    if authors.len() == 1 {
+        filters.author = Some(authors.into_values().next());
+    }
+    if !labels.is_empty() {
+        filters.labels = Some(Some(labels));
+    }
+    if !excluded.is_empty() {
+        filters.excluded_labels = Some(Some(excluded));
+    }
+    (text.join(" "), filters)
+}
+
 fn list_accepts(
     input: &PullRequestListInput,
     state: &PullRequestState,
@@ -278,7 +378,7 @@ fn list_accepts(
         .as_ref()
         .and_then(Option::as_ref)
         .map_or("", |v| v.0.as_str());
-    let draft_filter = query_draft_filter(query).or_else(|| {
+    let draft_filter = parse_list_search(query).1.draft.flatten().or_else(|| {
         input
             .filters
             .as_ref()

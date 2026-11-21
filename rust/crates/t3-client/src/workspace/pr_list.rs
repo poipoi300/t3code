@@ -1074,3 +1074,82 @@ pub fn retain_visible_stats_batches(
 ) {
     batches.retain(|batch| !batch.keys.is_disjoint(visible));
 }
+/// PullRequestsPage's cursor continuation, with bounded page growth for hosts without cursors.
+pub fn next_list_input(
+    current: &PullRequestListInput,
+    answer: &PullRequestListResult,
+) -> Option<PullRequestListInput> {
+    if !answer.truncated {
+        return None;
+    }
+    let mut next = current.clone();
+    if answer.next_cursors.is_empty() {
+        let limit = current.limit.flatten().unwrap_or(99);
+        if limit >= 500 {
+            return None;
+        }
+        next.limit = Some(Some((limit + 99).min(500)));
+        next.cursors = None;
+    } else {
+        // A host that repeats its continuation would otherwise offer the same page forever.
+        if current.cursors.as_ref().and_then(Option::as_ref) == Some(&answer.next_cursors) {
+            return None;
+        }
+        next.cursors = Some(Some(answer.next_cursors.clone()));
+    }
+    Some(next)
+}
+
+/// PullRequestsPage assigns a checkout to one configured server before searching it.
+/// Wait for project ownership when the route names a project and shells are still loading.
+pub fn list_targets(
+    environments: &[EnvironmentId],
+    projects: &[EnvironmentProject],
+    shells_known: bool,
+    named: &str,
+    project: Option<&ProjectId>,
+) -> Option<Vec<super::pr_assignment::ProjectQuery>> {
+    use super::pr_assignment::{ProjectQuery, project_queries};
+    let named = environments.iter().find(|env| env.0 == named);
+    let environments = environments
+        .iter()
+        .filter(|env| named.is_none_or(|id| id == *env))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(project) = project {
+        let known_owner = projects
+            .iter()
+            .any(|p| !p.is_scratch && &p.project.id == project);
+        if !known_owner && !shells_known {
+            return None;
+        }
+        let ids = query_environment_ids(&environments, projects, None, Some(project), true);
+        return Some(
+            ids.into_iter()
+                .map(|environment| ProjectQuery {
+                    environment,
+                    project_ids: None,
+                })
+                .collect(),
+        );
+    }
+    if !shells_known {
+        return Some(
+            environments
+                .into_iter()
+                .map(|environment| ProjectQuery {
+                    environment,
+                    project_ids: None,
+                })
+                .collect(),
+        );
+    }
+    let projects: Vec<_> = projects.iter().filter(|p| !p.is_scratch).cloned().collect();
+    // The initial assignment has no host availability observations yet.
+    Some(project_queries(
+        &projects,
+        &environments,
+        &BTreeMap::new(),
+        |_| String::new(),
+    ))
+}

@@ -387,3 +387,20 @@ pub async fn load_registered_diff(
         .finish(key, ticket, Ok(value), loader.platform.now_epoch_ms())
         .map_err(|_| super::diff_http::DiffLoadError::InvalidResponse)
 }
+
+/// Global list queries run on each selected server. The session endpoint enforces
+/// the live grant and decodes the server's typed list result.
+impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
+    pub async fn pull_request_list(
+        &self,
+        environment: &EnvironmentId,
+        input: PullRequestListInput,
+    ) -> Result<PullRequestListResult, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let session = self
+            .client(environment)
+            .and_then(|client| client.session())
+            .ok_or(RpcCallError::NotSent(crate::ClientError::Disconnected))?;
+        session.command::<WsPullRequestsListRpc>(input).await
+    }
+}
