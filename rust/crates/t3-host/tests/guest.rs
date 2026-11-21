@@ -348,10 +348,8 @@ async fn output_only_opens_command_rows_and_terminates_when_access_is_revoked() 
     f.host.enabled.store(false, Ordering::SeqCst);
     tokio::time::advance(std::time::Duration::from_secs(30)).await;
     assert!(output.next().await.is_none());
-    assert!(matches!(
-        stream.next().await,
-        Some(t3_contracts::guest_stream::GuestStreamEvent::Ended)
-    ));
+    // Turning the beta off closes the stream quietly so the browser reconnects (the TS
+    // `Stream.interruptWhen`); only closing, expiry, archive and deletion send `ended`.
     assert!(stream.next().await.is_none());
 }
 #[tokio::test]

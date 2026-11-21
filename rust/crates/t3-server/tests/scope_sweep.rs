@@ -101,7 +101,6 @@ async fn session(origin: &str, credential: &Value) -> (String, Value) {
 /// Both default-feature environments must register the same RPCs. Keep this list in sync
 /// with the measured counts and remaining blockers in `briefs/server-unserved.md`.
 const UNSERVED: &[&str] = &[
-    "guestShare.create",
     "orchestration.getNativeChildWork",
     "provider.consumeResetCredit",
     "server.commitDesktopUpdate",
