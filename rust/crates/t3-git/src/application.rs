@@ -210,10 +210,27 @@ impl GitApplicationService {
         Ok(result)
     }
     pub fn run_stacked_action(&self, input: GitRunStackedActionInput) -> GitActionSubscription {
+        self.run_stacked_action_guarded(input, ())
+    }
+
+    pub fn run_stacked_action_guarded(
+        &self,
+        input: GitRunStackedActionInput,
+        admission: impl Send + 'static,
+    ) -> GitActionSubscription {
         let receiver = Arc::new(ProgressBuffer::default());
         let sender = receiver.clone();
         let service = self.clone();
+        let worker = self.workflow.git().at(&input.cwd.0).admit_worker();
         let (task, handle) = SetupTask::spawn(move |cancellation| async move {
+            let _admission = admission;
+            let _worker = match worker {
+                Ok(guard) => guard,
+                Err(error) => {
+                    sender.send(Err(error));
+                    return;
+                }
+            };
             let workflow = tokio::select! { _ = cancellation.cancelled() => return, result = service.workflow(Path::new(&input.cwd.0)) => result };
             let workflow = match workflow {
                 Ok(workflow) => workflow.with_cancellation(cancellation.clone()),

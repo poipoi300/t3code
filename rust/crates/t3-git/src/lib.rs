@@ -184,6 +184,7 @@ pub struct Git {
     bound_repository: Option<Arc<binding::BoundRepository>>,
     bound_no_repository: bool,
     checkpoint_mode: bool,
+    cleanup_mode: bool,
 }
 
 impl Git {
@@ -204,6 +205,7 @@ impl Git {
             bound_repository: None,
             bound_no_repository: false,
             checkpoint_mode: false,
+            cleanup_mode: false,
         }
     }
     pub fn cwd(&self) -> &Path {
@@ -312,6 +314,70 @@ impl Git {
         args: &[impl AsRef<std::ffi::OsStr>],
         options: ExecuteOptions,
     ) -> Result<ProcessOutput, GitError> {
+        if !self.cleanup_mode {
+            return self.execute_process(args, options).await;
+        }
+        if self.bound_repository.is_none() {
+            return Err(GitError::Unavailable(
+                "Missing cleanup repository binding.".into(),
+            ));
+        }
+        // Read effective keys before each maintenance command. Repository-local commands are
+        // outside the trust boundary. User/system filters must not run implicitly under status.
+        let filters = self
+            .execute_process(
+                &[
+                    "config",
+                    "--null",
+                    "--includes",
+                    "--show-scope",
+                    "--name-only",
+                    "--get-regexp",
+                    "^filter\\..*\\.(clean|smudge|process|required)$",
+                ],
+                ExecuteOptions {
+                    allow_nonzero: true,
+                    max_output_bytes: 65_536,
+                    output_mode: OutputMode::Error,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if !matches!(filters.code, Some(0 | 1)) {
+            return Err(GitError::Unavailable(
+                "Cannot inspect Git filter configuration.".into(),
+            ));
+        }
+        let mut safe = Vec::<OsString>::new();
+        let text = std::str::from_utf8(&filters.stdout)
+            .map_err(|_| GitError::InvalidOutput("filter configuration".into()))?;
+        let mut fields = text.split_terminator('\0');
+        while let Some(scope) = fields.next() {
+            let key = fields
+                .next()
+                .ok_or_else(|| GitError::InvalidOutput("filter configuration".into()))?;
+            if !matches!(scope, "global" | "system" | "command") {
+                return Err(GitError::Unavailable(
+                    "Cleanup requires a repository without local filter commands.".into(),
+                ));
+            }
+            safe.push("-c".into());
+            let value = if key.ends_with(".required") {
+                "false"
+            } else {
+                ""
+            };
+            safe.push(format!("{key}={value}").into());
+        }
+        safe.extend(args.iter().map(|arg| arg.as_ref().to_owned()));
+        self.execute_process(&safe, options).await
+    }
+
+    async fn execute_process(
+        &self,
+        args: &[impl AsRef<std::ffi::OsStr>],
+        options: ExecuteOptions,
+    ) -> Result<ProcessOutput, GitError> {
         if self.bound_no_repository {
             return Err(self.command_error(
                 "Git.execute",
@@ -389,6 +455,16 @@ impl Git {
             // -C lets Git diagnose a deleted workspace without a spawn-cwd failure.
             process.env = git_environment(&self.environment, &options.env);
             if let Some(binding) = &self.bound_repository {
+                if self.cleanup_mode {
+                    process.env.insert(
+                        "GIT_DIR".into(),
+                        Some(core::git_path(&binding.identity.git_dir).into_os_string()),
+                    );
+                    process.env.insert(
+                        "GIT_WORK_TREE".into(),
+                        Some(core::git_path(&binding.identity.top_level).into_os_string()),
+                    );
+                }
                 process.env.insert(
                     "GIT_COMMON_DIR".into(),
                     Some(core::git_path(&binding.identity.common_dir).into_os_string()),
@@ -422,10 +498,19 @@ impl Git {
                 String::new()
             };
             process.check_exit = false;
-            process.cancellation = self.cancellation.clone();
+            process.cancellation = self.cancellation.child_token();
             process.on_stdout_chunk = options.on_stdout_chunk.clone();
             process.on_stderr_chunk = options.on_stderr_chunk.clone();
-            let output = run(process).await?;
+            // A dropped RPC cancels this command. Its worker owns admission through process reaping.
+            let cancel = process.cancellation.clone().drop_guard();
+            let worker = self.admit_worker()?;
+            let output = tokio::spawn(async move {
+                let _worker = worker;
+                run(process).await
+            })
+            .await
+            .map_err(|_| GitError::Unavailable("Git command worker stopped.".into()))??;
+            drop(cancel);
             if !options.allow_nonzero && output.code != Some(0) {
                 let stderr = output.stderr_text();
                 #[cfg(target_os = "macos")]

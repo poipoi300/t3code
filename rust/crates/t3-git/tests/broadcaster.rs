@@ -91,7 +91,12 @@ async fn dropping_last_remote_subscription_cancels_its_running_fetch_and_reaps_c
     let mut stream = service.stream_status(repo.root(), true).await?;
     stream.recv().await.expect("snapshot");
     let mut gate = accept_gate(&listener).await?;
+    assert!(
+        repo.git.try_quiesce_workers().is_none(),
+        "cleanup admitted during a background status fetch"
+    );
     stream.close().await;
+    assert!(repo.git.try_quiesce_workers().is_some());
     let mut remaining = Vec::new();
     assert!(match gate.read_to_end(&mut remaining).await {
         Ok(_) => true,

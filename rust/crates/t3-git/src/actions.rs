@@ -113,7 +113,73 @@ impl Drop for OperationGuard {
         self.0.operations_finished.notify_waiters();
     }
 }
+pub(crate) struct WorkerClaim {
+    folder: Option<PathBuf>,
+    repository: Option<crate::FileId>,
+    exclusive: bool,
+}
+
 impl Git {
+    fn worker_claim(&self, exclusive: bool) -> Option<Arc<WorkerClaim>> {
+        let folder = crate::safety::resolve(self.cwd()).ok();
+        let repository = self
+            .bound_repository
+            .as_ref()
+            .and_then(|b| b.identity.ids)
+            .map(|ids| ids.common_dir)
+            .or_else(|| {
+                for dir in folder.as_ref()?.ancestors() {
+                    let entry = dir.join(".git");
+                    let admin = match std::fs::symlink_metadata(&entry) {
+                        Ok(m) if m.is_dir() => entry,
+                        Ok(_) => crate::binding::pointer(&entry, "gitdir: ").ok()?,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => return None,
+                    };
+                    let common = match std::fs::symlink_metadata(admin.join("commondir")) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => admin,
+                        _ => crate::binding::pointer(&admin.join("commondir"), "").ok()?,
+                    };
+                    return crate::FileId::directory(&common).ok();
+                }
+                None
+            });
+        let claim = Arc::new(WorkerClaim {
+            folder,
+            repository,
+            exclusive,
+        });
+        let mut claims = self.core.workers.lock().unwrap_or_else(|e| e.into_inner());
+        claims.retain(|entry| entry.strong_count() != 0);
+        for other in claims.iter().filter_map(std::sync::Weak::upgrade) {
+            if (exclusive || other.exclusive)
+                && (claim.repository.is_none()
+                    || other.repository.is_none()
+                    || claim.repository == other.repository
+                    || claim
+                        .folder
+                        .as_ref()
+                        .zip(other.folder.as_ref())
+                        .is_none_or(|(a, b)| a.starts_with(b) || b.starts_with(a)))
+            {
+                return None;
+            }
+        }
+        claims.push(Arc::downgrade(&claim));
+        Some(claim)
+    }
+
+    /// Exclude workers in this repository, including its other linked checkouts.
+    pub fn try_quiesce_workers(&self) -> Option<impl Send + Sync + use<>> {
+        self.worker_claim(true)
+    }
+
+    /// Retain admission until the last child process has been reaped.
+    pub fn admit_worker(&self) -> Result<impl Send + Sync + use<>, GitError> {
+        self.worker_claim(false)
+            .ok_or_else(|| GitError::Unavailable("Storage cleanup is using the checkout.".into()))
+    }
+
     pub async fn drain_operations(&self) {
         if let Some(scope) = &self.operation_scope {
             scope.drain().await;
@@ -140,6 +206,7 @@ impl Git {
         F: FnOnce(Git) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T, GitError>> + Send + 'static,
     {
+        let worker = self.admit_worker()?;
         let token = self.cancellation.child_token();
         let guard = CancelOnDrop(token.clone());
         let git = self.clone().with_cancellation(token);
@@ -149,6 +216,7 @@ impl Git {
         let operation_guard = OperationGuard(self.core.clone());
         let scope = self.operation_scope.as_ref().map(|scope| scope.start());
         let result = tokio::spawn(async move {
+            let _worker = worker;
             let _guard = operation_guard;
             let _scope = scope;
             operation(git).await

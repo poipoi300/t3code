@@ -111,6 +111,30 @@ async fn rpc_service_creates_worktree_records_base_and_streams_stacked_actions()
 }
 
 #[tokio::test]
+async fn cleanup_fences_linked_checkouts_and_leaves_other_repositories_available() -> TestResult {
+    let repo = Repository::new().await?;
+    repo.commit("root").await?;
+    let sibling = repo.temp.path().join("linked");
+    repo.command(&["worktree", "add", "-b", "linked", sibling.to_str().unwrap()])
+        .await?;
+    let unrelated = Repository::new().await?;
+    let _permit = repo
+        .git
+        .at(&sibling)
+        .try_quiesce_workers()
+        .expect("idle checkout");
+    assert!(
+        repo.git.admit_worker().is_err(),
+        "linked worktrees share their common directory"
+    );
+    assert!(
+        repo.git.at(unrelated.root()).admit_worker().is_ok(),
+        "unrelated repository was blocked"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn closing_a_stacked_action_cancels_and_reaps_its_commit_process() -> TestResult {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     let repo = Repository::new().await?;
@@ -143,6 +167,15 @@ async fn closing_a_stacked_action_cancels_and_reaps_its_commit_process() -> Test
     let mut message = String::new();
     reader.read_line(&mut message).await?;
     assert!(message.starts_with("ready{"));
+    let sentinel = repo.root().join("cleanup-sentinel");
+    std::fs::write(&sentinel, "keep")?;
+    if let Some(_permit) = repo.git.try_quiesce_workers() {
+        std::fs::remove_file(&sentinel)?;
+    }
+    assert!(
+        sentinel.exists(),
+        "cleanup obtained deletion permission during the Git worker"
+    );
     let mut branch = broadcaster.stream_branch_status(repo.root()).await?;
     branch.recv().await.expect("branch snapshot");
     // Unsubscribing a watcher must not wait for a different, still-running action.
@@ -153,6 +186,10 @@ async fn closing_a_stacked_action_cancels_and_reaps_its_commit_process() -> Test
         Ok(_) => true,
         Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
     });
+    assert!(
+        repo.git.try_quiesce_workers().is_some(),
+        "reaped worker retained its permit"
+    );
     assert_eq!(repo.git.resolve_commit("HEAD").await?, before);
     assert!(repo.root().join("file").exists());
     broadcaster.shutdown().await;

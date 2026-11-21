@@ -975,6 +975,28 @@ impl GitWorkflowService {
         }
         Ok((context, true))
     }
+    /// An uncached checkout-bound lookup for a destructive maintenance decision.
+    pub async fn fresh_branch_pull_request(
+        &self,
+        branch: &str,
+    ) -> Result<Option<ChangeRequest>, GitError> {
+        let details = self.git.status_details_remote(false).await?;
+        if details.branch.as_deref() != Some(branch) || details.is_default_branch {
+            return Ok(None);
+        }
+        let (context, lookup) = self
+            .lookup_head_context(
+                branch,
+                details.upstream_ref.as_deref(),
+                details.default_branch.as_deref(),
+            )
+            .await?;
+        if !lookup {
+            return Ok(None);
+        }
+        self.find_request(&context, false).await
+    }
+
     pub async fn remote_status(
         &self,
         refresh_upstream: bool,

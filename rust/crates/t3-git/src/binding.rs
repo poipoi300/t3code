@@ -238,7 +238,173 @@ fn forget_scope(
     });
 }
 
+/// Read a bounded, ordinary Git pointer relative to its containing directory.
+pub(crate) fn pointer(path: &Path, prefix: &str) -> Result<PathBuf, GitError> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(changed(path, "Expected a regular repository pointer."));
+    }
+    let Marker::File(bytes, actual, _) = marker(path)? else {
+        return Err(changed(path, "Repository pointer is missing."));
+    };
+    let value = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|s| s.trim_end_matches(['\r', '\n']).strip_prefix(prefix))
+        .filter(|s| !s.is_empty() && !s.contains(['\r', '\n', '\0']))
+        .ok_or_else(|| changed(path, "Invalid repository pointer."))?;
+    Ok(std::fs::canonicalize(
+        actual
+            .parent()
+            .ok_or_else(|| changed(path, "Missing parent."))?
+            .join(value),
+    )?)
+}
+
 impl Git {
+    /// Pin maintenance commands without invoking Git's repository discovery on an untrusted checkout.
+    pub async fn cleanup_checkout(
+        &self,
+        source: Option<&RepositoryBinding>,
+        recorded: Option<&RepositoryBinding>,
+    ) -> Result<Self, GitError> {
+        let root = std::fs::canonicalize(self.cwd())?;
+        let marker_path = root.join(".git");
+        let (admin, common) = match source {
+            Some(source) => (
+                pointer(&marker_path, "gitdir: ")?,
+                source.common_dir.clone(),
+            ),
+            None if recorded.is_some() && !std::fs::symlink_metadata(&marker_path)?.is_dir() => {
+                let saved = recorded.ok_or_else(|| changed(&root, "Missing project binding."))?;
+                (saved.git_dir.clone(), saved.common_dir.clone())
+            }
+            None => (marker_path.clone(), marker_path.clone()),
+        };
+        if source.is_some() && admin.parent() != Some(common.join("worktrees").as_path()) {
+            return Err(changed(&root, "Unregistered worktree directory."));
+        }
+        let ids = RepositoryIds {
+            git_entry: file_id(&marker_path)?,
+            git_dir: FileId::directory(&admin)?,
+            common_dir: FileId::directory(&common)?,
+        };
+        let identity = RepositoryBinding {
+            version: REPOSITORY_BINDING_VERSION,
+            top_level: root.clone(),
+            git_dir: admin.clone(),
+            common_dir: common.clone(),
+            ids: Some(ids),
+        };
+        if recorded.is_some_and(|saved| saved != &identity)
+            || source
+                .is_some_and(|saved| saved.ids.map(|ids| ids.common_dir) != Some(ids.common_dir))
+        {
+            return Err(changed(
+                &root,
+                "The checkout differs from its recorded repository.",
+            ));
+        }
+        let bound = BoundRepository::snapshot(identity, &root)?;
+        if admin != marker_path || source.is_some() {
+            if admin.parent() != Some(common.join("worktrees").as_path())
+                || pointer(&marker_path, "gitdir: ")? != admin
+                || pointer(&admin.join("commondir"), "")? != common
+                || pointer(&admin.join("gitdir"), "")? != marker_path
+            {
+                return Err(changed(
+                    &root,
+                    "The worktree registration does not match its checkout.",
+                ));
+            }
+        } else if !matches!(marker(&admin.join("commondir"))?, Marker::Missing) {
+            return Err(changed(
+                &root,
+                "The project Git directory redirects its common directory.",
+            ));
+        }
+        let mut git = self.clone();
+        git.bound_repository = Some(Arc::new(bound));
+        git.fsmonitor_disabled = true;
+        git.cleanup_mode = true;
+        git.checkpoint_mode = true;
+        let top = git.discover_path("--show-toplevel").await?;
+        if std::fs::canonicalize(top)? != root {
+            return Err(changed(&root, "The checkout top-level changed."));
+        }
+        Ok(git)
+    }
+
+    /// A module store must be beneath the verified parent's own administrative directory.
+    /// Populated modules also have a gitfile and a core.worktree backlink.
+    pub async fn cleanup_submodule(
+        &self,
+        checkout: Option<&Path>,
+        store: Option<&Path>,
+    ) -> Result<Self, GitError> {
+        let parent = self
+            .recorded_repository()
+            .flatten()
+            .filter(|_| self.cleanup_mode)
+            .ok_or_else(|| changed(self.cwd(), "Missing cleanup repository."))?;
+        let root = match checkout {
+            Some(path) => std::fs::canonicalize(path)?,
+            None => parent.top_level.clone(),
+        };
+        if !root.starts_with(&parent.top_level) || checkout.is_some() && root == parent.top_level {
+            return Err(changed(
+                &root,
+                "Submodule checkout lies outside its parent.",
+            ));
+        }
+        let entry = root.join(".git");
+        let directory = match store {
+            Some(directory) => std::fs::canonicalize(directory)?,
+            None => pointer(&entry, "gitdir: ")?,
+        };
+        let modules = parent.git_dir.join("modules");
+        if !directory.starts_with(&modules)
+            || directory == modules
+            || !matches!(marker(&directory.join("commondir"))?, Marker::Missing)
+        {
+            return Err(changed(&directory, "Unregistered submodule store."));
+        }
+        let dir_id = FileId::directory(&directory)?;
+        let identity = RepositoryBinding {
+            version: REPOSITORY_BINDING_VERSION,
+            top_level: root.clone(),
+            git_dir: directory.clone(),
+            common_dir: directory.clone(),
+            ids: Some(RepositoryIds {
+                git_entry: file_id(&entry)?,
+                git_dir: dir_id,
+                common_dir: dir_id,
+            }),
+        };
+        let mut git = self.at(&root);
+        git.bound_repository = Some(Arc::new(BoundRepository::snapshot(identity, &root)?));
+        if checkout.is_some() {
+            if pointer(&entry, "gitdir: ")? != directory {
+                return Err(changed(&root, "Submodule registration changed."));
+            }
+            let backlink = git
+                .execute(
+                    &["config", "--local", "--get", "core.worktree"],
+                    Default::default(),
+                )
+                .await?
+                .stdout_text();
+            if std::fs::canonicalize(directory.join(backlink.trim_end_matches(['\n', '\r'])))?
+                != root
+            {
+                return Err(changed(&root, "Submodule checkout backlink changed."));
+            }
+        }
+        let top = git.discover_path("--show-toplevel").await?;
+        if std::fs::canonicalize(top)? != root {
+            return Err(changed(&root, "Submodule top-level changed."));
+        }
+        Ok(git)
+    }
+
     pub async fn bind_repository(&self) -> Result<Option<RepositoryBinding>, GitError> {
         Ok(self
             .repository_operation()
@@ -336,6 +502,9 @@ impl Git {
     }
 
     pub(crate) async fn repository_operation(&self) -> Result<Self, GitError> {
+        if self.cleanup_mode {
+            return self.repository_reader().await;
+        }
         let expected = self
             .bound_repository
             .as_ref()

@@ -261,6 +261,7 @@ pub(crate) struct CoreState {
     fetch_permits: Arc<Semaphore>,
     pub local_status: Cache<GitStatusDetails>,
     pub untracked_failures: Mutex<BTreeMap<PathBuf, (String, u32, Instant, String)>>,
+    pub workers: std::sync::Mutex<Vec<std::sync::Weak<crate::actions::WorkerClaim>>>,
     pub operations: std::sync::atomic::AtomicUsize,
     pub operations_finished: tokio::sync::Notify,
     background_shutdown: crate::CancellationToken,
@@ -282,6 +283,7 @@ impl Default for CoreState {
             fetch_permits: Arc::new(Semaphore::new(4)),
             local_status: Cache::new(2048),
             untracked_failures: Mutex::new(BTreeMap::new()),
+            workers: Default::default(),
             operations: std::sync::atomic::AtomicUsize::new(0),
             operations_finished: tokio::sync::Notify::new(),
             background_shutdown: crate::CancellationToken::new(),
@@ -1221,6 +1223,7 @@ impl Git {
             if locked.retry_at.is_some_and(|retry| Instant::now() < retry) {
                 return Ok(());
             }
+            let worker = reader.admit_worker()?;
             let (sender, receiver) = watch::channel(None);
             locked.pending = Some(receiver.clone());
             let state = state.clone();
@@ -1254,6 +1257,7 @@ impl Git {
             });
             let scope = reader.operation_scope.as_ref().map(|scope| scope.start());
             tokio::spawn(async move {
+                let _worker = worker;
                 let _operation = operation;
                 let _scope = scope;
                 let _permit = tokio::select! {
