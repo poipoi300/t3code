@@ -585,3 +585,38 @@ async fn status_reads_do_not_run_a_repository_planted_at_a_submodule_path() -> T
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn only_the_recorded_project_can_bind_a_recreated_linked_checkout() -> TestResult {
+    let project = Repository::new().await?;
+    project.commit("base").await?;
+    let other = Repository::new().await?;
+    let source = project.git.bind_repository().await?.expect("project");
+    let wrong = other.git.bind_repository().await?.expect("other project");
+    let folder = project.temp.path().join("linked");
+    let moved = project.temp.path().join("old");
+    let name = folder.to_str().expect("fixture path");
+    project
+        .command(&["worktree", "add", "-b", "initial", name])
+        .await?;
+    let checkout = project.git.at(&folder);
+    let first = checkout
+        .bind_repository()
+        .await?
+        .expect("original worktree");
+    project
+        .command(&["worktree", "move", name, moved.to_str().expect("old path")])
+        .await?;
+    project
+        .command(&["worktree", "add", "-b", "recreated", name])
+        .await?;
+    assert!(checkout.bind_recreated_worktree(&wrong).await.is_err());
+    assert!(
+        checkout.bind_repository().await.is_err(),
+        "original identity must stay pinned"
+    );
+    let second = checkout.bind_recreated_worktree(&source).await?;
+    assert_ne!(first, second);
+    assert_eq!(checkout.bind_repository().await?, Some(second));
+    Ok(())
+}

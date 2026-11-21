@@ -208,6 +208,24 @@ fn bindings() -> &'static Bindings {
     BINDINGS.get_or_init(Default::default)
 }
 
+fn forget_scope(
+    bindings: &mut BTreeMap<PathBuf, Arc<BoundRepository>>,
+    key: &Path,
+    resolved: &Path,
+) {
+    let forgotten: Vec<_> = [key, resolved]
+        .into_iter()
+        .filter_map(|path| bindings.remove(path))
+        .map(|bound| bound.identity.clone())
+        .collect();
+    // Subdirectory bindings never unpin the whole parent repository.
+    bindings.retain(|_, bound| {
+        !forgotten
+            .iter()
+            .any(|id| *id == bound.identity && id.top_level == resolved)
+    });
+}
+
 impl Git {
     pub async fn bind_repository(&self) -> Result<Option<RepositoryBinding>, GitError> {
         Ok(self
@@ -227,22 +245,23 @@ impl Git {
         let resolved = crate::safety::resolve(self.cwd())?;
         {
             let mut bindings = bindings().lock().await;
-            let forgotten: Vec<_> = [&key, &resolved]
-                .into_iter()
-                .filter_map(|path| bindings.remove(path))
-                .map(|bound| bound.identity.clone())
-                .collect();
-            // Other scopes are forgotten only when this is the repository's own top-level, where
-            // they all named the replaced repository; a trusted subfolder leaves its parent pinned.
-            bindings.retain(|_, bound| {
-                !forgotten
-                    .iter()
-                    .any(|identity| *identity == bound.identity && identity.top_level == resolved)
-            });
+            forget_scope(&mut bindings, &key, &resolved);
         }
         let mut fresh = self.clone();
         fresh.bound_repository = None;
         fresh.bind_repository().await
+    }
+
+    /// Only replace the cached identity after discovery proves that the linked
+    /// checkout belongs to the expected source repository. A refusal changes no cache entry.
+    pub async fn bind_recreated_worktree(
+        &self,
+        source: &RepositoryBinding,
+    ) -> Result<RepositoryBinding, GitError> {
+        self.resolve_binding(None, Some(source))
+            .await?
+            .map(|binding| binding.identity.clone())
+            .ok_or_else(|| changed(self.cwd(), "The recreated checkout is missing."))
     }
 
     pub async fn with_repository_binding(
@@ -296,16 +315,25 @@ impl Git {
         &self,
         expected: Option<&RepositoryBinding>,
     ) -> Result<Option<Arc<BoundRepository>>, GitError> {
+        self.resolve_binding(expected, None).await
+    }
+
+    async fn resolve_binding(
+        &self,
+        expected: Option<&RepositoryBinding>,
+        recreated_from: Option<&RepositoryBinding>,
+    ) -> Result<Option<Arc<BoundRepository>>, GitError> {
         let key = crate::safety::lexical_absolute(self.cwd())?;
         let resolved = crate::safety::resolve(self.cwd())?;
-        let cached = {
+        let previous = {
             let bindings = bindings().lock().await;
             bindings
                 .get(&key)
                 .or_else(|| bindings.get(&resolved))
                 .cloned()
         };
-        if let Some(cached) = &cached {
+        let cached = previous.as_ref().filter(|_| recreated_from.is_none());
+        if let Some(cached) = cached {
             cached.validate(self.cwd()).await?;
         }
         let mut discovery = self.without_fsmonitor();
@@ -369,10 +397,22 @@ impl Git {
             common_dir,
             ids: Some(ids),
         };
+        if let Some(source) = recreated_from
+            && (source.version != REPOSITORY_BINDING_VERSION
+                || source.ids.is_none()
+                || identity.top_level != resolved
+                || identity.git_dir == identity.common_dir
+                || identity.common_dir != source.common_dir
+                || identity.ids.as_ref().map(|ids| ids.common_dir)
+                    != source.ids.as_ref().map(|ids| ids.common_dir))
+        {
+            return Err(changed(
+                self.cwd(),
+                "The recreated checkout does not belong to the recorded project repository.",
+            ));
+        }
         if expected.is_some_and(|expected| *expected != identity)
-            || cached
-                .as_ref()
-                .is_some_and(|cached| cached.identity != identity)
+            || cached.is_some_and(|cached| cached.identity != identity)
         {
             return Err(changed(
                 self.cwd(),
@@ -380,7 +420,7 @@ impl Git {
             ));
         }
         if let Some(cached) = cached {
-            return Ok(Some(cached));
+            return Ok(Some(cached.clone()));
         }
         let cwd = self.cwd().to_owned();
         let root_identity = identity.clone();
@@ -397,6 +437,16 @@ impl Git {
         .map_err(|_| GitError::Unavailable("Repository binding failed.".into()))??;
         binding.validate(self.cwd()).await?;
         let mut bindings = bindings().lock().await;
+        if recreated_from.is_some() {
+            let current = bindings.get(&key).or_else(|| bindings.get(&resolved));
+            if current.map(|b| &b.identity) != previous.as_ref().map(|b| &b.identity) {
+                return Err(changed(
+                    self.cwd(),
+                    "The repository binding changed during worktree recovery.",
+                ));
+            }
+            forget_scope(&mut bindings, &key, &resolved);
+        }
         let binding = bindings.entry(key).or_insert(binding).clone();
         if binding.identity != root.identity {
             return Err(changed(
