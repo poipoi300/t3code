@@ -24,7 +24,7 @@ struct Form {
 #[derive(Clone, PartialEq)]
 enum CheckState {
     Busy(u64),
-    Ready(HostCheck),
+    Ready(Rc<HostCheck>),
     Failed,
 }
 impl Form {
@@ -91,7 +91,9 @@ impl Form {
                 if c.get(&env) == Some(&CheckState::Busy(attempt)) {
                     c.insert(
                         env,
-                        answer.map(CheckState::Ready).unwrap_or(CheckState::Failed),
+                        answer
+                            .map(|result| CheckState::Ready(Rc::new(result)))
+                            .unwrap_or(CheckState::Failed),
                     );
                 }
             });
@@ -483,13 +485,15 @@ fn check_status(f: Form, m: Live) -> AnyElement {
                 let label = match status {
                     CheckState::Busy(_) => t("Checking…"),
                     CheckState::Failed => t("Check failed"),
-                    CheckState::Ready(HostCheck::Ssh(_)) => t("Connected"),
-                    CheckState::Ready(HostCheck::Eas(a)) => {
-                        format!("{} {}", t("Signed in as"), a.signed_in_as)
-                    }
-                    CheckState::Ready(HostCheck::Simlock(a)) => {
-                        format!("{} {}", t("Signed in as"), a.signed_in_as)
-                    }
+                    CheckState::Ready(result) => match result.as_ref() {
+                        HostCheck::Ssh(_) => t("Connected"),
+                        HostCheck::Eas(account) => {
+                            format!("{} {}", t("Signed in as"), account.signed_in_as)
+                        }
+                        HostCheck::Simlock(identity) => {
+                            format!("{} {}", t("Signed in as"), identity.signed_in_as)
+                        }
+                    },
                 };
                 text(if f.page.members.with(|v| v.len() > 1) {
                     format!("{}: {label}", m.member.get().label)
@@ -505,7 +509,10 @@ fn project_picker(f: Form, m: Live) -> AnyElement {
     region(
         move || {
             f.checks.with(|c| match c.get(&m.member.get().id) {
-                Some(CheckState::Ready(HostCheck::Eas(a))) => a.apps.clone(),
+                Some(CheckState::Ready(result)) => match result.as_ref() {
+                    HostCheck::Eas(account) => account.apps.clone(),
+                    _ => vec![],
+                },
                 _ => vec![],
             })
         },
