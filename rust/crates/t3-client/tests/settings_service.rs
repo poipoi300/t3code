@@ -96,6 +96,9 @@ fn review_device_preference_types_round_trip_and_reject_bad_storage_values() {
         (ADVANCED, json!(true)),
         (THEME, json!("system")),
         (MODE, json!("dark")),
+        ("t3code:themes:v1", json!([{"future": 42}])),
+        ("t3code:theme-halves:v1", json!({"dark": "ocean"})),
+        ("t3code:theme-follow-system", json!(false)),
     ] {
         h.run(settings.write_device_preference(key, value.clone()))
             .unwrap();
@@ -123,6 +126,94 @@ fn review_device_preference_types_round_trip_and_reject_bad_storage_values() {
     })
     .unwrap();
     assert_eq!(h.run(settings.read_device_preference(ADVANCED)), None);
+}
+
+#[test]
+fn themes_read_imported_web_records_and_clearing_a_mix_survives_relaunch() {
+    use t3_client::{
+        persistence::{read_web_storage, save_record},
+        platform::StorageArea,
+    };
+    let (mut h, runtime) = settings_runtime(&["orchestration:read"], json!({}));
+    let settings = runtime.settings();
+    for (key, raw, value) in [
+        (
+            "t3code:theme-halves:v1",
+            r#"{"dark":"ocean"}"#,
+            json!({"dark":"ocean"}),
+        ),
+        (
+            "t3code:themes:v1",
+            r#"[{"future":42}]"#,
+            json!([{"future":42}]),
+        ),
+        ("t3code:theme-follow-system", "false", json!(false)),
+        ("t3code:theme", "ocean", json!("ocean")),
+    ] {
+        let imported = read_web_storage(key, raw.as_bytes(), false)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let platform = h.platform.clone();
+        h.run(async move { save_record(&platform, StorageArea::Ordinary, &imported.record).await })
+            .unwrap();
+        assert_eq!(h.run(settings.read_device_preference(key)), Some(value));
+    }
+    const HALVES: &str = "t3code:theme-halves:v1";
+    const LIBRARY: &str = "t3code:themes:v1";
+    assert!(
+        h.run(settings.write_device_preference(HALVES, json!({"light":false})))
+            .is_err()
+    );
+    let read_theme = |key| {
+        let settings = settings.clone();
+        async move { settings.read_theme_preference(key).await }
+    };
+    let (_, mix_read) = h.run(read_theme(HALVES)).unwrap();
+    assert!(
+        h.run(settings.write_theme_preferences(
+            vec![(HALVES, None), (LIBRARY, Some(json!("invalid")))],
+            mix_read.clone()
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        h.run(settings.read_device_preference(HALVES)),
+        Some(json!({"dark":"ocean"}))
+    );
+    assert!(
+        h.run(settings.write_theme_preferences(
+            vec![(HALVES, None), ("t3code:theme", Some(json!("system")))],
+            mix_read.clone()
+        ))
+        .unwrap()
+    );
+    assert!(
+        !h.run(settings.write_theme_preferences(
+            vec![(HALVES, Some(json!({"dark":"ocean","light":"grove"})))],
+            mix_read
+        ))
+        .unwrap(),
+        "a stale half edit must be rebased before it can overwrite the other half"
+    );
+    let (_, library_read) = h.run(read_theme(LIBRARY)).unwrap();
+    h.run(settings.write_device_preference(LIBRARY, json!([{"future":43}])))
+        .unwrap();
+    assert!(
+        !h.run(settings.write_theme_preferences(vec![(LIBRARY, Some(json!([])))], library_read))
+            .unwrap(),
+        "a stale writer must not overwrite another window's library"
+    );
+    let reopened = runtime.settings();
+    assert_eq!(h.run(reopened.read_device_preference(HALVES)), None);
+    assert_eq!(
+        h.run(reopened.read_device_preference("t3code:theme")),
+        Some(json!("system"))
+    );
+    assert_eq!(
+        h.run(reopened.read_device_preference(LIBRARY)),
+        Some(json!([{"future":43}]))
+    );
 }
 
 #[test]
