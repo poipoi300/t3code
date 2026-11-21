@@ -290,25 +290,23 @@ fn script_override_inheritance_runtime_env_and_completion_protocol() {
 }
 
 #[tokio::test]
-async fn completion_wrapper_reports_real_powershell_exit_code() {
+async fn completion_wrapper_reports_the_native_shell_exit_code() {
     let temp = tempfile::tempdir().expect("test fixture");
-    let wrapper = wrap_script(
-        "& $env:ComSpec /d /c exit 7",
-        CompletionShell::PowerShell,
-        "real123",
-    )
-    .expect("test fixture")
-    .replace('\r', "\n");
-    #[cfg(windows)]
-    let program = "powershell.exe";
-    #[cfg(not(windows))]
-    let program = "pwsh";
-    let mut options = t3_process::ProcessOptions::new(program).args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        &wrapper,
-    ]);
+    let (program, command, flags): (&str, &str, &[&str]) = if cfg!(windows) {
+        (
+            "powershell.exe",
+            "& $env:ComSpec /d /c exit 7",
+            &["-NoProfile", "-NonInteractive", "-Command"],
+        )
+    } else {
+        ("/bin/sh", "exit 7", &["-c"])
+    };
+    let shell = completion_shell(program).expect("test fixture");
+    let wrapper = wrap_script(command, shell, "real123")
+        .expect("test fixture")
+        .replace('\r', "\n");
+    let mut options = t3_process::ProcessOptions::new(program)
+        .args(flags.iter().copied().chain([wrapper.as_str()]));
     options.cwd = Some(temp.path().into());
     options.check_exit = false;
     let result = t3_process::run(options).await.expect("test fixture");
