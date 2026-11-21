@@ -923,7 +923,6 @@ async fn clones_never_land_where_code_or_configuration_is_trusted() {
         s.home().join("git-home").join(".config").join("git"),
         s.home().join("xdg").join("git"),
         s.home().join("git-global"),
-        s.home().join("program-data").join("Git"),
         s.home().join("future-tools").join("bin"),
         s.home().join("future-tools"),
         s.home().join(".local").join("src").join("x"),
@@ -932,6 +931,7 @@ async fn clones_never_land_where_code_or_configuration_is_trusted() {
     if cfg!(windows) {
         let documents = s.home().join("Documents");
         refused.extend([
+            s.home().join("program-data").join("Git"),
             documents.join("PowerShell"),
             documents
                 .join("WindowsPowerShell")
@@ -989,14 +989,17 @@ async fn clones_never_land_in_hidden_application_or_t3_folders() {
     repository(&seed);
     let remote = s.home().join("remote.git");
     bare(&remote, Some(&seed));
-    for refused_destination in [
+    let mut refused_destinations = vec![
         s.base().join("userdata").join("secrets").join("web"),
         s.home().join(".config").join("git"),
         s.home().join(".ssh").join("keys"),
-        s.home().join("AppData").join("Roaming").join("fixture"),
         s.base().join("runtime").join("versions").join("9.9.9"),
         s.base().join("tools").join("acp-registry").join("fixture"),
-    ] {
+    ];
+    if cfg!(windows) {
+        refused_destinations.push(s.home().join("AppData").join("Roaming").join("fixture"));
+    }
+    for refused_destination in refused_destinations {
         let _ = failure(
             s.call(
                 "sourceControl.cloneRepository",
@@ -1033,6 +1036,7 @@ async fn refused_destinations_answer_a_repository_error() {
     let mut s = Server::start(&github).await;
     for refused_destination in [
         PathBuf::from(r"\\fixture-server\share\web"),
+        PathBuf::from(r"\\?\C:\fixture\web"),
         s.base().join("userdata").join("secrets").join("web"),
         s.home().join(".config").join("git"),
     ] {

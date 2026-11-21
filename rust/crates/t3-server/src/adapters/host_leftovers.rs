@@ -168,7 +168,8 @@ pub mod editors {
                 Some(Component::Prefix(prefix)) => {
                     matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
                 }
-                _ => true,
+                // On Unix the Windows verbatim prefix is parsed as ordinary path text.
+                _ => !(path.starts_with("//?/") || path.starts_with(r"\\?\")),
             }
     }
 

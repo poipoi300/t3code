@@ -735,6 +735,10 @@ impl ForgeAdapter {
             }))
         };
         let raw = raw.trim();
+        // Joining to the cwd can hide a Windows network or verbatim prefix on Unix.
+        if validate_host_path(Path::new(raw)).is_err() {
+            return Err(refused());
+        }
         let expanded = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
             self.home.join(raw.get(2..).unwrap_or(""))
         } else {
