@@ -1491,7 +1491,7 @@ mod tests {
             environment: t3_client::types::EnvironmentId("environment".into()),
             thread: t3_client::types::ThreadId("thread".into()),
         });
-        let log = signal(String::new());
+        let log = signal(Vec::<String>::new());
         let registry = PanelRegistry::new(vec![
             PanelRegistration::new(
                 SurfaceKind::Browser,
@@ -1500,9 +1500,7 @@ mod tests {
                 |_| view().into_element(),
             )
             .with_browser_close(move |key, tab| {
-                log.update(|log| {
-                    log.push_str(&format!("{}/{}:{tab} ", key.environment.0, key.thread.0))
-                });
+                log.update(|log| log.push(format!("{}/{}:{tab}", key.environment.0, key.thread.0)));
             }),
         ]);
         for id in ["tab", "menu", "pane"] {
@@ -1526,7 +1524,10 @@ mod tests {
         )
     }
 
-    fn close_probe_button(close: impl Fn() + 'static, log: Signal<String>) -> impl IntoElement {
+    fn close_probe_button(
+        close: impl Fn() + 'static,
+        log: Signal<Vec<String>>,
+    ) -> impl IntoElement {
         view()
             .child(
                 nsh_base::button()
@@ -1534,7 +1535,9 @@ mod tests {
                     .child(text("Run close actions"))
                     .on_press(close),
             )
-            .child(text(move || SharedString::from(log.get())))
+            .child(text(move || {
+                SharedString::from(log.with(|calls| calls.join(" ")))
+            }))
     }
 
     #[test]
@@ -1546,9 +1549,11 @@ mod tests {
         sets.push(fixtures);
         let mut app = nsh_testing::Headless::start(EngineConfig {
             ui_sets: sets,
+            viewport: size(px(390.0), px(844.0)),
             ..EngineConfig::new(Root::of::<BrowserTabCloseProbe>())
         })
         .unwrap();
+        app.wait_for("text:Run close actions").unwrap();
         app.press("role:button[Run close actions]").unwrap();
         app.wait_for("text:environment/thread:tab environment/thread:menu")
             .unwrap();
