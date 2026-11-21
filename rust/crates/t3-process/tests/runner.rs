@@ -188,6 +188,73 @@ async fn cancellation_and_dropped_futures_kill_owned_descendants()
     Ok(())
 }
 
+#[cfg(unix)]
+async fn assert_leader_exit_retains_group(
+    mode: &str,
+    expected_code: Option<i32>,
+    expected_signal: Option<(i32, &str)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::ExitStatusExt;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let options = ProcessOptions::new("/bin/sh").args([
+        "-c",
+        r#""$1" helper "$2" </dev/null >/dev/null 2>&1 &
+IFS= read -r release
+if [ "$3" = signal ]; then kill -TERM "$$"; fi
+exit 37"#,
+        "process-fixture",
+        env!("CARGO_BIN_EXE_process-fixture"),
+        &listener.local_addr()?.to_string(),
+        mode,
+    ]);
+    let mut leader = t3_process::spawn(&options)?;
+    let (mut socket, _) = listener.accept().await?;
+    let mut greeting = [0; 5];
+    socket.read_exact(&mut greeting).await?;
+    assert_eq!(&greeting, b"ready");
+    // Exercise the helper before triggering the leader's natural exit.
+    socket.write_all(b"x").await?;
+    let mut byte = [0];
+    socket.read_exact(&mut byte).await?;
+    assert_eq!(&byte, b"x");
+
+    leader
+        .stdin
+        .as_mut()
+        .expect("leader stdin")
+        .write_all(b"go\n")
+        .await?;
+    let exit = leader.wait_and_kill_group().await?;
+    assert_eq!(exit.status.code(), expected_code);
+    assert_eq!(
+        exit.status.signal(),
+        expected_signal.map(|(number, _)| number)
+    );
+    assert_eq!(exit.signal_name, expected_signal.map(|(_, name)| name));
+    let eof = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte)).await;
+    assert_eq!(eof.expect("owned process group must be gone")?, 0);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn observing_nonzero_leader_exit_preserves_group_cleanup()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_leader_exit_retains_group("code", Some(37), None).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn observing_leader_signal_preserves_group_cleanup() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_leader_exit_retains_group(
+        "signal",
+        None,
+        Some((nix::sys::signal::Signal::SIGTERM as i32, "SIGTERM")),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn normal_exit_preserves_detached_helper() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;

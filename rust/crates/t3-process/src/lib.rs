@@ -134,6 +134,13 @@ impl ProcessOutput {
     }
 }
 
+/// The leader's native exit status and, on Unix, its conventional signal name.
+#[derive(Clone, Copy, Debug)]
+pub struct LeaderExit {
+    pub status: std::process::ExitStatus,
+    pub signal_name: Option<&'static str>,
+}
+
 /// Dropping an unfinished child terminates its group/job; successful wait preserves helpers.
 pub struct SpawnedProcess {
     child: Box<dyn ChildWrapper>,
@@ -152,6 +159,44 @@ impl SpawnedProcess {
         let status = self.wait_for_exit().await?;
         self.finish()?;
         Ok(status)
+    }
+    /// Waits for the leader's natural exit, then kills its remaining process group or job.
+    ///
+    /// Use this on a handle that still owns its group or job. [Self::wait] releases
+    /// ownership and lets helpers survive. Observation and cleanup occur in one
+    /// operation so the caller never holds a reaped leader while it still owns a
+    /// numeric process-group ID. Cancelling a pending wait leaves ownership intact.
+    pub async fn wait_and_kill_group(&mut self) -> Result<LeaderExit, ProcessError> {
+        let status = self.wait_for_exit().await?;
+        if !self.reaped {
+            if let Err(source) = self.start_kill() {
+                #[cfg(unix)]
+                let group_gone = source.raw_os_error() == Some(nix::libc::ESRCH);
+                #[cfg(not(unix))]
+                let group_gone = false;
+                if !group_gone {
+                    return Err(ProcessError::Io {
+                        stream: "kill",
+                        source,
+                    });
+                }
+            }
+            self.reaped = true;
+        }
+        #[cfg(unix)]
+        let signal_name = {
+            use std::os::unix::process::ExitStatusExt;
+            status
+                .signal()
+                .and_then(|signal| nix::sys::signal::Signal::try_from(signal).ok())
+                .map(nix::sys::signal::Signal::as_str)
+        };
+        #[cfg(not(unix))]
+        let signal_name = None;
+        Ok(LeaderExit {
+            status,
+            signal_name,
+        })
     }
     fn finish(&mut self) -> Result<(), ProcessError> {
         #[cfg(windows)]
