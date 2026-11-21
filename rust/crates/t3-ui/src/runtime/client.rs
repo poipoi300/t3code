@@ -95,7 +95,7 @@ pub(crate) fn follow_native_links(pair_screen: bool) {
                     .event_sender()
                     .emit(PlatformEvent::OpenedLink(link));
             } else if !cold {
-                platform.open_link(link);
+                platform.open_prompt_link(link);
             }
         }
     });
@@ -179,12 +179,7 @@ mod host {
         let (mut config, lasting) = config(dir);
         config.presentation = Some(presentation_for_host());
         let launch = nsh_core::prelude::app_url().await;
-        config.launch_url = launch
-            .as_deref()
-            .and_then(|address| {
-                t3_client::connection::pairing_link::read_pairing_launch(address).stripped
-            })
-            .or_else(|| launch.clone());
+        config.launch_url = launch.clone();
         let platform = Entered {
             handle: runtime.handle().clone(),
             future: Box::pin(NativePlatform::open(config)),

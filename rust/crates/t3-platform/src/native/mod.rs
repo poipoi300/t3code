@@ -186,6 +186,32 @@ pub(crate) fn spawn_abortable<T: Send + 'static>(
     async move { (&mut task.0).await.map_err(|_| PlatformError::Cancelled)? }
 }
 
+fn validated_prompt_path(link: &str) -> Option<String> {
+    use t3_client::navigation::{
+        Location, Route, normalize_app_path, prompt_links::prompt_link_app_path,
+    };
+    let path = prompt_link_app_path(link, None).filter(|path| {
+        matches!(
+            Location::parse(&normalize_app_path(path)).route,
+            Route::NewThread | Route::Thread(_)
+        )
+    });
+    if path.is_none() {
+        // Native URLs can carry pairing credentials or private prompt text.
+        log::warn!("t3-platform: rejected an unsupported native link");
+    }
+    path
+}
+
+/// Separate the route used by history from the launch address exposed to the client.
+fn validated_launch(link: &str) -> Option<(String, String)> {
+    let pairing = t3_client::connection::pairing_link::read_pairing_launch(link);
+    if let Some(clean) = pairing.stripped {
+        return Some(("/pair".into(), clean));
+    }
+    validated_prompt_path(link).map(|path| (path, link.to_owned()))
+}
+
 impl NativePlatform {
     pub async fn open(config: NativeConfig) -> Result<Self, OpenError> {
         let runtime = Handle::try_current().map_err(|_| OpenError::NoRuntime)?;
@@ -208,6 +234,8 @@ impl NativePlatform {
         let tls = Arc::new(tls_config(extra_roots)?);
         let http = http::HttpClient::new(tls.clone(), &timeouts)
             .map_err(|e| OpenError::Network(e.to_string()))?;
+        let launch = launch_url.as_deref().and_then(validated_launch);
+        let (path, launch_url) = launch.unzip();
         Ok(Self {
             inner: Rc::new(Inner {
                 store: Arc::new(store),
@@ -222,11 +250,7 @@ impl NativePlatform {
                 extension,
                 host: host::HostState::default(),
                 report,
-                history: std::cell::RefCell::new(history::MemoryHistory::new(
-                    launch_url
-                        .as_deref()
-                        .and_then(t3_client::navigation::app_path),
-                )),
+                history: std::cell::RefCell::new(history::MemoryHistory::new(path)),
                 launch_url,
             }),
         })
@@ -241,13 +265,30 @@ impl NativePlatform {
         self.inner.report
     }
 
-    /// The shell hands over a link the OS delivered while the app runs (a mobile deep link or
-    /// a claimed URL): an app address becomes the next location, and every link is announced
-    /// as `PlatformEvent::OpenedLink` (pairing links are read from it).
-    pub fn open_link(&self, link: String) {
-        if let Some(path) = t3_client::navigation::app_path(&link) {
-            self.inner.history.borrow_mut().push(path);
+    /// Canonical initial route, including when the host has no URL history service.
+    pub fn launch_path(link: &str) -> Option<String> {
+        validated_launch(link).map(|(path, _)| path)
+    }
+
+    /// Accepts an OS-delivered prompt link after checking the same allowlist as cold launch.
+    pub fn open_prompt_link(&self, link: String) {
+        if let Some(path) = validated_prompt_path(&link) {
+            self.publish_link(path, link);
         }
+    }
+
+    /// An app pairing link announces the original credential to its confirmation subscriber.
+    /// History retains only the pairing route.
+    pub fn open_link(&self, link: String) {
+        if t3_client::connection::pairing_link::read_pairing_app_link(&link).is_some() {
+            self.publish_link("/pair".into(), link);
+        } else {
+            self.open_prompt_link(link);
+        }
+    }
+
+    fn publish_link(&self, path: String, link: String) {
+        self.inner.history.borrow_mut().push(path);
         self.inner.events.emit(PlatformEvent::OpenedLink(link));
     }
 

@@ -1361,20 +1361,20 @@ async fn the_app_location_starts_at_the_launch_link_and_follows_opened_links_and
     let dir = tempfile::tempdir().unwrap();
     let secrets = Arc::new(EphemeralSecretStore::default());
     let mut launched = config(dir.path(), &secrets);
-    launched.launch_url = Some("t3code://settings".into());
+    launched.launch_url = Some("t3code-dev://new".into());
     let platform = NativePlatform::open(launched).await.unwrap();
     assert_eq!(
         platform.app_url().await.unwrap().as_deref(),
-        Some("t3code://settings")
+        Some("t3code-dev://new")
     );
     let mut locations = platform.app_url_changes();
-    assert_eq!(locations.next().await.unwrap().unwrap().path, "/settings");
+    assert_eq!(locations.next().await.unwrap().unwrap().path, "/new");
     let mut events = platform.events();
     platform
         .open_link("t3code://pair?pairingUrl=https%3A%2F%2Fhost.test%2Fpair%23token%3Dabc".into());
     assert_eq!(
         locations.next().await.unwrap().unwrap().path,
-        "/pair?pairingUrl=https%3A%2F%2Fhost.test%2Fpair%23token%3Dabc"
+        "/pair"
     );
     let Some(PlatformEvent::OpenedLink(link)) = events.next().await else {
         panic!("the link is announced");
@@ -1391,8 +1391,84 @@ async fn the_app_location_starts_at_the_launch_link_and_follows_opened_links_and
         .await
         .unwrap();
     let back = locations.next().await.unwrap().unwrap();
-    assert_eq!(back.path, "/settings");
+    assert_eq!(back.path, "/new");
     assert!(back.can_go_forward && !back.can_go_back);
+}
+
+const PROMPT_ROUTES: &[(&str, Option<&str>)] = &[
+    ("t3code-dev://settings/general", None),
+    ("t3code-dev://other/path", None),
+    ("t3code-dev://new?prompt=hello", Some("/new?prompt=hello")),
+    ("t3code-dev://threads/env/thread", Some("/env/thread")),
+];
+
+#[tokio::test]
+async fn native_prompt_routes_validate_cold_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    for &(link, expected) in PROMPT_ROUTES {
+        let mut launch = config(dir.path(), &secrets);
+        launch.launch_url = Some(link.to_owned());
+        let platform = NativePlatform::open(launch).await.unwrap();
+        let mut history = platform.app_url_changes();
+        assert_eq!(
+            history.next().await.unwrap().unwrap().path,
+            expected.unwrap_or("/")
+        );
+        assert_eq!(
+            platform.app_url().await.unwrap().is_some(),
+            expected.is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_prompt_routes_validate_warm_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(EphemeralSecretStore::default());
+    let platform = NativePlatform::open(config(dir.path(), &secrets))
+        .await
+        .unwrap();
+    let mut history = platform.app_url_changes();
+    assert_eq!(history.next().await.unwrap().unwrap().path, "/");
+    let mut events = platform.events();
+    for &(link, expected) in PROMPT_ROUTES {
+        platform.open_prompt_link(link.to_owned());
+        if let Some(path) = expected {
+            assert_eq!(history.next().await.unwrap().unwrap().path, path);
+            assert!(matches!(
+                events.next().await,
+                Some(PlatformEvent::OpenedLink(_))
+            ));
+        } else {
+            assert!(history.next().now_or_never().is_none());
+            assert!(events.next().now_or_never().is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cold_pairing_launch_exposes_only_the_stripped_address_and_pair_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut launch = config(dir.path(), &Arc::new(EphemeralSecretStore::default()));
+    launch.launch_url = Some(
+        "t3code-dev://pair?pairingUrl=https%3A%2F%2Fexample.test%2Fpair%23token%3Dfixture".into(),
+    );
+    let platform = NativePlatform::open(launch).await.unwrap();
+    assert_eq!(
+        platform.app_url().await.unwrap().as_deref(),
+        Some("t3code-dev://pair")
+    );
+    assert_eq!(
+        platform
+            .app_url_changes()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .path,
+        "/pair"
+    );
 }
 
 /// Records every key id it is asked to store; the first `store` fails, as a declined keychain
