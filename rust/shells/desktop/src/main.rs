@@ -1,3 +1,5 @@
+mod backend;
+
 #[cfg(target_os = "linux")]
 use nsh_platform_linux as platform;
 #[cfg(target_os = "macos")]
@@ -14,6 +16,8 @@ fn asset_base() -> Option<platform::AssetBase> {
 
 fn main() -> impl std::process::Termination {
     platform::set_ui_sets(t3_ui::registries());
+    // Dropped after the window closes: the server and its process group stop with the app.
+    let _backend = backend::start();
     platform::run_app(
         platform::AppSource::Rust(platform::Root::of::<t3_ui::App>().url_schemes(["t3code-dev"])),
         platform::AppOptions {

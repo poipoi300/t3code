@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 t3-ui = { path = "../../crates/t3-ui" }
+t3-client = { path = "../../crates/t3-client" }
+t3-desktop-backend = { path = "../../crates/t3-desktop-backend" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false, features = ["svg"] }

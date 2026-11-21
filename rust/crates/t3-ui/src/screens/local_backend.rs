@@ -55,10 +55,71 @@ pub struct LocalBackendHandle {
     pub act: Rc<dyn Fn(RecoveryAction)>,
 }
 
+/// What the desktop shell holds to report the server's state from its own thread
+/// ([`install_local_backend`]).
+#[derive(Clone)]
+pub struct LocalBackendPublisher(futures::channel::mpsc::UnboundedSender<LocalBackendStatus>);
+
+impl LocalBackendPublisher {
+    /// The window shows `status` from now on.
+    pub fn publish(&self, status: LocalBackendStatus) {
+        let _ = self.0.unbounded_send(status);
+    }
+}
+
+type Act = std::sync::Arc<dyn Fn(RecoveryAction) + Send + Sync>;
+type Pending = (
+    futures::channel::mpsc::UnboundedReceiver<LocalBackendStatus>,
+    Act,
+);
+
+thread_local! {
+    static INSTALLED: std::cell::RefCell<Option<Pending>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The shell calls this once on the thread that runs the UI, before the app starts, when it
+/// supervises a local server: `act` performs what the recovery window asks (`runAction`) and the
+/// returned publisher feeds the window. Without a call the overlay stays inert.
+pub fn install_local_backend(
+    act: impl Fn(RecoveryAction) + Send + Sync + 'static,
+) -> LocalBackendPublisher {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    INSTALLED.with(|installed| {
+        *installed.borrow_mut() = Some((receiver, std::sync::Arc::new(act)));
+    });
+    LocalBackendPublisher(sender)
+}
+
+thread_local! {
+    static MOUNTED: std::cell::RefCell<Option<LocalBackendHandle>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The handle of the installed server link on the UI thread: created from [`install_local_backend`]
+/// the first time it is asked for, then shared.
+fn installed_handle() -> Option<LocalBackendHandle> {
+    use futures::StreamExt;
+    if let Some(handle) = MOUNTED.with(|mounted| mounted.borrow().clone()) {
+        return Some(handle);
+    }
+    let (mut receiver, act) = INSTALLED.with(|installed| installed.borrow_mut().take())?;
+    let status = signal(LocalBackendStatus::Starting);
+    crate::runtime::tasks::watch(async move {
+        while let Some(next) = receiver.next().await {
+            status.set(next);
+        }
+    });
+    let handle = LocalBackendHandle {
+        status,
+        act: Rc::new(move |action| act(action)),
+    };
+    MOUNTED.with(|mounted| *mounted.borrow_mut() = Some(handle.clone()));
+    Some(handle)
+}
+
 /// The overlay `app::themed_tree` mounts: nothing while ready, a status line while starting or
 /// restarting, the recovery window once the failure is reported.
 pub fn overlay() -> AnyElement {
-    let Some(handle) = use_context::<LocalBackendHandle>() else {
+    let Some(handle) = use_context::<LocalBackendHandle>().or_else(installed_handle) else {
         return view().into_element();
     };
     let status = handle.status;

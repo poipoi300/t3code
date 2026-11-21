@@ -1,0 +1,22 @@
+[package]
+name = "t3-desktop-backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+t3-client = { path = "../t3-client" }
+t3-contracts = { path = "../t3-contracts" }
+t3-process = { path = "../t3-process" }
+serde_json.workspace = true
+getrandom = "0.3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
+
+[lints]
+workspace = true

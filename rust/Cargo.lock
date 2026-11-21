@@ -5476,6 +5476,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "t3-desktop-backend"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde_json",
+ "t3-client",
+ "t3-contracts",
+ "t3-process",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "t3-device"
 version = "0.1.0"
 dependencies = [
@@ -5993,6 +6006,7 @@ dependencies = [
  "tungstenite 0.29.0",
  "url",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

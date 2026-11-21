@@ -3530,6 +3530,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-wrap"
+version = "10.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
+dependencies = [
+ "futures",
+ "indexmap",
+ "nix 0.31.3",
+ "tokio",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4516,7 +4530,22 @@ dependencies = [
  "nsh-platform-linux",
  "nsh-platform-macos",
  "nsh-platform-windows",
+ "t3-client",
+ "t3-desktop-backend",
  "t3-ui",
+ "tokio",
+]
+
+[[package]]
+name = "t3-desktop-backend"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde_json",
+ "t3-client",
+ "t3-contracts",
+ "t3-process",
+ "tokio",
 ]
 
 [[package]]
@@ -4565,6 +4594,19 @@ dependencies = [
  "webpki-roots 1.0.12",
  "windows-registry",
  "zeroize",
+]
+
+[[package]]
+name = "t3-process"
+version = "0.1.0"
+dependencies = [
+ "nix 0.29.0",
+ "process-wrap",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "win32job",
+ "windows",
 ]
 
 [[package]]
@@ -4813,6 +4855,20 @@ dependencies = [
  "tokio-rustls",
  "tungstenite",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -5417,6 +5473,16 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "win32job"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21b25acac91041257d64f5625690b626133e0ca9e4e17814552b5803b1a82f7c"
+dependencies = [
+ "thiserror 1.0.69",
+ "windows",
+]
 
 [[package]]
 name = "winapi-util"

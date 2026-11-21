@@ -196,3 +196,45 @@ fn buttons_reach_the_shell_and_empty_output_says_so() {
     app.wait_for("main acted Quit")
         .expect("quit reaches the shell");
 }
+
+#[component]
+fn Linked() -> impl IntoElement {
+    theme::install(&theme::ThemeChoice::default());
+    let acted = signal(String::new());
+    // The shell installs before the app starts; here the root does it on the UI thread, and the
+    // key handler publishes from another thread, as the supervisor's runtime does.
+    let publisher = t3_ui::screens::local_backend::install_local_backend(|action| {
+        assert_eq!(action, RecoveryAction::Quit);
+    });
+    on_key("ctrl+shift+f", move |_| {
+        let publisher = publisher.clone();
+        std::thread::spawn(move || publisher.publish(failed(2, "from the supervisor thread")));
+    });
+    acted.set(String::new());
+    view()
+        .w_full()
+        .h_full()
+        .child(text(move || {
+            SharedString::from(format!("main {}", acted.get()))
+        }))
+        .child(untracked(t3_ui::screens::local_backend::overlay))
+}
+
+#[test]
+fn a_status_published_by_the_shell_reaches_the_overlay_from_another_thread() {
+    let mut config = EngineConfig {
+        ui_sets: t3_ui::registries(),
+        viewport: size(px(DESKTOP.0), px(DESKTOP.1)),
+        ..EngineConfig::new(Root::new::<Linked>(|| ()))
+    };
+    config.environment.os = nsh_core::platform::Os::Linux;
+    config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    let mut app = Headless::start(config).expect("headless linked status");
+    app.wait_for("Starting T3 Code…")
+        .expect("installed link starts as starting");
+    app.press_key("ctrl+shift+f").expect("publish");
+    app.wait_for("T3 Code could not start")
+        .expect("published failure");
+    app.wait_for("from the supervisor thread")
+        .expect("its output");
+}
