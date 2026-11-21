@@ -21,8 +21,8 @@ local-services = [
     "dep:t3-telemetry",
 ]
 orchestration = ["dep:t3-orchestration", "dep:t3-persistence", "t3-orchestration/git-backend", "t3-orchestration/acp-adapter", "dep:t3-git", "dep:async-trait"]
-workspace = ["dep:t3-workspace", "dep:t3-git"]
-git = ["dep:t3-git", "dep:t3-shared", "dep:t3-workspace", "dep:async-trait"]
+workspace = ["dep:t3-git"]
+git = ["dep:t3-git", "dep:t3-shared", "dep:async-trait"]
 forge = ["dep:t3-forge", "local-services", "git", "workspace", "dep:t3-process", "dep:async-trait"]
 terminal = ["dep:t3-terminal"]
 scheduler = ["dep:t3-scheduler", "dep:async-trait", "dep:t3-shared"]
@@ -35,7 +35,7 @@ pull-requests = ["dep:t3-pull-request", "t3-pull-request/forge", "t3-pull-reques
 # Generated text over the configured model APIs, and the runtime's title port (`adapters/textgen.rs`).
 textgen = ["dep:t3-textgen", "t3-textgen/orchestration-host", "orchestration", "local-services", "dep:t3-shared", "dep:async-trait"]
 # `git.runStackedAction` and `git.preparePullRequestThread`, and the project setup runner.
-git-actions = ["textgen", "forge", "project", "pull-requests", "terminal", "dep:t3-terminal", "dep:t3-workspace"]
+git-actions = ["textgen", "forge", "project", "pull-requests", "terminal", "dep:t3-terminal"]
 # Honours the `T3CODE_DEV_MANAGED_*` policy overrides in a debug build. Never a default and
 # never in a shipped binary: it lets a user point the policy reader away from the machine's
 # policy. Tests get it through the `t3-config` dev-dependency below.
@@ -54,7 +54,7 @@ t3-auth = { path = "../t3-auth", optional = true }
 t3-config = { path = "../t3-config", optional = true }
 t3-persistence = { path = "../t3-persistence", optional = true }
 t3-orchestration = { path = "../t3-orchestration", optional = true }
-t3-workspace = { path = "../t3-workspace", optional = true }
+t3-workspace = { path = "../t3-workspace" }
 t3-git = { path = "../t3-git", optional = true }
 t3-shared = { path = "../t3-shared", optional = true }
 t3-forge = { path = "../t3-forge", optional = true }
@@ -104,6 +104,8 @@ tungstenite = { version = "0.29", default-features = false }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2", "service"] }
 [dev-dependencies]
+# Observe a blocked launch reservation in the socket race test.
+t3-orchestration = { path = "../t3-orchestration", features = ["testkit"] }
 # Turns the managed-policy overrides on for this crate's tests only (not for `cargo build`).
 t3-config = { path = "../t3-config", features = ["dev-policy-overrides"] }
 p256 = { version = "0.13", features = ["ecdsa"] }

@@ -182,6 +182,30 @@ fn fake_glab(bin: &Path, published: &Path) {
     }
 }
 
+fn record_empty_checkout(base: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    let path = base.join("userdata/repository-bindings.json");
+    let mut records: Value = std::fs::read(&path).map_or_else(
+        |_| json!({"version": 1, "bindings": {}}),
+        |bytes| serde_json::from_slice(&bytes).unwrap(),
+    );
+    records["bindings"][destination.to_string_lossy().as_ref()] = json!({"repository":null});
+    std::fs::write(path, serde_json::to_vec(&records).unwrap()).unwrap();
+}
+
+fn assert_trusted_clone(base: &Path, destination: &Path) {
+    let records: Value = serde_json::from_slice(
+        &std::fs::read(base.join("userdata/repository-bindings.json")).unwrap(),
+    )
+    .unwrap();
+    let binding = &records["bindings"][destination.to_string_lossy().as_ref()]["repository"];
+    assert_eq!(binding["version"], 2, "{binding}");
+    assert_eq!(
+        Path::new(binding["git_dir"].as_str().unwrap()),
+        destination.join(".git").canonicalize().unwrap()
+    );
+}
+
 fn glab_calls(home: &Path) -> Vec<String> {
     std::fs::read_to_string(home.join("bin").join("glab-calls.txt"))
         .unwrap_or_default()
@@ -642,6 +666,7 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
     let remote = s.home().join("remote.git");
     bare(&remote, Some(&seed));
     let destination = s.home().join("code").join("web");
+    record_empty_checkout(&s.base(), &destination);
     let cloned = ok(s
         .call(
             "sourceControl.cloneRepository",
@@ -653,6 +678,7 @@ async fn repositories_discovery_and_pull_requests_go_through_the_one_forge_regis
         "hello\n"
     );
     assert!(cloned["cwd"].as_str().unwrap().ends_with("web"));
+    assert_trusted_clone(&s.base(), &destination);
     // A second clone into the same, now non-empty, folder fails with the service's reason.
     let occupied = failure(
         s.call(
@@ -1392,6 +1418,7 @@ async fn project_clones_stream_start_retry_and_end_with_the_socket() {
     let remote = s.home().join("remote.git");
     bare(&remote, Some(&seed));
     let destination = s.home().join("clones").join("web");
+    record_empty_checkout(&s.base(), &destination);
     let start = |id: &str, remote: &Path, destination: &Path| {
         json!({
             "projectId": id, "title": "Web", "createdAt": "2026-11-14T00:00:00.000Z",
@@ -1412,6 +1439,7 @@ async fn project_clones_stream_start_retry_and_end_with_the_socket() {
         "hello\n"
     );
     assert!(s.project_root("clone-1").unwrap().ends_with("web"));
+    assert_trusted_clone(&s.base(), &destination);
     // A finished clone has nothing to cancel or retry.
     assert_eq!(
         ok(
@@ -1448,6 +1476,63 @@ async fn project_clones_stream_start_retry_and_end_with_the_socket() {
     );
     until_phase(&mut s, "clone-2", "done").await;
     assert!(late_destination.join("hello.txt").is_file());
+
+    let finalizing = s.home().join("clones").join("record-retry");
+    let binding_store = s.base().join("userdata/repository-bindings.json");
+    let good_records = std::fs::read(&binding_store).unwrap();
+    std::fs::write(&binding_store, "broken binding store").unwrap();
+    ok(s.call(
+        "projectClone.start",
+        start("clone-record-retry", &remote, &finalizing),
+    )
+    .await);
+    let failed = until_phase(&mut s, "clone-record-retry", "failed").await;
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not record")
+    );
+    assert!(finalizing.join(".git").is_dir());
+    std::fs::write(finalizing.join("local-note"), "keep this file").unwrap();
+    std::fs::write(binding_store, good_records).unwrap();
+    assert_eq!(
+        ok(s.call(
+            "projectClone.retry",
+            json!({"projectId": "clone-record-retry"})
+        )
+        .await)["applied"],
+        true
+    );
+    until_phase(&mut s, "clone-record-retry", "done").await;
+    assert_eq!(
+        std::fs::read_to_string(finalizing.join("local-note")).unwrap(),
+        "keep this file"
+    );
+    assert_trusted_clone(&s.base(), &finalizing);
+
+    // A failed clone only owns its private staging checkout. A replacement that appears
+    // in the published location before retry belongs to the user.
+    let occupied = s.home().join("clones").join("replaced");
+    let missing = s.home().join("missing-again.git");
+    ok(s.call(
+        "projectClone.start",
+        start("clone-replaced", &missing, &occupied),
+    )
+    .await);
+    until_phase(&mut s, "clone-replaced", "failed").await;
+    if occupied.exists() {
+        std::fs::rename(&occupied, s.home().join("empty-aside")).unwrap();
+    }
+    repository(&occupied);
+    std::fs::write(occupied.join("local-note"), "keep").unwrap();
+    let _ = s
+        .call("projectClone.retry", json!({"projectId":"clone-replaced"}))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(occupied.join("local-note")).unwrap(),
+        "keep"
+    );
 
     // Destinations in T3's own state or Git's configuration folder are refused before a project
     // or folder exists.

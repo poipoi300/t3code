@@ -1685,6 +1685,10 @@ async fn overlapping_socket_writers_wait_through_provider_rollback() {
         calls.push((socket, client, tag, payload));
     }
     let file = f.folder.join("after.txt");
+    let (at_git, release_git) =
+        t3_orchestration::runtime::checkpoints::restore_testkit::pause_before_git_restore(
+            &f.folder,
+        );
     {
         let rollback = f.restore("command:held");
         tokio::pin!(rollback);
@@ -1705,6 +1709,19 @@ async fn overlapping_socket_writers_wait_through_provider_rollback() {
         }
         assert!(!file.exists());
         pause.release.notify_one();
+        tokio::select! {
+            reached = at_git => reached.unwrap(),
+            result = &mut rollback => panic!("rollback finished before the Git restore: {result:?}"),
+            _ = writers.next() => panic!("a writer entered before Git restored the checkpoint"),
+        }
+        // Poll a fresh admission at the Git boundary. Existing RPC futures can still be
+        // pending for unrelated reasons after a hold is mistakenly released.
+        tokio::select! {
+            biased;
+            _ = pause.gate.enter("probe", None, Some(Path::new(&folder))) => panic!("file restore released its writer hold before Git returned"),
+            _ = std::future::ready(()) => {}
+        }
+        release_git.send(()).unwrap();
         let (result, _) = tokio::join!(rollback, writers.collect::<Vec<_>>());
         assert_eq!(result, None);
     }
@@ -1793,11 +1810,10 @@ async fn a_live_setup_script_serving_a_preview_refuses_file_restore() {
     f.server.shutdown().await.unwrap();
 }
 
-/// The launch RPC returns after enqueueing setup. The script itself must wait
-/// until rollback releases the hold, even though it belongs to another thread.
+/// An existing-worktree launch cannot claim the checkout during provider rollback.
 #[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
 #[tokio::test]
-async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
+async fn an_existing_worktree_launch_waits_for_rollback_before_claiming_the_checkout() {
     let pause = Arc::new(RestorePause::default());
     let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
     let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1805,7 +1821,8 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
     std::fs::write(&tracked, "shared checkout edit").unwrap();
     let launch = setup_preview_launch(&f, &ready);
     let (mut socket, mut client) = session_socket(&f.server, &f.cookie).await;
-    let mut waiting = pause.gate.waiting();
+    let reservations = t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations::global();
+    let folder = f.folder.clone();
     {
         let rollback = f.restore("command:hold-setup");
         tokio::pin!(rollback);
@@ -1813,7 +1830,7 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
             () = pause.entered.notified() => {}
             result = &mut rollback => panic!("provider rollback did not start: {result:?}"),
         }
-        let call = tokio::spawn(async move {
+        let mut call = tokio::spawn(async move {
             call_exit(
                 &mut socket,
                 &mut client,
@@ -1823,22 +1840,15 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
             .await
         });
         tokio::select! {
-            result = waiting.wait_for(|n| *n > 0) => { result.unwrap(); }
+            result = reservations.waiting_on(&folder) => { result.unwrap(); }
+            result = &mut call => panic!("launch claimed during provider rollback: {result:?}"),
             connected = ready.accept() => panic!("preview started before restore released its folder: {connected:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("setup did not reach the writer gate"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("launch did not reach the reservation"),
         }
         pause.release.notify_one();
         let (restored, launched) = tokio::join!(rollback, call);
-        // The new thread has claimed this checkout during provider rollback.
-        // The post-provider ownership check must preserve its files.
-        assert!(
-            restored.is_some(),
-            "restore accepted a newly shared checkout"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&tracked).unwrap(),
-            "shared checkout edit"
-        );
+        assert_eq!(restored, None);
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "first\n");
         let launched = launched.unwrap();
         assert_eq!(launched["_tag"], "Success", "{launched}");
     }
@@ -1847,14 +1857,70 @@ async fn a_setup_preview_cannot_start_while_rollback_holds_its_folder() {
         .expect("setup must resume")
         .unwrap();
     f.server.shutdown().await.unwrap();
-    // The client sees the generic rollback failure. The journal keeps the reason.
-    let db =
-        t3_persistence::rusqlite::Connection::open(f.home.join("userdata/statev2.sqlite")).unwrap();
-    let reason: String = db.query_row(
-        "SELECT last_error FROM orchestration_v2_effect_outbox WHERE command_id=?1 AND status='failed'",
-        ["command:hold-setup"], |row| row.get(0),
-    ).unwrap();
-    assert!(reason.contains("isolated worktree"), "{reason}");
+}
+
+#[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
+#[tokio::test]
+async fn a_root_launch_waits_before_claiming_the_restoring_project() {
+    let pause = Arc::new(RestorePause::default());
+    let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
+    let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut launch = setup_preview_launch(&f, &ready);
+    launch["workspaceStrategy"] = json!({"type":"root"});
+    let (mut socket, mut client) = session_socket(&f.server, &f.cookie).await;
+    let folder = f.folder.clone();
+    let reservations = t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations::global();
+    {
+        let rollback = f.restore("command:root-claim");
+        tokio::pin!(rollback);
+        tokio::select! {
+            () = pause.entered.notified() => {}
+            result = &mut rollback => panic!("rollback failed to start: {result:?}"),
+        }
+        let launch = call_exit(
+            &mut socket,
+            &mut client,
+            "orchestration.launchThread",
+            launch,
+        );
+        tokio::pin!(launch);
+        tokio::select! {
+            result = reservations.waiting_on(&folder) => result.unwrap(),
+            result = &mut launch => panic!("project root was claimed during rollback: {result}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("launch never requested its project root"),
+        }
+        pause.release.notify_one();
+        let (result, launched) = tokio::join!(rollback, launch);
+        assert_eq!(result, None);
+        assert_eq!(launched["_tag"], "Success", "{launched}");
+    }
+    f.server.shutdown().await.unwrap();
+}
+
+/// Exercise the project script's own writer admission without an orchestration reservation.
+#[cfg(all(feature = "git-actions", feature = "terminal", feature = "preview"))]
+#[tokio::test]
+async fn a_setup_preview_waits_for_the_host_writer_hold() {
+    let pause = Arc::new(RestorePause::default());
+    let mut f = RestoreFixture::start_with_pause(None, Some(pause.clone())).await;
+    let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let launch = setup_preview_launch(&f, &ready);
+    let (hold, writers) = pause.gate.hold("different-thread", &f.folder);
+    assert!(writers.is_empty());
+    let mut waiting = pause.gate.waiting();
+    let launched = f.call("orchestration.launchThread", launch).await;
+    assert_eq!(launched["_tag"], "Success", "{launched}");
+    tokio::select! {
+        result = waiting.wait_for(|n| *n > 0) => {result.unwrap();}
+        connected = ready.accept() => panic!("setup escaped admission: {connected:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => panic!("setup did not request admission"),
+    }
+    drop(hold);
+    tokio::time::timeout(std::time::Duration::from_secs(30), ready.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    f.server.shutdown().await.unwrap();
 }
 
 /// t3-git H-2 at the server: a file restore refuses while the thread has a live terminal,
@@ -2066,6 +2132,21 @@ async fn a_trusted_repository_restores_after_its_folder_was_recloned_in_place() 
     assert_eq!(
         denied["cause"][0]["error"]["requiredPermission"], "orchestration:operate",
         "{denied}"
+    );
+
+    let init = call_exit(
+        &mut socket,
+        &mut client,
+        "vcs.init",
+        json!({"cwd": fixture.folder()}),
+    )
+    .await;
+    let refused = fixture.restore("command:rollback-after-init").await;
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no longer belongs")),
+        "init {init} changed the binding: {refused:?}"
     );
 
     let trusted = fixture

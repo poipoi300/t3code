@@ -31,6 +31,44 @@ pub struct BeforeRecreation {
     source: t3_git::RepositoryBinding,
 }
 
+/// One-shot synchronization for tests that exercise the real server and Git backend together.
+#[cfg(feature = "testkit")]
+pub mod restore_testkit {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex},
+    };
+    use tokio::sync::oneshot::{self, Receiver, Sender};
+
+    type Pause = (Sender<()>, Receiver<()>);
+    static PAUSES: LazyLock<Mutex<HashMap<PathBuf, Pause>>> = LazyLock::new(Default::default);
+
+    pub fn pause_before_git_restore(folder: &Path) -> (Receiver<()>, Sender<()>) {
+        let (entered, reached) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let mut pending = PAUSES.lock().unwrap_or_else(|e| e.into_inner());
+        pending.retain(|_, (entered, _)| !entered.is_closed());
+        assert!(
+            pending
+                .insert(folder.to_owned(), (entered, resume))
+                .is_none()
+        );
+        (reached, release)
+    }
+
+    pub(super) async fn wait(folder: &Path, cancellation: &tokio_util::sync::CancellationToken) {
+        let pause = PAUSES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(folder);
+        if let Some((entered, resume)) = pause {
+            let _ = entered.send(());
+            tokio::select! { _ = resume => {}, _ = cancellation.cancelled() => {} }
+        }
+    }
+}
+
 pub struct GitCheckpointBackend {
     factory: Arc<dyn Fn(PathBuf) -> Git + Send + Sync>,
     bindings: Option<Arc<dyn crate::api::RepositoryBindingStore>>,
@@ -65,7 +103,14 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
                 "worktree recovery without a branch and path",
             ));
         };
-        if !self.is_managed(std::path::Path::new(&path.0)).await? {
+        let named = Path::new(&path.0);
+        let destination = t3_workspace::paths::nearest_real(named)
+            .map_err(|e| Error::Service {
+                operation: "worktree.recreate",
+                detail: e.to_string(),
+            })?
+            .0;
+        if !self.is_managed(named).await? || !self.is_managed(&destination).await? {
             return Err(Error::Unsupported("recovery outside managed worktrees"));
         }
         let project_id = expanded_id(&thread.project_id)?;
@@ -79,25 +124,30 @@ impl crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorks
         };
         // Through the project root's saved binding: a repository planted there refuses the
         // recreation instead of supplying the checkout (re-review 4 F6).
-        let destination = PathBuf::from(&path.0);
+        let verify = || {
+            t3_workspace::restore::verify_target(named, &destination).map_err(|e| Error::Service {
+                operation: "worktree.recreate",
+                detail: e.to_string(),
+            })
+        };
         let (git, source, before) = self
             .backend
-            .worktree_source(PathBuf::from(project.workspace_root), destination.clone())
+            .worktree_source(PathBuf::from(project.workspace_root), named.to_owned())
             .await?;
         let git = git
             .with_repository_binding(source)
             .await
             .map_err(git_error)?
             .with_cancellation(cancellation.clone());
+        verify()?;
         git.execute(&["worktree", "prune"], Default::default())
             .await
             .map_err(git_error)?;
-        git.add_worktree(t3_git::WorktreeOptions::new(
-            PathBuf::from(&path.0),
-            branch.0.clone(),
-        ))
-        .await
-        .map_err(git_error)?;
+        verify()?;
+        git.add_worktree(t3_git::WorktreeOptions::new(&destination, branch.0.clone()))
+            .await
+            .map_err(git_error)?;
+        verify()?;
         self.backend
             .finish_rollback_recreation(before, &cancellation)
             .await
@@ -282,6 +332,57 @@ impl GitCheckpointBackend {
         Ok(git)
     }
 
+    /// Persist the identity supplied by the operation that created a standalone repository.
+    /// File identity checks do not discover or install a new Git binding.
+    pub async fn record_created_repository(
+        &self,
+        scope: &Path,
+        identity: &t3_git::RepositoryBinding,
+    ) -> Result<()> {
+        let _lock = self.binding_locks.acquire(scope).await?;
+        let refusal = || {
+            git_error(GitError::RepositoryChanged {
+                path: scope.to_owned(),
+                detail: "The newly created repository no longer has its verified identity.",
+            })
+        };
+        let root = std::fs::canonicalize(scope).map_err(|_| refusal())?;
+        let admin = root.join(".git");
+        if identity.version != t3_git::REPOSITORY_BINDING_VERSION
+            || root != identity.top_level
+            || admin != identity.git_dir
+            || admin != identity.common_dir
+        {
+            return Err(refusal());
+        }
+        let expected = identity.ids.as_ref().ok_or_else(refusal)?;
+        let actual = t3_git::FileId::directory(&admin).map_err(|_| refusal())?;
+        if [expected.git_entry, expected.git_dir, expected.common_dir] != [actual; 3]
+            || ["commondir", "gitdir"].iter().any(|name| {
+                !matches!(std::fs::symlink_metadata(admin.join(name)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+            })
+        {
+            return Err(refusal());
+        }
+        let store = self
+            .bindings
+            .as_ref()
+            .ok_or(Error::Unsupported("repository binding store"))?;
+        store
+            .put(
+                scope,
+                serde_json::to_value(SavedBinding {
+                    repository: Some(identity.clone()),
+                })?,
+            )
+            .await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(scope);
+        Ok(())
+    }
+
     fn pending_for(&self, cwd: &Path) -> Option<PendingBinding> {
         self.pending
             .lock()
@@ -454,6 +555,8 @@ impl CheckpointBackend for GitCheckpointBackend {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        #[cfg(feature = "testkit")]
+        restore_testkit::wait(git.cwd(), &cancellation).await;
         let restored = git
             .restore_checkpoint(&reference.0, false)
             .await
@@ -1821,6 +1924,84 @@ mod tests {
                 .await,
         );
         assert!(!worktree.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_a_created_repository_persists_only_the_verified_identity() -> Result<()> {
+        use crate::api::RepositoryBindingStore;
+        let repo = Repository::new().await?;
+        let store = bindings_at(repo._temp.path().join("bindings.json"));
+        let backend = GitCheckpointBackend::default().with_repository_bindings(store.clone());
+        let identity = repo
+            .git
+            .bind_repository()
+            .await
+            .map_err(git_error)?
+            .unwrap();
+        backend
+            .record_created_repository(&repo.root, &identity)
+            .await?;
+        let saved = store.get(&repo.root).await?.unwrap();
+        assert_eq!(saved["repository"], serde_json::to_value(&identity)?);
+        let lock = backend.binding_locks.acquire(&repo.root).await?;
+        let recording = backend.record_created_repository(&repo.root, &identity);
+        tokio::pin!(recording);
+        tokio::select! {
+            biased;
+            result = &mut recording => panic!("save ignored the scope lock: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        std::fs::rename(repo.root.join(".git"), repo._temp.path().join("saved-git"))?;
+        let replacement = Repository::new().await?;
+        std::fs::rename(replacement.root.join(".git"), repo.root.join(".git"))?;
+        drop(lock);
+        assert!(
+            recording.await.is_err(),
+            "saved a different repository after waiting"
+        );
+        assert_eq!(store.get(&repo.root).await?, Some(saved));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rollback_recreation_rechecks_the_destination_after_resolving_the_source() -> Result<()>
+    {
+        use crate::ports::checkpoints_forks::checkpoint_rollback_service::RollbackWorkspaceRecovery;
+        let repo = Repository::new().await?;
+        repo.command(&["branch", "feature"]).await?;
+        let managed = repo._temp.path().join("managed");
+        let outside = repo._temp.path().join("outside");
+        let parent = managed.join("repo");
+        std::fs::create_dir_all(&parent)?;
+        std::fs::create_dir(&outside)?;
+        let worktree = parent.join("feature");
+        let changed = std::sync::Once::new();
+        let redirected = outside.clone();
+        let backend = GitCheckpointBackend::new(move |cwd| {
+            changed.call_once(|| {
+                std::fs::remove_dir(&parent).unwrap();
+                std::os::unix::fs::symlink(&redirected, &parent).unwrap();
+            });
+            Git::new(cwd)
+        });
+        let recovery = GitRollbackWorkspaceRecovery {
+            backend: Arc::new(backend),
+            database: project_rooted_at(&repo.root).await?,
+            managed_roots: vec![managed],
+        };
+        let result = recovery
+            .recreate(
+                &project_thread("project:test", &worktree)?,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            !outside.join("feature").exists(),
+            "checkout followed a changed parent"
+        );
+        assert!(result.is_err());
         Ok(())
     }
 

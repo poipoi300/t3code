@@ -2006,6 +2006,31 @@ mod tests {
         thread
     }
 
+    #[tokio::test]
+    async fn send_recovery_waits_for_the_rollback_workspace_lease() -> Result<()> {
+        let folder = tempfile::tempdir()?;
+        let thread = app_thread(folder.path().to_str().unwrap());
+        let reader = Arc::new(crate::testing::FakeProjectionReader::default());
+        reader.thread.push(Ok(Some(thread.clone())));
+        let restore = LeasedWorktreeRestore {
+            inner: Some(Arc::new(NoWorktreeRestore)),
+            reader,
+        };
+        let lease = WorkspaceLocks::workspace_leases()
+            .acquire(folder.path())
+            .await?;
+        let recovery = restore.restore(thread);
+        tokio::pin!(recovery);
+        tokio::select! {
+            biased;
+            result = &mut recovery => panic!("send finished under a rollback lease: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        drop(lease);
+        assert!(!recovery.await?);
+        Ok(())
+    }
+
     /// Re-review 4 F1: a send's worktree restore that recreated nothing never rebinds the folder,
     /// so a repository planted there cannot become the thread's binding.
     #[tokio::test]

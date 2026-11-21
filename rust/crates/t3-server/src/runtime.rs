@@ -371,6 +371,25 @@ async fn seed_dev_replay_instance(local: &LocalServices) {
     }
 }
 
+#[cfg(all(feature = "orchestration", feature = "terminal"))]
+fn terminal_writers(
+    domains: &Domains,
+) -> crate::Result<Arc<dyn t3_orchestration::api::ThreadWriters>> {
+    domains
+        .get::<crate::adapters::terminal::TerminalAdapter>()
+        .map(|terminal| {
+            Arc::new(crate::adapters::terminal::TerminalWriters(terminal))
+                as Arc<dyn t3_orchestration::api::ThreadWriters>
+        })
+        .ok_or_else(|| crate::Error::Service("Terminal writer admission is missing.".into()))
+}
+
+#[cfg(all(test, feature = "orchestration", feature = "terminal"))]
+#[test]
+fn startup_requires_terminal_writer_admission_when_terminals_are_enabled() {
+    assert!(terminal_writers(&Domains::default()).is_err());
+}
+
 async fn start_domains(
     local: &LocalServices,
     shutdown: &CancellationToken,
@@ -502,15 +521,10 @@ async fn start_domains(
     let launch_ports = None;
     // A file restore holds the thread's terminals, setup scripts included (t3-git H-2).
     #[cfg(all(feature = "orchestration", feature = "terminal"))]
-    let writers = domains
-        .get::<crate::adapters::terminal::TerminalAdapter>()
-        .map(|terminal| {
-            Arc::new(crate::adapters::terminal::TerminalWriters(terminal))
-                as Arc<dyn t3_orchestration::api::ThreadWriters>
-        });
+    let writers = terminal_writers(domains)?;
     #[cfg(all(feature = "orchestration", not(feature = "terminal")))]
-    let writers = Some(Arc::new(crate::writers::RpcWriters(writer_gate.clone()))
-        as Arc<dyn t3_orchestration::api::ThreadWriters>);
+    let writers = Arc::new(crate::writers::RpcWriters(writer_gate.clone()))
+        as Arc<dyn t3_orchestration::api::ThreadWriters>;
     #[cfg(all(feature = "orchestration", feature = "workspace"))]
     let managed_worktrees = authority.managed_directories().await;
     #[cfg(all(feature = "orchestration", not(feature = "workspace")))]

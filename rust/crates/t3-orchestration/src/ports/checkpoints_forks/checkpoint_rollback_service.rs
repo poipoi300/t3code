@@ -126,7 +126,7 @@ impl CheckpointRollback for CheckpointRollbackService {
     }
 }
 
-fn reject(reason: &'static str) -> Error {
+fn reject(reason: impl Into<String>) -> Error {
     Error::Service {
         operation: "checkpoint.rollback",
         detail: reason.into(),
@@ -700,29 +700,64 @@ impl CheckpointRollbackService {
                     .recreate(thread, cancellation.clone())
                     .await;
             }
+            // A missing .git does not make user files disposable. Keep the named folder
+            // intact when its contents cannot be positively identified as build outputs.
+            use t3_workspace::restore::{is_leftover, remove_leftovers, verify_target};
+            if !std::fs::symlink_metadata(&path)?.is_dir() || !is_leftover(&path) {
+                return Err(reject(
+                    "Worktree recovery refused to replace a folder containing user files.",
+                ));
+            }
             let parent = path
                 .parent()
                 .ok_or_else(|| reject("worktree has no parent"))?;
+            let real_parent = t3_workspace::paths::nearest_real(parent)
+                .map_err(|e| reject(e.to_string()))?
+                .0;
             let aside = tempfile::Builder::new()
                 .prefix(".t3-replaced-")
-                .tempdir_in(parent)?;
-            let aside = aside.keep();
+                .tempdir_in(&real_parent)?
+                .keep();
             let saved = aside.join("folder");
+            let unchanged =
+                || verify_target(parent, &real_parent).map_err(|e| reject(e.to_string()));
+            unchanged()?;
             std::fs::rename(&path, &saved)?;
-            match self
-                .workspace_recovery
-                .recreate(thread, cancellation.clone())
-                .await
-            {
+            let result = if is_leftover(&saved) {
+                self.workspace_recovery
+                    .recreate(thread, cancellation.clone())
+                    .await
+            } else {
+                Err(reject("Worktree contents changed during recovery."))
+            };
+            unchanged()?;
+            match result {
                 Ok(()) => {
-                    std::fs::remove_dir_all(&aside)?;
+                    if !remove_leftovers(&saved, &saved).map_err(|e| {
+                        reject(format!("Saved worktree at {}: {e}", aside.display()))
+                    })? {
+                        return Err(reject(format!(
+                            "Worktree data was preserved at {}",
+                            saved.display()
+                        )));
+                    }
+                    std::fs::remove_dir(&aside)?;
                 }
                 Err(error) => {
-                    // Preserve the set-aside data if checkout removal or putting it back fails.
-                    if path.try_exists()? {
-                        std::fs::remove_dir_all(&path)?;
+                    // Never recursively erase a partial checkout: a concurrent file may be there.
+                    let partial = aside.join("incomplete");
+                    match std::fs::rename(&path, &partial) {
+                        Ok(()) => {
+                            std::fs::rename(&saved, &path)?;
+                            return Err(reject(format!(
+                                "{error}. Incomplete checkout preserved at {}",
+                                partial.display()
+                            )));
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
                     }
-                    std::fs::rename(aside.join("folder"), &path)?;
+                    std::fs::rename(&saved, &path)?;
                     std::fs::remove_dir(&aside)?;
                     return Err(error);
                 }

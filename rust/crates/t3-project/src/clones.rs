@@ -33,6 +33,10 @@ pub fn parse_git_clone_progress_line(line: &str) -> Option<CloneProgress> {
 /// Prepared URLs are deliberately not Debug: clone_url may contain credentials.
 #[derive(Clone)]
 pub struct PreparedClone {
+    /// The destination authorized for this job, reused by retries.
+    pub destination_id: Option<t3_git::FileId>,
+    /// The checkout this job published, retained across a failed persistence operation.
+    pub created_repository: Arc<tokio::sync::OnceCell<t3_git::RepositoryBinding>>,
     pub destination_path: String,
     pub remote_url: String,
     pub clone_url: String,
@@ -50,7 +54,7 @@ pub trait CloneRepository: Send + Sync {
         progress: Arc<dyn Fn(CloneProgress) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<()>;
-    /// Refuses non-clone contents, symlink/junction redirection and inspection errors.
+    /// Release only staging contents owned by the attempt. Preserve public destination data.
     async fn discard(&self, destination: &str) -> Result<()>;
 }
 
@@ -61,6 +65,44 @@ pub struct ForgeCloneRepository {
     pub home: std::path::PathBuf,
 }
 impl ForgeCloneRepository {
+    pub async fn clone_with_identity(
+        &self,
+        input: &ProjectCloneStartInput,
+        prepared: &PreparedClone,
+        progress: Arc<dyn Fn(CloneProgress) + Send + Sync>,
+        cancel: CancellationToken,
+        destination_id: t3_git::FileId,
+    ) -> Result<t3_git::RepositoryBinding> {
+        let callback = Arc::new(move |p: t3_forge::clone_progress::GitCloneProgressLine| {
+            progress(CloneProgress {
+                stage: p.stage,
+                percent: p.percent.map(i64::from),
+                detail: p.detail,
+            })
+        });
+        let service = self.service(cancel.clone());
+        let result = service
+            .clone_with_identity(
+                t3_contracts::source_control::SourceControlCloneRepositoryInput {
+                    provider: None,
+                    repository: None,
+                    remote_url: Some(Some(prepared.clone_url.clone().into())),
+                    destination_path: prepared.destination_path.clone().into(),
+                    protocol: input.protocol.clone(),
+                },
+                t3_forge::services::CloneOptions {
+                    timeout: None,
+                    on_progress: Some(callback),
+                },
+                destination_id,
+            )
+            .await;
+        match result {
+            Ok(created) => Ok(created.identity),
+            Err(_) if cancel.is_cancelled() => Err(Error::Cancelled),
+            Err(e) => Err(repository_error(e)),
+        }
+    }
     fn service(
         &self,
         cancel: CancellationToken,
@@ -93,6 +135,8 @@ impl CloneRepository for ForgeCloneRepository {
             .await
             .map_err(repository_error)?;
         Ok(PreparedClone {
+            destination_id: None,
+            created_repository: Default::default(),
             destination_path: prepared.destination_path.to_string_lossy().into(),
             remote_url: prepared.remote_url,
             clone_url: prepared.clone_url,
@@ -106,40 +150,22 @@ impl CloneRepository for ForgeCloneRepository {
         progress: Arc<dyn Fn(CloneProgress) + Send + Sync>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let callback = Arc::new(move |p: t3_forge::clone_progress::GitCloneProgressLine| {
-            progress(CloneProgress {
-                stage: p.stage,
-                percent: p.percent.map(i64::from),
-                detail: p.detail,
-            })
-        });
-        let service = self.service(cancel.clone());
-        let result = service
-            .clone_repository(
-                t3_contracts::source_control::SourceControlCloneRepositoryInput {
-                    provider: None,
-                    repository: None,
-                    remote_url: Some(Some(prepared.clone_url.clone().into())),
-                    destination_path: prepared.destination_path.clone().into(),
-                    protocol: input.protocol.clone(),
-                },
-                t3_forge::services::CloneOptions {
-                    timeout: None,
-                    on_progress: Some(callback),
-                },
-            )
-            .await;
-        match result {
-            Ok(_) => Ok(()),
-            Err(_) if cancel.is_cancelled() => Err(Error::Cancelled),
-            Err(e) => Err(repository_error(e)),
-        }
-    }
-    async fn discard(&self, destination: &str) -> Result<()> {
-        self.service(CancellationToken::new())
-            .discard_clone(std::path::Path::new(destination))
+        let id = match prepared.destination_id {
+            Some(id) => id,
+            None => {
+                let folder = std::path::Path::new(&prepared.destination_path);
+                std::fs::create_dir_all(folder).map_err(t3_git::GitError::from)?;
+                t3_git::FileId::directory(folder).map_err(t3_git::GitError::from)?
+            }
+        };
+        self.clone_with_identity(input, prepared, progress, cancel, id)
             .await
-            .map_err(repository_error)
+            .map(|_| ())
+    }
+    async fn discard(&self, _destination: &str) -> Result<()> {
+        // Staged clones clean up their own tempdir. The public directory is the authorized
+        // retry placeholder or a completed checkout and can contain the user's work.
+        Ok(())
     }
 }
 #[async_trait]
@@ -214,6 +240,15 @@ impl ProjectCloneTracker {
         input: ProjectCloneStartInput,
         hooks: Arc<dyn CloneHooks>,
     ) -> Result<ProjectCloneStartResult> {
+        self.start_with_destination(input, hooks, None).await
+    }
+
+    pub async fn start_with_destination(
+        &self,
+        input: ProjectCloneStartInput,
+        hooks: Arc<dyn CloneHooks>,
+        destination_id: Option<t3_git::FileId>,
+    ) -> Result<ProjectCloneStartResult> {
         let task = {
             let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
@@ -222,7 +257,7 @@ impl ProjectCloneTracker {
             let this = self.clone();
             self.0
                 .tasks
-                .spawn(async move { this.start_inner(input, hooks).await })
+                .spawn(async move { this.start_inner(input, hooks, destination_id).await })
         };
         task.await?
     }
@@ -230,9 +265,11 @@ impl ProjectCloneTracker {
         &self,
         mut input: ProjectCloneStartInput,
         hooks: Arc<dyn CloneHooks>,
+        destination_id: Option<t3_git::FileId>,
     ) -> Result<ProjectCloneStartResult> {
         let _action = self.0.actions.lock().await;
-        let prepared = self.0.backend.prepare(&input).await?;
+        let mut prepared = self.0.backend.prepare(&input).await?;
+        prepared.destination_id = destination_id;
         let original = input.project_id.clone();
         {
             let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());

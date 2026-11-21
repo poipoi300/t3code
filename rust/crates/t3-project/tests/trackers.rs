@@ -33,6 +33,8 @@ struct GitCloneFixture {
 impl CloneRepository for GitCloneFixture {
     async fn prepare(&self, input: &ProjectCloneStartInput) -> Result<PreparedClone> {
         Ok(PreparedClone {
+            destination_id: None,
+            created_repository: Default::default(),
             destination_path: input.destination_path.0.clone(),
             remote_url: "https://example.invalid/team/repo.git".into(),
             clone_url: "https://secret@example.invalid/team/repo.git?token=hidden".into(),
@@ -284,7 +286,7 @@ async fn clone_subscription_keeps_start_order_across_progress_changes() {
     tracker.shutdown().await;
 }
 #[tokio::test]
-async fn concrete_forge_backend_clones_fixture_and_refuses_foreign_contents() {
+async fn staged_clone_cleanup_preserves_published_and_replacement_contents() {
     let (tmp, fixture, _hooks, tracker, mut input) = harness().await;
     let backend = ForgeCloneRepository {
         registry: Arc::new(t3_forge::registry::ForgeRegistry::default()),
@@ -319,42 +321,37 @@ async fn concrete_forge_backend_clones_fixture_and_refuses_foreign_contents() {
         "fixture checkout"
     );
     assert!(progress.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    // A completed checkout has already left private staging. Cleanup by its former
+    // destination must preserve both that checkout and anything later placed there.
+    let destination = std::path::Path::new(&input.destination_path.0);
     backend.discard(&input.destination_path.0).await.unwrap();
-    assert!(
-        std::fs::read_dir(&input.destination_path.0)
-            .unwrap()
-            .next()
-            .is_none()
+    assert_eq!(
+        std::fs::read_to_string(destination.join("file")).unwrap(),
+        "fixture checkout"
     );
-    t3_git::Git::new(&input.destination_path.0)
+    std::fs::rename(destination, tmp.path().join("published")).unwrap();
+    std::fs::create_dir(destination).unwrap();
+    t3_git::Git::new(destination)
         .with_environment(git_environment(tmp.path()))
         .execute(&["init"], Default::default())
         .await
         .unwrap();
-    std::fs::write(
-        std::path::Path::new(&input.destination_path.0).join(".git/objects/incomplete"),
-        "partial pack",
-    )
-    .unwrap();
+    let pack = destination.join(".git/objects/incomplete");
+    std::fs::write(&pack, "partial pack").unwrap();
+    let foreign = destination.join("foreign");
+    std::fs::write(&foreign, "user data").unwrap();
+    assert!(backend.prepare(&input).await.is_err());
     backend.discard(&input.destination_path.0).await.unwrap();
-    assert!(
-        std::fs::read_dir(&input.destination_path.0)
-            .unwrap()
-            .next()
-            .is_none()
-    );
-    std::fs::write(
-        std::path::Path::new(&input.destination_path.0).join("foreign"),
-        "user data",
+    assert_eq!(std::fs::read_to_string(pack).unwrap(), "partial pack");
+    assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "user data");
+    std::fs::rename(
+        destination.join(".git"),
+        tmp.path().join("replacement-metadata"),
     )
     .unwrap();
     assert!(backend.prepare(&input).await.is_err());
-    assert!(backend.discard(&input.destination_path.0).await.is_err());
-    assert_eq!(
-        std::fs::read_to_string(std::path::Path::new(&input.destination_path.0).join("foreign"))
-            .unwrap(),
-        "user data"
-    );
+    backend.discard(&input.destination_path.0).await.unwrap();
+    assert_eq!(std::fs::read_to_string(foreign).unwrap(), "user data");
     tracker.shutdown().await;
 }
 #[tokio::test]

@@ -417,3 +417,36 @@ async fn real_git_clone_failure_redacts_userinfo_and_query_from_snapshots_and_er
     );
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_clone_carries_its_identity_across_replacement_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("source");
+    let destination = root.join("destination");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    git(&source).init_repository().await.unwrap();
+    let service = SourceControlRepositoryService::new(
+        Arc::new(ForgeRegistry::default()),
+        git(root),
+        root.into(),
+    );
+    let cloned = service
+        .clone_with_identity(
+            serde_json::from_value(json!({"remoteUrl":source,"destinationPath":destination}))
+                .unwrap(),
+            Default::default(),
+            t3_git::FileId::directory(&destination).unwrap(),
+        )
+        .await
+        .unwrap();
+    std::fs::rename(destination.join(".git"), root.join("original-metadata")).unwrap();
+    std::fs::rename(source.join(".git"), destination.join(".git")).unwrap();
+    assert!(
+        git(&destination)
+            .with_repository_binding(cloned.identity)
+            .await
+            .is_err()
+    );
+}

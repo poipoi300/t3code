@@ -204,6 +204,38 @@ impl Default for CloneOptions {
     }
 }
 
+/// Internal result. The RPC only serializes `result`.
+pub struct CreatedClone {
+    pub result: SourceControlCloneRepositoryResult,
+    pub identity: t3_git::RepositoryBinding,
+}
+
+struct CloneMetadata {
+    folder: PathBuf,
+    destination_id: t3_git::FileId,
+    git_id: t3_git::FileId,
+}
+
+impl CloneMetadata {
+    fn capture(folder: &Path, destination_id: t3_git::FileId) -> RepositoryResult<Self> {
+        let git_id = t3_git::FileId::directory(&folder.join(".git")).map_err(|_| {
+            repository_error("unknown", "cloneRepository", "Missing clone metadata.")
+        })?;
+        Ok(Self {
+            folder: folder.into(),
+            destination_id,
+            git_id,
+        })
+    }
+
+    async fn bind(&self, git: &t3_git::Git) -> RepositoryResult<t3_git::RepositoryBinding> {
+        git.at(&self.folder)
+            .bind_cloned_repository(self.destination_id, self.git_id)
+            .await
+            .map_err(|e| git_error("unknown", "cloneRepository", e))
+    }
+}
+
 pub struct SourceControlRepositoryService {
     registry: Arc<ForgeRegistry>,
     git: t3_git::Git,
@@ -407,17 +439,13 @@ impl SourceControlRepositoryService {
         url: &str,
         options: CloneOptions,
         provider: &str,
+        parent: &Path,
     ) -> RepositoryResult<()> {
-        let destination = prepared
+        let operand = prepared
             .destination_path
-            .file_name()
-            .ok_or_else(|| {
-                repository_error(provider, "cloneRepository", "Invalid clone destination.")
-            })?
+            .strip_prefix(parent)
+            .unwrap_or(&prepared.destination_path)
             .to_string_lossy();
-        let parent = prepared.destination_path.parent().ok_or_else(|| {
-            repository_error(provider, "cloneRepository", "Invalid clone destination.")
-        })?;
         let url = clone_url(url);
         let lines = Arc::new(std::sync::Mutex::new(
             crate::clone_progress::Lines::default(),
@@ -439,7 +467,7 @@ impl SourceControlRepositoryService {
             .at(parent)
             .execute_command(
                 "SourceControlRepositoryService.cloneRepository",
-                &["clone", "--progress", "--", &url, &destination],
+                &["clone", "--progress", "--", &url, &operand],
                 t3_git::ExecuteOptions {
                     timeout: options.timeout,
                     on_stderr_chunk,
@@ -470,12 +498,35 @@ impl SourceControlRepositoryService {
         options: CloneOptions,
     ) -> RepositoryResult<SourceControlCloneRepositoryResult> {
         let prepared = self.prepare_clone(input.clone()).await?;
+        let parent = prepared
+            .destination_path
+            .parent()
+            .ok_or_else(|| {
+                repository_error("unknown", "cloneRepository", "Invalid clone destination.")
+            })?
+            .to_owned();
+        self.clone_prepared(input, prepared, options, &parent).await
+    }
+
+    async fn clone_prepared(
+        &self,
+        input: SourceControlCloneRepositoryInput,
+        prepared: PreparedClone,
+        options: CloneOptions,
+        parent: &Path,
+    ) -> RepositoryResult<SourceControlCloneRepositoryResult> {
         let provider = input
             .provider
             .flatten()
             .map_or_else(|| "unknown".into(), |p| p.0);
         let remote = match self
-            .run_clone(&prepared, &prepared.clone_url, options.clone(), &provider)
+            .run_clone(
+                &prepared,
+                &prepared.clone_url,
+                options.clone(),
+                &provider,
+                parent,
+            )
             .await
         {
             Ok(()) => prepared.remote_url.clone(),
@@ -495,7 +546,7 @@ impl SourceControlRepositoryService {
                 let Some(fallback) = fallback.filter(|_| ssh_rejected(&error)) else {
                     return Err(error);
                 };
-                self.run_clone(&prepared, &fallback, options, &provider)
+                self.run_clone(&prepared, &fallback, options, &provider, parent)
                     .await?;
                 redacted_url(&fallback)
             }
@@ -507,6 +558,65 @@ impl SourceControlRepositoryService {
             repository: prepared.repository,
         })
     }
+    pub async fn clone_with_identity(
+        &self,
+        input: SourceControlCloneRepositoryInput,
+        options: CloneOptions,
+        expected_destination: t3_git::FileId,
+    ) -> RepositoryResult<CreatedClone> {
+        let mut prepared = self.prepare_clone(input.clone()).await?;
+        let destination = prepared.destination_path.clone();
+        let parent = destination.parent().ok_or_else(|| {
+            repository_error("unknown", "cloneRepository", "Invalid clone destination.")
+        })?;
+        let changed = || {
+            repository_error(
+                "unknown",
+                "cloneRepository",
+                "The authorized clone destination changed.",
+            )
+        };
+        let io = |e: std::io::Error| git_error("unknown", "cloneRepository", e.into());
+        if t3_git::FileId::directory(&destination).map_err(io)? != expected_destination {
+            return Err(changed());
+        }
+        // Clone into a private sibling on the same volume. Git resolves relative remotes
+        // from the original parent. Capture the clone's own directory and metadata identities
+        // while this operation still exclusively owns the staging directory.
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".t3-clone-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let stage = builder.tempdir_in(parent).map_err(io)?;
+        let checkout = stage.path().join("checkout");
+        std::fs::create_dir(&checkout).map_err(io)?;
+        let checkout_id = t3_git::FileId::directory(&checkout).map_err(io)?;
+        prepared.destination_path = checkout.clone();
+        let mut result = self
+            .clone_prepared(input, prepared, options, parent)
+            .await?;
+        let mut metadata = CloneMetadata::capture(&checkout, checkout_id)?;
+        if t3_git::FileId::directory(&destination).map_err(io)? != expected_destination
+            || std::fs::read_dir(&destination)
+                .map_err(io)?
+                .next()
+                .is_some()
+        {
+            return Err(changed());
+        }
+        // Unix replaces an empty directory atomically. Windows requires its removal first.
+        #[cfg(windows)]
+        std::fs::remove_dir(&destination).map_err(io)?;
+        std::fs::rename(&checkout, &destination).map_err(io)?;
+        metadata.folder.clone_from(&destination);
+        let identity = metadata.bind(&self.git).await?;
+        result.cwd = Text(destination.to_string_lossy().into_owned());
+        Ok(CreatedClone { result, identity })
+    }
+
     pub async fn discard_clone(&self, destination: &Path) -> RepositoryResult<()> {
         let destination = self.destination(destination)?;
         let mut entries = match tokio::fs::read_dir(&destination).await {
@@ -873,6 +983,40 @@ mod url_tests {
         assert_eq!(
             redacted_url("https://user:private@host/repo?token=private#branch"),
             "https://host/repo#branch"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clone_identity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replacing_clone_metadata_before_binding_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        let git = t3_git::Git::new(temp.path());
+        git.at(&source).init_repository().await.unwrap();
+        git.execute(
+            &[
+                "clone",
+                "--",
+                source.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ],
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let proof =
+            CloneMetadata::capture(&target, t3_git::FileId::directory(&target).unwrap()).unwrap();
+        std::fs::rename(target.join(".git"), temp.path().join("first")).unwrap();
+        std::fs::rename(source.join(".git"), target.join(".git")).unwrap();
+        assert!(
+            proof.bind(&git).await.is_err(),
+            "the clone accepted replacement metadata"
         );
     }
 }

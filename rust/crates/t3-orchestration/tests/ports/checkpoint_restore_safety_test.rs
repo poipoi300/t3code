@@ -417,3 +417,58 @@ async fn recovery_keeps_the_named_workspace_leased_after_unlinking_a_leftover() 
     let _acquired = normal.await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn reserving_a_missing_checkout_covers_case_variants_of_its_unresolved_name() -> Result<()> {
+    let parent = tempfile::tempdir()?;
+    let reservations = WorkspaceReservations::global();
+    let cancel = CancellationToken::new();
+    let restore = reservations
+        .reserve(
+            &parent.path().join("Future"),
+            ReservationKind::Restore,
+            &cancel,
+        )
+        .await?;
+    let alternate = parent.path().join("future");
+    let launch = reservations.reserve(&alternate, ReservationKind::TurnStart, &cancel);
+    tokio::pin!(launch);
+    tokio::select! {
+        biased;
+        result = &mut launch => panic!("an alternate spelling claimed the missing checkout: {}", result.is_ok()),
+        _ = std::future::ready(()) => {}
+    }
+    drop(restore);
+    launch.await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_waiting_claim_rechecks_its_alias_after_it_wakes() -> Result<()> {
+    let parent = tempfile::tempdir()?;
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    let link = parent.path().join("link");
+    std::fs::create_dir(&a)?;
+    std::fs::create_dir(&b)?;
+    std::os::unix::fs::symlink(&a, &link)?;
+    let reservations = WorkspaceReservations::global();
+    let cancel = CancellationToken::new();
+    let first = reservations
+        .reserve(&a, ReservationKind::Restore, &cancel)
+        .await?;
+    let second = reservations
+        .reserve(&b, ReservationKind::Restore, &cancel)
+        .await?;
+    let waiter = reservations.reserve(&link, ReservationKind::TurnStart, &cancel);
+    tokio::pin!(waiter);
+    tokio::select! { biased; _ = &mut waiter => panic!("first restore bypassed"), _ = std::future::ready(()) => {} }
+    std::fs::remove_file(&link)?;
+    std::os::unix::fs::symlink(&b, &link)?;
+    drop(first);
+    tokio::select! { biased; _ = &mut waiter => panic!("second restore bypassed"), _ = std::future::ready(()) => {} }
+    drop(second);
+    waiter.await?;
+    Ok(())
+}

@@ -1046,37 +1046,58 @@ impl CodexSessionRuntime {
         }
     }
 
-    /// Reverts the newest `count` native turns, stopping short of `stop_at`: a retry after a
-    /// revert T3 did not record finds the target among the newest turns and removes nothing more
-    /// (re-review 4 F7).
+    /// Fork trimming uses a count. Rollback locates its durable boundary in native history.
     async fn revert(
         &self,
         thread: &str,
-        count: usize,
-        stop_at: Option<&str>,
+        limit: usize,
+        boundary: Option<mapping::RollbackBoundary<'_>>,
     ) -> ProviderResult<Value> {
-        let mut remaining = count;
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
         let mut before = None;
-        while remaining > 0 {
+        let mut remaining = limit;
+        'pages: loop {
             if !seen.insert(cursor.clone()) {
                 return Err(protocol("Thread history pagination repeated a cursor"));
             }
-            let page:native::ThreadTurnsListResponse=self.rpc("thread/turns/list", &json!({"threadId":thread,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"})).await?;
+            let page: native::ThreadTurnsListResponse = self
+                .rpc(
+                    "thread/turns/list",
+                    &json!({
+                        "threadId":thread, "cursor":cursor, "limit":remaining.clamp(1,100),
+                        "sortDirection":"desc", "itemsView":"summary"
+                    }),
+                )
+                .await?;
             for turn in page.data {
-                if stop_at == Some(turn.id.as_str()) {
-                    remaining = 0;
-                    break;
-                }
-                before = Some(turn.id);
-                remaining -= 1;
-                if remaining == 0 {
-                    break;
+                match boundary {
+                    Some(mapping::RollbackBoundary::After(retained)) if turn.id == retained => {
+                        break 'pages;
+                    }
+                    Some(mapping::RollbackBoundary::From(first)) => {
+                        if turn.id == first {
+                            before = Some(turn.id);
+                            break 'pages;
+                        }
+                    }
+                    Some(mapping::RollbackBoundary::After(_)) => before = Some(turn.id),
+                    None => {
+                        before = Some(turn.id);
+                        remaining -= 1;
+                        if remaining == 0 {
+                            break 'pages;
+                        }
+                    }
                 }
             }
             cursor = field_option(page.next_cursor);
             if cursor.is_none() {
+                if matches!(boundary, Some(mapping::RollbackBoundary::After(_))) {
+                    return Err(protocol(
+                        "Native history does not contain the retained rollback turn",
+                    ));
+                }
                 break;
             }
         }
@@ -1442,18 +1463,18 @@ impl SessionRuntime for CodexSessionRuntime {
     }
     async fn rollback(&self, input: RollbackInput) -> ProviderResult<ThreadSnapshot> {
         let _lane = self.operation_lane.lock().await;
-        let count = mapping::rollback_count(&input)?;
+        let boundary = mapping::rollback_boundary(&input)?;
         let head = match &input.target {
             RollbackTarget::ThreadStart { .. } => None,
             RollbackTarget::ProviderTurn { provider_turn, .. } => {
                 provider_turn.native_turn_ref.clone()
             }
         };
-        if count == 0 {
+        let Some(boundary) = boundary else {
             return self
                 .snapshot_result(input.provider_thread, None, head)
                 .await;
-        }
+        };
         let thread = native_thread(&input.provider_thread)?;
         let metadata: Value = self
             .rpc(
@@ -1478,11 +1499,7 @@ impl SessionRuntime for CodexSessionRuntime {
             params["excludeTurns"] = json!(true);
             self.resume_native(params, &input.provider_thread).await?;
         }
-        let target = head
-            .as_ref()
-            .and_then(|head| head.native_id.as_ref())
-            .map(|id| id.0.clone());
-        let response = self.revert(thread, count, target.as_deref()).await?;
+        let response = self.revert(thread, 100, Some(boundary)).await?;
         self.snapshot_result(input.provider_thread, Some(response), head)
             .await
     }

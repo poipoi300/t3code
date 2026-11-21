@@ -739,33 +739,53 @@ pub fn provider_thread(
     )
 }
 
-pub fn rollback_count(input: &RollbackInput) -> ProviderResult<usize> {
-    match &input.target {
-        RollbackTarget::ThreadStart { .. } => Ok(input
+/// Codex reverts *before* a native turn ID. A retained checkpoint therefore uses the
+/// immediate successor in native history. At thread start the first T3-owned turn is removed.
+pub enum RollbackBoundary<'a> {
+    After(&'a str),
+    From(&'a str),
+}
+
+pub fn rollback_boundary(input: &RollbackInput) -> ProviderResult<Option<RollbackBoundary<'_>>> {
+    let owned = || {
+        input
             .provider_thread_turns
             .iter()
-            .filter(|t| terminal_turn(t))
-            .count()),
+            .filter(|t| t.provider_thread_id == input.provider_thread.id)
+    };
+    let (boundary, from) = match &input.target {
+        RollbackTarget::ThreadStart { .. } => {
+            let Some(first) = owned()
+                .filter(|t| terminal_turn(t))
+                .min_by_key(|t| t.ordinal)
+            else {
+                return Ok(None);
+            };
+            (first, true)
+        }
         RollbackTarget::ProviderTurn { provider_turn, .. } => {
             if provider_turn.provider_thread_id != input.provider_thread.id {
                 return Err(protocol(
                     "Rollback target belongs to another provider thread",
                 ));
             }
-            let boundary = input
-                .provider_thread_turns
-                .iter()
-                .find(|t| t.id == provider_turn.id)
-                .ok_or_else(|| {
-                    protocol("Rollback target was not found in durable provider turn history")
-                })?;
-            Ok(input
-                .provider_thread_turns
-                .iter()
-                .filter(|t| t.ordinal > boundary.ordinal && terminal_turn(t))
-                .count())
+            let retained = owned().find(|t| t.id == provider_turn.id).ok_or_else(|| {
+                protocol("Rollback target was not found in durable provider turn history")
+            })?;
+            (retained, false)
         }
-    }
+    };
+    let id = &boundary
+        .native_turn_ref
+        .as_ref()
+        .and_then(|r| r.native_id.as_ref())
+        .ok_or_else(|| protocol("Cannot identify the native rollback boundary"))?
+        .0;
+    Ok(Some(if from {
+        RollbackBoundary::From(id)
+    } else {
+        RollbackBoundary::After(id)
+    }))
 }
 fn terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
     turn.native_turn_ref.is_some()

@@ -552,14 +552,29 @@ impl ForgeAdapter {
             .authorize_destination(provider.as_ref(), &input.destination_path.0)
             .await?;
         input.destination_path = text(&destination.path);
+        let cannot_record = || {
+            Refusal::Repository(Box::new(SourceControlRepositoryError {
+                _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
+                provider: provider
+                    .clone()
+                    .unwrap_or_else(|| SourceControlProviderKind("unknown".into())),
+                operation: "cloneRepository".into(),
+                detail: CLONE_IDENTITY_ERROR.into(),
+                cause: None,
+            }))
+        };
+        let destination_id = destination.id;
         match self
             .repositories
-            .clone_repository(input, CloneOptions::default())
+            .clone_with_identity(input, CloneOptions::default(), destination_id)
             .await
         {
             Ok(cloned) => {
-                self.git.at(&destination.path).invalidate_caches().await;
-                Ok(cloned)
+                self.workspaces
+                    .record_created(&destination.path, &cloned.identity)
+                    .await
+                    .map_err(|_| cannot_record())?;
+                Ok(cloned.result)
             }
             Err(error) => {
                 destination.discard().await;
@@ -790,19 +805,26 @@ impl ForgeAdapter {
         resolved.extend(missing.iter().rev());
         if !local_disk(&resolved)
             || resolved.file_name().is_none()
+            // The forge service trims its path inputs. A canonical path that changes under
+            // that transform would send Git to a different destination than the one authorized.
+            || resolved.to_string_lossy().trim() != resolved.to_string_lossy()
             || self.destinations.refuses(&resolved).await
         {
             return Err(refused());
         }
         let target = resolved.clone();
-        let created = tokio::task::spawn_blocking(move || create_verified(&target))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .ok_or_else(refused)?;
+        let (created, id) = tokio::task::spawn_blocking(move || {
+            let created = create_verified(&target)?;
+            Ok::<_, std::io::Error>((created, t3_git::FileId::directory(&target)?))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or_else(refused)?;
         Ok(Destination {
             path: resolved,
             created,
+            id,
         })
     }
 
@@ -816,7 +838,7 @@ impl ForgeAdapter {
                 cwd: self.cwd.clone(),
                 home: self.home.clone(),
             },
-            git: self.git.clone(),
+            workspaces: self.workspaces.clone(),
         })
     }
 
@@ -835,7 +857,11 @@ impl ForgeAdapter {
             .map_err(ProjectCloneRefusal::Refused)?;
         input.destination_path = text(&destination.path);
         let provider = requested.unwrap_or_else(|| SourceControlProviderKind("unknown".into()));
-        match projects.start_clone(input).await {
+        match projects
+            .clones()
+            .start_with_destination(input, Arc::new(projects.clone()), Some(destination.id))
+            .await
+        {
             Ok(started) => Ok(started),
             Err(error) => {
                 destination.discard().await;
@@ -863,11 +889,12 @@ const T3_BASE_ENTRIES: &[&str] = &[
 pub struct Destination {
     pub path: PathBuf,
     created: bool,
+    id: t3_git::FileId,
 }
 impl Destination {
     /// After a failed clone: removes the folder if this request created it and it is still empty.
     async fn discard(&self) {
-        if self.created {
+        if self.created && t3_git::FileId::directory(&self.path).ok() == Some(self.id) {
             let _ = tokio::fs::remove_dir(&self.path).await;
         }
     }
@@ -1262,12 +1289,14 @@ fn manager_error(cwd: &str) -> Box<GitManagerServiceError> {
     }))
 }
 
-/// `ForgeCloneRepository`, plus invalidating the shared Git handle's caches for the new checkout
-/// (its negative discovery and unborn refs predate the clone).
+const CLONE_IDENTITY_ERROR: &str =
+    "The clone finished, but T3 Code could not record its repository identity.";
+
+/// Records a successful clone as trusted and invalidates the shared Git handle's caches.
 #[cfg(feature = "project")]
 struct ProjectClones {
     inner: t3_project::clones::ForgeCloneRepository,
-    git: t3_git::Git,
+    workspaces: Arc<GitAdapter>,
 }
 #[cfg(feature = "project")]
 #[async_trait::async_trait]
@@ -1285,13 +1314,24 @@ impl t3_project::clones::CloneRepository for ProjectClones {
         progress: Arc<dyn Fn(t3_project::clones::CloneProgress) + Send + Sync>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> t3_project::Result<()> {
-        self.inner
-            .clone_repository(input, prepared, progress, cancel)
+        let destination = Path::new(&prepared.destination_path);
+        let cannot_record = || t3_project::Error::Operation {
+            operation: "cloneRepository",
+            detail: CLONE_IDENTITY_ERROR.into(),
+        };
+        let binding = prepared
+            .created_repository
+            .get_or_try_init(|| async {
+                let destination_id = prepared.destination_id.ok_or_else(cannot_record)?;
+                self.inner
+                    .clone_with_identity(input, prepared, progress, cancel, destination_id)
+                    .await
+            })
             .await?;
-        self.git
-            .at(&prepared.destination_path)
-            .invalidate_caches()
-            .await;
+        self.workspaces
+            .record_created(destination, binding)
+            .await
+            .map_err(|_| cannot_record())?;
         Ok(())
     }
     async fn discard(&self, destination: &str) -> t3_project::Result<()> {

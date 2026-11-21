@@ -4,9 +4,10 @@
 //! hold is taken are named, and the restore refuses rather than racing them.
 use std::{
     collections::BTreeMap,
-    path::{Component, Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
+use t3_workspace::restore::RestoreFolder;
 
 #[derive(Default)]
 pub struct FolderGate {
@@ -24,13 +25,13 @@ struct State {
 
 struct Claim {
     thread: Option<String>,
-    folder: Option<PathBuf>,
+    folder: Option<RestoreFolder>,
 }
 
 impl Claim {
     fn conflicts(&self, other: &Claim) -> bool {
         matches!((&self.thread, &other.thread), (Some(a), Some(b)) if a == b)
-            || matches!((&self.folder, &other.folder), (Some(a), Some(b)) if overlaps(a, b))
+            || matches!((&self.folder, &other.folder), (Some(a), Some(b)) if a.overlaps(b))
     }
 }
 
@@ -82,13 +83,13 @@ impl FolderGate {
         thread: Option<&str>,
         folder: Option<&Path>,
     ) -> Admission {
-        let claim = Claim {
-            thread: thread.map(str::to_owned),
-            folder: folder.map(plain),
-        };
         let name = name.into();
         let mut waiting = None;
         loop {
+            let claim = Claim {
+                thread: thread.map(str::to_owned),
+                folder: folder.map(RestoreFolder::resolve),
+            };
             let released = self.released.notified();
             tokio::pin!(released);
             released.as_mut().enable();
@@ -116,7 +117,7 @@ impl FolderGate {
     pub fn hold(self: &Arc<Self>, thread: &str, folder: &Path) -> (Hold, Vec<String>) {
         let claim = Claim {
             thread: Some(thread.to_owned()),
-            folder: Some(plain(folder)),
+            folder: Some(RestoreFolder::resolve(folder)),
         };
         let mut state = self.lock();
         let running = state
@@ -156,40 +157,7 @@ pub async fn admit(
 
 /// One folder contains the other: a writer in a parent folder can write into the child.
 pub fn overlaps(a: &Path, b: &Path) -> bool {
-    let (a, b) = (plain(a), plain(b));
-    within(&a, &b) || within(&b, &a)
-}
-
-fn within(candidate: &Path, root: &Path) -> bool {
-    let parts = |path: &Path| -> Vec<String> {
-        path.components()
-            .filter(|part| !matches!(part, Component::CurDir))
-            .map(|part| {
-                let text = part.as_os_str().to_string_lossy();
-                if cfg!(windows) {
-                    text.to_lowercase()
-                } else {
-                    text.into_owned()
-                }
-            })
-            .collect()
-    };
-    let (candidate, root) = (parts(candidate), parts(root));
-    candidate.len() >= root.len() && candidate.iter().zip(&root).all(|(a, b)| a == b)
-}
-
-/// Without the drive verbatim prefix a canonical scope carries, with `/` as `\` on Windows.
-fn plain(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    let text = if cfg!(windows) {
-        text.replace('/', "\\")
-    } else {
-        text.into_owned()
-    };
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with("UNC\\") => rest.into(),
-        _ => text.into(),
-    }
+    RestoreFolder::resolve(a).overlaps(&RestoreFolder::resolve(b))
 }
 
 /// File and Git RPCs still write when the terminal feature is disabled.
@@ -202,12 +170,55 @@ impl t3_orchestration::api::ThreadWriters for RpcWriters {
     async fn hold(
         &self,
         thread: t3_orchestration::api::ThreadId,
-        cwd: PathBuf,
+        cwd: std::path::PathBuf,
     ) -> t3_orchestration::error::Result<t3_orchestration::api::WriterHold> {
         let (guard, running) = self.0.hold(&thread.0, &cwd);
         Ok(t3_orchestration::api::WriterHold {
             guard: Box::new(guard),
             running,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn assert_same_claim(a: &Path, b: &Path) {
+        for (writer, restore) in [(a, b), (b, a)] {
+            let gate = Arc::new(FolderGate::default());
+            let first = gate.enter("writer", None, Some(writer)).await;
+            let (hold, running) = gate.hold("other-thread", restore);
+            assert_eq!(running, ["writer"], "{writer:?} vs {restore:?}");
+            drop(first);
+            let next = gate.enter("next", None, Some(writer));
+            tokio::pin!(next);
+            tokio::select! {
+                biased;
+                _ = &mut next => panic!("writer entered a held folder"),
+                _ = std::future::ready(()) => {}
+            }
+            drop(hold);
+            next.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn folder_claims_resolve_alternate_spellings_and_missing_tails() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("Workspace");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::create_dir(root.path().join("sibling")).unwrap();
+        let missing = real.join("future");
+        assert_same_claim(&missing, &root.path().join("sibling/../Workspace/future")).await;
+        #[cfg(unix)]
+        {
+            let link = root.path().join("linked");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_same_claim(&missing, &link.join("future")).await;
+        }
+        if root.path().join("workspace").is_dir() {
+            assert_same_claim(&missing, &root.path().join("workspace/future")).await;
+        }
     }
 }

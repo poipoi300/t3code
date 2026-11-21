@@ -70,6 +70,27 @@ struct Created {
     ended: Option<CancellationToken>,
 }
 
+impl Created {
+    async fn remove_checkout(&self, path: &Path, launch_branch: Option<&str>) -> Result<()> {
+        let git = self
+            .repository
+            .clone()
+            .with_cancellation(CancellationToken::new());
+        let removed = git
+            .remove_worktree(path, true)
+            .await
+            .map_err(git_failure("remove-worktree"));
+        if removed.is_ok()
+            && let Err(error) = git
+                .delete_local_branch(launch_branch.unwrap_or(&self.branch), true)
+                .await
+        {
+            tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
+        }
+        removed
+    }
+}
+
 struct Late {
     projects: Arc<crate::adapters::project::ProjectAdapter>,
     setup: Option<Arc<crate::adapters::project_setup::ProjectSetupAdapter>>,
@@ -164,7 +185,7 @@ impl LaunchAdapter {
     pub async fn check_client_strategy(
         &self,
         project: &ProjectId,
-        strategy: &Strategy,
+        strategy: &mut Strategy,
     ) -> std::result::Result<(), String> {
         match strategy {
             Strategy::Root(root) => check_branch(root.branch.as_ref().and_then(Option::as_ref)),
@@ -175,9 +196,12 @@ impl LaunchAdapter {
             }
             Strategy::ExistingWorktree(existing) => {
                 check_branch(existing.branch.as_ref().and_then(Option::as_ref))?;
-                self.inner
+                let checked = self
+                    .inner
                     .registered_worktree(project, &existing.worktree_path.0)
-                    .await
+                    .await?;
+                existing.worktree_path.0 = checked.to_string_lossy().into_owned();
+                Ok(())
             }
         }
     }
@@ -191,10 +215,53 @@ impl crate::adapters::scheduled_launch::StrategyCheck for LaunchAdapter {
     async fn check(
         &self,
         project: &ProjectId,
-        strategy: &Strategy,
+        strategy: &mut Strategy,
     ) -> std::result::Result<(), String> {
         self.check_client_strategy(project, strategy).await
     }
+}
+
+/// Check the two on-disk pointers as well as the worktree registration. A stale registry
+/// entry can outlive the actual checkout, and two linked checkouts can share a common directory.
+fn confirmed_checkout(target: &Path, repository: &t3_git::Repository) -> bool {
+    use t3_workspace::paths::canonicalize;
+    fn pointer(path: &Path, prefix: &str) -> Option<PathBuf> {
+        use std::io::Read;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > 16_384 {
+            return None;
+        }
+        let mut value = String::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(16_385)
+            .read_to_string(&mut value)
+            .ok()?;
+        if value.len() > 16_384 {
+            return None;
+        }
+        let value = value.strip_suffix('\n').unwrap_or(&value);
+        let value = value
+            .strip_suffix('\r')
+            .unwrap_or(value)
+            .strip_prefix(prefix)?;
+        canonicalize(path.parent()?.join(value)).ok()
+    }
+    let marker = target.join(".git");
+    let Some(common) = canonicalize(&repository.common_dir).ok() else {
+        return false;
+    };
+    if std::fs::symlink_metadata(&marker).is_ok_and(|m| m.is_dir())
+        && canonicalize(&marker).ok().as_ref() == Some(&common)
+    {
+        return true;
+    }
+    let Some(admin) = pointer(&marker, "gitdir: ") else {
+        return false;
+    };
+    admin.parent() == Some(common.join("worktrees").as_path())
+        && pointer(&admin.join("gitdir"), "").as_ref() == Some(&marker)
+        && pointer(&admin.join("commondir"), "").as_ref() == Some(&common)
 }
 
 /// A revision a client names reaches Git after `--end-of-options` or as a ref argument; it may
@@ -342,7 +409,7 @@ impl Inner {
         &self,
         project: &ProjectId,
         path: &str,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<PathBuf, String> {
         const REFUSED: &str = "The worktree is not a registered worktree of this project.";
         if !crate::adapters::git::local_disk_path(Path::new(path)) {
             return Err(REFUSED.into());
@@ -366,7 +433,7 @@ impl Inner {
             };
             return match scratch {
                 Some(root) if t3_workspace::paths::within(&target, &root) && target != root => {
-                    Ok(())
+                    Ok(target)
                 }
                 _ => Err(REFUSED.into()),
             };
@@ -377,12 +444,29 @@ impl Inner {
         let Ok(trees) = root.list_worktrees().await else {
             return Err(REFUSED.into());
         };
+        let repository = root
+            .detect_repository()
+            .await
+            .ok()
+            .flatten()
+            .ok_or(REFUSED)?;
         for tree in trees {
             if local_real_path(tree.path)
                 .await
                 .is_some_and(|tree| tree == target)
             {
-                return Ok(());
+                let checkout = target.clone();
+                let checked = tokio::task::spawn_blocking(move || {
+                    if confirmed_checkout(&checkout, &repository) {
+                        Some(checkout)
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
+                return checked.ok_or_else(|| REFUSED.into());
             }
         }
         Err(REFUSED.into())
@@ -1016,10 +1100,10 @@ impl WorkspaceBackend for Inner {
             Strategy::ExistingWorktree(existing) => {
                 check_branch(existing.branch.as_ref().and_then(Option::as_ref))
                     .map_err(|reason| failure("provision-worktree", reason))?;
-                self.registered_worktree(&project_id, &existing.worktree_path.0)
+                let path = self
+                    .registered_worktree(&project_id, &existing.worktree_path.0)
                     .await
                     .map_err(|reason| failure("provision-worktree", reason))?;
-                let path = PathBuf::from(&existing.worktree_path.0);
                 Ok(Workspace {
                     cwd: path.clone(),
                     branch: existing.branch.flatten().map(|b| b.0),
@@ -1090,18 +1174,9 @@ impl WorkspaceBackend for Inner {
             .map(|active| active.preparation.is_cancelled());
         // Through the root's bound handle, like the creation; cleanup completes during shutdown
         // too (TS removes in an uninterruptible finalizer), so not under the shutdown token.
-        let git = created
-            .repository
-            .with_cancellation(CancellationToken::new());
-        let removed = git
-            .remove_worktree(&path, true)
-            .await
-            .map_err(git_failure("remove-worktree"));
-        if removed.is_ok()
-            && let Err(error) = git.delete_local_branch(&created.branch, true).await
-        {
-            tracing::warn!(%error, "failed to delete an abandoned thread worktree branch");
-        }
+        let removed = created
+            .remove_checkout(&path, workspace.branch.as_deref())
+            .await;
         // Still running: the launch failed or was cancelled before its setup step.
         match cancelled {
             Some(true) => self.finish(&created.thread, WorktreeSetupPhase::Cancelled, None),
@@ -1119,10 +1194,70 @@ impl WorkspaceBackend for Inner {
     }
 
     async fn current_branch(&self, cwd: PathBuf) -> Result<Option<String>> {
-        self.git
-            .at(cwd)
+        self.bound_root(&cwd)
+            .await?
             .current_branch()
             .await
             .map_err(git_failure("current-branch"))
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_removes_the_renamed_launch_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("repo");
+        let checkout = temp.path().join("checkout");
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-b", "main"]);
+        git(&project, &["commit", "--allow-empty", "-m", "baseline"]);
+        git(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git(&checkout, &["branch", "-m", "generated"]);
+        // The old name is available again and can belong to someone else.
+        git(&project, &["branch", "temporary"]);
+        let created = Created {
+            thread: ThreadId("thread:cleanup".into()),
+            repository: t3_git::Git::new(&project),
+            branch: "temporary".into(),
+            ended: None,
+        };
+        created
+            .remove_checkout(&checkout, Some("generated"))
+            .await
+            .unwrap();
+        assert!(!checkout.exists());
+        assert!(git(&project, &["branch", "--list", "generated"]).is_empty());
+        assert!(!git(&project, &["branch", "--list", "temporary"]).is_empty());
     }
 }

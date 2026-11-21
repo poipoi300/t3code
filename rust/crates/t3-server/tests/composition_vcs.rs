@@ -911,6 +911,9 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
     repository(&changed);
     let kept = home.join("worktrees").join("kept");
     repository(&kept);
+    let appeared = home.join("worktrees").join("appeared");
+    std::fs::create_dir_all(&appeared).unwrap();
+    let appeared_key = appeared.to_string_lossy().into_owned();
     let earlier_binding = isolated(&earlier).bind_repository().await.unwrap().unwrap();
     let kept_binding = isolated(&kept).bind_repository().await.unwrap().unwrap();
     let changed_key = changed.to_string_lossy().into_owned();
@@ -921,6 +924,7 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
         serde_json::to_vec(&json!({"version": 1, "bindings": {
             &changed_key: {"repository": earlier_binding},
             &kept_key: {"repository": kept_binding},
+            &appeared_key: {"repository": null},
         }}))
         .unwrap(),
     )
@@ -937,6 +941,25 @@ async fn status_reads_refuse_a_folder_whose_saved_repository_changed() {
     // The folder that still holds its bound repository is served.
     let refreshed = ok(s.call("vcs.refreshStatus", json!({"cwd": kept_key})).await);
     assert_eq!(refreshed["isRepo"], true, "{refreshed}");
+    // A cached checkout of a folder first seen without Git must preserve that binding.
+    let cwd = json!({"cwd": appeared_key});
+    let before = ok(s.call("vcs.refreshStatus", cwd.clone()).await);
+    assert_eq!(before["isRepo"], false, "{before}");
+    repository(&appeared);
+    repository_changed(s.call("vcs.refreshBranch", cwd.clone()).await);
+    repository_changed(s.call("vcs.refreshStatus", cwd.clone()).await);
+    std::fs::remove_dir_all(appeared.join(".git")).unwrap();
+    assert_eq!(ok(s.call("vcs.refreshStatus", cwd).await)["isRepo"], false);
+
+    #[cfg(unix)]
+    {
+        std::fs::remove_dir_all(&changed).unwrap();
+        std::os::unix::fs::symlink(&kept, &changed).unwrap();
+        let cwd = json!({"cwd": changed_key});
+        repository_changed(s.call("vcs.refreshBranch", cwd.clone()).await);
+        repository_changed(s.call("vcs.refreshStatus", cwd).await);
+    }
+
     s.socket.close(None).await.unwrap();
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }

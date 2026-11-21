@@ -96,6 +96,8 @@ pub struct OrchestrationAdapter {
     stopped: std::sync::atomic::AtomicBool,
     /// The repository each checkpoint scope was bound to (t3-git H-1), kept in the state folder.
     repository_bindings: Option<Arc<RepositoryBindings>>,
+    #[cfg(all(feature = "local-services", feature = "git"))]
+    checkpoints: Option<Arc<t3_orchestration::runtime::checkpoints::GitCheckpointBackend>>,
 }
 
 type RepositoryBindings = t3_orchestration::runtime::repository_bindings::FileRepositoryBindings;
@@ -164,7 +166,7 @@ impl t3_orchestration::api::SettingsService for LiveSettings {
 /// What a checkpoint file restore needs from the host (t3-git H-2).
 pub struct RestorePorts {
     /// The thread's terminals and setup scripts, held through a restore.
-    pub writers: Option<Arc<dyn t3_orchestration::api::ThreadWriters>>,
+    pub writers: Arc<dyn t3_orchestration::api::ThreadWriters>,
     /// Managed worktree folders at start, where rollback may recreate a missing worktree.
     pub managed_worktrees: Vec<std::path::PathBuf>,
     #[cfg(all(feature = "local-services", feature = "workspace"))]
@@ -370,7 +372,7 @@ impl OrchestrationAdapter {
             ports.workspaces = workspaces;
             ports.launch = Some(Arc::new(
                 t3_orchestration::runtime::checkpoints::GitLaunchEnvironment::new(
-                    checkpoints,
+                    checkpoints.clone(),
                     host,
                 ),
             ));
@@ -393,7 +395,7 @@ impl OrchestrationAdapter {
         // Each provider session opens with its thread's MCP credential (`adapters/mcp.rs`).
         ports.credentials = credentials;
         // A file restore holds the thread's terminals and setup scripts (t3-git H-2).
-        ports.thread_writers = restore.writers;
+        ports.thread_writers = Some(restore.writers);
         // Turns run in the project's root, in the modes their provider instance offers.
         let (provider_snapshots, offered) = tokio::sync::watch::channel(Arc::new(Vec::new()));
         ports.provider_snapshots = Some(offered.clone());
@@ -431,6 +433,8 @@ impl OrchestrationAdapter {
             provider_source: Some(provider_source),
             stopped: Default::default(),
             repository_bindings: Some(repository_bindings),
+            #[cfg(all(feature = "local-services", feature = "git"))]
+            checkpoints: Some(checkpoints),
         }))
     }
 
@@ -458,6 +462,19 @@ impl OrchestrationAdapter {
             .map(serde_json::from_value::<Saved>)
             .transpose()?
             .map(|saved| saved.repository))
+    }
+
+    #[cfg(all(feature = "local-services", feature = "git"))]
+    pub(crate) async fn record_created_repository(
+        &self,
+        scope: &std::path::Path,
+        identity: &t3_git::RepositoryBinding,
+    ) -> OrchestrationResult<()> {
+        self.checkpoints
+            .as_ref()
+            .ok_or(OrchestrationError::Unsupported("repository binding store"))?
+            .record_created_repository(scope, identity)
+            .await
     }
 
     /// Records the repository now in `scope` as trusted (`OrchestrationRuntime::trust_repository`):
@@ -601,6 +618,8 @@ impl OrchestrationAdapter {
             provider_source: None,
             stopped: Default::default(),
             repository_bindings: None,
+            #[cfg(all(feature = "local-services", feature = "git"))]
+            checkpoints: None,
         }
     }
 

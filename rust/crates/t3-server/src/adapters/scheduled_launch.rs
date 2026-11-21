@@ -49,7 +49,7 @@ pub trait StrategyCheck: Send + Sync {
     async fn check(
         &self,
         project: &t3_contracts::base_schemas::ProjectId,
-        strategy: &t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchWorkspaceStrategy,
+        strategy: &mut t3_contracts::orchestration_v2::OrchestrationV2ThreadLaunchWorkspaceStrategy,
     ) -> std::result::Result<(), String>;
 }
 
@@ -131,12 +131,12 @@ impl Orchestration for LaunchingBackend {
         if request.task.thread_id.is_some() {
             return self.bound.dispatch(request).await;
         }
-        let task = request.task;
+        let mut task = request.task;
         // Checked before the thread is created, as `orchestration.launchThread` checks a
         // client's strategy (TypeScript's scheduler passes it unchecked).
         if let Some(check) = &self.check {
             check
-                .check(&task.project_id, &task.workspace_strategy)
+                .check(&task.project_id, &mut task.workspace_strategy)
                 .await
                 .map_err(Error::Dispatch)?;
         }

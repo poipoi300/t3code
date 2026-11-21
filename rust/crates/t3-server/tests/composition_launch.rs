@@ -1032,3 +1032,158 @@ async fn a_launched_worktree_is_bound_before_its_setup_script_runs() {
     );
     s.runtime.take().unwrap().shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn existing_launch_refuses_a_stale_worktree_registration() {
+    let mut s = Server::start().await;
+    let root = s.home().join("root");
+    let checkout = s.home().join("registered");
+    repository(&root);
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    s.insert_project("registered-project", &root, "[]");
+    std::fs::rename(&checkout, s.home().join("aside")).unwrap();
+    repository(&checkout);
+    let request = launch(
+        "thread:foreign",
+        "registered-project",
+        json!({"type":"existing_worktree","worktreePath":checkout}),
+        "auto-accept-edits",
+    );
+    launch_refused(
+        s.call("orchestration.launchThread", request).await,
+        "not a registered worktree",
+    );
+    assert_eq!(s.thread_count(), 0);
+    // A worktree pointer can resolve into the right repository and still name the
+    // wrong registration. Its gitdir backlink must identify this checkout.
+    let sibling = s.home().join("sibling");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "sibling",
+            sibling.to_str().unwrap(),
+        ],
+    );
+    std::fs::rename(&checkout, s.home().join("foreign")).unwrap();
+    std::fs::rename(s.home().join("aside"), &checkout).unwrap();
+    std::fs::copy(sibling.join(".git"), checkout.join(".git")).unwrap();
+    let request = launch(
+        "thread:wrong-registration",
+        "registered-project",
+        json!({"type":"existing_worktree","worktreePath":checkout}),
+        "auto-accept-edits",
+    );
+    launch_refused(
+        s.call("orchestration.launchThread", request).await,
+        "not a registered worktree",
+    );
+    assert_eq!(s.thread_count(), 0);
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_launch_records_the_checked_canonical_worktree() {
+    let mut s = Server::start().await;
+    let root = s.home().join("root");
+    let checkout = s.home().join("registered");
+    let alias = s.home().join("alias");
+    repository(&root);
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "linked",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    std::os::unix::fs::symlink(&checkout, &alias).unwrap();
+    s.insert_project("registered-project", &root, "[]");
+    let request = launch(
+        "thread:canonical",
+        "registered-project",
+        json!({"type":"existing_worktree","worktreePath":alias}),
+        "auto-accept-edits",
+    );
+    let launched = ok(s.call("orchestration.launchThread", request).await);
+    assert_eq!(
+        launched["projection"]["thread"]["worktreePath"],
+        json!(canonical(&checkout))
+    );
+    first_turn_completes(&mut s, "thread:canonical").await;
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn root_launch_reads_the_branch_through_its_saved_binding() {
+    use t3_orchestration::api::RepositoryBindingStore;
+    let mut s = Server::start().await;
+    let first = s.home().join("first");
+    let project = s.home().join("changed");
+    repository(&first);
+    repository(&project);
+    git(&project, &["branch", "-m", "foreign-branch"]);
+    let binding = t3_git::Git::new(&first)
+        .bind_repository()
+        .await
+        .unwrap()
+        .unwrap();
+    t3_orchestration::runtime::repository_bindings::FileRepositoryBindings::new(bindings_file(&s))
+        .put(&project, json!({"repository": binding}))
+        .await
+        .unwrap();
+    s.insert_project("changed-project", &project, "[]");
+    let mut request = launch(
+        "thread:bound-root",
+        "changed-project",
+        json!({"type":"root"}),
+        "auto-accept-edits",
+    );
+    request.as_object_mut().unwrap().remove("initialMessage");
+    let launched = ok(s.call("orchestration.launchThread", request).await);
+    assert!(
+        launched["projection"]["thread"]["branch"].is_null(),
+        "{launched}"
+    );
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_linked_project_can_launch_into_its_main_worktree() {
+    let mut s = Server::start().await;
+    let main = s.home().join("root");
+    let linked = s.home().join("linked");
+    repository(&main);
+    git(
+        &main,
+        &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+    );
+    s.insert_project("linked-project", &linked, "[]");
+    let request = launch(
+        "thread:main",
+        "linked-project",
+        json!({"type":"existing_worktree","worktreePath":main}),
+        "auto-accept-edits",
+    );
+    let launched = ok(s.call("orchestration.launchThread", request).await);
+    assert_eq!(
+        launched["projection"]["thread"]["worktreePath"],
+        json!(canonical(&main))
+    );
+    first_turn_completes(&mut s, "thread:main").await;
+    s.runtime.take().unwrap().shutdown().await.unwrap();
+}

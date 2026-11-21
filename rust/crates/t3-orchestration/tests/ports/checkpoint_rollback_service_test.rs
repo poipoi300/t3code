@@ -215,7 +215,8 @@ async fn failed_or_cancelled_checkout_restores_the_set_aside_user_folder() -> Re
             .path()
             .join(if cancelled { "cancelled" } else { "failed" });
         std::fs::create_dir(&cwd)?;
-        std::fs::write(cwd.join("user-work"), "preserve this work")?;
+        std::fs::create_dir(cwd.join(".next"))?;
+        std::fs::write(cwd.join(".next/user-work"), "preserve this work")?;
         let h = Harness::new().await?;
         let backend = Arc::new(Backend::default());
         h.seed("thread.created", thread("thread:test", Some(&cwd)))
@@ -242,7 +243,7 @@ async fn failed_or_cancelled_checkout_restores_the_set_aside_user_folder() -> Re
                 .is_err()
         );
         assert_eq!(
-            std::fs::read_to_string(cwd.join("user-work"))?,
+            std::fs::read_to_string(cwd.join(".next/user-work"))?,
             "preserve this work"
         );
         assert!(!cwd.join("partial-checkout").exists());
@@ -381,7 +382,7 @@ impl RollbackWorkspaceRecovery for RecreateFolder {
 }
 
 #[tokio::test]
-async fn successful_recreation_discards_leftover_before_a_later_provider_failure() -> Result<()> {
+async fn rollback_refuses_to_replace_a_folder_containing_user_files() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let cwd = temp.path().join("checkout");
     std::fs::create_dir(&cwd)?;
@@ -409,9 +410,11 @@ async fn successful_recreation_discards_leftover_before_a_later_provider_failure
             .await
             .is_err()
     );
-    assert!(cwd.join(".git").is_dir());
-    // TypeScript discards the backup on recreation, before the provider confirms rollback.
-    assert!(!cwd.join("unsaved.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("unsaved.txt"))?,
+        "leftover user work"
+    );
+    assert!(!cwd.join(".git").exists());
     assert_eq!(std::fs::read_dir(temp.path())?.count(), 1);
     assert_eq!(backend.restores.load(Ordering::SeqCst), 0);
     assert_eq!(

@@ -76,7 +76,7 @@ mod live {
         orchestration: Arc<OrchestrationAdapter>,
         launch: Arc<LaunchAdapter>,
     ) -> crate::Result<()> {
-        registry.register::<WsOrchestrationV2LaunchThreadRpc, _, _>(move |ctx, input| {
+        registry.register::<WsOrchestrationV2LaunchThreadRpc, _, _>(move |ctx, mut input| {
             let (orchestration, launch) = (orchestration.clone(), launch.clone());
             async move {
                 let (command_id, project_id) = (input.command_id.clone(), input.project_id.clone());
@@ -89,7 +89,7 @@ mod live {
                     ));
                 }
                 if let Err(reason) = launch
-                    .check_client_strategy(&input.project_id, &input.workspace_strategy)
+                    .check_client_strategy(&input.project_id, &mut input.workspace_strategy)
                     .await
                 {
                     return Err(refused(

@@ -9,6 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use t3_contracts::{orchestration_v2::*, orchestration_v2_id_table::IdOrIndex};
+use t3_workspace::restore::RestoreFolder;
 
 pub const SHARED_WORKSPACE_RESTORE_MESSAGE: &str = "File restore requires an isolated worktree. This workspace may contain changes from another thread or a side chat. Rewind the conversation without restoring files instead, or delete side chats you no longer need.";
 
@@ -73,21 +74,7 @@ pub(super) fn workspace_keys(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 pub fn paths_overlap(a: &Path, b: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        let parts = |p: &Path| {
-            p.components()
-                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-                .collect::<Vec<_>>()
-        };
-        let a = parts(a);
-        let b = parts(b);
-        a.starts_with(&b) || b.starts_with(&a)
-    }
-    #[cfg(not(windows))]
-    {
-        a.starts_with(b) || b.starts_with(a)
-    }
+    RestoreFolder::from_resolved(a.to_owned()).overlaps(&RestoreFolder::from_resolved(b.to_owned()))
 }
 
 pub fn is_managed_worktree_path(path: &Path, roots: &[PathBuf]) -> Result<bool> {
@@ -269,8 +256,8 @@ pub enum ReservationKind {
 #[derive(Default)]
 struct Reservations {
     next: u64,
-    held: Vec<(u64, PathBuf, ReservationKind)>,
-    waiting: Vec<(u64, PathBuf)>,
+    held: Vec<(u64, RestoreFolder, ReservationKind)>,
+    waiting: Vec<(u64, RestoreFolder)>,
 }
 
 pub struct WorkspaceReservations {
@@ -325,18 +312,21 @@ impl WorkspaceReservations {
         kind: ReservationKind,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<WorkspaceReservation> {
-        let keys = workspace_keys(cwd)?;
         let mut released = self.released.subscribe();
         let mut waiting = None;
         loop {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            let keys: Vec<_> = workspace_keys(cwd)?
+                .into_iter()
+                .map(RestoreFolder::from_resolved)
+                .collect();
             {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if !state.held.iter().any(|(_, path, held_kind)| {
                     (kind == ReservationKind::Restore || *held_kind == ReservationKind::Restore)
-                        && keys.iter().any(|key| paths_overlap(path, key))
+                        && keys.iter().any(|key| path.overlaps(key))
                 }) {
                     let id = state.next;
                     state.next = state.next.checked_add(1).ok_or_else(|| Error::Service {
@@ -369,6 +359,7 @@ impl WorkspaceReservations {
                 _ = cancellation.cancelled() => return Err(Error::Cancelled),
                 result = released.changed() => { result.map_err(|error| Error::Service { operation: "workspace.reserve", detail: error.to_string() })?; },
             }
+            drop(waiting.take());
         }
     }
 }
@@ -378,7 +369,7 @@ impl WorkspaceReservations {
     /// a turn start is held off rather than not yet reached.
     #[cfg(any(test, feature = "testkit"))]
     pub async fn waiting_on(&self, cwd: &Path) -> Result<()> {
-        let canonical = canonicalize_missing(cwd)?;
+        let canonical = RestoreFolder::from_resolved(canonicalize_missing(cwd)?);
         let mut changed = self.waiters.subscribe();
         loop {
             if self
@@ -387,7 +378,7 @@ impl WorkspaceReservations {
                 .unwrap_or_else(|e| e.into_inner())
                 .waiting
                 .iter()
-                .any(|(_, path)| paths_overlap(path, &canonical))
+                .any(|(_, path)| path.overlaps(&canonical))
             {
                 return Ok(());
             }

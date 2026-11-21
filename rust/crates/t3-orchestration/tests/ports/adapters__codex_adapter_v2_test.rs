@@ -2543,20 +2543,20 @@ fn rollback_and_fork_boundaries_use_durable_terminal_native_turns() {
         turn("second", 2, "completed", true),
         first.clone(),
     ];
-    assert_eq!(
-        mapping::rollback_count(&RollbackInput {
-            provider_thread: thread.clone(),
-            target: RollbackTarget::ProviderTurn {
-                checkpoint_id: CheckpointId("checkpoint".into()),
-                app_run_ordinal: 1,
-                provider_turn: Box::new(first.clone()),
-                message: None
-            },
-            provider_thread_turns: turns.clone()
-        })
-        .unwrap(),
-        2
-    );
+    let rollback = RollbackInput {
+        provider_thread: thread.clone(),
+        target: RollbackTarget::ProviderTurn {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+            app_run_ordinal: 1,
+            provider_turn: Box::new(first.clone()),
+            message: None,
+        },
+        provider_thread_turns: turns.clone(),
+    };
+    assert!(matches!(
+        mapping::rollback_boundary(&rollback).unwrap(),
+        Some(mapping::RollbackBoundary::After("first"))
+    ));
     let mut fork = ForkInput {
         source_provider_thread: thread,
         source_provider_turns: Some(turns),
@@ -2823,6 +2823,100 @@ async fn a_retried_rollback_never_reverts_the_target_turn() {
     result.unwrap();
     h.runtime.close().await.unwrap();
     assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test]
+async fn retry_to_thread_start_preserves_inherited_codex_history() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let thread = kit::thread("native-thread").unwrap();
+    let turn = |id: &str, native: &str, ordinal: u64| -> OrchestrationV2ProviderTurn {
+        mapping::decode(json!({"id":id,"providerThreadId":thread.id,"nodeId":"root","runAttemptId":format!("attempt:{id}"),"nativeTurnRef":mapping::native_ref(native),"ordinal":ordinal,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap()
+    };
+    let turns = vec![
+        turn("t1", "n1", 1),
+        turn("t2", "n2", 2),
+        turn("t3", "n3", 3),
+    ];
+    let input = RollbackInput {
+        provider_thread: thread.clone(),
+        target: RollbackTarget::ThreadStart {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+        },
+        provider_thread_turns: turns,
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let read = h.peer.read().await.unwrap();
+        assert_eq!(read["method"], "thread/read");
+        h.peer.respond(&read,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+        let list = h.peer.read().await.unwrap();
+        assert_eq!(list["method"], "thread/turns/list");
+        // Only the inherited history remains after the first rollback.
+        h.peer
+            .respond(
+                &list,
+                json!({"data":[kit::native_turn("inherited","completed")],"nextCursor":null}),
+            )
+            .await
+            .unwrap();
+        let next = h.peer.read().await.unwrap();
+        assert_ne!(
+            next["method"], "thread/revert",
+            "the retry reverted the target turn: {next}"
+        );
+        assert_eq!(next["method"], "thread/read");
+        h.peer.respond(&next,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+    };
+    let (result, _) = tokio::join!(runtime.rollback(input), server);
+    result.unwrap();
+    h.runtime.close().await.unwrap();
+    assert!(h.peer.read().await.is_err());
+}
+
+#[tokio::test]
+async fn rollback_to_a_retained_turn_finds_its_successor_across_pages() {
+    let mut h = kit::Harness::open().await.unwrap();
+    let thread = kit::thread("native-thread").unwrap();
+    let turn = |id: &str, native: &str, ordinal: u64| -> OrchestrationV2ProviderTurn {
+        mapping::decode(json!({"id":id,"providerThreadId":thread.id,"nodeId":"root","runAttemptId":format!("attempt:{id}"),"nativeTurnRef":mapping::native_ref(native),"ordinal":ordinal,"status":"completed","startedAt":kit::NOW,"completedAt":kit::NOW})).unwrap()
+    };
+    let turns = vec![
+        turn("t1", "n1", 1),
+        turn("t2", "n2", 2),
+        turn("t3", "n3", 3),
+    ];
+    let input = RollbackInput {
+        provider_thread: thread.clone(),
+        target: RollbackTarget::ProviderTurn {
+            checkpoint_id: CheckpointId("checkpoint".into()),
+            app_run_ordinal: 1,
+            provider_turn: Box::new(turns[0].clone()),
+            message: None,
+        },
+        provider_thread_turns: turns,
+    };
+    let runtime = h.runtime.clone();
+    let server = async {
+        let metadata = h.peer.read().await.unwrap();
+        h.peer.respond(&metadata,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+        let first = h.peer.read().await.unwrap();
+        assert_eq!(first["method"], "thread/turns/list");
+        h.peer.respond(&first, json!({"data":[kit::native_turn("extra","completed"), kit::native_turn("n3","completed")],"nextCursor":"older"})).await.unwrap();
+        let second = h.peer.read().await.unwrap();
+        assert_eq!(
+            second["method"], "thread/turns/list",
+            "reverted by count before finding the target"
+        );
+        assert_eq!(second["params"]["cursor"], "older");
+        h.peer.respond(&second, json!({"data":[kit::native_turn("n2","completed"),kit::native_turn("n1","completed")],"nextCursor":null})).await.unwrap();
+        let revert = h.peer.read().await.unwrap();
+        assert_eq!(revert["method"], "thread/revert");
+        assert_eq!(revert["params"]["beforeTurnId"], "n2");
+        h.peer.respond(&revert,json!({"thread":{"id":"native-thread","historyMode":"paginated","status":{"type":"idle"}}})).await.unwrap();
+    };
+    let (result, ()) = tokio::join!(runtime.rollback(input), server);
+    result.unwrap();
+    h.runtime.close().await.unwrap();
 }
 
 macro_rules! recording_test {
@@ -5068,6 +5162,37 @@ async fn composed_codex_scenario(name: &str) -> t3_orchestration::error::Result<
         operation: "Codex scenario recording",
         detail: error.to_string(),
     })?;
+    // The TypeScript recording requests only the newest turn. Rust must also see the
+    // retained turn. Supply the larger page from the very same recorded completions.
+    // All subsequent frames, including the exact beforeTurnId, remain the recording's.
+    if name.starts_with("thread_rollback") {
+        use t3_orchestration::testing::replay::ReplayEntry;
+        let mut completed = Vec::new();
+        let mut list_id = None;
+        for entry in &mut transcript.entries {
+            match entry {
+                ReplayEntry::EmitInbound(e) if e.frame["method"] == "turn/completed" => {
+                    completed.push(e.frame["params"]["turn"].clone());
+                }
+                ReplayEntry::ExpectOutbound(e) if e.frame["method"] == "thread/turns/list" => {
+                    list_id = e.frame["id"].as_u64();
+                    e.frame["params"]["limit"] = json!(100);
+                }
+                ReplayEntry::EmitInbound(e)
+                    if list_id.is_some() && e.frame["id"].as_u64() == list_id =>
+                {
+                    assert_eq!(
+                        completed.last().and_then(|turn| turn.get("id")),
+                        Some(&e.frame["result"]["data"][0]["id"])
+                    );
+                    e.frame["result"]["data"] = json!(completed.iter().rev().collect::<Vec<_>>());
+                    e.frame["result"]["nextCursor"] = Value::Null;
+                    list_id = None;
+                }
+                _ => {}
+            }
+        }
+    }
     if let Some(label) = &variant.transcript_entries_through_label {
         let index = transcript
             .entries

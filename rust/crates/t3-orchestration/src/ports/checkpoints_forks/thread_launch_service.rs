@@ -355,6 +355,19 @@ fn worktree_path(strategy: &OrchestrationV2ThreadLaunchWorkspaceStrategy) -> Opt
     }
 }
 
+async fn reserve_claim(
+    strategy: &OrchestrationV2ThreadLaunchWorkspaceStrategy,
+    project_root: &str,
+    cancellation: &CancellationToken,
+) -> Result<super::checkpoint_restore_safety::WorkspaceReservation> {
+    use super::checkpoint_restore_safety::{ReservationKind, WorkspaceReservations};
+    // A record without a worktree path claims its project root for isolation purposes.
+    let folder = worktree_path(strategy).unwrap_or_else(|| PathBuf::from(project_root));
+    WorkspaceReservations::global()
+        .reserve(&folder, ReservationKind::TurnStart, cancellation)
+        .await
+}
+
 fn temporary(branch: &str) -> bool {
     let normalized = branch.trim().to_ascii_lowercase();
     let branch = normalized.as_str();
@@ -697,6 +710,8 @@ impl ThreadLaunchService {
             strategy =
                 serde_json::from_value(json!({"type":"existing_worktree", "worktreePath": path}))?;
         }
+        let claim_reservation =
+            reserve_claim(&strategy, &project.workspace_root, &self.0.cancellation).await?;
         let mut claim = if input.reuse_existing_thread {
             json!({"type":"thread.metadata.update", "commandId": input.command_id, "threadId": candidate, "expectedEmpty":true})
         } else {
@@ -729,6 +744,7 @@ impl ThreadLaunchService {
                 e,
             )
         })?;
+        drop(claim_reservation);
         let AggregateId::Thread(thread_id) = &claimed.aggregate else {
             return Err(failure(
                 "create-thread",
@@ -1096,12 +1112,14 @@ impl ThreadLaunchService {
             if cancellation.is_cancelled() { return Err(Error::Cancelled) }
             if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {self.progress(input,"worktree").await?;}
             observer.status(SetupStage::Checkout,if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {StageStatus::Running} else {StageStatus::Skipped}).await?;
+            let reservation = reserve_claim(&strategy, &project.workspace_root, &cancellation).await?;
             let mut workspace = self.0.preparation.prepare(input.project_id.clone(),input.thread_id.clone(),strategy.clone(),observer.clone(),cancellation.clone()).await.map_err(|e| if cancellation.is_cancelled() {Error::Cancelled} else {failure("provision-worktree",e)})?;
             if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {created = Some(workspace.clone());}
             if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {observer.status(SetupStage::Checkout,StageStatus::Done).await?;}
             if !input.reused {
                 self.dispatch(json!({"type":"thread.metadata.update","commandId":format!("{}:workspace",input.command_id.0),"threadId":input.thread_id,"branch":workspace.branch,"worktreePath":workspace.worktree_path}),None).await.map_err(|e| failure("update-thread",e))?;
             }
+            drop(reservation);
             recorded = true;
             let rename_cancellation = cancellation.child_token();
             let naming = async {
