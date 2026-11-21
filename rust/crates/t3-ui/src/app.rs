@@ -211,6 +211,7 @@ fn themed_tree(nav: Navigator) -> AnyElement {
         }))
         // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
         .child(crate::ui::confirm::confirm_dialog_host())
+        .child(crate::screens::guest_share_dialog::guest_share_dialog_host())
         // CONN-1: pairing links handed to the running app (confirmed by origin, through the
         // confirm host above) and the storage notice, once; nothing on the demo backend.
         .child(
@@ -247,6 +248,25 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
     theme::bind(client, host);
     provide_context(crate::screens::pull_requests::list::bind(client));
     thread_ops::bind_confirmation(client);
+    {
+        let creator = client.clone();
+        provide_context(crate::screens::guest_share_dialog::GuestShareCreator(
+            Rc::new(move |key| {
+                let create = creator.thread_actions().create_guest_share(key);
+                Box::pin(async move { create.await.map(|link| link.url().to_owned()) })
+            }),
+        ));
+        let shares = client.clone();
+        provide_context(crate::screens::guest_share_dialog::ReplacesShare(Rc::new(
+            move |key| {
+                shares
+                    .thread_actions()
+                    .header_state(key)
+                    .guest_share
+                    .is_some()
+            },
+        )));
+    }
     provide_context(git_panel::git_actions(client.git_panel()));
     provide_context(git_panel::git_actions_registration(client.git_panel()));
     provide_context(git_panel::branch_registration(client.git_panel()));

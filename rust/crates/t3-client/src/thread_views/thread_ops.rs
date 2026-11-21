@@ -2,6 +2,7 @@
 pub mod actions;
 pub mod approvals;
 pub mod deletion;
+pub mod guest_share;
 pub mod header;
 pub mod menu;
 pub mod metadata;

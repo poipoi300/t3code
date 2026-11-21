@@ -435,6 +435,14 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                             });
                         }
                     }
+                    Ok(Action::Host {
+                        command: t3_client::navigation::palette_service::HostCommand::ShareGuest,
+                        thread: Some(key),
+                        ..
+                    }) => {
+                        palette.close();
+                        crate::screens::guest_share_dialog::open_guest_share_dialog(key);
+                    }
                     Ok(Action::NewProject | Action::Host { .. }) => {}
                 }
             });

@@ -209,6 +209,10 @@ impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
             "archive" => service.archive_thread(key),
             "unarchive" => service.unarchive_thread(key),
             "delete" => service.delete_thread(key),
+            "share-guest" => {
+                crate::screens::guest_share_dialog::open_guest_share_dialog(key);
+                Box::pin(async { Ok(()) })
+            }
             _ => service.perform_action(key, action),
         }
     }

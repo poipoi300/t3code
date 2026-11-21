@@ -330,3 +330,5 @@ mod ui_mounts_links;
 mod tl_rows_viewed_images;
 #[path = "ui/guest_page.rs"]
 mod guest_page;
+#[path = "ui/guest_owner.rs"]
+mod guest_owner;

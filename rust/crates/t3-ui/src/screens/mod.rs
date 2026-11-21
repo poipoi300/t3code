@@ -8,6 +8,7 @@ pub mod composer;
 pub mod connect;
 pub mod connect_qr;
 pub mod guest;
+pub mod guest_share_dialog;
 pub mod history_swipe;
 pub mod home;
 pub mod local_backend;
