@@ -98,6 +98,12 @@ pub struct SidebarDrop {
     pub active_time_ordered: bool,
 }
 
+#[derive(Debug)]
+pub struct SidebarDropFailure {
+    pub title: &'static str,
+    pub error: ClientError,
+}
+
 pub type ConfirmationPort =
     Rc<dyn Fn(String, bool) -> LocalBoxFuture<'static, Result<bool, ClientError>>>;
 
@@ -448,6 +454,9 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     pub fn can_drag_thread(&self, key: &ThreadKey) -> bool {
         self.can_operate(key)
             && self
+                .thread_shell(key)
+                .is_some_and(|row| row.archived_at.is_none() && row.deleted_at.is_none())
+            && self
                 .runtime
                 .store()
                 .snapshot()
@@ -457,6 +466,7 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 .is_some_and(|config| {
                     let caps = &config.environment.capabilities;
                     caps.thread_pinning == Some(true)
+                        || caps.thread_pin_reorder == Some(true)
                         || caps.thread_settlement == Some(true)
                         || caps.thread_active_reorder == Some(true)
                 })
@@ -498,7 +508,10 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
         let Some(source_caps) = caps(source) else {
             return Ok(vec![]);
         };
-        if target.section == Section::Pinned && source_caps.thread_pinning != Some(true) {
+        if target.section == Section::Pinned
+            && section != Section::Pinned
+            && source_caps.thread_pinning != Some(true)
+        {
             return Ok(vec![]);
         }
         // Snapshot each environment's projected shell once per hover or release.
@@ -667,17 +680,35 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     pub fn perform_sidebar_drop(
         &self,
         drop: SidebarDrop,
-    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
+    ) -> LocalBoxFuture<'static, Result<bool, SidebarDropFailure>> {
+        use ThreadLifecycleAction::*;
         let service = self.clone();
         async move {
-            let operations = service.sidebar_drop_plan(&drop)?;
+            let operations =
+                service
+                    .sidebar_drop_plan(&drop)
+                    .map_err(|error| SidebarDropFailure {
+                        title: "Failed to move thread",
+                        error,
+                    })?;
             let settled = operations
                 .iter()
-                .any(|(_, action)| matches!(action, ThreadLifecycleAction::Settle));
+                .any(|(_, action)| matches!(action, Settle));
             for (key, action) in operations {
+                let title = match action {
+                    Settle => "Failed to settle thread",
+                    Unpin => "Failed to unpin thread",
+                    Unsettle => "Failed to un-settle thread",
+                    Unsnooze => "Failed to wake thread",
+                    Pin { .. } => "Failed to pin thread",
+                    ReorderPin { .. } => "Failed to reorder pinned threads",
+                    ReorderActive { .. } => "Failed to reorder active threads",
+                    _ => "Failed to move thread",
+                };
                 service
                     .dispatch_action(key, Action::Lifecycle(action), false, true)
-                    .await?;
+                    .await
+                    .map_err(|error| SidebarDropFailure { title, error })?;
             }
             Ok(settled)
         }
@@ -1017,5 +1048,124 @@ fn operation_error(error: crate::operations::OperationError) -> ClientError {
     match error {
         crate::operations::OperationError::Client(error) => error,
         error => ClientError::InvalidPayload(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod sidebar_drop_tests {
+    use super::*;
+    use crate::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        testing::environment::{EnvironmentPlatform, FakeEnvironment, shell},
+        types::ThreadId,
+        view_logic::shell::sidebar::{ListItem, Marker, Section},
+    };
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
+
+    fn key(id: &str) -> ThreadKey {
+        ThreadKey {
+            environment: EnvironmentId("sidebar-tests".into()),
+            thread: ThreadId(id.into()),
+        }
+    }
+
+    fn fixture(pool: &mut LocalPool) -> (ClientRuntime<EnvironmentPlatform>, FakeEnvironment) {
+        let spawner = pool.spawner();
+        let spawn: Spawner =
+            Rc::new(move |task| spawner.spawn_local(task).expect("spawn test task"));
+        let fake = FakeEnvironment::new("sidebar-tests", spawn.clone());
+        let mut snapshot = shell(&[("first", "First"), ("second", "Second")]);
+        for (index, row) in snapshot["threads"]
+            .as_array_mut()
+            .expect("test rows")
+            .iter_mut()
+            .enumerate()
+        {
+            row["pinnedAt"] = json!("2026-06-20T00:00:00Z");
+            row["pinOrderKey"] = json!(["am", "bm"][index]);
+        }
+        fake.set_shell(snapshot);
+        fake.edit_config(|config| {
+            let capabilities = &mut config["environment"]["capabilities"];
+            capabilities["threadPinning"] = json!(false);
+            capabilities["threadPinReorder"] = json!(true);
+            capabilities["threadSettlement"] = json!(false);
+            capabilities["threadActiveReorder"] = json!(false);
+        });
+        let client = ClientRuntime::new(
+            fake.platform(),
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            spawn,
+        );
+        pool.run_until(client.pair(fake.pairing()))
+            .expect("pair test server");
+        pool.run_until_stalled();
+        (client, fake)
+    }
+
+    fn pinned_drop() -> SidebarDrop {
+        SidebarDrop {
+            items: vec![
+                ListItem::Marker(Marker::PinnedHeader),
+                ListItem::Thread {
+                    key: "first".into(),
+                    section: Section::Pinned,
+                },
+                ListItem::Thread {
+                    key: "second".into(),
+                    section: Section::Pinned,
+                },
+                ListItem::Marker(Marker::PinnedDivider),
+            ],
+            threads: [
+                ("first".into(), key("first")),
+                ("second".into(), key("second")),
+            ]
+            .into(),
+            source: "first".into(),
+            destination: "second".into(),
+            active_time_ordered: true,
+        }
+    }
+
+    #[test]
+    fn sidebar_drop_plans_a_pinned_reorder_with_only_reorder_permission() {
+        let mut pool = LocalPool::new();
+        let (client, _) = fixture(&mut pool);
+        let service = client.thread_actions();
+        let operations = service
+            .sidebar_drop_plan(&pinned_drop())
+            .expect("read live plan");
+        assert!(
+            matches!(operations.as_slice(), [(thread, ThreadLifecycleAction::ReorderPin { .. })] if thread == &key("first"))
+        );
+        let mut stale = pinned_drop();
+        stale.threads.insert("second".into(), key("removed"));
+        assert!(
+            service
+                .sidebar_drop_plan(&stale)
+                .expect("read stale plan")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn can_drag_thread_checks_a_live_row_and_current_grants() {
+        let mut pool = LocalPool::new();
+        let (client, _) = fixture(&mut pool);
+        let service = client.thread_actions();
+        assert!(service.can_drag_thread(&key("first")));
+        assert!(!service.can_drag_thread(&key("missing")));
+        client
+            .client(&key("first").environment)
+            .and_then(|client| client.session())
+            .expect("test session")
+            .update_grants(crate::permissions::SessionGrants {
+                scopes: ["orchestration:read".into()].into(),
+                valid: true,
+            });
+        assert!(!service.can_drag_thread(&key("first")));
     }
 }

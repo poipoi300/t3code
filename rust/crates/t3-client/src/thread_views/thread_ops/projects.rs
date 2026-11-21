@@ -52,6 +52,23 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             .find(|p| p.key() == *key)
             .cloned()
     }
+    pub fn copy_project_path(
+        &self,
+        path: String,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let platform = self.platform.clone();
+        async move {
+            platform
+                .clipboard_write(vec![crate::platform::MimeData {
+                    mime: "text/plain".into(),
+                    bytes: path.into_bytes(),
+                }])
+                .await?;
+            Ok(())
+        }
+        .boxed_local()
+    }
+
     pub fn can_organize_projects(&self, members: &[ProjectKey]) -> bool {
         !members.is_empty()
             && members
