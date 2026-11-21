@@ -26,6 +26,37 @@ use t3_contracts::{
     rpc::{WsOrchestrationV2DispatchCommandRpc, WsOrchestrationV2LaunchThreadRpc},
 };
 
+/// A prompt can be present in the conversation messages or only in the visible item window.
+pub(super) fn projected_user_message_ids(
+    projection: &OrchestrationV2ThreadProjection,
+) -> impl Iterator<Item = &t3_contracts::base_schemas::MessageId> {
+    use t3_contracts::orchestration_v2_id_table::IdOrIndex;
+
+    projection
+        .messages
+        .iter()
+        .filter_map(|message| match &message.id {
+            IdOrIndex::Id(id) if message.role == ConversationMessageRole::User => Some(id),
+            _ => None,
+        })
+        .chain(
+            projection
+                .visible_turn_items
+                .iter()
+                .filter_map(|row| match &row.item {
+                    OrchestrationV2TurnItem::UserMessage(item)
+                        if row.source_thread_id == projection.thread.id =>
+                    {
+                        match &item.message_id {
+                            IdOrIndex::Id(id) => Some(id),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }),
+        )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FailureKind {
     Retry,
@@ -1052,6 +1083,35 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             return Ok(());
         };
         let messages = self.inner.outbox.messages();
+        {
+            let mut echoes = self.inner.projected_echoes.borrow_mut();
+            echoes.retain(|id, revision| {
+                messages.iter().any(|message| &message.message_id == id)
+                    && self.inner.outbox.revision(id) == *revision
+            });
+            for message in messages.iter().filter(|message| {
+                message.environment_id == self.inner.environment
+                    && !message.extra.contains_key("queuedRunId")
+            }) {
+                if environment
+                    .threads
+                    .get(&message.thread_id)
+                    .filter(|thread| {
+                        thread.session == generation
+                            && thread.status == crate::types::SyncStatus::Live
+                    })
+                    .and_then(|thread| thread.projection.as_ref())
+                    .is_some_and(|projection| {
+                        projected_user_message_ids(projection).any(|id| id == &message.message_id)
+                    })
+                {
+                    echoes.insert(
+                        message.message_id.clone(),
+                        self.inner.outbox.revision(&message.message_id),
+                    );
+                }
+            }
+        }
         self.inner
             .launches
             .borrow_mut()
@@ -1073,7 +1133,11 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                         .iter()
                         .any(|thread| thread.id == message.thread_id)
                 });
-            if exists && !unchanged && !self.inner.editing.borrow().contains(&message.message_id) {
+            if exists
+                && !unchanged
+                && !self.has_projected_echo(&message.message_id)
+                && !self.inner.editing.borrow().contains(&message.message_id)
+            {
                 let revision = self.inner.outbox.revision(&message.message_id);
                 if self
                     .restore_message(
@@ -1143,17 +1207,47 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             let evidence = if record.method
                 == <WsOrchestrationV2LaunchThreadRpc as t3_contracts::rpc::RpcMethod>::TAG
             {
-                record.change.apply.0.as_ref().is_some_and(|message|projection.is_some_and(|projection|projection.messages.iter().any(|row|matches!(&row.id,t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) if id==&message.message_id))) || (shell.is_some() && !self.inner.launches.borrow().contains_key(&message.message_id)))
+                record.change.apply.0.as_ref().is_some_and(|message| {
+                    projection.is_some_and(|projection| {
+                        projected_user_message_ids(projection).any(|id| id == &message.message_id)
+                    }) || (shell.is_some()
+                        && !self
+                            .inner
+                            .launches
+                            .borrow()
+                            .contains_key(&message.message_id))
+                })
             } else {
                 let command: OrchestrationV2Command = serde_json::from_value(record.input)?;
                 match &command {
-                OrchestrationV2Command::MessageDispatch(command)=>projection.is_some_and(|projection|projection.messages.iter().any(|message|matches!(&message.id,t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) if id==&command.message_id))),
-                OrchestrationV2Command::QueuedRunEdit(command)=>projection.is_some_and(|projection|projection.messages.iter().any(|message|matches!(&message.run_id,Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id)) if id==&command.run_id) && message.text==command.text && command.attachments.as_ref().is_none_or(|attachments|message.attachments==attachments.clone().unwrap_or_default()) && command.context.as_ref().is_none_or(|context|message.context.as_ref().and_then(Option::as_ref)==context.as_ref()))),
-                OrchestrationV2Command::ThreadCreate(_)=>shell.is_some(),
-                OrchestrationV2Command::ThreadRuntimeModeSet(command)=>shell.is_some_and(|shell|shell.runtime_mode==command.runtime_mode),
-                OrchestrationV2Command::ThreadInteractionModeSet(command)=>shell.is_some_and(|shell|shell.interaction_mode==command.interaction_mode),
-                _=>false,
-            }
+                    OrchestrationV2Command::MessageDispatch(command) => {
+                        projection.is_some_and(|projection| {
+                            projected_user_message_ids(projection).any(|id| id == &command.message_id)
+                        })
+                    }
+                    OrchestrationV2Command::QueuedRunEdit(command) => {
+                        projection.is_some_and(|projection| {
+                            projection.messages.iter().any(|message| {
+                                matches!(&message.run_id, Some(t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id)) if id == &command.run_id)
+                                    && message.text == command.text
+                                    && command.attachments.as_ref().is_none_or(|attachments| {
+                                        message.attachments == attachments.clone().unwrap_or_default()
+                                    })
+                                    && command.context.as_ref().is_none_or(|context| {
+                                        message.context.as_ref().and_then(Option::as_ref) == context.as_ref()
+                                    })
+                            })
+                        })
+                    }
+                    OrchestrationV2Command::ThreadCreate(_) => shell.is_some(),
+                    OrchestrationV2Command::ThreadRuntimeModeSet(command) => {
+                        shell.is_some_and(|shell| shell.runtime_mode == command.runtime_mode)
+                    }
+                    OrchestrationV2Command::ThreadInteractionModeSet(command) => {
+                        shell.is_some_and(|shell| shell.interaction_mode == command.interaction_mode)
+                    }
+                    _ => false,
+                }
             };
             if evidence
                 && matches!(
@@ -1245,11 +1339,16 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                     .contains(&record.command),
                 _ => false,
             }) {
-                self.inner
+                if self
+                    .inner
                     .commands
                     .prune_confirmed(self.inner.platform.as_ref())
                     .await
-                    .map_err(operation_error)?;
+                    .map_err(operation_error)?
+                    > 0
+                {
+                    self.inner.changes.notify();
+                }
                 let remaining: BTreeSet<_> = self
                     .inner
                     .commands

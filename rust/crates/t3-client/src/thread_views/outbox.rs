@@ -697,6 +697,10 @@ pub enum DeliveryResult {
     StaleMessage,
 }
 impl Delivery {
+    pub(crate) fn clear_acknowledgement(&mut self, message: &MessageId) {
+        self.acknowledged.remove(message);
+    }
+
     pub async fn deliver<S: Storage>(
         &mut self,
         outbox: &Outbox<S>,

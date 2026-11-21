@@ -62,6 +62,16 @@ fn seen(
     id: &t3_contracts::base_schemas::MessageId,
     sequence: u64,
 ) {
+    echo(store, generation, id, sequence, false);
+}
+
+fn echo(
+    store: &ClientStore,
+    generation: Generation,
+    id: &t3_contracts::base_schemas::MessageId,
+    sequence: u64,
+    visible_only: bool,
+) {
     let mut message: Value = serde_json::from_str(
         include_str!("../../../fixtures/samples/OrchestrationV2ConversationMessage.jsonl")
             .lines()
@@ -71,7 +81,23 @@ fn seen(
     .expect("message");
     message["id"] = json!(id);
     message["threadId"] = json!("thread");
-    let snapshot = json!({"kind":"snapshot","snapshotSequence":sequence,"historyCursor":null,"projection":{"thread":thread(),"runs":[],"attempts":[],"nodes":[],"subagents":[],"providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],"messages":[message],"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],"contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":NOW}});
+    message["role"] = json!("user");
+    let visible = if visible_only {
+        let item = json!({"type":"user_message","id":"item","threadId":"thread","runId":"run",
+            "nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,
+            "parentItemId":null,"ordinal":0,"status":"completed","title":null,"startedAt":null,
+            "completedAt":NOW,"updatedAt":NOW,"messageId":id,"text":"ambiguous",
+            "inputIntent":"turn_start","attachments":[],"createdBy":"user","creationSource":"web"});
+        json!([{"position":0,"visibility":"local","sourceThreadId":"thread","sourceItemId":"item","item":item}])
+    } else {
+        json!([])
+    };
+    let messages = if visible_only {
+        json!([])
+    } else {
+        json!([message])
+    };
+    let snapshot = json!({"kind":"snapshot","snapshotSequence":sequence,"historyCursor":null,"projection":{"thread":thread(),"runs":[],"attempts":[],"nodes":[],"subagents":[],"providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],"messages":messages,"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],"contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":visible,"updatedAt":NOW}});
     store
         .apply_thread(
             key(),
@@ -1086,9 +1112,12 @@ fn actual_rpc_dispatch_keeps_optimistic_message_until_authoritative_confirmation
                     .expect("rows")
                     .is_empty()
             );
+            let mut changes = service.changes();
+            assert_eq!(changes.next().await, Some(()));
             seen(&store, generation, &id, 9);
             assert!(service.step().await.expect("reconcile").is_none());
             assert!(service.pending_messages(&key()).is_empty());
+            assert_eq!(changes.next().now_or_never(), Some(Some(())));
             assert!(requests.try_recv().is_err());
             endpoint.invalidate();
         };
@@ -1257,6 +1286,64 @@ fn lost_dispatch_is_not_resent_after_restart_and_entity_evidence_confirms_it() {
         );
         assert!(restored.pending_messages(&key()).is_empty());
         assert!(requests.try_recv().is_err());
+    });
+}
+
+#[test]
+fn projected_user_echo_retires_the_durable_outbox_and_notifies_before_history_eviction() {
+    block_on(async {
+        for visible_only in [false, true] {
+            let platform = Rc::new(FakePlatform::default());
+            let (store, generation) = store();
+            let (wire, mut requests) = mpsc::unbounded::<Frame>();
+            let (_peer, incoming) = mpsc::unbounded::<Result<Frame, mpsc::SendError>>();
+            let (endpoint, _driver) = rpc::session(wire, incoming, key().environment, grants(), 0);
+            let service = Service::new(
+                key().environment,
+                platform.clone(),
+                store.clone(),
+                OrchestrationV2CreationSource::Web,
+            );
+            service
+                .connect(generation, Rc::new(endpoint), config())
+                .expect("connect");
+            let id = service
+                .send_message(&key(), "ambiguous".into())
+                .await
+                .expect("submit");
+            assert_eq!(service.pending_messages(&key()).len(), 1);
+            let mut changes = service.changes();
+            assert_eq!(changes.next().await, Some(()));
+            echo(&store, generation, &id, 12, visible_only);
+            assert!(
+                service.pending_messages(&key()).is_empty(),
+                "projected echo (visible only: {visible_only})"
+            );
+            service
+                .step()
+                .now_or_never()
+                .expect("reconcile without sending")
+                .expect("reconcile");
+            assert_eq!(changes.next().now_or_never(), Some(Some(())));
+            assert!(
+                platform
+                    .list(StorageArea::Ordinary, "outbox".into())
+                    .await
+                    .expect("rows")
+                    .is_empty()
+            );
+            assert!(requests.try_recv().is_err());
+            seen(
+                &store,
+                generation,
+                &t3_contracts::base_schemas::MessageId("newer".into()),
+                13,
+            );
+            assert!(
+                service.pending_messages(&key()).is_empty(),
+                "eviction must not bring back the outbox row"
+            );
+        }
     });
 }
 

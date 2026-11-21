@@ -171,6 +171,8 @@ pub(super) struct SendInner<P: Platform, E: RpcEndpoint> {
     pub source: OrchestrationV2CreationSource,
     pub session: RefCell<Option<Session<E>>>,
     pub outbox: Outbox<SharedStorage<P>>,
+    // Keep echoes until durable removal succeeds, including across history window changes.
+    pub projected_echoes: RefCell<BTreeMap<MessageId, u64>>,
     pub commands: OperationQueue<Overlay>,
     pub states: RefCell<BTreeMap<MessageId, SendState>>,
     pub attempts: RefCell<BTreeMap<MessageId, u32>>,
@@ -240,6 +242,7 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 source,
                 session: RefCell::new(None),
                 outbox: Outbox::new(SharedStorage(platform)),
+                projected_echoes: RefCell::default(),
                 states: RefCell::new(BTreeMap::new()),
                 attempts: RefCell::new(BTreeMap::new()),
                 epochs: RefCell::new(BTreeMap::new()),
@@ -811,24 +814,6 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
             },
         );
         let mut result = queued.as_ref().clone();
-        let snapshot = self.inner.store.snapshot();
-        let seen: BTreeSet<_> = snapshot
-            .environments
-            .get(&key.environment)
-            .and_then(|environment| environment.threads.get(&key.thread))
-            .and_then(|thread| thread.projection.as_ref())
-            .map_or_else(BTreeSet::new, |projection| {
-                projection
-                    .messages
-                    .iter()
-                    .filter_map(|message| match &message.id {
-                        t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) => {
-                            Some(id.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            });
         for message in self
             .inner
             .outbox
@@ -859,15 +844,31 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
                 }
             }
         }
+        if result.is_empty() {
+            return result;
+        }
+        let snapshot = self.inner.store.snapshot();
+        let seen = snapshot
+            .environments
+            .get(&key.environment)
+            .and_then(|environment| environment.threads.get(&key.thread))
+            .and_then(|thread| thread.projection.as_ref())
+            .map_or_else(BTreeSet::new, |projection| {
+                super::send_transport::projected_user_message_ids(projection).collect()
+            });
         result.retain(|item| {
+            let id = &item.message.message_id;
             item.message.extra.contains_key("queuedRunId") == edits
-                && (edits || !seen.contains(&item.message.message_id))
+                && (edits || (!seen.contains(id) && !self.has_projected_echo(id)))
         });
         result.sort_by(|a, b| {
             (&a.message.created_at, &a.message.message_id)
                 .cmp(&(&b.message.created_at, &b.message.message_id))
         });
         result
+    }
+    pub(super) fn has_projected_echo(&self, id: &MessageId) -> bool {
+        self.inner.projected_echoes.borrow().get(id) == Some(&self.inner.outbox.revision(id))
     }
     pub(super) fn current(&self, generation: Generation) -> bool {
         !self.inner.disposed.get()
@@ -891,47 +892,95 @@ impl<P: Platform + 'static, E: RpcEndpoint + 'static> SendService<P, E> {
         else {
             return Ok(None);
         };
-        if !self
-            .inner
-            .store
-            .snapshot()
-            .environments
-            .get(&self.inner.environment)
-            .is_some_and(|environment| {
-                environment.shell.session == generation
-                    && environment.shell.status == crate::types::SyncStatus::Live
+        let messages = self.inner.outbox.messages();
+        let echo = messages
+            .iter()
+            .find(|message| {
+                message.environment_id == self.inner.environment
+                    && self.has_projected_echo(&message.message_id)
             })
-        {
-            return Ok(None);
-        }
-        let now = self.inner.platform.monotonic_ms();
-        let mut seen = BTreeSet::new();
-        let candidate=self.inner.outbox.messages().into_iter().filter(|message|message.environment_id==self.inner.environment && seen.insert(message.thread_id.clone())).find(|message| {
-            !self.inner.editing.borrow().contains(&message.message_id) && !matches!(self.state(&message.message_id),Some(SendState::Retry {not_before,..}) if not_before>now)
-                && !matches!(self.state(&message.message_id),Some(SendState::AwaitingConfirmation))
+            .cloned();
+        let acknowledged = echo.is_some();
+        let candidate = echo.or_else(|| {
+            if !self
+                .inner
+                .store
+                .snapshot()
+                .environments
+                .get(&self.inner.environment)
+                .is_some_and(|environment| {
+                    environment.shell.session == generation
+                        && environment.shell.status == crate::types::SyncStatus::Live
+                })
+            {
+                return None;
+            }
+            let now = self.inner.platform.monotonic_ms();
+            let mut seen = BTreeSet::new();
+            messages
+                .into_iter()
+                .filter(|message| {
+                    message.environment_id == self.inner.environment
+                        && seen.insert(message.thread_id.clone())
+                })
+                .find(|message| {
+                    !self.inner.editing.borrow().contains(&message.message_id)
+                        && !matches!(
+                            self.state(&message.message_id),
+                            Some(SendState::Retry { not_before, .. }) if not_before > now
+                        )
+                        && !matches!(
+                            self.state(&message.message_id),
+                            Some(SendState::AwaitingConfirmation)
+                        )
+                })
         });
         let Some(message) = candidate else {
             return Ok(None);
         };
-        if !self.inner.outbox.confirm_queued(&message).await {
-            self.inner.outbox.enqueue(message.as_ref().clone()).await?;
-            self.inner.changes.notify();
-            return Ok(Some(DeliveryResult::Retry));
-        }
-        let transport = super::send_transport::ProductionDelivery(self.clone());
-        let gate = || {
-            self.current(generation) && !self.inner.editing.borrow().contains(&message.message_id)
+        let result = if acknowledged {
+            let revision = self.inner.outbox.revision(&message.message_id);
+            if self
+                .inner
+                .outbox
+                .remove(&message, Some(revision), || self.current(generation))
+                .await?
+                .is_none()
+            {
+                return Ok(Some(DeliveryResult::StaleMessage));
+            }
+            self.inner
+                .projected_echoes
+                .borrow_mut()
+                .remove(&message.message_id);
+            self.inner
+                .delivery
+                .lock()
+                .await
+                .clear_acknowledgement(&message.message_id);
+            Ok(DeliveryResult::Accepted(None))
+        } else {
+            if !self.inner.outbox.confirm_queued(&message).await {
+                self.inner.outbox.enqueue(message.as_ref().clone()).await?;
+                self.inner.changes.notify();
+                return Ok(Some(DeliveryResult::Retry));
+            }
+            let transport = super::send_transport::ProductionDelivery(self.clone());
+            let gate = || {
+                self.current(generation)
+                    && !self.inner.editing.borrow().contains(&message.message_id)
+            };
+            let mut delivery = self.inner.delivery.lock().await;
+            delivery
+                .deliver(
+                    &self.inner.outbox,
+                    &transport,
+                    message.clone(),
+                    super::super::outbox::DispatchStep::Send,
+                    gate,
+                )
+                .await
         };
-        let mut delivery = self.inner.delivery.lock().await;
-        let result = delivery
-            .deliver(
-                &self.inner.outbox,
-                &transport,
-                message.clone(),
-                super::super::outbox::DispatchStep::Send,
-                gate,
-            )
-            .await;
         let outcome = match result {
             Ok(DeliveryResult::Accepted(sequence)) => {
                 self.link_checkout_pull_request(&message).await;
