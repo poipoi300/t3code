@@ -40,6 +40,18 @@ pub struct FileId {
     pub inode: u64,
 }
 
+impl FileId {
+    pub fn directory(path: &Path) -> std::io::Result<Self> {
+        if !std::fs::symlink_metadata(path)?.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Expected a directory entry",
+            ));
+        }
+        file_id(path)
+    }
+}
+
 fn file_id(path: &Path) -> std::io::Result<FileId> {
     #[cfg(unix)]
     {
@@ -249,6 +261,7 @@ impl Git {
         }
         let mut fresh = self.clone();
         fresh.bound_repository = None;
+        fresh.bound_no_repository = false;
         fresh.bind_repository().await
     }
 
@@ -258,10 +271,22 @@ impl Git {
         &self,
         source: &RepositoryBinding,
     ) -> Result<RepositoryBinding, GitError> {
-        self.resolve_binding(None, Some(source))
+        self.resolve_binding(None, Some(source), None)
             .await?
             .map(|binding| binding.identity.clone())
             .ok_or_else(|| changed(self.cwd(), "The recreated checkout is missing."))
+    }
+
+    /// Install an identity only after discovery verifies the standalone clone and its directory.
+    pub async fn bind_cloned_repository(
+        &self,
+        destination: FileId,
+        git_directory: FileId,
+    ) -> Result<RepositoryBinding, GitError> {
+        self.resolve_binding(None, None, Some((destination, git_directory)))
+            .await?
+            .map(|binding| binding.identity.clone())
+            .ok_or_else(|| changed(self.cwd(), "The cloned repository is missing."))
     }
 
     pub async fn with_repository_binding(
@@ -275,8 +300,28 @@ impl Git {
             ));
         }
         self.bound_repository = None;
+        self.bound_no_repository = false;
         self.fsmonitor_disabled = true;
         self.bound_repository = self.resolve_repository_binding(Some(&identity)).await?;
+        Ok(self)
+    }
+
+    /// The explicit pin carried by this handle. The outer option is absent for discovery.
+    pub fn recorded_repository(&self) -> Option<Option<&RepositoryBinding>> {
+        if self.bound_no_repository {
+            Some(None)
+        } else {
+            self.bound_repository
+                .as_ref()
+                .map(|binding| Some(&binding.identity))
+        }
+    }
+
+    pub async fn with_no_repository_binding(mut self) -> Result<Self, GitError> {
+        self.bound_repository = None;
+        self.bound_no_repository = true;
+        self.fsmonitor_disabled = true;
+        self.resolve_repository_binding(None).await?;
         Ok(self)
     }
 
@@ -315,13 +360,36 @@ impl Git {
         &self,
         expected: Option<&RepositoryBinding>,
     ) -> Result<Option<Arc<BoundRepository>>, GitError> {
-        self.resolve_binding(expected, None).await
+        self.resolve_binding(expected, None, None).await
+    }
+
+    async fn discover_path(&self, field: &str) -> Result<String, GitError> {
+        let output = self
+            .execute_unbound(
+                &["rev-parse", "--path-format=absolute", field],
+                ExecuteOptions {
+                    max_output_bytes: 65_536,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let path = output.stdout_text();
+        let path = if cfg!(windows) {
+            path.strip_suffix("\r\n")
+        } else {
+            None
+        }
+        .or_else(|| path.strip_suffix('\n'))
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| GitError::InvalidOutput("repository identity".into()))?;
+        Ok(path.to_owned())
     }
 
     async fn resolve_binding(
         &self,
         expected: Option<&RepositoryBinding>,
         recreated_from: Option<&RepositoryBinding>,
+        cloned: Option<(FileId, FileId)>,
     ) -> Result<Option<Arc<BoundRepository>>, GitError> {
         let key = crate::safety::lexical_absolute(self.cwd())?;
         let resolved = crate::safety::resolve(self.cwd())?;
@@ -332,12 +400,14 @@ impl Git {
                 .or_else(|| bindings.get(&resolved))
                 .cloned()
         };
-        let cached = previous.as_ref().filter(|_| recreated_from.is_none());
+        let replacing = recreated_from.is_some() || cloned.is_some();
+        let cached = previous.as_ref().filter(|_| !replacing);
         if let Some(cached) = cached {
             cached.validate(self.cwd()).await?;
         }
         let mut discovery = self.without_fsmonitor();
         discovery.bound_repository = None;
+        discovery.bound_no_repository = false;
         discovery.git_dir = None;
         let output = match discovery
             .execute_unbound(
@@ -377,10 +447,27 @@ impl Git {
             }
             return Ok(None);
         }
+        if self.bound_no_repository {
+            return Err(changed(
+                self.cwd(),
+                "A Git repository was created in this folder after T3 Code first saw it without one.",
+            ));
+        }
         let text = output.stdout_text();
         let lines: Vec<_> = text.lines().collect();
-        let ["true", git_dir, common_dir, top_level] = lines.as_slice() else {
-            return Err(GitError::InvalidOutput("repository identity".into()));
+        let separate;
+        let (git_dir, common_dir, top_level) = match lines.as_slice() {
+            ["true", git_dir, common_dir, top_level] => (*git_dir, *common_dir, *top_level),
+            _ => {
+                // Git emits literal newlines in path names. Separate the records at the
+                // process boundary when line splitting cannot identify all three paths.
+                separate = [
+                    discovery.discover_path("--absolute-git-dir").await?,
+                    discovery.discover_path("--git-common-dir").await?,
+                    discovery.discover_path("--show-toplevel").await?,
+                ];
+                (&*separate[0], &*separate[1], &*separate[2])
+            }
         };
         let top_level = std::fs::canonicalize(top_level)?;
         let git_dir = std::fs::canonicalize(git_dir)?;
@@ -397,6 +484,20 @@ impl Git {
             common_dir,
             ids: Some(ids),
         };
+        if let Some((destination, git_directory)) = cloned
+            && (crate::core::git_path(&resolved) != crate::core::git_path(&key)
+                || FileId::directory(&resolved)? != destination
+                || identity.top_level != resolved
+                || identity.git_dir != resolved.join(".git")
+                || identity.common_dir != identity.git_dir
+                || ids.git_entry != git_directory
+                || ids.git_dir != git_directory)
+        {
+            return Err(changed(
+                self.cwd(),
+                "The clone no longer has the verified repository identity.",
+            ));
+        }
         if let Some(source) = recreated_from
             && (source.version != REPOSITORY_BINDING_VERSION
                 || source.ids.is_none()
@@ -437,12 +538,20 @@ impl Git {
         .map_err(|_| GitError::Unavailable("Repository binding failed.".into()))??;
         binding.validate(self.cwd()).await?;
         let mut bindings = bindings().lock().await;
-        if recreated_from.is_some() {
+        if let Some((destination, _)) = cloned
+            && FileId::directory(&resolved)? != destination
+        {
+            return Err(changed(
+                self.cwd(),
+                "The clone destination changed while verifying the repository.",
+            ));
+        }
+        if replacing {
             let current = bindings.get(&key).or_else(|| bindings.get(&resolved));
             if current.map(|b| &b.identity) != previous.as_ref().map(|b| &b.identity) {
                 return Err(changed(
                     self.cwd(),
-                    "The repository binding changed during worktree recovery.",
+                    "The repository binding changed while verifying a replacement checkout.",
                 ));
             }
             forget_scope(&mut bindings, &key, &resolved);

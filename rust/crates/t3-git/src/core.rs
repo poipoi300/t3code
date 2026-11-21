@@ -466,6 +466,9 @@ impl Git {
         &self,
     ) -> Result<Option<RepositoryPaths>, GitError> {
         let reader = self.repository_reader().await?;
+        if reader.bound_no_repository {
+            return Ok(None);
+        }
         let output = reader
             .execute_command(
                 "GitVcsDriver.resolveRepositoryPaths.commonDir",
@@ -523,6 +526,9 @@ impl Git {
         &self,
         refresh: bool,
     ) -> Result<Option<RepositoryPaths>, GitError> {
+        if self.bound_no_repository {
+            return self.repository_paths_uncached().await;
+        }
         let key = path_key(self.cwd());
         if refresh {
             self.core
@@ -1073,6 +1079,9 @@ impl Git {
     }
     pub async fn cached_local_status(&self) -> Result<GitStatusDetails, GitError> {
         self.repository_operation().await?;
+        if self.bound_no_repository {
+            return Ok(GitStatusDetails::default());
+        }
         let key = path_key(&physical_path(self.cwd()));
         self.core
             .local_status
@@ -1159,6 +1168,9 @@ impl Git {
     }
     pub async fn refresh_status_upstream(&self) -> Result<(), GitError> {
         let reader = self.repository_operation().await?;
+        if reader.bound_no_repository {
+            return Ok(());
+        }
         let head = reader
             .core_text(
                 "GitVcsDriver.refreshStatusUpstreamIfStale.headRef",

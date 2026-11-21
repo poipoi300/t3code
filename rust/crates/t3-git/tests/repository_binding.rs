@@ -2,6 +2,55 @@ mod common;
 use common::{Repository, TestResult};
 use t3_git::{ExecuteOptions, checkpoint_ref};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repository_binding_preserves_newlines_in_checkout_paths() -> TestResult {
+    let repo = Repository::new().await?;
+    let relocated = repo.temp.path().join("checkout\nwith-newline");
+    std::fs::rename(repo.root(), &relocated)?;
+    let binding = repo
+        .git
+        .at(&relocated)
+        .bind_repository()
+        .await?
+        .expect("binding");
+    assert_eq!(binding.top_level, relocated.canonicalize()?);
+    assert_eq!(binding.git_dir, relocated.join(".git").canonicalize()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn refusing_a_cloned_destination_keeps_the_previous_repository_binding() -> TestResult {
+    let repo = Repository::new().await?;
+    let previous = repo.git.bind_repository().await?.expect("binding");
+    let git_directory = repo.root().join(".git");
+    let saved = repo.temp.path().join("original.git");
+    std::fs::rename(&git_directory, &saved)?;
+    repo.git
+        .execute(
+            &["init", "--initial-branch=other"],
+            ExecuteOptions::default(),
+        )
+        .await?;
+    let mut wrong_destination = t3_git::FileId::directory(repo.root())?;
+    wrong_destination.inode = wrong_destination.inode.wrapping_add(1);
+    let replacement = t3_git::FileId::directory(&git_directory)?;
+    assert!(matches!(
+        repo.git
+            .bind_cloned_repository(wrong_destination, replacement)
+            .await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    assert!(matches!(
+        repo.git.bind_repository().await,
+        Err(t3_git::GitError::RepositoryChanged { .. })
+    ));
+    std::fs::rename(&git_directory, repo.temp.path().join("replacement.git"))?;
+    std::fs::rename(saved, git_directory)?;
+    assert_eq!(repo.git.bind_repository().await?, Some(previous));
+    Ok(())
+}
+
 async fn planted_repository_is_refused(operation: &str) -> TestResult {
     let mut failures = Vec::new();
     for git_file in [false, true] {

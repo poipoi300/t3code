@@ -113,7 +113,9 @@ struct Listeners {
     retiring: Vec<Arc<Worker>>,
 }
 struct Checkout {
+    physical_path: PathBuf,
     workflow: GitWorkflowService,
+    factory: Option<Arc<dyn crate::GitWorkflowFactory>>,
     policy: Arc<dyn VcsStatusPolicy>,
     cached: AsyncMutex<Cached>,
     local_lock: AsyncMutex<()>,
@@ -124,6 +126,16 @@ struct Checkout {
     branch_changes: Arc<BranchChanges>,
 }
 impl Checkout {
+    async fn can_reuse(&self, cwd: &Path) -> Result<bool, GitError> {
+        if crate::core::physical_path(self.workflow.git().cwd()) != self.physical_path {
+            return Ok(false);
+        }
+        match &self.factory {
+            Some(factory) => factory.can_reuse_checkout(cwd, &self.workflow).await,
+            None => Ok(true),
+        }
+    }
+
     fn listeners(&self) -> std::sync::MutexGuard<'_, Listeners> {
         self.listeners.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -404,6 +416,10 @@ impl Checkout {
         token: &CancellationToken,
         ready: watch::Sender<bool>,
     ) {
+        if !self.can_reuse(workflow.git().cwd()).await.unwrap_or(false) {
+            ready.send_replace(true);
+            return;
+        }
         let path = workflow.git().head_path().await;
         let watched_directory = path
             .as_ref()
@@ -456,6 +472,9 @@ impl Checkout {
                 if token.is_cancelled() {
                     return;
                 }
+                if !self.can_reuse(workflow.git().cwd()).await.unwrap_or(false) {
+                    return;
+                }
                 match self.refresh_checked_out(workflow).await {
                     Ok(()) => {
                         failures = 0;
@@ -499,6 +518,9 @@ impl Checkout {
             if interval.is_zero() && !initial || !enabled {
                 delay = active;
                 continue;
+            }
+            if !self.can_reuse(workflow.git().cwd()).await.unwrap_or(false) {
+                return;
             }
             match self
                 .remote(workflow, !interval.is_zero(), false, true)
@@ -788,43 +810,63 @@ impl VcsStatusBroadcaster {
         self
     }
     async fn checkout(&self, cwd: &Path) -> Result<Arc<Checkout>, GitError> {
-        let path = crate::core::physical_path(cwd);
-        let existing = self
-            .inner
-            .checkouts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&path)
-            .cloned();
-        if let Some(checkout) = existing {
+        loop {
+            let path = crate::core::physical_path(cwd);
+            let existing = self
+                .inner
+                .checkouts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&path)
+                .cloned();
+            if let Some(checkout) = &existing
+                && checkout.can_reuse(cwd).await?
+            {
+                return Ok(checkout.clone());
+            }
+            let workflow = match &self.inner.factory {
+                // The caller's spelling identifies its saved binding before aliases are shared.
+                Some(factory) => factory.for_checkout(cwd).await?,
+                None => self.inner.workflow.at(&path),
+            }
+            .without_fsmonitor();
+            let checkout = Arc::new(Checkout {
+                physical_path: path.clone(),
+                workflow,
+                factory: self.inner.factory.clone(),
+                policy: self.inner.policy.clone(),
+                cached: AsyncMutex::new(Cached::default()),
+                local_lock: AsyncMutex::new(()),
+                remote_lock: AsyncMutex::new(()),
+                requests: AtomicU64::new(0),
+                detailed: AtomicUsize::new(0),
+                listeners: Mutex::new(Listeners::default()),
+                branch_changes: self.inner.branch_changes.clone(),
+            });
+            if !checkout.can_reuse(cwd).await? {
+                continue;
+            }
+            let removed = {
+                let mut checkouts = self
+                    .inner
+                    .checkouts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let unchanged = match (checkouts.get(&path), &existing) {
+                    (Some(current), Some(existing)) => Arc::ptr_eq(current, existing),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !unchanged {
+                    continue;
+                }
+                checkouts.insert(path.clone(), checkout.clone())
+            };
+            if let Some(removed) = removed {
+                Self::stop_checkout(&removed).await;
+            }
             return Ok(checkout);
         }
-        let workflow = match &self.inner.factory {
-            // The caller's spelling: saved bindings are keyed by the folder as recorded.
-            Some(factory) => factory.for_checkout(cwd).await?,
-            None => self.inner.workflow.at(&path),
-        }
-        .without_fsmonitor();
-        Ok(self
-            .inner
-            .checkouts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(path.clone())
-            .or_insert_with(|| {
-                Arc::new(Checkout {
-                    workflow,
-                    policy: self.inner.policy.clone(),
-                    cached: AsyncMutex::new(Cached::default()),
-                    local_lock: AsyncMutex::new(()),
-                    remote_lock: AsyncMutex::new(()),
-                    requests: AtomicU64::new(0),
-                    detailed: AtomicUsize::new(0),
-                    listeners: Mutex::new(Listeners::default()),
-                    branch_changes: self.inner.branch_changes.clone(),
-                })
-            })
-            .clone())
     }
     pub async fn stream_branch_status(
         &self,

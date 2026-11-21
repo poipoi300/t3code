@@ -348,6 +348,14 @@ type RequestCache = BTreeMap<String, (tokio::time::Instant, Option<ChangeRequest
 #[async_trait]
 pub trait GitWorkflowFactory: Send + Sync {
     async fn for_checkout(&self, cwd: &Path) -> Result<GitWorkflowService, GitError>;
+
+    async fn can_reuse_checkout(
+        &self,
+        _cwd: &Path,
+        _workflow: &GitWorkflowService,
+    ) -> Result<bool, GitError> {
+        Ok(true)
+    }
 }
 
 #[derive(Clone)]
@@ -536,6 +544,10 @@ impl GitWorkflowService {
     ) -> Result<Self, GitError> {
         self.git = self.git.with_repository_binding(binding).await?;
         Ok(self)
+    }
+    pub fn with_git(mut self, git: Git) -> Self {
+        self.git = git;
+        self
     }
     pub fn with_cancellation(mut self, cancellation: crate::CancellationToken) -> Self {
         self.git.operation_scope = Some(Arc::new(crate::actions::OperationScope::default()));

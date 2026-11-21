@@ -182,6 +182,7 @@ pub struct Git {
     git_dir: Option<PathBuf>,
     fsmonitor_disabled: bool,
     bound_repository: Option<Arc<binding::BoundRepository>>,
+    bound_no_repository: bool,
     checkpoint_mode: bool,
 }
 
@@ -201,6 +202,7 @@ impl Git {
             git_dir: None,
             fsmonitor_disabled: false,
             bound_repository: None,
+            bound_no_repository: false,
             checkpoint_mode: false,
         }
     }
@@ -237,6 +239,7 @@ impl Git {
             } else {
                 None
             },
+            bound_no_repository: cwd == self.cwd && self.bound_no_repository,
             cwd,
             ..self.clone()
         }
@@ -309,6 +312,12 @@ impl Git {
         args: &[impl AsRef<std::ffi::OsStr>],
         options: ExecuteOptions,
     ) -> Result<ProcessOutput, GitError> {
+        if self.bound_no_repository {
+            return Err(self.command_error(
+                "Git.execute",
+                "No Git repository is recorded for this folder.",
+            ));
+        }
         let _permit = if options.unbounded_concurrency
             || options
                 .timeout
@@ -474,6 +483,9 @@ impl Git {
 
     pub async fn detect_repository(&self) -> Result<Option<Repository>, GitError> {
         let reader = self.repository_operation().await?;
+        if reader.bound_no_repository {
+            return Ok(None);
+        }
         if let Some(binding) = &reader.bound_repository {
             return Ok(Some(Repository {
                 root: core::git_path(&binding.identity.top_level),
