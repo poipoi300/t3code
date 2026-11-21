@@ -21,6 +21,7 @@ use std::{
 };
 use t3_contracts::chat_attachment::ChatAttachment;
 
+#[derive(Clone)]
 pub struct ThreadMessageIntake {
     pub threads: ThreadManagementService,
     pub launches: Option<ThreadLaunchService>,
@@ -54,6 +55,42 @@ fn intake_error(detail: impl Into<String>) -> Error {
         operation: "ThreadMessageIntake",
         detail: detail.into(),
     }
+}
+
+struct PreparedClaims {
+    backend: Arc<dyn AttachmentBackend>,
+    paths: Vec<PathBuf>,
+}
+
+impl PreparedClaims {
+    fn take(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.paths)
+    }
+}
+impl Drop for PreparedClaims {
+    fn drop(&mut self) {
+        if !self.paths.is_empty() {
+            let paths = self.take();
+            let backend = self.backend.clone();
+            tokio::spawn(async move {
+                let _ = backend.release_claimed_paths(paths).await;
+            });
+        }
+    }
+}
+
+// Once dispatch may accept the command, only its outcome can decide whether to roll back.
+// Drive dispatch and reconciliation to completion even if the RPC receiver goes away.
+async fn finish_dispatch<T: Send + 'static>(
+    has_copies: bool,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    if !has_copies {
+        return work.await;
+    }
+    tokio::spawn(work)
+        .await
+        .map_err(|e| intake_error(e.to_string()))?
 }
 
 async fn claim(
@@ -134,92 +171,73 @@ impl ThreadMessageIntake {
             serde_json::from_value(value.get("attachments").cloned().unwrap_or(json!([])))?;
         let thread: ThreadId = serde_json::from_value(value["threadId"].clone())?;
         let claimed = claim(self.attachments.as_ref(), thread.clone(), before.clone()).await?;
+        let mut guard = PreparedClaims {
+            backend: self.attachments.clone(),
+            paths: claimed.claimed_paths,
+        };
         value["attachments"] = t3_contracts::stored::to_value(&claimed.attachments)?;
         remap_context(&mut value, &before, &claimed.attachments);
         let prepared = match serde_json::from_value::<OrchestrationV2ServerCommand>(value.clone()) {
             Ok(command) => command,
             Err(error) => {
-                self.release(claimed.claimed_paths).await;
+                self.release(guard.take()).await;
                 return Err(error.into());
             }
         };
-        let result = self.threads.dispatch(prepared).await;
-        if result.is_ok() {
-            let message_id = if kind == "queued-run.edit" {
-                self.projections
-                    .run(
-                        thread.clone(),
-                        serde_json::from_value(value["runId"].clone())?,
-                    )
-                    .await?
-                    .map(|run| super::provider_event_ingestor::expanded_id(&run.user_message_id))
-                    .transpose()?
-            } else {
-                Some(serde_json::from_value::<MessageId>(
-                    value["messageId"].clone(),
-                )?)
-            };
-            let records = self
-                .projections
-                .query_records(ProjectionRecordQuery {
-                    thread_id: thread,
-                    fields: vec![RecordKind::Messages],
-                    filter: RecordFilter::default(),
-                    messages: MessageFilter {
-                        ids: Some(message_id.into_iter().collect()),
-                        ..Default::default()
-                    },
-                    run_statuses: None,
-                    include_latest_run: false,
-                })
-                .await?;
-            let accepted = records
-                .records
-                .into_iter()
-                .flat_map(|records| match records {
-                    ProjectionRecordSet::Messages(messages) => messages
-                        .into_iter()
-                        .flat_map(|message| message.attachments)
-                        .collect(),
-                    _ => vec![],
-                })
-                .collect::<Vec<_>>();
-            self.release_unused(claimed.claimed_paths, &accepted).await;
-        } else if result.as_ref().err().is_some_and(not_accepted) {
-            self.release(claimed.claimed_paths).await;
-        }
-        result
-    }
-    async fn reference(
-        &self,
-        attachment: &ChatAttachment,
-        paths: &[PathBuf],
-        resolver: Option<&dyn AttachmentReferenceResolver>,
-    ) -> Result<AttachmentReference> {
-        if let Some(resolver) = resolver {
-            return resolver.reference(attachment).await;
-        }
-        let directory = paths
-            .first()
-            .and_then(|path| path.parent())
-            .ok_or(Error::Unsupported("AttachmentBackend.attachment_reference"))?;
-        let path = attachment_path(directory, attachment).ok_or_else(|| {
-            intake_error(format!(
-                "Attachment '{}' is no longer available. Attach it again.",
-                attachment_name(attachment)
-            ))
-        })?;
-        if !path.exists() {
-            return Err(intake_error(format!(
-                "Attachment '{}' is no longer available. Attach it again.",
-                attachment_name(attachment)
-            )));
-        }
-        let extracted = PathBuf::from(format!("{}.txt", path.display()));
-        Ok(AttachmentReference {
-            path,
-            extracted_path: extracted.exists().then_some(extracted),
+        let paths = guard.take();
+        let intake = self.clone();
+        finish_dispatch(!paths.is_empty(), async move {
+            let result = intake.threads.dispatch(prepared).await;
+            if result.is_ok() {
+                let message_id = if kind == "queued-run.edit" {
+                    intake
+                        .projections
+                        .run(
+                            thread.clone(),
+                            serde_json::from_value(value["runId"].clone())?,
+                        )
+                        .await?
+                        .map(|run| {
+                            super::provider_event_ingestor::expanded_id(&run.user_message_id)
+                        })
+                        .transpose()?
+                } else {
+                    Some(serde_json::from_value::<MessageId>(
+                        value["messageId"].clone(),
+                    )?)
+                };
+                let records = intake
+                    .projections
+                    .query_records(ProjectionRecordQuery {
+                        thread_id: thread,
+                        fields: vec![RecordKind::Messages],
+                        filter: RecordFilter::default(),
+                        messages: MessageFilter {
+                            ids: Some(message_id.into_iter().collect()),
+                            ..Default::default()
+                        },
+                        run_statuses: None,
+                        include_latest_run: false,
+                    })
+                    .await?;
+                let accepted = records
+                    .records
+                    .into_iter()
+                    .flat_map(|records| match records {
+                        ProjectionRecordSet::Messages(messages) => messages
+                            .into_iter()
+                            .flat_map(|message| message.attachments)
+                            .collect(),
+                        _ => vec![],
+                    })
+                    .collect::<Vec<_>>();
+                intake.release_unused(paths, &accepted).await;
+            } else if result.as_ref().err().is_some_and(not_accepted) {
+                intake.release(paths).await;
+            }
+            result
         })
+        .await
     }
     async fn respond_with_attachments(
         &self,
@@ -237,7 +255,10 @@ impl ThreadMessageIntake {
             .flatten()
             .collect::<Vec<_>>();
         validate_attachment_limits(&all)?;
-        let mut paths = Vec::new();
+        let mut guard = PreparedClaims {
+            backend: self.attachments.clone(),
+            paths: vec![],
+        };
         let prepared = async {
             let mut questions = serde_json::Map::new();
             for (question, attachments) in incoming {
@@ -247,7 +268,7 @@ impl ThreadMessageIntake {
                     serde_json::from_value(attachments)?,
                 )
                 .await?;
-                paths.extend(claimed.claimed_paths);
+                guard.paths.extend(claimed.claimed_paths);
                 questions.insert(
                     question,
                     t3_contracts::stored::to_value(&claimed.attachments)?,
@@ -258,7 +279,10 @@ impl ThreadMessageIntake {
                 let attachments: Vec<ChatAttachment> = serde_json::from_value(attachments.clone())?;
                 let mut references = Vec::new();
                 for attachment in attachments {
-                    let reference = self.reference(&attachment, &paths, resolver).await?;
+                    let reference = resolver
+                        .ok_or(Error::Unsupported("AttachmentBackend.attachment_reference"))?
+                        .reference(&attachment)
+                        .await?;
                     let suffix = match reference.extracted_path {
                         Some(path) => format!(
                             " (text extracted to: {})",
@@ -302,55 +326,62 @@ impl ThreadMessageIntake {
         let command = match prepared {
             Ok(command) => command,
             Err(error) => {
-                self.release(paths).await;
+                self.release(guard.take()).await;
                 return Err(error);
             }
         };
-        let result = self.threads.dispatch(command).await;
-        if result.is_ok() {
-            let request: RuntimeRequestId = serde_json::from_value(value["requestId"].clone())?;
-            let records = self
-                .projections
-                .records(
-                    thread,
-                    vec![RecordKind::TurnItems],
-                    RecordFilter {
-                        turn_item_request_ids: Some(vec![request]),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            let mut resolved = false;
-            let mut accepted = Vec::new();
-            for set in records.records {
-                if let ProjectionRecordSet::TurnItems(items) = set {
-                    for item in items {
-                        if let OrchestrationV2TurnItem::UserInputRequest(item) = item {
-                            if item.status == OrchestrationV2TurnItemStatus::Pending {
-                                continue;
-                            }
-                            resolved = true;
-                            let item = t3_contracts::stored::to_value(&item)?;
-                            if let Some(questions) =
-                                item["questionAnswer"]["attachmentsByQuestionId"].as_object()
-                            {
-                                for attachments in questions.values() {
-                                    accepted.extend(serde_json::from_value::<Vec<ChatAttachment>>(
-                                        attachments.clone(),
-                                    )?);
+        let paths = guard.take();
+        let intake = self.clone();
+        finish_dispatch(!paths.is_empty(), async move {
+            let result = intake.threads.dispatch(command).await;
+            if result.is_ok() {
+                let request: RuntimeRequestId = serde_json::from_value(value["requestId"].clone())?;
+                let records = intake
+                    .projections
+                    .records(
+                        thread,
+                        vec![RecordKind::TurnItems],
+                        RecordFilter {
+                            turn_item_request_ids: Some(vec![request]),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let mut resolved = false;
+                let mut accepted = Vec::new();
+                for set in records.records {
+                    if let ProjectionRecordSet::TurnItems(items) = set {
+                        for item in items {
+                            if let OrchestrationV2TurnItem::UserInputRequest(item) = item {
+                                if item.status == OrchestrationV2TurnItemStatus::Pending {
+                                    continue;
+                                }
+                                resolved = true;
+                                let item = t3_contracts::stored::to_value(&item)?;
+                                if let Some(questions) =
+                                    item["questionAnswer"]["attachmentsByQuestionId"].as_object()
+                                {
+                                    for attachments in questions.values() {
+                                        accepted.extend(serde_json::from_value::<
+                                            Vec<ChatAttachment>,
+                                        >(
+                                            attachments.clone()
+                                        )?);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                if resolved {
+                    intake.release_unused(paths, &accepted).await;
+                }
+            } else if result.as_ref().err().is_some_and(not_accepted) {
+                intake.release(paths).await;
             }
-            if resolved {
-                self.release_unused(paths, &accepted).await;
-            }
-        } else if result.as_ref().err().is_some_and(not_accepted) {
-            self.release(paths).await;
-        }
-        result
+            result
+        })
+        .await
     }
     pub async fn send_to_thread(&self, mut input: SendInput) -> Result<SendResult> {
         let claimed = claim(
@@ -360,14 +391,22 @@ impl ThreadMessageIntake {
         )
         .await?;
         input.attachments = claimed.attachments;
-        let result = self.threads.send_to_thread(input).await;
-        if let Ok(result) = &result {
-            self.release_unused(claimed.claimed_paths, &result.message.attachments)
-                .await;
-        } else if result.as_ref().err().is_some_and(not_accepted) {
-            self.release(claimed.claimed_paths).await;
+        if claimed.claimed_paths.is_empty() {
+            return self.threads.send_to_thread(input).await;
         }
-        result
+        let intake = self.clone();
+        finish_dispatch(true, async move {
+            let result = intake.threads.send_to_thread(input).await;
+            if let Ok(result) = &result {
+                intake
+                    .release_unused(claimed.claimed_paths, &result.message.attachments)
+                    .await;
+            } else if result.as_ref().err().is_some_and(not_accepted) {
+                intake.release(claimed.claimed_paths).await;
+            }
+            result
+        })
+        .await
     }
     pub async fn launch_thread(&self, mut input: LaunchInput) -> Result<LaunchResult> {
         let launches = self
@@ -387,32 +426,44 @@ impl ThreadMessageIntake {
             .ok_or_else(|| intake_error("Attachments need a thread id at launch."))?;
         let before = message.attachments.clone();
         let claimed = claim(self.attachments.as_ref(), thread, before.clone()).await?;
+        let mut guard = PreparedClaims {
+            backend: self.attachments.clone(),
+            paths: claimed.claimed_paths,
+        };
         message.attachments = claimed.attachments;
         if let Some(context) = &message.context {
             let mut value = json!({"context":t3_contracts::stored::to_value(context)?});
             remap_context(&mut value, &before, &message.attachments);
             message.context = Some(serde_json::from_value(value["context"].clone())?);
         }
-        let result = launches.launch(input).await;
-        if let Ok(result) = &result {
-            self.release_unused(
-                claimed.claimed_paths,
-                &result
-                    .projection
-                    .messages
-                    .iter()
-                    .flat_map(|message| message.attachments.clone())
-                    .collect::<Vec<_>>(),
-            )
-            .await;
-        } else if result.as_ref().err().is_some_and(not_accepted) {
-            self.release(claimed.claimed_paths).await;
-        }
-        result
+        let paths = guard.take();
+        let intake = self.clone();
+        let launches = launches.clone();
+        finish_dispatch(!paths.is_empty(), async move {
+            let result = launches.launch(input).await;
+            if let Ok(result) = &result {
+                intake
+                    .release_unused(
+                        paths,
+                        &result
+                            .projection
+                            .messages
+                            .iter()
+                            .flat_map(|message| message.attachments.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await;
+            } else if result.as_ref().err().is_some_and(not_accepted) {
+                intake.release(paths).await;
+            }
+            result
+        })
+        .await
     }
     async fn release(&self, paths: Vec<PathBuf>) {
         if !paths.is_empty() {
-            let _ = self.attachments.release_claimed_paths(paths).await;
+            let backend = self.attachments.clone();
+            let _ = tokio::spawn(async move { backend.release_claimed_paths(paths).await }).await;
         }
     }
     async fn release_unused(&self, paths: Vec<PathBuf>, accepted: &[ChatAttachment]) {

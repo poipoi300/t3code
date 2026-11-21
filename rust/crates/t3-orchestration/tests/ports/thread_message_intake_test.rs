@@ -152,7 +152,12 @@ async fn question_paths_are_readable_and_ambiguous_dispatch_keeps_copies_while_r
             Arc::new(NoDocumentText),
         ));
         let (intake, dispatcher) = intake(&h, claims.clone(), mode);
-        assert!(intake.dispatch_command(respond(&upload)).await.is_err());
+        assert!(
+            intake
+                .dispatch_command_with_resolver(respond(&upload), Some(claims.as_ref()))
+                .await
+                .is_err()
+        );
         let command = dispatcher.commands.lock().unwrap()[0].clone();
         let accepted: ChatAttachment =
             serde_json::from_value(command["attachmentsByQuestionId"]["q"][0].clone())?;
@@ -197,7 +202,9 @@ async fn replayed_answers_release_new_claims_only_after_the_recorded_resolution_
             Arc::new(NoDocumentText),
         ));
         let (intake, dispatcher) = intake(&h, claims.clone(), "accepted");
-        intake.dispatch_command(respond(&upload)).await?;
+        intake
+            .dispatch_command_with_resolver(respond(&upload), Some(claims.as_ref()))
+            .await?;
         let command = dispatcher.commands.lock().unwrap()[0].clone();
         let claimed: ChatAttachment =
             serde_json::from_value(command["attachmentsByQuestionId"]["q"][0].clone())?;
@@ -229,14 +236,24 @@ async fn failed_question_preparation_rolls_back_and_retry_uses_preserved_sources
     let command = serde_json::from_value(
         json!({"type":"runtime-request.respond","commandId":"command:retry","threadId":"thread:test","requestId":"request:one","attachmentsByQuestionId":{"q1":[first],"q2":[second]}}),
     )?;
-    assert!(intake.dispatch_command(command).await.is_err());
+    assert!(
+        intake
+            .dispatch_command_with_resolver(command, Some(claims.as_ref()))
+            .await
+            .is_err()
+    );
     assert!(dispatcher.commands.lock().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
     std::fs::write(second_path, [1, 2, 3])?;
     let command = serde_json::from_value(
         json!({"type":"runtime-request.respond","commandId":"command:retry","threadId":"thread:test","requestId":"request:one","attachmentsByQuestionId":{"q1":[first],"q2":[second]}}),
     )?;
-    assert!(intake.dispatch_command(command).await.is_err());
+    assert!(
+        intake
+            .dispatch_command_with_resolver(command, Some(claims.as_ref()))
+            .await
+            .is_err()
+    );
     {
         let commands = dispatcher.commands.lock().unwrap();
         assert_eq!(commands.len(), 1);
@@ -286,5 +303,68 @@ async fn guest_dispatch_uses_only_pending_guest_attachments_and_never_client_nam
         );
         claims.shutdown().await;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_question_preparation_releases_claimed_files() -> Result<()> {
+    use t3_orchestration::ports::runs_ingestion::thread_message_intake::{
+        AttachmentReference, AttachmentReferenceResolver,
+    };
+    struct Paused(tokio::sync::Notify);
+    #[async_trait]
+    impl AttachmentReferenceResolver for Paused {
+        async fn reference(&self, _: &ChatAttachment) -> Result<AttachmentReference> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+    let h = Harness::new().await?;
+    let directory = tempfile::tempdir()?;
+    let attachment = upload(directory.path());
+    let claims = Arc::new(AttachmentClaimService::new(
+        directory.path().into(),
+        Arc::new(NoDocumentText),
+    ));
+    let (intake, dispatcher) = intake(&h, claims.clone(), "reject");
+    let pause = Arc::new(Paused(Default::default()));
+    let resolver = pause.clone();
+    let job = tokio::spawn(async move {
+        intake
+            .dispatch_command_with_resolver(respond(&attachment), Some(resolver.as_ref()))
+            .await
+    });
+    pause.0.notified().await;
+    job.abort();
+    assert!(job.await.unwrap_err().is_cancelled());
+    assert!(dispatcher.commands.lock().unwrap().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while std::fs::read_dir(directory.path()).unwrap().count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled preparation left the claimed copy");
+    claims.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn question_without_a_resolver_fails_before_dispatch() -> Result<()> {
+    let h = Harness::new().await?;
+    let root = tempfile::tempdir()?;
+    let attachment = upload(root.path());
+    let claims = Arc::new(AttachmentClaimService::new(
+        root.path().into(),
+        Arc::new(NoDocumentText),
+    ));
+    let (intake, dispatcher) = intake(&h, claims.clone(), "accepted");
+    assert!(matches!(
+        intake.dispatch_command(respond(&attachment)).await,
+        Err(Error::Unsupported("AttachmentBackend.attachment_reference"))
+    ));
+    assert!(dispatcher.commands.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
+    claims.shutdown().await;
     Ok(())
 }
