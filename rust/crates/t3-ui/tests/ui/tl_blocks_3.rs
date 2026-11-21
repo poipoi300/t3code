@@ -443,6 +443,8 @@ fn start(size: (f32, f32)) -> Headless {
     let mut app = Headless::start(EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: nsh_core::geometry::size(px(size.0), px(size.1)),
+        // Headless drives each frame of a scroll without waiting for the display.
+        clock: nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH),
         ..EngineConfig::new(Root::of::<BlockListFixture>())
     })
     .expect("production block list");
