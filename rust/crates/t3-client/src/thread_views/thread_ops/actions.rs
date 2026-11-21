@@ -34,6 +34,11 @@ pub enum Action {
     MarkUnread,
     RegenerateTitle,
     CloseGuestShare,
+    /// The owner declines a guest's pending message (`thread.guest-message.dismiss`).
+    DismissGuestMessage(t3_contracts::base_schemas::GuestMessageId),
+    /// The owner accepts it: a `message.dispatch` that names the guest message, so the server
+    /// supplies the words and files, queued after the active run.
+    SendGuestMessage(t3_contracts::base_schemas::GuestMessageId),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Intent {
@@ -381,6 +386,7 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             title_regeneration: capabilities
                 .is_some_and(|c| c.thread_title_regeneration == Some(true)),
             regenerating: row.title_regeneration.as_ref().is_some_and(Option::is_some),
+            can_share: super::guest_share::can_share_with_guest(&self.runtime, key),
             presets: calendar.map_or_else(Vec::new, |calendar| {
                 self.resolve_snooze_presets(&key.environment, calendar)
             }),
@@ -785,10 +791,26 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
         action: &Action,
     ) -> Result<OrchestrationV2Command, ClientError> {
         use ThreadLifecycleAction::*;
+        let command_id = crate::operations::allocate_command_id(&self.platform, None)?;
         let (kind, fields) = match action {
             Action::Rename(title) => ("thread.metadata.update", json!({"title":title})),
             Action::RegenerateTitle => ("thread.metadata.update", json!({"regenerateTitle":true})),
             Action::CloseGuestShare => ("thread.guest-share.close", json!({})),
+            Action::DismissGuestMessage(id) => {
+                ("thread.guest-message.dismiss", json!({"guestMessageId":id}))
+            }
+            Action::SendGuestMessage(id) => (
+                "message.dispatch",
+                json!({
+                    "messageId":command_id,
+                    "guestMessageId":id,
+                    "text":"",
+                    "attachments":[],
+                    "dispatchMode":{"type":"queue_after_active"},
+                    "createdBy":"user",
+                    "creationSource":self.runtime.creation_source(),
+                }),
+            ),
             Action::Archive => ("thread.archive", json!({})),
             Action::Unarchive => ("thread.unarchive", json!({})),
             Action::Delete => ("thread.delete", json!({})),
@@ -820,7 +842,7 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 ),
             },
         };
-        let mut payload = json!({"type":kind,"commandId":crate::operations::allocate_command_id(&self.platform,None)?,"threadId":key.thread});
+        let mut payload = json!({"type":kind,"commandId":command_id,"threadId":key.thread});
         if let Some(fields) = fields.as_object() {
             for (key, value) in fields {
                 payload[key] = value.clone();

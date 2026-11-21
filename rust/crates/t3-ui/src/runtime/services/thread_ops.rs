@@ -151,6 +151,27 @@ impl<P: Platform + Clone + 'static> ThreadHeaderService for HeaderBinding<P> {
     }
 }
 
+/// Sends or dismisses a guest's pending message through the client's thread actions.
+pub fn guest_message_resolver<P: Platform + Clone + 'static>(
+    client: &ClientRuntime<P>,
+) -> crate::screens::thread::guest_pending::GuestMessageResolver {
+    let client = client.clone();
+    crate::screens::thread::guest_pending::GuestMessageResolver(Rc::new(
+        move |key, message, decision| {
+            let resolve = client
+                .thread_actions()
+                .resolve_guest_message(key, message, decision);
+            async move {
+                match resolve.await {
+                    Err(ClientError::Cancelled) | Ok(()) => Ok(()),
+                    Err(error) => Err(display_error(error)),
+                }
+            }
+            .boxed_local()
+        },
+    ))
+}
+
 pub fn thread_action_menu<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
     key: &ThreadKey,

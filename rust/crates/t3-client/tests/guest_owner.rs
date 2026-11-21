@@ -146,3 +146,87 @@ fn a_session_without_access_write_cannot_create_a_link() {
         "the client refused before sending"
     );
 }
+
+fn dispatched(h: &Harness) -> Vec<serde_json::Value> {
+    h.server()
+        .state
+        .borrow()
+        .rpc_calls
+        .iter()
+        .filter(|(tag, _)| tag == "orchestration.dispatchCommand")
+        .map(|(_, payload)| payload.clone())
+        .collect()
+}
+
+fn accept_commands(h: &Harness) {
+    let mut state = h.server().state.borrow_mut();
+    let script = state
+        .rpc_script
+        .entry("orchestration.dispatchCommand".into())
+        .or_default();
+    for sequence in 2..6 {
+        script.push_back(Ok(json!({ "sequence": sequence })));
+    }
+}
+
+#[test]
+fn dismissing_a_guest_message_sends_the_dismiss_command() {
+    use t3_client::thread_views::thread_ops::guest_share::GuestMessageDecision;
+    let mut h = Harness::new("env");
+    let c = paired(&mut h);
+    accept_commands(&h);
+    h.run(c.thread_actions().resolve_guest_message(
+        key(),
+        t3_contracts::base_schemas::GuestMessageId("gm1".into()),
+        GuestMessageDecision::Dismiss,
+    ))
+    .unwrap();
+    let sent = dispatched(&h);
+    let command = sent.last().expect("a command was dispatched");
+    assert_eq!(command["type"], "thread.guest-message.dismiss");
+    assert_eq!(command["threadId"], "t1");
+    assert_eq!(command["guestMessageId"], "gm1");
+}
+
+#[test]
+fn sending_a_guest_message_queues_it_without_client_supplied_text() {
+    use t3_client::thread_views::thread_ops::guest_share::GuestMessageDecision;
+    let mut h = Harness::new("env");
+    let c = paired(&mut h);
+    accept_commands(&h);
+    h.run(c.thread_actions().resolve_guest_message(
+        key(),
+        t3_contracts::base_schemas::GuestMessageId("gm1".into()),
+        GuestMessageDecision::Send,
+    ))
+    .unwrap();
+    let sent = dispatched(&h);
+    let command = sent.last().expect("a command was dispatched");
+    // As the TS client: the server supplies the guest's words; the run queues after the active one.
+    assert_eq!(command["type"], "message.dispatch");
+    assert_eq!(command["guestMessageId"], "gm1");
+    assert_eq!(command["text"], "");
+    assert_eq!(command["attachments"], json!([]));
+    assert_eq!(
+        command["dispatchMode"],
+        json!({"type": "queue_after_active"})
+    );
+    assert_eq!(command["createdBy"], "user");
+    assert_eq!(command["creationSource"], "web");
+    assert_eq!(command["messageId"], command["commandId"]);
+}
+
+#[test]
+fn a_session_without_operate_scope_cannot_resolve_guest_messages() {
+    use t3_client::thread_views::thread_ops::guest_share::GuestMessageDecision;
+    let mut h = Harness::new("env");
+    let c = paired_with(&mut h, &["orchestration:read", "access:write"]);
+    accept_commands(&h);
+    let result = h.run(c.thread_actions().resolve_guest_message(
+        key(),
+        t3_contracts::base_schemas::GuestMessageId("gm1".into()),
+        GuestMessageDecision::Dismiss,
+    ));
+    assert!(result.is_err());
+    assert!(dispatched(&h).is_empty());
+}

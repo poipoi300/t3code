@@ -267,6 +267,7 @@ pub fn provide_client_services<P: Platform + Clone + 'static>(client: &ClientRun
             },
         )));
     }
+    provide_context(thread_ops::guest_message_resolver(client));
     provide_context(git_panel::git_actions(client.git_panel()));
     provide_context(git_panel::git_actions_registration(client.git_panel()));
     provide_context(git_panel::branch_registration(client.git_panel()));

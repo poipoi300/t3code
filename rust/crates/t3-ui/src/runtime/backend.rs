@@ -111,7 +111,12 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
     }
 
     fn palette(&self) -> Option<Rc<dyn PaletteClient>> {
-        Some(Rc::new(ClientRuntime::palette(self)))
+        use t3_client::navigation::palette_service::HostCommand;
+        let palette = ClientRuntime::palette(self);
+        // The commands this UI can carry out (`screens/palette` handles `Action::Host`); without
+        // this the service offers no host command at all.
+        palette.set_host_commands([HostCommand::ShareGuest].into());
+        Some(Rc::new(palette))
     }
 
     fn client(&self) -> Option<HostClient> {

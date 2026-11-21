@@ -3,6 +3,7 @@
 pub mod blocks;
 pub mod composer;
 pub mod find;
+pub mod guest_pending;
 pub mod header;
 pub mod markdown;
 pub mod minimap;

@@ -1,5 +1,6 @@
 //! GUEST-1: the guest page through the production app at desktop and phone widths, over a
 //! scripted transport: join, read the live thread, send for approval, and revocation.
+#![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};
 

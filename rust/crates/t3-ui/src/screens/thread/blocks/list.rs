@@ -619,6 +619,8 @@ pub struct BlockListThreadContext {
     pub approvals: ApprovalContext,
     pub plans: PlanContext,
     pub pending: Option<(PendingMessages, Rc<dyn ComposerSendClient>)>,
+    /// Whether the viewer may send or dismiss a guest's pending messages.
+    pub can_operate: Memo<bool>,
     /// MessagesTimeline's `listHeader` (the parent-thread divider), built by the timeline.
     pub header: Option<Rc<dyn Fn() -> AnyElement>>,
     pub viewed_images: ViewedImagesContext,
@@ -656,6 +658,7 @@ impl BlockListOptions {
             approvals,
             plans,
             pending,
+            can_operate: services.rewind.can_operate,
             header: None,
             viewed_images: ViewedImagesContext::new(services.key.clone()),
             find_state: services.find_state,
@@ -830,6 +833,12 @@ pub fn messages_timeline(rows: TimelineRows, options: BlockListOptions) -> impl 
                     "mx-auto w-full min-w-0 max-w-(--chat-content-max-width)",
                 ))
                 .child(unmatched_pending_approval_rows(rows, context.approvals))
+                .child(
+                    crate::screens::thread::guest_pending::guest_pending_messages(
+                        context.key.clone(),
+                        context.can_operate,
+                    ),
+                )
                 .child(
                     context
                         .pending

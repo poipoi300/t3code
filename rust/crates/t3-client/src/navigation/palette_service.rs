@@ -220,29 +220,13 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             HostCommand::LinkPullRequest | HostCommand::LinkedPullRequests => {
                 server.is_some() && config.is_some()
             }
-            HostCommand::ShareGuest => {
-                let Some(key) = key.filter(|_| server.is_some()) else {
-                    return false;
-                };
-                config.is_some_and(|c| {
-                    c.settings.guest_sharing_enabled
-                        && c.managed_policy
-                            .as_ref()
-                            .and_then(|p| p.limits.as_ref())
-                            .and_then(|l| l.connect)
-                            != Some(false)
-                }) && self
-                    .runtime
-                    .client(&key.environment)
-                    .and_then(|c| c.session())
-                    .is_some_and(|endpoint| {
-                        endpoint.available::<t3_contracts::rpc::WsGuestShareCreateRpc>(
-                            &t3_contracts::guest_share::GuestShareCreateInput {
-                                thread_id: key.thread,
-                            },
-                        )
-                    })
-            }
+            HostCommand::ShareGuest => key.as_ref().is_some_and(|key| {
+                server.is_some()
+                    && crate::thread_views::thread_ops::guest_share::can_share_with_guest(
+                        &self.runtime,
+                        key,
+                    )
+            }),
             HostCommand::CopyPrompt | HostCommand::CopyPromptContext => {
                 let drafts = self.runtime.composer_drafts();
                 let draft = match &*self.route.borrow() {

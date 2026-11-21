@@ -374,6 +374,11 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         &self.inner.store
     }
 
+    /// How this client names itself in the messages and threads it creates (web, mobile).
+    pub fn creation_source(&self) -> OrchestrationV2CreationSource {
+        self.inner.source.clone()
+    }
+
     /// The workspace Files panel: tree, access, workspace target and file reads.
     pub fn project_files(&self) -> crate::workspace::project_files::ProjectFiles<P> {
         crate::workspace::project_files::ProjectFiles::new(
