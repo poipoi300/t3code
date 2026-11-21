@@ -1,6 +1,15 @@
 //! File formats through the Files panel and attachment viewer.
 
-use std::rc::Rc;
+use std::{
+    future::{Future, poll_fn},
+    io::{BufRead, BufReader, Write},
+    net::TcpListener,
+    path::PathBuf,
+    pin::pin,
+    rc::Rc,
+};
+
+use futures::FutureExt;
 
 use crate::files_1::FakeFiles;
 use crate::files_2::{
@@ -9,7 +18,11 @@ use crate::files_2::{
 use crate::support::{DESKTOP, PHONE};
 use nsh_core::prelude::*;
 use nsh_engine::Root;
-use t3_client::workspace::project_files::{read::FileReadView, tree::Problem};
+use t3_client::{
+    platform::{Credentials, HttpRequest, Platform, PlatformError},
+    workspace::project_files::{assets::AssetReadError, read::FileReadView, tree::Problem},
+};
+use t3_platform::{EphemeralSecretStore, NativeConfig, NativePlatform};
 use t3_ui::screens::panel::files_tree::FilesRuntime;
 
 fn setup(path: &str, text: &str) -> Setup {
@@ -170,9 +183,58 @@ fn BinaryCase() -> impl IntoElement {
     surface_fixture(asset_case("data.zip", bytes))
 }
 
+#[derive(Clone, PartialEq, Props)]
+struct BinaryEndpoint {
+    port: u16,
+}
+
+fn binary_cap_dir(port: u16) -> PathBuf {
+    std::env::temp_dir().join(format!("t3-ui-binary-cap-{}-{port}", std::process::id()))
+}
+
 #[component]
-fn LargeBinaryCase() -> impl IntoElement {
-    surface_fixture(asset_case("large.zip", vec![0; 1024 * 1024 + 1]))
+fn LargeBinaryCase(endpoint: BinaryEndpoint) -> impl IntoElement {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("binary fixture runtime");
+    let handle = io.handle().clone();
+    cleanup(move || drop(io));
+    let dir = binary_cap_dir(endpoint.port);
+    let url = format!("http://127.0.0.1:{}/asset", endpoint.port);
+    let mut setup = asset_case("large.zip", Vec::new());
+    setup.viewer.asset_loader = Some(Rc::new(move |limit| {
+        let config = NativeConfig::new(&dir, Box::new(EphemeralSecretStore::default()));
+        let handle = handle.clone();
+        let url = url.clone();
+        async move {
+            let mut opening = pin!(NativePlatform::open(config));
+            let platform = poll_fn(|cx| {
+                let _entered = handle.enter();
+                opening.as_mut().poll(cx)
+            })
+            .await
+            .expect("native platform");
+            platform
+                .http(HttpRequest {
+                    method: "GET".into(),
+                    url,
+                    headers: Default::default(),
+                    body: Vec::new(),
+                    credentials: Credentials::Omit,
+                    max_response_bytes: limit,
+                })
+                .await
+                .map(|response| response.body)
+                .map_err(|error| match error {
+                    PlatformError::TooLarge => AssetReadError::TooLarge,
+                    _ => AssetReadError::Unavailable,
+                })
+        }
+        .boxed_local()
+    }));
+    surface_fixture(setup)
 }
 
 #[component]
@@ -235,9 +297,39 @@ fn a_binary_read_failure_opens_a_paged_hex_preview() {
 #[test]
 fn a_binary_file_above_the_preview_cap_is_refused() {
     for viewport in [DESKTOP, PHONE] {
-        let mut app = start_root(viewport, Root::of::<LargeBinaryCase>());
-        app.wait_for("text:Preview limited to files under 1 MB.")
-            .expect("cap notice");
+        let server = TcpListener::bind(("127.0.0.1", 0)).expect("binary asset endpoint");
+        let address = server.local_addr().expect("loopback address");
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().expect("preview request");
+            let mut reader = BufReader::new(&mut stream);
+            loop {
+                let mut line = String::new();
+                let received = reader.read_line(&mut line).expect("request header");
+                assert!(received > 0, "GET has a complete set of headers");
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            // The real adapter must refuse the length before consuming a body.
+            // Without the platform cap, this incomplete response is a load error.
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n",
+                )
+                .expect("oversized length response");
+        });
+        let port = address.port();
+        let dir = binary_cap_dir(port);
+        std::fs::create_dir(&dir).expect("isolated binary cap data directory");
+        let mut app = start_root(
+            viewport,
+            Root::new::<LargeBinaryCase>(move || BinaryEndpoint { port }),
+        );
+        let notice = app.wait_for("text:Preview limited to files under 1 MB.");
+        drop(app);
+        std::fs::remove_dir_all(dir).expect("remove fixture data");
+        notice.expect("platform cap notice");
+        responder.join().expect("fixture served the preview");
     }
 }
 
@@ -305,5 +397,188 @@ fn a_truncated_workspace_notebook_uses_the_bounded_asset_read() {
         let mut app = start_root(viewport, Root::of::<TruncatedNotebookCase>());
         app.wait_for("text:Loaded in full")
             .expect("full notebook from the signed asset");
+    }
+}
+
+const NOTEBOOK_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
+
+fn display(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"output_type": "display_data", "data": data})
+}
+
+fn notebook_fixture(cells: Vec<serde_json::Value>) -> Setup {
+    setup(
+        "saved.ipynb",
+        &serde_json::json!({"nbformat": 4, "cells": cells}).to_string(),
+    )
+}
+
+fn saved_cell(outputs: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({"cell_type": "code", "source": "", "outputs": outputs})
+}
+
+fn raster_header(width: u32, height: u32) -> String {
+    // Headless never decodes the image. Change only the header dimensions to exercise
+    // admission without allocating a bitmap or adding large compressed fixtures.
+    let uri = format!("data:image/png;base64,{NOTEBOOK_PNG}");
+    let (_, mut bytes) = nsh_core::image::decode_data_uri(&uri).expect("PNG fixture");
+    bytes[16..20].copy_from_slice(&width.to_be_bytes());
+    bytes[20..24].copy_from_slice(&height.to_be_bytes());
+    t3_client::workspace::project_files::assets::preview_data_url("image/png", &bytes)
+        .strip_prefix("data:image/png;base64,")
+        .expect("PNG URL")
+        .to_owned()
+}
+
+#[component]
+fn NotebookFillsBudget() -> impl IntoElement {
+    let oversized = display(serde_json::json!({
+        "image/png": raster_header(2_001, 2_000), "text/plain": "Oversize fallback"
+    }));
+    let mut outputs = vec![oversized];
+    for index in 1..=5 {
+        outputs.push(display(serde_json::json!({
+            "image/png": raster_header(2_000, 2_000), "text/plain": format!("Budget fallback {index}")
+        })));
+    }
+    surface_fixture(notebook_fixture(vec![saved_cell(outputs)]))
+}
+
+#[test]
+fn notebook_rasters_are_capped_per_output_and_per_notebook() {
+    for viewport in [DESKTOP, PHONE] {
+        let mut app = start_root(viewport, Root::of::<NotebookFillsBudget>());
+        app.wait_for("text:Oversize fallback")
+            .expect("per-output cap");
+        app.wait_for("text:Budget fallback 5").expect("total cap");
+        assert_eq!(
+            app.screen()
+                .count("role:image[Cell 1 output]")
+                .expect("saved images"),
+            4
+        );
+        assert!(!app.screen().shows("Budget fallback 4"));
+    }
+}
+
+#[component]
+fn NotebookOutputFallbacks() -> impl IntoElement {
+    surface_fixture(notebook_fixture(vec![
+        saved_cell(vec![
+            display(serde_json::json!({"image/png": "YWJj", "text/plain": "Bad-image fallback"})),
+            serde_json::json!({
+                "output_type": "display_data",
+                "data": {"image/png": "?"}, "metadata": {"image/png": {"alt": "Image description"}}
+            }),
+            display(serde_json::json!({
+                "image/png": NOTEBOOK_PNG, "text/plain": "Decoder-error fallback"
+            })),
+        ]),
+        saved_cell(vec![
+            display(serde_json::json!({
+                "text/html": "<script>hidden-script</script>", "text/plain": "Plain HTML fallback"
+            })),
+            display(serde_json::json!({"text/html": "<img src='https://external.invalid'>"})),
+            display(serde_json::json!({
+                "application/vnd.jupyter.widget-view+json": {"model_id": "private-widget"},
+                "application/javascript": "private-js"
+            })),
+        ]),
+    ]))
+}
+
+#[test]
+fn notebook_refusals_render_only_inert_fallbacks() {
+    for viewport in [DESKTOP, PHONE] {
+        let mut app = start_root(viewport, Root::of::<NotebookOutputFallbacks>());
+        app.wait_for("text:Bad-image fallback")
+            .expect("signature refusal");
+        app.wait_for("text:Image description")
+            .expect("encoded image alt");
+        app.wait_for("text:Plain HTML fallback")
+            .expect("HTML text fallback");
+        app.wait_for("text:HTML output not shown")
+            .expect("HTML fallback notice");
+        app.wait_for("role:image[Cell 1 output]")
+            .expect("valid raster");
+        app.fail_images("data:*").expect("platform decode failure");
+        app.wait_for("text:Decoder-error fallback")
+            .expect("decode refusal");
+        assert_eq!(
+            app.screen()
+                .count("role:image[Cell 1 output]")
+                .expect("removed image"),
+            0
+        );
+        for untrusted in [
+            "hidden-script",
+            "private-widget",
+            "private-js",
+            "https://external.invalid",
+        ] {
+            assert!(!app.screen().shows(untrusted));
+        }
+    }
+}
+
+#[component]
+fn NotebookPages() -> impl IntoElement {
+    let large = raster_header(2_000, 2_000);
+    let mut cells = vec![saved_cell(vec![
+        display(
+            serde_json::json!({"image/png": large})
+        );
+        4
+    ])];
+    for index in 2..=43 {
+        let mut data = serde_json::json!({"text/plain": format!("Output {index}")});
+        if index == 21 {
+            data["image/png"] = NOTEBOOK_PNG.into();
+        }
+        cells.push(saved_cell(vec![display(data)]));
+    }
+    surface_fixture(notebook_fixture(cells))
+}
+
+#[test]
+fn notebook_paging_keeps_the_first_raster_mounted() {
+    for viewport in [DESKTOP, PHONE] {
+        let mut app = start_root(viewport, Root::of::<NotebookPages>());
+        let first = "role:button[Show more cells (23 remaining)]";
+        app.wait_for(first).expect("first page");
+        let image_id = app
+            .screen()
+            .layout_nodes()
+            .iter()
+            .find(|node| node.kind == nsh_core::ViewKind::Image)
+            .expect("first raster")
+            .id;
+        app.press(first).expect("show the next batch");
+        app.wait_for("text:Output 21").expect("new output");
+        assert!(
+            app.screen()
+                .layout_nodes()
+                .iter()
+                .any(|node| node.id == image_id),
+            "the first raster must keep its native node"
+        );
+        assert_eq!(
+            app.screen()
+                .count("role:image[Cell 1 output]")
+                .expect("first page rasters"),
+            4,
+            "append keeps earlier admissions and the same budget"
+        );
+        let last = "role:button[Show more cells (3 remaining)]";
+        app.wait_for(last).expect("remaining count");
+        app.press(last).expect("show the final batch");
+        app.wait_for("text:Output 43").expect("final output");
+        assert_eq!(
+            app.screen()
+                .count("role:button[/Show more cells/]")
+                .expect("page control"),
+            0
+        );
     }
 }

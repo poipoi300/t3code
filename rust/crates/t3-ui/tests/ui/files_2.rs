@@ -53,10 +53,13 @@ pub fn contents(path: &str, text: &str) -> FileReadView {
     }
 }
 
+type AssetLoader = Rc<dyn Fn(usize) -> LocalBoxFuture<'static, Result<Vec<u8>, AssetReadError>>>;
+
 #[derive(Clone, Default)]
 pub struct FakeViewer {
     pub files: Rc<RefCell<BTreeMap<String, FileReadView>>>,
     pub assets: Rc<RefCell<BTreeMap<String, Vec<u8>>>>,
+    pub asset_loader: Option<AssetLoader>,
 }
 impl FileViewerService for FakeViewer {
     fn workspace(&self, _: &ThreadKey) -> Option<FilesWorkspace> {
@@ -78,6 +81,9 @@ impl FileViewerService for FakeViewer {
         limit: usize,
         _: Option<String>,
     ) -> LocalBoxFuture<'static, Result<Vec<u8>, AssetReadError>> {
+        if let Some(load) = &self.asset_loader {
+            return load(limit);
+        }
         let assets = self.assets.borrow();
         let result = match asset_path(&resource).and_then(|path| assets.get(path)) {
             Some(bytes) if bytes.len() <= limit => Ok(bytes.clone()),

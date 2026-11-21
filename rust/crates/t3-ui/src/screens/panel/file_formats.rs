@@ -12,13 +12,13 @@ mod notebook;
 pub(super) use binary::binary_preview;
 pub(super) use image::image_preview;
 
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 
 use nsh_core::prelude::*;
 use t3_client::workspace::project_files::{
     assets::AssetReadError,
     formats::{
-        CellKind, DelimitedLimits, NOTEBOOK_MAX_BYTES, Notebook, OutputKind,
+        CellKind, DelimitedLimits, NOTEBOOK_MAX_BYTES, Notebook, NotebookCell,
         notebook_cell_language, open_notebook, parse_delimited_preview,
     },
 };
@@ -201,12 +201,13 @@ pub fn notebook_preview(source: &str, size_bytes: u64) -> impl IntoElement {
             .app_class(tw("flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive"))
             .child(text(crate::i18n::Text::client_key(message).resolve()))
             .into_element(),
-        Ok(notebook) => notebook_view(Rc::new(notebook), size_bytes).into_element(),
+        Ok(notebook) => notebook_view(notebook, size_bytes).into_element(),
     }
 }
 
-fn notebook_view(notebook: Rc<Notebook>, size_bytes: u64) -> impl IntoElement {
-    let visible = signal(20_usize);
+fn notebook_view(notebook: Notebook, size_bytes: u64) -> impl IntoElement {
+    const CELLS_PER_PAGE: usize = 20;
+    let visible = signal(CELLS_PER_PAGE);
     let total = notebook.cells.len();
     let status = format!(
         "{} · {} · {}",
@@ -215,45 +216,72 @@ fn notebook_view(notebook: Rc<Notebook>, size_bytes: u64) -> impl IntoElement {
         if size_bytes == 0 {
             t("0 bytes")
         } else {
-            tr("{size} bytes", &[("size", Value::Text(crate::i18n::formats().decimal(size_bytes as f64)))])
+            tr(
+                "{size} bytes",
+                &[(
+                    "size",
+                    Value::Text(crate::i18n::formats().decimal(size_bytes as f64)),
+                )],
+            )
         }
     );
     let language = notebook_cell_language(&notebook.language);
-    let cells = notebook.clone();
+    let budget = Cell::new(notebook::MAX_NOTEBOOK_PIXELS);
     view()
         .app_class(tw("flex min-h-0 flex-1 flex-col"))
-        .child(text(status).app_class(tw("border-b border-border/60 px-3 py-2 text-xs text-muted-foreground tabular-nums")))
-        .child(file_surface_notice(t("Saved outputs only. Code is never executed.")))
+        .child(text(status).app_class(tw(
+            "border-b border-border/60 px-3 py-2 text-xs text-muted-foreground tabular-nums",
+        )))
+        .child(file_surface_notice(t(
+            "Saved outputs only. Code is never executed.",
+        )))
         .child(
             scroll().app_class(tw("min-h-0 flex-1")).child(
                 view()
                     .app_class(tw("mx-auto flex w-full max-w-4xl flex-col gap-5 px-5 py-6"))
-                    .child(dynamic(move || {
-                        let shown = visible.get().min(total);
-                        let cells = cells.clone();
-                        let language = language.clone();
-                        Some(untracked(move || {
-                            view()
-                                .app_class(tw("flex flex-col gap-5"))
-                                .children(cells.cells[..shown].iter().enumerate().map(|(index, cell)| {
-                                    notebook_cell(index, cell.clone(), &cells.language, &language).into_element()
-                                }))
-                                .into_element()
-                        }))
+                    .child(view().app_class(tw("flex flex-col gap-5")).child(each(
+                        move || (0..visible.get().min(total)).collect::<Vec<_>>(),
+                        |index| *index,
+                        move |index, _| {
+                            let index = index.get_untracked();
+                            notebook_cell(
+                                index,
+                                &notebook.cells[index],
+                                &notebook.language,
+                                &language,
+                                &budget,
+                            )
+                        },
+                    )))
+                    .child((total == 0).then(|| {
+                        text(t("This notebook is empty."))
+                            .app_class(tw("text-sm text-muted-foreground"))
                     }))
-                    .child((total == 0).then(|| text(t("This notebook is empty.")).app_class(tw("text-sm text-muted-foreground"))))
-                    .child(when(move || visible.get() < total, move || {
-                        let remaining = total.saturating_sub(visible.get_untracked());
-                        view().app_class(tw("flex")).child(button(
-                            ButtonContent::Label(tr(
-                                "Show more cells ({count} remaining)",
-                                &[("count", Value::Text(crate::i18n::formats().decimal(remaining as f64)))],
-                            )),
-                            ButtonVariant::Outline,
-                            ButtonSize::Sm,
-                            || false,
-                            move || visible.set(visible.get_untracked() + 20),
-                        ))
+                    .child(dynamic(move || {
+                        let remaining = total.saturating_sub(visible.get());
+                        (remaining > 0).then(|| {
+                            untracked(|| {
+                                view()
+                                    .app_class(tw("flex"))
+                                    .child(button(
+                                        ButtonContent::Label(tr(
+                                            "Show more cells ({count} remaining)",
+                                            &[(
+                                                "count",
+                                                Value::Text(
+                                                    crate::i18n::formats()
+                                                        .decimal(remaining as f64),
+                                                ),
+                                            )],
+                                        )),
+                                        ButtonVariant::Outline,
+                                        ButtonSize::Sm,
+                                        || false,
+                                        move || visible.update(|shown| *shown += CELLS_PER_PAGE),
+                                    ))
+                                    .into_element()
+                            })
+                        })
                     })),
             ),
         )
@@ -261,10 +289,11 @@ fn notebook_view(notebook: Rc<Notebook>, size_bytes: u64) -> impl IntoElement {
 
 fn notebook_cell(
     index: usize,
-    cell: t3_client::workspace::project_files::formats::NotebookCell,
+    cell: &NotebookCell,
     notebook_language: &str,
     highlight_language: &str,
-) -> impl IntoElement {
+    budget: &Cell<u64>,
+) -> AnyElement {
     let kind_label = match cell.kind {
         CellKind::Code => notebook_language.to_owned(),
         CellKind::Markdown => "markdown".to_owned(),
@@ -294,42 +323,12 @@ fn notebook_cell(
             "border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground",
         )))
         .child(body)
-        .children(cell.outputs.into_iter().filter_map(|output| {
-            match output.kind {
-                OutputKind::Image => {
-                    let (data_mime, bytes) = nsh_core::image::decode_data_uri(&output.text).ok()?;
-                    let (mime, width, height) = image::raster_info(&bytes)?;
-                    if mime != data_mime {
-                        return None;
-                    }
-                    let scale = 1.0_f32.min(384.0 / height as f32);
-                    Some(
-                        view()
-                            .app_class(tw("border-t border-border/60 p-4"))
-                            .child(
-                                image(output.text)
-                                    .role(AccessibilityRole::Image)
-                                    .label(tr(
-                                        "Cell {index} output",
-                                        &[("index", Value::Text((index + 1).to_string()))],
-                                    ))
-                                    .w(px(width as f32 * scale))
-                                    .app_class(tw("max-w-full"))
-                                    .aspect_ratio(width as f32 / height as f32),
-                            )
-                            .into_element(),
-                    )
-                }
-                OutputKind::Text => Some(
-                    view()
-                        .app_class(tw("border-t border-border/60"))
-                        .child(text(output.text).app_class(tw("p-4 font-mono text-xs")))
-                        .into_element(),
-                ),
-                // DocumentPages' sandboxed HTML output frame is not built: FILES-3 hand-off.
-                OutputKind::Html => None,
-            }
-        }))
+        .children(
+            cell.outputs
+                .iter()
+                .map(|output| notebook::notebook_output(index, output, budget)),
+        )
+        .into_element()
 }
 
 /// NotebookSource: the cell through the shared tokenizer queue, unvirtualised (cells are
