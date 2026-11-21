@@ -203,10 +203,18 @@ mod enabled {
         ) -> TerminalResult<TerminalSessionSnapshot> {
             let _admitted = self
                 .gate
-                .enter(
+                .enter_folders(
                     format!("terminal `{}`", input.terminal_id.0),
                     Some(&input.thread_id.0),
-                    Some(std::path::Path::new(&input.cwd.0)),
+                    &std::iter::once(std::path::Path::new(&input.cwd.0))
+                        .chain(
+                            input
+                                .worktree_path
+                                .iter()
+                                .flatten()
+                                .map(|p| std::path::Path::new(&p.0)),
+                        )
+                        .collect::<Vec<_>>(),
                 )
                 .await;
             let input = self.launch.open(input).await?;
@@ -232,14 +240,16 @@ mod enabled {
             // An attach may restart an exited terminal.
             let _admitted = self
                 .gate
-                .enter(
+                .enter_folders(
                     format!("terminal `{}`", input.terminal_id.0),
                     Some(&input.thread_id.0),
-                    input
+                    &input
                         .cwd
-                        .as_ref()
-                        .and_then(Option::as_ref)
-                        .map(|cwd| std::path::Path::new(&cwd.0)),
+                        .iter()
+                        .flatten()
+                        .chain(input.worktree_path.iter().flatten())
+                        .map(|p| std::path::Path::new(&p.0))
+                        .collect::<Vec<_>>(),
                 )
                 .await;
             let input = self.launch.attach(input).await?;
@@ -408,7 +418,10 @@ mod enabled {
                         terminal.status,
                         TerminalSessionStatus::Starting | TerminalSessionStatus::Running
                     ) && (terminal.thread_id == thread_id.0
-                        || crate::writers::overlaps(std::path::Path::new(&terminal.cwd), &cwd))
+                        || crate::writers::overlaps(std::path::Path::new(&terminal.cwd), &cwd)
+                        || terminal.worktree_path.as_ref().is_some_and(|p| {
+                            crate::writers::overlaps(std::path::Path::new(&p.0), &cwd)
+                        }))
                 })
                 .map(|terminal| {
                     let name = if terminal.label.trim().is_empty() {

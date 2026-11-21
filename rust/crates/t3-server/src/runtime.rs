@@ -79,10 +79,14 @@ impl Drop for RunningServer {
 /// What a host injects into the composition root beyond configuration.
 #[derive(Default, Clone)]
 pub struct StartOptions {
-    /// Checkout coordination supplied by hosts that cover launch, restore, terminal and Git
-    /// writers through completion. Without it no cleanup worker or cleanup RPC starts.
+    /// Checkout coordination supplied by an embedder. Without it, and without `native_cleanup`,
+    /// no cleanup worker or cleanup RPC starts.
     #[cfg(feature = "storage-cleanup")]
     pub cleanup_worktrees: Option<Arc<dyn crate::adapters::storage_cleanup::CleanupWorktrees>>,
+    /// Opt in to storage cleanup with the native Git worker fence and fresh forge lookup. Off by
+    /// default: the default binary never removes a checkout.
+    #[cfg(all(feature = "storage-cleanup", feature = "forge"))]
+    pub native_cleanup: bool,
     /// Admission shared by every host writer in this environment.
     pub writer_gate: Option<Arc<crate::writers::FolderGate>>,
     #[cfg(feature = "providers")]
@@ -175,14 +179,6 @@ async fn start_configured(
     let address = listener.local_addr()?;
     let (account_home, environment) = (inputs.home.clone(), inputs.env.clone());
     let local = LocalServices::open(config, address.port(), policy).await?;
-    #[cfg(feature = "storage-cleanup")]
-    let local = {
-        let mut local = local;
-        let enabled = options.cleanup_worktrees.as_ref().map(|_| true);
-        local.environment.capabilities.storage_cleanup = enabled;
-        local.environment.capabilities.storage_cleanup_run = enabled;
-        local
-    };
     // Dev mode is `--dev-url` / `VITE_DEV_SERVER_URL`, as in TypeScript; it keeps the free
     // Replay (dev) provider (`seedDevReplayInstance` in ProviderInstanceRegistryHydration.ts).
     #[cfg(feature = "orchestration")]
@@ -234,6 +230,17 @@ async fn start_configured(
             .disposition("pullRequests.subscribeLinkedThreadRefreshes")
             .filter(|served| *served)
     );
+    #[cfg(feature = "storage-cleanup")]
+    let local = {
+        let mut local = local;
+        local.environment.capabilities.storage_cleanup = handlers
+            .disposition("server.getStorageCleanupReport")
+            .filter(|served| *served);
+        local.environment.capabilities.storage_cleanup_run = handlers
+            .disposition("server.runStorageCleanup")
+            .filter(|served| *served);
+        local
+    };
     let unserved_methods: Vec<&'static str> = t3_contracts::rpc::WS_METHODS
         .iter()
         .filter(|method| handlers.disposition(method.tag) != Some(true))
@@ -837,12 +844,16 @@ async fn start_domains(
         domains.insert_runtime(mcp)?;
     }
     #[cfg(feature = "storage-cleanup")]
-    if let Some(worktrees) = &options.cleanup_worktrees {
-        let cleanup = crate::adapters::storage_cleanup::CleanupAdapter::new(
-            &context,
-            domains,
-            worktrees.clone(),
-        )?;
+    #[cfg_attr(not(feature = "forge"), allow(unused_mut))]
+    let mut worktrees = options.cleanup_worktrees.clone();
+    #[cfg(all(feature = "storage-cleanup", feature = "forge"))]
+    if worktrees.is_none() && options.native_cleanup {
+        worktrees = crate::adapters::storage_cleanup::NativeWorktrees::from_domains(domains);
+    }
+    #[cfg(feature = "storage-cleanup")]
+    if let Some(worktrees) = worktrees {
+        let cleanup =
+            crate::adapters::storage_cleanup::CleanupAdapter::new(&context, domains, worktrees)?;
         domains.insert_runtime(cleanup)?;
     }
     let _ = (&context, domains, options);

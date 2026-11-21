@@ -603,6 +603,15 @@ impl ForgeAdapter {
                     cause: None,
                 })),
             })?;
+        let _worker = git.admit_worker().map_err(|_| {
+            Refusal::Repository(Box::new(SourceControlRepositoryError {
+                _tag: SourceControlRepositoryErrorTag::SourceControlRepositoryError,
+                provider: input.provider.clone(),
+                operation: "publishRepository".into(),
+                detail: "The checkout is in use by storage cleanup.".into(),
+                cause: None,
+            }))
+        })?;
         input.cwd = text(git.cwd());
         let cwd = git.cwd().to_owned();
         let published = self
@@ -724,6 +733,38 @@ impl ForgeAdapter {
             template,
             lenient_lookups: false,
         })
+    }
+
+    #[cfg(feature = "storage-cleanup")]
+    pub(crate) async fn cleanup_pull_request(
+        &self,
+        checkout: &t3_git::Git,
+        branch: &str,
+    ) -> t3_host::Result<Option<t3_host::storage_cleanup::MergedPullRequest>> {
+        use t3_contracts::source_control::ChangeRequestState;
+        let git = checkout
+            .clone()
+            .with_environment(self.credentials.patch.clone());
+        let handle = self
+            .registry
+            .resolve_fresh(&git)
+            .await
+            .map_err(|_| t3_host::Error::Refused("fresh pull request lookup failed"))?;
+        let workflow = t3_git::GitWorkflowService::new(git).with_review_host(Arc::new(
+            ForgeReviewHost::new(handle, Arc::new(NoProjectSetup)),
+        ));
+        let request = workflow
+            .fresh_branch_pull_request(branch)
+            .await
+            .map_err(|_| t3_host::Error::Refused("fresh pull request lookup failed"))?;
+        Ok(request
+            .filter(|pr| pr.state == ChangeRequestState::Merged)
+            .map(|pr| t3_host::storage_cleanup::MergedPullRequest {
+                state: "merged".into(),
+                head_ref: pr.head_ref_name.0,
+                base_ref: pr.base_ref_name.0,
+                head_sha: pr.head_sha.flatten().map(|s| s.0).unwrap_or_default(),
+            }))
     }
 
     /// Clone destinations. `~` and relative paths are read as the repository service reads them;

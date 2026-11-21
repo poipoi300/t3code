@@ -32,16 +32,60 @@ use t3_orchestration::{
 };
 
 /// A fresh, checkout-bound PR lookup and exclusion of Git, launch and terminal writers.
-/// A successful permit must remain exclusive until dropped, including after a client disconnect.
+/// The server holds Restore's reservation, workspace lease, thread lanes and host writer gate
+/// through removal. Launch retains a conflicting reservation until background branch rename ends.
+/// This permit must exclude outstanding Git workers through process exit, even after disconnect.
 #[async_trait]
 pub trait CleanupWorktrees: Send + Sync {
     async fn permit(&self, cwd: &Path) -> Result<Box<dyn Send + Sync>>;
     async fn branch_pull_request(
         &self,
-        cwd: &Path,
+        checkout: &t3_git::Git,
         branch: &str,
     ) -> Result<Option<MergedPullRequest>>;
     async fn invalidate_git_status(&self, project: &Path);
+}
+
+#[cfg(feature = "forge")]
+pub(crate) struct NativeWorktrees {
+    git: Arc<super::git::GitAdapter>,
+    forge: Arc<super::forge::ForgeAdapter>,
+}
+
+#[cfg(feature = "forge")]
+impl NativeWorktrees {
+    pub(crate) fn from_domains(domains: &Domains) -> Option<Arc<dyn CleanupWorktrees>> {
+        Some(Arc::new(Self {
+            git: domains.get()?,
+            forge: domains.get()?,
+        }))
+    }
+}
+
+#[cfg(feature = "forge")]
+#[async_trait]
+impl CleanupWorktrees for NativeWorktrees {
+    async fn permit(&self, path: &Path) -> Result<Box<dyn Send + Sync>> {
+        Ok(Box::new(
+            self.git
+                .at(path)
+                .try_quiesce_workers()
+                .ok_or(Error::Refused("workspace is busy"))?,
+        ))
+    }
+    async fn branch_pull_request(
+        &self,
+        checkout: &t3_git::Git,
+        branch: &str,
+    ) -> Result<Option<MergedPullRequest>> {
+        self.forge.cleanup_pull_request(checkout, branch).await
+    }
+    async fn invalidate_git_status(&self, project: &Path) {
+        self.git.at(project).invalidate_caches().await;
+        if let Some(vcs) = self.git.vcs() {
+            let _ = vcs.broadcaster().refresh_status(project, false).await;
+        }
+    }
 }
 
 struct Host {
@@ -50,6 +94,8 @@ struct Host {
     runtime: Arc<t3_orchestration::composition::OrchestrationRuntime>,
     terminal: Arc<TerminalAdapter>,
     worktrees: Arc<dyn CleanupWorktrees>,
+    gate: Arc<crate::writers::FolderGate>,
+    orchestration: Arc<OrchestrationAdapter>,
     default_worktrees: PathBuf,
     home: PathBuf,
 }
@@ -268,19 +314,104 @@ impl CleanupHost for Host {
             .await
             .map_err(|_| Error::Refused("workspace is busy"))
     }
-    async fn acquire_removal_permit(&self, path: &Path) -> Result<Box<dyn Send + Sync>> {
+    async fn acquire_candidate_permit(
+        &self,
+        path: &Path,
+        owners: &[&CleanupThread],
+    ) -> Result<Box<dyn Send + Sync>> {
+        use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations;
+        let busy = || Error::Refused("workspace is busy");
+        let reservation = WorkspaceReservations::global()
+            .try_reserve_cleanup(path)
+            .map_err(|_| busy())?
+            .ok_or_else(busy)?;
+        let lease = WorkspaceLocks::workspace_leases()
+            .try_acquire(path)
+            .map_err(|_| busy())?
+            .ok_or_else(busy)?;
+        let lanes = self.runtime.thread_lanes();
+        let mut guards = Vec::new();
+        let snapshot = self.snapshot().await?;
+        let subjects = |state: &CleanupSnapshot| {
+            let mut ids: BTreeSet<ThreadId> = owners.iter().map(|o| o.shell.id.clone()).collect();
+            for thread in &state.threads {
+                let cwd = thread
+                    .shell
+                    .worktree_path
+                    .as_ref()
+                    .map(|p| Path::new(&p.0))
+                    .or(thread.project_path.as_deref());
+                if cwd.is_some_and(|cwd| crate::writers::overlaps(path, cwd)) {
+                    ids.insert(thread.shell.id.clone());
+                }
+            }
+            ids
+        };
+        let locked = subjects(&snapshot);
+        for thread in &locked {
+            let lane = lanes.lane(&thread.0).try_lock_owned().map_err(|_| busy())?;
+            let (hold, running) = self.gate.hold(&thread.0, path);
+            if !running.is_empty() {
+                return Err(busy());
+            }
+            guards.push((lane, hold));
+        }
+        let latest = self.snapshot().await?;
+        if subjects(&latest) != locked
+            || latest
+                .terminal_paths
+                .iter()
+                .chain(&latest.live_provider_paths)
+                .any(|p| crate::writers::overlaps(path, p))
+        {
+            return Err(busy());
+        }
+        for thread in &locked {
+            let owner = latest
+                .threads
+                .iter()
+                .find(|t| &t.shell.id == thread)
+                .ok_or_else(busy)?;
+            if owner.shell.active_run_id.is_some()
+                || owner
+                    .shell
+                    .pending_background_tasks
+                    .iter()
+                    .flatten()
+                    .any(|tasks| !tasks.is_empty())
+                || self
+                    .runtime
+                    .has_agent_processes(thread)
+                    .await
+                    .map_err(|_| busy())?
+            {
+                return Err(busy());
+            }
+            let id = thread.0.clone();
+            let command: bool = self.db.read(move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND type='command_execution' AND status IN ('pending','running','waiting'))", [id], |r| r.get(0))?)).await.map_err(|_| busy())?;
+            if command {
+                return Err(busy());
+            }
+        }
         let writers = self.worktrees.permit(path).await?;
-        Ok(Box::new((
-            writers,
-            self.acquire_workspace_lease(path).await?,
-        )))
+        Ok(Box::new((reservation, guards, lease, writers)))
+    }
+
+    async fn recorded_binding(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Option<t3_git::RepositoryBinding>>> {
+        self.orchestration
+            .repository_binding(path)
+            .await
+            .map_err(|_| Error::Refused("repository or branch changed"))
     }
     async fn branch_pull_request(
         &self,
-        cwd: &Path,
+        checkout: &t3_git::Git,
         branch: &str,
     ) -> Result<Option<MergedPullRequest>> {
-        self.worktrees.branch_pull_request(cwd, branch).await
+        self.worktrees.branch_pull_request(checkout, branch).await
     }
     async fn invalidate_git_status(&self, project: &Path) {
         self.worktrees.invalidate_git_status(project).await;
@@ -311,6 +442,8 @@ impl CleanupAdapter {
             runtime: orchestration.composed().cloned().ok_or_else(missing)?,
             terminal: domains.get().ok_or_else(missing)?,
             worktrees,
+            gate: domains.get().ok_or_else(missing)?,
+            orchestration,
             default_worktrees: context.local.config.paths.worktrees(),
             home: context.account_home.clone(),
         });

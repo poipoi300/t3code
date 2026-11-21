@@ -86,15 +86,14 @@ mod live {
         registry.register_stream::<WsGitRunStackedActionRpc, _, _, _>(move |ctx, input| {
             let a = a.clone();
             async move {
-                // Held while the action's stream runs.
+                // The worker owns admission until cancellation has reaped its Git processes.
                 let admitted =
                     crate::writers::admit(&ctx.services, "a Git action", &input.cwd.0).await;
                 let mut events = a
-                    .run_stacked_action(&ctx.session_id, input)
+                    .run_stacked_action(&ctx.session_id, input, admitted)
                     .await
                     .map_err(refusal)?;
                 Ok(async_stream::stream! {
-                    let _admitted = admitted;
                     use futures::StreamExt;
                     while let Some(event) = events.next().await {
                         yield event.map_err(|e| {

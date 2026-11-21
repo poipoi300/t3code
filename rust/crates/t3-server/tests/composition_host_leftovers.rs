@@ -589,6 +589,9 @@ impl ProviderAdapter for Held {
         session["driver"] = "replay".into();
         session["providerInstanceId"] = "replay".into();
         session["status"] = "ready".into();
+        if let Some(cwd) = input.runtime_policy.cwd.as_ref() {
+            session["cwd"] = json!(cwd);
+        }
         session["model"] = json!(input.model_selection.model);
         session["capabilities"] =
             serde_json::to_value(&self.capabilities).map_err(provider_error)?;
@@ -1357,28 +1360,96 @@ async fn database_storage_capability_matches_served_methods() {
         .unwrap();
     assert_eq!(descriptor["capabilities"]["databaseStorage"], true);
     for key in ["storageCleanup", "storageCleanupRun"] {
-        assert!(descriptor["capabilities"].get(key).is_none());
+        assert!(
+            descriptor["capabilities"].get(key).is_none(),
+            "default cleanup must stay disabled: {key}"
+        );
     }
     s.served(&["server.getDatabaseStorage", "server.reclaimDatabaseSpace"]);
     s.runtime.shutdown().await.unwrap();
 }
 
+/// Closing a session or releasing a writer can start an automatic sweep; the stream carries
+/// its report before the manual one.
 #[cfg(feature = "storage-cleanup")]
-struct IsolatedCheckout;
+async fn manual_chunk(reader: &mut c_support::Socket, client: &mut t3_rpc::Client) -> Value {
+    loop {
+        let chunk = c_support::chunk(reader, client).await;
+        if chunk["trigger"] == "manual" {
+            return chunk;
+        }
+    }
+}
+
+/// Cleanup is opt-in: with the native fence enabled the same descriptor advertises it and the
+/// manual run completes with the Git worker fence and a real forge registry.
+#[cfg(all(feature = "storage-cleanup", feature = "forge"))]
+#[tokio::test]
+async fn native_cleanup_is_advertised_and_runs_only_when_enabled() {
+    let home = tempfile::tempdir().unwrap();
+    let s = start(
+        home.path(),
+        Default::default(),
+        StartOptions {
+            native_cleanup: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let descriptor: Value = s
+        .http
+        .get(format!("{}/.well-known/t3/environment", s.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for key in ["storageCleanup", "storageCleanupRun"] {
+        assert_eq!(descriptor["capabilities"][key], true, "{key}");
+    }
+    let (mut writer, mut client) = s.socket(&s.cookie(&["settings:write"]).await).await;
+    let report = ok(unary(
+        &mut writer,
+        &mut client,
+        "server.runStorageCleanup",
+        json!({}),
+    )
+    .await);
+    assert_eq!(report["trigger"], "manual", "{report}");
+    drop(writer);
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "storage-cleanup")]
+#[derive(Default)]
+struct CleanupPermits(Arc<Mutex<Vec<(&'static str, bool)>>>);
+
+#[cfg(feature = "storage-cleanup")]
+struct PermitProbe(Arc<Mutex<Vec<(&'static str, bool)>>>, PathBuf);
+
+#[cfg(feature = "storage-cleanup")]
+impl Drop for PermitProbe {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().push(("dropped", self.1.exists()));
+    }
+}
 
 #[cfg(feature = "storage-cleanup")]
 #[async_trait]
-impl t3_server::adapters::storage_cleanup::CleanupWorktrees for IsolatedCheckout {
-    async fn permit(&self, _: &Path) -> t3_host::Result<Box<dyn Send + Sync>> {
-        // This temp checkout has one writer, the started server's serialized cleanup worker.
-        Ok(Box::new(()))
+impl t3_server::adapters::storage_cleanup::CleanupWorktrees for CleanupPermits {
+    async fn permit(&self, path: &Path) -> t3_host::Result<Box<dyn Send + Sync>> {
+        // Records whether the checkout still exists when the permit is taken and dropped, so a
+        // test can prove removal happened while the permit was held.
+        self.0.lock().unwrap().push(("acquired", path.exists()));
+        Ok(Box::new(PermitProbe(self.0.clone(), path.to_owned())))
     }
     async fn branch_pull_request(
         &self,
-        _: &Path,
+        _: &t3_git::Git,
         _: &str,
     ) -> t3_host::Result<Option<t3_host::storage_cleanup::MergedPullRequest>> {
-        panic!("deleted thread cleanup must not query a forge");
+        Ok(None)
     }
     async fn invalidate_git_status(&self, _: &Path) {}
 }
@@ -1389,17 +1460,24 @@ async fn storage_cleanup_obeys_scopes_and_preserves_projection_ownership() {
     let home = tempfile::tempdir().unwrap();
     settings(
         home.path(),
-        json!({"storageCleanup":{"browserArtifactsAfterDays":7,"logsAfterDays":7,"worktreeOnDelete":true,"worktreeAfterDays":7}}),
+        json!({"providerInstances":{"replay":{"driver":"replay","enabled":true}}, "storageCleanup":{"browserArtifactsAfterDays":7,"logsAfterDays":7,"worktreeOnDelete":true,"worktreeAfterDays":7}}),
     );
-    let s = start(
-        home.path(),
-        Default::default(),
-        StartOptions {
-            cleanup_worktrees: Some(Arc::new(IsolatedCheckout)),
-            ..Default::default()
-        },
-    )
-    .await;
+    let gate = Arc::new(t3_server::writers::FolderGate::default());
+    let (turns, _events) = mpsc::unbounded_channel();
+    let (mut options, slot) = held_options(turns);
+    let permits = Arc::new(CleanupPermits::default());
+    options.writer_gate = Some(gate.clone());
+    options.cleanup_worktrees = Some(permits.clone());
+    // The terminal needs a shell: a minimal environment, no user profile.
+    let shell_env = if cfg!(windows) {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("SHELL".to_owned(), "/bin/sh".to_owned()),
+        ])
+    };
+    let s = start(home.path(), shell_env, options).await;
     let descriptor: Value = s
         .http
         .get(format!("{}/.well-known/t3/environment", s.base))
@@ -1539,9 +1617,132 @@ async fn storage_cleanup_obeys_scopes_and_preserves_projection_ownership() {
     assert_eq!(row["reason"], "Project is unavailable", "{kept}");
     assert!(row["projectPath"].is_null() && worktree.exists());
     db.execute("UPDATE orchestration_v2_projection_threads SET archived_at=NULL,deleted_at=?1,payload_json=?2 WHERE thread_id='owner'",[date,&thread.to_string()]).unwrap();
+    db.execute("INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES ('other','other',?1,'[]',?2,?2)",[repo.to_str().unwrap(),date]).unwrap();
+    let (mut admin, mut admin_client) = s.socket(&s.admin).await;
+    ok(unary(&mut admin,&mut admin_client,"orchestration.dispatchCommand", json!({"type":"thread.create","commandId":"create:other","threadId":"other-thread","projectId":"other","title":"Other","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await);
+    let nested = worktree.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let terminal = ok(unary(
+        &mut admin,
+        &mut admin_client,
+        "terminal.open",
+        json!({"threadId":"other-thread","terminalId":"cleanup-probe","cwd":nested}),
+    )
+    .await);
+    assert_eq!(terminal["status"], "running", "{terminal}");
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(c_support::chunk(&mut reader, &mut read_client).await, kept);
+    assert!(
+        kept["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["threadId"] == "owner"
+                && e["reason"]
+                    .as_str()
+                    .is_some_and(|s| s.to_ascii_lowercase().contains("open terminal"))),
+        "{kept}"
+    );
+    assert!(worktree.join(".git").is_file());
+    ok(unary(
+        &mut admin,
+        &mut admin_client,
+        "terminal.close",
+        json!({"threadId":"other-thread","terminalId":"cleanup-probe","deleteHistory":true}),
+    )
+    .await);
+    let runtime = &slot
+        .get()
+        .unwrap()
+        .secrets
+        .as_ref()
+        .unwrap()
+        .cards
+        .as_ref()
+        .unwrap()
+        .runtime;
+    let session_id = t3_contracts::base_schemas::ProviderSessionId("cleanup-session".into());
+    let native = runtime
+        .sessions
+        .attach_with_policy(
+            ProviderInstanceId("replay".into()),
+            OpenSession {
+                thread_id: "other-thread".to_owned().into(),
+                provider_session_id: session_id.clone(),
+                model_selection: serde_json::from_value(
+                    json!({"instanceId":"replay","model":"replay-model"}),
+                )
+                .unwrap(),
+                runtime_policy: RuntimePolicy {
+                    runtime_mode: serde_json::from_value(json!("full-access")).unwrap(),
+                    interaction_mode: serde_json::from_value(json!("default")).unwrap(),
+                    cwd: Some(nested.clone()),
+                    approval_policy: None,
+                    sandbox_policy: None,
+                    max_runtime_mode: None,
+                },
+                prompt_suggestions: None,
+                resume_from_session: None,
+                initial_native_thread_id: None,
+                initial_provider_item_identity_version: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(runtime.sessions.is_live(&session_id));
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(c_support::chunk(&mut reader, &mut read_client).await, kept);
+    assert!(
+        kept["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["threadId"] == "owner"
+                && e["reason"].as_str().is_some_and(|s| s
+                    .to_ascii_lowercase()
+                    .contains("provider session is still open"))),
+        "{kept}"
+    );
+    assert!(worktree.join(".git").is_file());
+    native.close().await.unwrap();
+    assert!(!runtime.sessions.is_live(&session_id));
+    let host_writer = gate.enter("Git action", None, Some(&worktree)).await;
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(manual_chunk(&mut reader, &mut read_client).await, kept);
+    assert!(
+        worktree.join(".git").is_file(),
+        "deleted under an admitted host writer: {kept}"
+    );
+    drop(host_writer);
+    let launch = t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations::global()
+        .reserve(&worktree, t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::ReservationKind::TurnStart, &tokio_util::sync::CancellationToken::new()).await.unwrap();
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(manual_chunk(&mut reader, &mut read_client).await, kept);
+    assert!(
+        worktree.join(".git").is_file(),
+        "deleted under a launch reservation: {kept}"
+    );
+    drop(launch);
+    db.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,ordinal,type,status,updated_at,payload_json) VALUES('running-command','owner',1,'command_execution','running',?1,'{}')", [date]).unwrap();
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(manual_chunk(&mut reader, &mut read_client).await, kept);
+    assert!(
+        worktree.join(".git").is_file(),
+        "deleted under a running command: {kept}"
+    );
+    db.execute("UPDATE orchestration_v2_projection_turn_items SET status='completed' WHERE turn_item_id='running-command'", []).unwrap();
     let after = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
-    assert_eq!(c_support::chunk(&mut reader, &mut read_client).await, after);
+    assert_eq!(manual_chunk(&mut reader, &mut read_client).await, after);
     assert!(!worktree.exists(), "{after}");
+    assert!(
+        permits
+            .0
+            .lock()
+            .unwrap()
+            .ends_with(&[("acquired", true), ("dropped", false)]),
+        "removal must finish under the checkout permit"
+    );
     let payload: String = db
         .query_row(
             "SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id='owner'",

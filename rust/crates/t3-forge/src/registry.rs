@@ -85,8 +85,27 @@ impl ForgeRegistry {
         {
             return self.resolve_remotes(&[], context.clone());
         }
-        let output = t3_git::Git::new(cwd)
-            .with_environment(self.git_environment.clone())
+        let git = t3_git::Git::new(cwd).with_environment(self.git_environment.clone());
+        let context = self.detect(&git).await?;
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 2048
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(cache_key, (Instant::now(), context.clone()));
+        self.resolve_remotes(&[], context)
+    }
+    pub async fn resolve_fresh(&self, git: &t3_git::Git) -> Result<ForgeHandle> {
+        self.resolve_remotes(&[], self.detect(git).await?)
+    }
+
+    async fn detect(&self, git: &t3_git::Git) -> Result<Option<CheckoutContext>> {
+        let cwd = git.cwd();
+        let output = git
             .execute(&["remote", "-v"], t3_git::ExecuteOptions::default())
             .await
             .map_err(|_| {
@@ -115,17 +134,7 @@ impl ForgeRegistry {
                 }
             }
         }
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= 2048
-            && let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (at, _))| *at)
-                .map(|(key, _)| key.clone())
-        {
-            cache.remove(&oldest);
-        }
-        cache.insert(cache_key, (Instant::now(), context.clone()));
-        self.resolve_remotes(&[], context)
+        Ok(context)
     }
 }
 pub fn parse_fetch_remotes(value: &str) -> Vec<(String, String)> {

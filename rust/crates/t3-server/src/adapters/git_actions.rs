@@ -120,6 +120,7 @@ impl GitActionsAdapter {
         &self,
         session: &AuthSessionId,
         input: GitRunStackedActionInput,
+        admission: Option<crate::writers::Admission>,
     ) -> Result<ActionStream, PullRequestRefusal> {
         const OPERATION: &str = "runStackedAction";
         let git = self.authorize(session, &input.cwd.0, OPERATION).await?;
@@ -159,7 +160,7 @@ impl GitActionsAdapter {
         )
         .with_action_effects(Arc::new(GitActionFollowups::new(self.host.clone())));
         let cwd = input.cwd.0.clone();
-        let mut subscription = application.run_stacked_action(input);
+        let mut subscription = application.run_stacked_action_guarded(input, admission);
         Ok(Box::pin(async_stream::stream! {
             while let Some(event) = subscription.recv().await {
                 match event {

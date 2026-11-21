@@ -227,10 +227,25 @@ mod forge {
             .clone_repository(input)
             .await
             .map_err(repository));
-        method!(WsSourceControlPublishRepositoryRpc, |f, ctx, input| f
-            .publish_repository(&ctx.session_id, input)
-            .await
-            .map_err(repository));
+        method!(WsSourceControlPublishRepositoryRpc, |f, ctx, input| {
+            let admission =
+                crate::writers::admit(&ctx.services, "repository publication", &input.cwd.0).await;
+            // The forge may have started pushing when the socket goes away.
+            let session = ctx.session_id.clone();
+            ctx.services
+                .connections
+                .spawn(async move {
+                    let _admission = admission;
+                    f.publish_repository(&session, input).await
+                })
+                .await
+                .map_err(|_| {
+                    Failure::Defect(crate::registry::ServerDefect::Internal {
+                        message: "Repository publication stopped.".into(),
+                    })
+                })?
+                .map_err(repository)
+        });
         method!(WsSourceControlSignInStartRpc, |f, _ctx, input| f
             .sign_in_start(input)
             .await

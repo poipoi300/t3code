@@ -25,13 +25,16 @@ struct State {
 
 struct Claim {
     thread: Option<String>,
-    folder: Option<RestoreFolder>,
+    folders: Vec<RestoreFolder>,
 }
 
 impl Claim {
     fn conflicts(&self, other: &Claim) -> bool {
         matches!((&self.thread, &other.thread), (Some(a), Some(b)) if a == b)
-            || matches!((&self.folder, &other.folder), (Some(a), Some(b)) if a.overlaps(b))
+            || self
+                .folders
+                .iter()
+                .any(|a| other.folders.iter().any(|b| a.overlaps(b)))
     }
 }
 
@@ -83,12 +86,22 @@ impl FolderGate {
         thread: Option<&str>,
         folder: Option<&Path>,
     ) -> Admission {
+        self.enter_folders(name, thread, &folder.into_iter().collect::<Vec<_>>())
+            .await
+    }
+
+    pub async fn enter_folders(
+        self: &Arc<Self>,
+        name: impl Into<String>,
+        thread: Option<&str>,
+        folders: &[&Path],
+    ) -> Admission {
         let name = name.into();
         let mut waiting = None;
         loop {
             let claim = Claim {
                 thread: thread.map(str::to_owned),
-                folder: folder.map(RestoreFolder::resolve),
+                folders: folders.iter().map(|p| RestoreFolder::resolve(p)).collect(),
             };
             let released = self.released.notified();
             tokio::pin!(released);
@@ -117,7 +130,7 @@ impl FolderGate {
     pub fn hold(self: &Arc<Self>, thread: &str, folder: &Path) -> (Hold, Vec<String>) {
         let claim = Claim {
             thread: Some(thread.to_owned()),
-            folder: Some(RestoreFolder::resolve(folder)),
+            folders: vec![RestoreFolder::resolve(folder)],
         };
         let mut state = self.lock();
         let running = state
