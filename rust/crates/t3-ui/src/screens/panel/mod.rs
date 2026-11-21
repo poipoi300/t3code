@@ -1555,8 +1555,15 @@ mod tests {
         .unwrap();
         app.wait_for("text:Run close actions").unwrap();
         app.press("role:button[Run close actions]").unwrap();
-        app.wait_for("text:environment/thread:tab environment/thread:menu")
-            .unwrap();
+        let expected = "environment/thread:tab environment/thread:menu";
+        app.wait_for(&format!("text:{expected}")).unwrap();
+        let log = app
+            .screen()
+            .texts()
+            .into_iter()
+            .filter(|text| text.starts_with("environment/thread:"))
+            .collect::<Vec<_>>();
+        assert_eq!(log, [expected]);
     }
 
     #[test]
