@@ -46,6 +46,13 @@ impl GuestChunks for BodyReader {
     }
 }
 
+struct NoBody;
+impl GuestChunks for NoBody {
+    fn next(&mut self) -> GuestFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
 fn network(context: &'static str) -> impl Fn(JsValue) -> GuestError {
     // Error names only: browsers can echo URLs in messages.
     move |error| GuestError::Network(format!("{context}: {}", js::error_name(&error)))
@@ -136,13 +143,20 @@ impl GuestHttp for BrowserGuestHttp {
     fn open(&self, request: GuestRequest) -> GuestFuture<'_, GuestStreamResponse> {
         Box::pin(async move {
             let (response, abort) = self.fetch(request).await?;
-            Ok(GuestStreamResponse {
-                status: response.status(),
-                chunks: Box::new(BodyReader {
-                    reader: reader(&response)?,
+            let status = response.status();
+            // A rejection without a body (a bare 403 from a proxy) is still a rejection; only an
+            // accepted stream must have a body to read.
+            let chunks: Box<dyn GuestChunks> = match (reader(&response), status) {
+                (Ok(reader), _) => Box::new(BodyReader {
+                    reader,
                     _abort: abort,
                 }),
-            })
+                (Err(_), 200) => {
+                    return Err(GuestError::Network("no response body".into()));
+                }
+                (Err(_), _) => Box::new(NoBody),
+            };
+            Ok(GuestStreamResponse { status, chunks })
         })
     }
 
@@ -187,7 +201,7 @@ mod tests {
                 });
                 init.signal.addEventListener('abort', () => { aborted += 1; });
                 const path = url.split('?')[0];
-                if (path === '/api/guest/stream') {
+                if (path === '/api/guest/stream' && !url.includes('share=bodiless')) {
                     // Stays open until the page lets go of it.
                     return new Response(new ReadableStream({
                         start(controller) {
@@ -195,6 +209,9 @@ mod tests {
                             controller.enqueue(bytes('\\ndata: {\"type\":\"ended\"}\\n\\n'));
                         },
                     }), { status: 200 });
+                }
+                if (url.includes('share=bodiless')) {
+                    return new Response(null, { status: 403 });
                 }
                 if (url.includes('share=gone')) {
                     return new Response(
@@ -294,5 +311,20 @@ mod tests {
         assert_eq!(abort_count(), 0);
         drop(stream);
         assert_eq!(abort_count(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_bodiless_rejection_of_the_stream_is_terminal_not_a_retry() {
+        install_fetch();
+        let _restore = RestoreFetch;
+        let guest = transport();
+        assert!(matches!(
+            guest.open_stream("bodiless").await,
+            Err(GuestError::Rejected {
+                status: 403,
+                reason: GuestFailure::Unknown,
+                ..
+            })
+        ));
     }
 }

@@ -15,14 +15,25 @@ pub enum GuestMethod {
     Post,
 }
 
-/// A request relative to the page's origin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request relative to the page's origin. The body of `redeem` holds the invite, so `Debug`
+/// never prints a body.
+#[derive(Clone, PartialEq, Eq)]
 pub struct GuestRequest {
     pub method: GuestMethod,
     /// Path and query, starting with `/api/guest/`.
     pub path: String,
     /// A JSON body; hosts send it with `content-type: application/json`.
     pub json: Option<String>,
+}
+
+impl std::fmt::Debug for GuestRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuestRequest")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("json", &self.json.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,22 +159,32 @@ pub fn rejection(status: u16, body: &[u8]) -> GuestError {
     }
 }
 
+/// The most one unterminated line or one event's joined `data` may hold. Guest events are bounded
+/// snapshots and deltas; past this the stream is treated as broken and reconnects.
+const SSE_LIMIT: usize = 1024 * 1024;
+
 /// An incremental `text/event-stream` decoder that yields each event's JSON `data`. Comments (the
 /// server's keep-alive), other fields and frames that are not JSON are skipped, as the TS page
 /// skips events it cannot parse.
 #[derive(Default)]
 pub struct SseDecoder {
     pending: Vec<u8>,
+    /// How much of `pending` is known to hold no line break, so a long line is scanned once.
+    scanned: usize,
     data: Option<String>,
     started: bool,
 }
 
+/// A line or an event that never ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SseOverflow;
+
 impl SseDecoder {
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Value> {
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Value>, SseOverflow> {
         self.pending.extend_from_slice(chunk);
         if !self.started {
             if self.pending.len() < 3 && b"\xef\xbb\xbf".starts_with(&self.pending) {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             self.started = true;
             if self.pending.starts_with(b"\xef\xbb\xbf") {
@@ -172,49 +193,70 @@ impl SseDecoder {
         }
         let mut events = Vec::new();
         let mut consumed = 0;
+        let mut from = self.scanned.min(self.pending.len());
         loop {
             let rest = &self.pending[consumed..];
-            let Some(end) = rest.iter().position(|b| matches!(b, b'\n' | b'\r')) else {
+            let Some(offset) = rest[from..].iter().position(|b| matches!(b, b'\n' | b'\r')) else {
                 break;
             };
+            let end = from + offset;
+            from = 0;
             let mut skip = end + 1;
             if rest[end] == b'\r' {
                 match rest.get(end + 1) {
                     // "\r" at the end of a chunk may be half of "\r\n".
-                    None => break,
+                    None => {
+                        from = end;
+                        break;
+                    }
                     Some(b'\n') => skip += 1,
                     Some(_) => {}
                 }
             }
             let line = String::from_utf8_lossy(&rest[..end]).into_owned();
             consumed += skip;
-            if let Some(event) = self.line(&line) {
+            if let Some(event) = self.line(&line)? {
                 events.push(event);
             }
         }
         self.pending.drain(..consumed);
-        events
+        self.scanned = from;
+        if self.pending.len() > SSE_LIMIT {
+            return Err(SseOverflow);
+        }
+        Ok(events)
     }
 
-    fn line(&mut self, line: &str) -> Option<Value> {
+    fn line(&mut self, line: &str) -> Result<Option<Value>, SseOverflow> {
         if line.is_empty() {
-            return serde_json::from_str(&self.data.take()?).ok();
+            return Ok(self
+                .data
+                .take()
+                .and_then(|data| serde_json::from_str(&data).ok()));
         }
         if line.starts_with(':') {
-            return None;
+            return Ok(None);
         }
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         if field == "data" {
             let value = value.strip_prefix(' ').unwrap_or(value);
             match &mut self.data {
                 Some(data) => {
+                    if data.len() + value.len() + 1 > SSE_LIMIT {
+                        return Err(SseOverflow);
+                    }
                     data.push('\n');
                     data.push_str(value);
                 }
-                None => self.data = Some(value.to_owned()),
+                None => {
+                    if value.len() > SSE_LIMIT {
+                        return Err(SseOverflow);
+                    }
+                    self.data = Some(value.to_owned());
+                }
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -232,7 +274,11 @@ impl GuestStreamHandle for SseStream {
                     return Ok(Some(frame));
                 }
                 match self.chunks.next().await? {
-                    Some(chunk) => self.ready.extend(self.decoder.push(&chunk)),
+                    Some(chunk) => self.ready.extend(self.decoder.push(&chunk).map_err(|_| {
+                        GuestError::Network(
+                            "the event stream sent an event that is too large".into(),
+                        )
+                    })?),
                     None => return Ok(None),
                 }
             }

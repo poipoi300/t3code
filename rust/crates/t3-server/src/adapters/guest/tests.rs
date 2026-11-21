@@ -492,7 +492,7 @@ async fn the_guest_client_joins_reads_and_submits_over_the_real_routes() {
     use t3_platform::guest::NativeGuestHttp;
 
     let Harness {
-        http,
+        http: _,
         base,
         id,
         credential,
@@ -502,10 +502,9 @@ async fn the_guest_client_joins_reads_and_submits_over_the_real_routes() {
     } = harness(Arc::new(t3_cloud::SystemClock)).await;
     let origin: url::Url = base.parse().unwrap();
     let browser = |origin: &url::Url| {
-        Rc::new(HttpGuestTransport::new(NativeGuestHttp::new(
-            http.clone(),
-            origin.clone(),
-        )))
+        Rc::new(HttpGuestTransport::new(
+            NativeGuestHttp::new(reqwest::Client::builder(), origin.clone()).unwrap(),
+        ))
     };
     let wake = Rc::new(tokio::sync::Notify::new());
     let until = |client: GuestClient, ready: fn(&GuestSession) -> bool| {

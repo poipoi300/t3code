@@ -69,7 +69,7 @@ fn decode(chunks: &[&[u8]]) -> Vec<Value> {
     let mut decoder = SseDecoder::default();
     chunks
         .iter()
-        .flat_map(|chunk| decoder.push(chunk))
+        .flat_map(|chunk| decoder.push(chunk).expect("within limits"))
         .collect()
 }
 
@@ -252,4 +252,41 @@ fn a_clean_end_of_stream_is_none() {
         assert_eq!(stream.next().await, Ok(Some(json!({"a": 1}))));
         assert_eq!(stream.next().await, Ok(None));
     });
+}
+
+#[test]
+fn the_invite_never_prints_from_a_request() {
+    let request = requests::redeem("share_1.secret", "Alex");
+    assert!(!format!("{request:?}").contains("secret"));
+    assert!(format!("{request:?}").contains("/api/guest/redeem"));
+}
+
+#[test]
+fn the_decoder_refuses_unbounded_lines_and_events() {
+    let mut decoder = SseDecoder::default();
+    let line = vec![b'x'; 256 * 1024];
+    let mut failed = false;
+    for _ in 0..8 {
+        failed |= decoder.push(&line).is_err();
+    }
+    assert!(failed, "a line that never ends is cut off");
+
+    let mut decoder = SseDecoder::default();
+    let mut failed = false;
+    for _ in 0..64 {
+        // Many short data lines of one event that never ends.
+        let mut chunk = Vec::new();
+        for _ in 0..1024 {
+            chunk.extend_from_slice(b"data: 0123456789abcdef\n");
+        }
+        failed |= decoder.push(&chunk).is_err();
+    }
+    assert!(failed, "an event that never ends is cut off");
+
+    // A long but bounded event still decodes.
+    let mut decoder = SseDecoder::default();
+    let body = "y".repeat(200 * 1024);
+    let frame = format!("data: {{\"text\":\"{body}\"}}\n\n");
+    let got = decoder.push(frame.as_bytes()).expect("within limits");
+    assert_eq!(got.len(), 1);
 }
