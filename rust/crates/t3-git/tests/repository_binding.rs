@@ -669,3 +669,53 @@ async fn only_the_recorded_project_can_bind_a_recreated_linked_checkout() -> Tes
     assert_eq!(checkout.bind_repository().await?, Some(second));
     Ok(())
 }
+
+/// The environment pins are checked on their own, past the two-way link check: a wrapper
+/// records what each child Git process inherits, and every command must carry the registered
+/// administrative directory and work tree, so helpers Git spawns cannot rediscover a repository.
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_commands_carry_git_dir_and_git_work_tree_pins_in_their_environment() -> TestResult
+{
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repository::new().await?;
+    repo.commit("root").await?;
+    let sibling = repo.temp.path().join("linked");
+    repo.command(&["worktree", "add", "-b", "linked", sibling.to_str().unwrap()])
+        .await?;
+    let project = repo.git.cleanup_checkout(None, None).await?;
+    let source = project
+        .recorded_repository()
+        .flatten()
+        .expect("project binding")
+        .clone();
+    let linked = t3_git::Git::new(&sibling)
+        .cleanup_checkout(Some(&source), None)
+        .await?;
+    let pinned = linked.recorded_repository().flatten().expect("pin").clone();
+    let log = repo.temp.path().join("env.log");
+    let wrapper = repo.temp.path().join("git-wrapper.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$GIT_DIR\" \"$GIT_WORK_TREE\" >> '{}'\nexec git \"$@\"\n",
+            log.display()
+        ),
+    )?;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+    let linked = linked.with_program(&wrapper);
+    linked
+        .execute(&["rev-parse", "HEAD"], ExecuteOptions::default())
+        .await?;
+    let logged = std::fs::read_to_string(&log)?;
+    assert!(!logged.is_empty(), "wrapper was not used");
+    let expected = format!(
+        "{}|{}",
+        pinned.git_dir.display(),
+        pinned.top_level.display()
+    );
+    for line in logged.lines() {
+        assert_eq!(line, expected, "a cleanup child lacked the pins");
+    }
+    Ok(())
+}

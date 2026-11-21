@@ -876,11 +876,17 @@ impl StorageCleanup {
                     "preview requires remote eligibility checks; keeping worktree",
                 ));
             }
-            let default = if names.is_empty() {
-                read_git(&project_git, &["symbolic-ref", "--quiet", "HEAD"])
+            // Without a remote the project's own branch is the base. With one, the network step
+            // runs in a scratch repository that holds none of the project's configuration.
+            let scratch;
+            let (default, base) = if names.is_empty() {
+                let default = read_git(&project_git, &["symbolic-ref", "--quiet", "HEAD"])
                     .await?
                     .trim()
-                    .to_owned()
+                    .to_owned();
+                let base = read_git(&git, &["rev-parse", &default]).await?;
+                scratch = None;
+                (default, base.trim().to_owned())
             } else {
                 let remote = if names.contains(&"origin") {
                     "origin"
@@ -897,47 +903,38 @@ impl StorageCleanup {
                     true,
                 )
                 .await?;
-                let default = if symbolic.code == Some(0) {
-                    symbolic
-                        .stdout_text()
-                        .trim()
-                        .strip_prefix(&format!("refs/remotes/{remote}/"))
-                        .map(str::to_owned)
-                } else {
-                    let output = read_git(
-                        &project_git,
-                        &["ls-remote", "--symref", "--", remote, "HEAD"],
-                    )
-                    .await?;
-                    output.lines().find_map(|l| {
-                        l.strip_prefix("ref: refs/heads/")
-                            .and_then(|s| s.strip_suffix("\tHEAD"))
+                let known = (symbolic.code == Some(0))
+                    .then(|| {
+                        symbolic
+                            .stdout_text()
+                            .trim()
+                            .strip_prefix(&format!("refs/remotes/{remote}/"))
                             .map(str::to_owned)
                     })
-                }
-                .ok_or(Error::Refused("default branch is unavailable"))?;
-                read_git(
-                    &project_git,
-                    &[
-                        "fetch",
-                        "--no-tags",
-                        "--",
-                        remote,
-                        &format!("+refs/heads/{default}:refs/remotes/{remote}/{default}"),
-                    ],
-                )
-                .await?;
-                format!("refs/remotes/{remote}/{default}")
+                    .flatten();
+                let lookup = RemoteLookup::new(&project_git, remote).await?;
+                let default = match known {
+                    Some(name) => name,
+                    None => lookup.default_branch().await?,
+                };
+                let base = lookup.fetch_branch(&default).await?;
+                let default = format!("refs/remotes/{remote}/{default}");
+                scratch = Some(lookup);
+                (default, base)
             };
-            let base = read_git(&git, &["rev-parse", &default]).await?;
-            let integrated = execute_git(
-                &git,
-                &["merge-base", "--is-ancestor", head.trim(), base.trim()],
-                true,
-            )
-            .await?
-            .code
-                == Some(0);
+            let integrated = match &scratch {
+                Some(lookup) => lookup.is_ancestor(head.trim(), base.trim()).await?,
+                None => {
+                    execute_git(
+                        &git,
+                        &["merge-base", "--is-ancestor", head.trim(), base.trim()],
+                        true,
+                    )
+                    .await?
+                    .code
+                        == Some(0)
+                }
+            };
             eligible = integrated && unchanged;
             if eligible {
                 reason = if names.is_empty() {
@@ -1484,6 +1481,184 @@ fn owner<'a>(group: &[&'a CleanupThread]) -> Option<&'a CleanupThread> {
     }
     Some(group[top])
 }
+/// The network step of the merge-eligibility check. Repository-local configuration can name
+/// commands for transports (`core.sshCommand`, `remote.*.uploadpack`, `ext::` URLs, proxies and
+/// credential helpers) and for maintenance, so none of it is read. The remote URL is copied from
+/// the project into a scratch bare repository that borrows the project's objects, and only a
+/// plain https, ssh or file URL is used.
+struct RemoteLookup {
+    git: t3_git::Git,
+    url: String,
+    protocol: &'static str,
+    _dir: tempfile::TempDir,
+}
+
+/// The transport an acceptable remote URL uses, or `None` for anything else.
+fn remote_protocol(url: &str) -> Option<&'static str> {
+    if url.is_empty()
+        || url.starts_with('-')
+        || url.contains(|c: char| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    let plain_host = |authority: &str| {
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host.split(':').next().unwrap_or(host);
+        let user = authority.rsplit_once('@').map_or("", |(user, _)| user);
+        !host.is_empty()
+            && !host.starts_with('-')
+            && !user.starts_with('-')
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    };
+    if let Some(rest) = url.strip_prefix("https://") {
+        return plain_host(rest.split('/').next()?).then_some("https");
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        return plain_host(rest.split('/').next()?).then_some("ssh");
+    }
+    if let Some(rest) = url.strip_prefix("file://") {
+        return rest.starts_with('/').then_some("file");
+    }
+    if url.starts_with('/') {
+        return Some("file");
+    }
+    if url.contains("::") || url.contains("://") {
+        return None;
+    }
+    // scp-like `user@host:path`
+    let (authority, path) = url.split_once(':')?;
+    (!path.is_empty() && plain_host(authority)).then_some("ssh")
+}
+
+impl RemoteLookup {
+    async fn new(project: &t3_git::Git, remote: &str) -> Result<Self> {
+        if remote.starts_with('-') {
+            return Err(Error::Refused("remote name is invalid"));
+        }
+        let url = read_git(project, &["ls-remote", "--get-url", remote])
+            .await?
+            .trim()
+            .to_owned();
+        let protocol = remote_protocol(&url)
+            .ok_or(Error::Refused("remote URL uses an unsupported transport"))?;
+        let objects = read_git(
+            project,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+        )
+        .await?;
+        let dir = tempfile::tempdir().map_err(|_| Error::Io)?;
+        let git = t3_git::Git::new(dir.path());
+        read_git(&git, &["init", "--bare", "--quiet"]).await?;
+        let alternates = dir.path().join("objects/info/alternates");
+        fs::create_dir_all(alternates.parent().ok_or(Error::Io)?).map_err(|_| Error::Io)?;
+        fs::write(alternates, format!("{}\n", objects.trim())).map_err(|_| Error::Io)?;
+        Ok(Self {
+            git,
+            url,
+            protocol,
+            _dir: dir,
+        })
+    }
+
+    async fn network(&self, args: &[&str]) -> Result<String> {
+        let mut full = vec![
+            "-c",
+            "safe.bareRepository=all",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.fsmonitor=false",
+        ];
+        let allow = format!("protocol.{}.allow=always", self.protocol);
+        full.extend(["-c", &allow]);
+        full.extend_from_slice(args);
+        let mut options = t3_git::ExecuteOptions {
+            max_output_bytes: 1024 * 1024,
+            output_mode: t3_git::OutputMode::Error,
+            timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+        options.env.insert("LC_ALL".into(), Some("C".into()));
+        options
+            .env
+            .insert("GIT_TERMINAL_PROMPT".into(), Some("0".into()));
+        options.env.insert("GIT_ASKPASS".into(), Some("".into()));
+        options
+            .env
+            .insert("GIT_ALLOW_PROTOCOL".into(), Some(self.protocol.into()));
+        self.git
+            .execute(&full, options)
+            .await
+            .map(|o| o.stdout_text())
+            .map_err(|_| Error::Service)
+    }
+
+    async fn default_branch(&self) -> Result<String> {
+        let output = self
+            .network(&["ls-remote", "--symref", "--", &self.url, "HEAD"])
+            .await?;
+        output
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("ref: refs/heads/")
+                    .and_then(|s| s.strip_suffix("\tHEAD"))
+                    .map(str::to_owned)
+            })
+            .ok_or(Error::Refused("default branch is unavailable"))
+    }
+
+    /// Fetch one branch into the scratch repository and return its commit.
+    async fn fetch_branch(&self, branch: &str) -> Result<String> {
+        self.network(&[
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            "--",
+            &self.url,
+            &format!("+refs/heads/{branch}:refs/fetched/base"),
+        ])
+        .await?;
+        self.network(&["rev-parse", "--verify", "refs/fetched/base"])
+            .await
+            .map(|s| s.trim().to_owned())
+    }
+
+    /// Whether `head` is reachable from `base`, using the objects the project already holds.
+    async fn is_ancestor(&self, head: &str, base: &str) -> Result<bool> {
+        let mut options = t3_git::ExecuteOptions {
+            allow_nonzero: true,
+            timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+        options.env.insert("LC_ALL".into(), Some("C".into()));
+        self.git
+            .execute(
+                &[
+                    "-c",
+                    "safe.bareRepository=all",
+                    "merge-base",
+                    "--is-ancestor",
+                    head,
+                    base,
+                ],
+                options,
+            )
+            .await
+            .map(|o| o.code == Some(0))
+            .map_err(|_| Error::Service)
+    }
+}
 /// Removal commands walk and delete a whole checkout, as in the TypeScript implementation.
 fn git_timeout(args: &[&str]) -> Duration {
     Duration::from_secs(
@@ -2016,6 +2191,28 @@ fn shared_pnpm_virtual_store(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod git_command_tests {
     use super::*;
+
+    #[test]
+    fn only_plain_https_ssh_and_file_remotes_are_used() {
+        for (url, expected) in [
+            ("https://example.com/a/b.git", Some("https")),
+            ("ssh://git@example.com:22/a.git", Some("ssh")),
+            ("git@example.com:a/b.git", Some("ssh")),
+            ("file:///srv/repo.git", Some("file")),
+            ("/srv/repo.git", Some("file")),
+            ("ext::sh -c touch% /tmp/x", None),
+            ("ext::/bin/true %S", None),
+            ("ssh://-oProxyCommand=x/a", None),
+            ("-oProxyCommand=x:a", None),
+            ("git://example.com/a", None),
+            ("http://example.com/a", None),
+            ("fd::17", None),
+            ("https://exa mple.com/a", None),
+            ("", None),
+        ] {
+            assert_eq!(remote_protocol(url), expected, "{url}");
+        }
+    }
 
     #[test]
     fn removal_commands_get_the_long_timeout_and_clean_is_quiet() {

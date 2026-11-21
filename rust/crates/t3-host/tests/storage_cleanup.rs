@@ -724,6 +724,177 @@ async fn removing_a_checkout_never_prunes_other_worktree_registrations() {
     );
 }
 
+/// A project with a bare `origin` and the merge-eligibility rules that reach the network.
+#[cfg(unix)]
+async fn remote_eligibility_fixture(
+    temp: &Path,
+    with_origin_head: bool,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    StorageCleanup,
+) {
+    let (repo, path, h, service) = linked_repository(temp).await;
+    let remote = temp.join("origin.git");
+    std::fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare", "-b", "main"]).await;
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    )
+    .await;
+    git(&repo, &["push", "origin", "main"]).await;
+    if with_origin_head {
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await;
+    } else {
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "symbolic-ref",
+                "-d",
+                "refs/remotes/origin/HEAD",
+            ])
+            .output()
+            .await;
+    }
+    {
+        let mut state = h.state.lock().await;
+        state.settings.storage_cleanup.worktree_after_days = None;
+        state.settings.storage_cleanup.worktree_on_merge = true;
+        state.settings.storage_cleanup.worktree_unchanged = false;
+    }
+    // The checkout has a commit beyond main, so only the remote lookup decides.
+    git(
+        &path,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "ahead",
+        ],
+    )
+    .await;
+    (repo, remote, path, service)
+}
+
+#[cfg(unix)]
+fn command_probe(dir: &Path, name: &str, exec: &str) -> (std::path::PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let marker = dir.join(format!("{name}-ran"));
+    let script = dir.join(format!("{name}.sh"));
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\n{exec}\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (marker, script.to_string_lossy().into_owned())
+}
+
+/// A1: `remote.<name>.uploadpack` in the project's config is attacker-writable.
+#[cfg(unix)]
+#[tokio::test]
+async fn eligibility_fetch_never_runs_the_projects_uploadpack_command() {
+    let home = tempfile::tempdir().unwrap();
+    let (repo, _, path, service) = remote_eligibility_fixture(home.path(), true).await;
+    let (marker, script) = command_probe(home.path(), "uploadpack", "exec git-upload-pack \"$@\"");
+    git(&repo, &["config", "remote.origin.uploadpack", &script]).await;
+    let report = service.run_now().await.unwrap();
+    assert!(
+        !marker.exists(),
+        "cleanup ran remote.origin.uploadpack: {report:?}"
+    );
+    assert!(path.exists(), "{report:?}");
+}
+
+/// A2: transport commands from the project's config (`core.sshCommand`, `core.gitProxy`,
+/// `ext::` URLs) must not run while the default branch is looked up.
+#[cfg(unix)]
+#[tokio::test]
+async fn eligibility_lookup_never_runs_transport_commands_from_project_config() {
+    let home = tempfile::tempdir().unwrap();
+    let (repo, _, path, service) = remote_eligibility_fixture(home.path(), false).await;
+    let (ssh, ssh_script) = command_probe(home.path(), "ssh", "exit 1");
+    let (proxy, proxy_script) = command_probe(home.path(), "proxy", "exit 1");
+    let (ext, ext_script) = command_probe(home.path(), "ext", "exit 1");
+    git(&repo, &["config", "core.sshCommand", &ssh_script]).await;
+    git(&repo, &["config", "core.gitProxy", &proxy_script]).await;
+    git(&repo, &["config", "protocol.ext.allow", "always"]).await;
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.url",
+            "ssh://attacker.invalid/x.git",
+        ],
+    )
+    .await;
+    let report = service.run_now().await.unwrap();
+    assert!(!ssh.exists(), "cleanup ran core.sshCommand: {report:?}");
+    assert!(!proxy.exists(), "cleanup ran core.gitProxy: {report:?}");
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.url",
+            &format!("ext::{ext_script} %S"),
+        ],
+    )
+    .await;
+    let report = service.run_now().await.unwrap();
+    assert!(!ext.exists(), "cleanup ran an ext:: transport: {report:?}");
+    assert!(path.exists(), "{report:?}");
+}
+
+/// A3: automatic maintenance in the project must not prune another registration.
+#[cfg(unix)]
+#[tokio::test]
+async fn eligibility_fetch_runs_no_auto_maintenance_that_prunes_other_registrations() {
+    let home = tempfile::tempdir().unwrap();
+    let (repo, _, path, service) = remote_eligibility_fixture(home.path(), true).await;
+    let stale = home.path().join("worktrees/repo/stale");
+    git(
+        &repo,
+        &["worktree", "add", "-b", "stale", stale.to_str().unwrap()],
+    )
+    .await;
+    std::fs::remove_dir_all(&stale).unwrap();
+    for (key, value) in [
+        ("gc.auto", "1"),
+        ("gc.autoDetach", "false"),
+        ("maintenance.autoDetach", "false"),
+        ("gc.worktreePruneExpire", "now"),
+    ] {
+        git(&repo, &["config", key, value]).await;
+    }
+    for i in 0..5 {
+        let blob = home.path().join(format!("blob{i}"));
+        std::fs::write(&blob, format!("loose {i}")).unwrap();
+        git(&repo, &["hash-object", "-w", blob.to_str().unwrap()]).await;
+    }
+    let report = service.run_now().await.unwrap();
+    assert!(path.exists(), "{report:?}");
+    let listed = git_text(&repo, &["worktree", "list", "--porcelain"]).await;
+    assert!(
+        listed.contains(stale.to_str().unwrap()),
+        "a kept checkout still changed another registration: {listed}"
+    );
+}
+
 #[tokio::test]
 async fn preview_never_fetches_resolves_remote_eligibility_or_takes_a_workspace_lease() {
     let temp = tempfile::tempdir().unwrap();
@@ -1144,7 +1315,7 @@ async fn pull_request_cleanup_requires_the_merged_record_for_the_exact_unintegra
         head_sha: head,
     });
     let report = service.run_now().await.unwrap();
-    assert!(!path.exists());
+    assert!(!path.exists(), "{report:?}");
     assert_eq!(report.counts.removed, WireNumber::Finite(1.into()));
     assert!(h.pr_lookups.load(Ordering::SeqCst) >= 3);
     assert_eq!(h.pr_path.lock().await.as_deref(), Some(path.as_path()));
