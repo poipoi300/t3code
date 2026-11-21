@@ -218,5 +218,6 @@
   "vcs.refreshStatus": "vcs",
   "vcs.removeWorktree": "vcs",
   "vcs.switchRef": "vcs",
+  "vcs.trustRepository": "vcs",
   "worktreeSetup.cancel": "vcs"
 }

@@ -143,8 +143,11 @@ async fn failure(http: Failing) -> String {
         other => panic!("{other}"),
     }
 }
-fn read(api: &CliproxyApi) -> impl std::future::Future<Output = Vec<Value>> + '_ {
-    async move { json!(api.accounts(URL, KEY).await.unwrap()).as_array().unwrap().clone() }
+async fn read(api: &CliproxyApi) -> Vec<Value> {
+    json!(api.accounts(URL, KEY).await.unwrap())
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 #[tokio::test]
