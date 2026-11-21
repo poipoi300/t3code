@@ -215,11 +215,15 @@ pub fn download_plan<P: Platform + Clone + 'static>(
 
 struct RewindBinding<P: Platform + Clone + 'static>(
     t3_client::thread_views::thread_ops::ThreadOperations<P>,
+    ClientRuntime<P>,
 );
 pub fn timeline_rewind<P: Platform + Clone + 'static>(
     client: &ClientRuntime<P>,
 ) -> crate::screens::thread::rewind::RewindService {
-    crate::screens::thread::rewind::RewindService(Rc::new(RewindBinding(client.timeline_rewind())))
+    crate::screens::thread::rewind::RewindService(Rc::new(RewindBinding(
+        client.timeline_rewind(),
+        client.clone(),
+    )))
 }
 fn rewind_error(error: ClientError) -> crate::screens::thread::rewind::RewindError {
     match error {
@@ -240,17 +244,44 @@ impl<P: Platform + Clone + 'static> crate::screens::thread::rewind::TimelineRewi
     for RewindBinding<P>
 {
     fn state(&self, key: &ThreadKey) -> crate::screens::thread::rewind::RewindState {
-        let state = self.0.rewind_state(key);
-        crate::screens::thread::rewind::RewindState {
-            reverting: state.reverting,
-            can_fork: state.can_fork,
-        }
+        self.0.rewind_state(key)
+    }
+    fn has_operate_scope(&self, key: &ThreadKey) -> bool {
+        self.1
+            .client(&key.environment)
+            .and_then(|client| client.session())
+            .and_then(|session| {
+                session.grants_scope(t3_contracts::auth::AuthEnvironmentScope::OrchestrationOperate)
+            })
+            == Some(true)
     }
     fn availability(
         &self,
         key: &ThreadKey,
         target: &crate::screens::thread::rewind::RewindTarget,
     ) -> crate::screens::thread::rewind::RewindAvailability {
+        // Cached history remains editable with an operate grant. Check connectivity again
+        // on activation, including when the thread falls out of sync with the dialog open.
+        let snapshot = self.1.store().snapshot();
+        let thread = t3_client::state::selectors::thread(&snapshot, key);
+        if thread.is_some_and(|t| t.status != t3_client::types::SyncStatus::Live) {
+            let label = self
+                .1
+                .environments()
+                .into_iter()
+                .find(|env| env.id == key.environment)
+                .map_or_else(|| key.environment.0.clone(), |env| env.label);
+            return crate::screens::thread::rewind::RewindAvailability {
+                reason: Some(crate::screens::thread::rewind::RewindError {
+                    message: crate::i18n::tr(
+                        "Reconnect {environment} before reverting checkpoints.",
+                        &[("environment", crate::i18n::Value::Text(label))],
+                    ),
+                    detail: None,
+                }),
+                ..Default::default()
+            };
+        }
         let state = self.0.rewind_availability(
             key,
             &t3_client::thread_views::thread_ops::rewind::RewindTarget {

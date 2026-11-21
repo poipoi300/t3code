@@ -67,16 +67,15 @@ pub struct RewindAvailability {
     pub reason: Option<RewindError>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RewindState {
-    pub reverting: bool,
-    pub can_fork: bool,
-}
+pub use t3_client::thread_views::thread_ops::rewind::RewindState;
 
 /// Thin binding over the client's composed rewind and fork operations.
 /// Implementations restore draft/attachments only after persisted rollback and recheck all guards.
 pub trait TimelineRewindClient {
     fn state(&self, key: &ThreadKey) -> RewindState;
+    fn has_operate_scope(&self, _key: &ThreadKey) -> bool {
+        false
+    }
     fn availability(&self, key: &ThreadKey, target: &RewindTarget) -> RewindAvailability;
     fn changes(&self, key: &ThreadKey) -> LocalBoxStream<'static, ()>;
     fn rewind(
@@ -104,6 +103,7 @@ pub struct TimelineRewind {
     nav: Navigator,
     pending: Signal<bool>,
     pub reverting: Memo<bool>,
+    pub can_operate: Memo<bool>,
     pub error: Signal<Option<RewindError>>,
     pub restored_prompt: Signal<Option<String>>,
 }
@@ -121,10 +121,13 @@ pub fn use_timeline_rewind(key: ThreadKey) -> TimelineRewind {
 impl TimelineRewind {
     /// Construct above the virtual list so recycling does not cancel a confirmed operation.
     pub fn with_client(key: ThreadKey, client: Option<Rc<dyn TimelineRewindClient>>) -> Self {
+        let read = |client: &Rc<dyn TimelineRewindClient>, key: &ThreadKey| {
+            (client.state(key).reverting, client.has_operate_scope(key))
+        };
         let state = signal(
             client
                 .as_ref()
-                .map_or_else(RewindState::default, |client| client.state(&key)),
+                .map_or((false, false), |client| read(client, &key)),
         );
         if let Some(client) = &client {
             let mut changes = client.changes(&key);
@@ -132,7 +135,7 @@ impl TimelineRewind {
             let key = key.clone();
             watch(async move {
                 while changes.next().await.is_some() {
-                    state.set(client.state(&key));
+                    state.set(read(&client, &key));
                 }
             });
         }
@@ -143,7 +146,8 @@ impl TimelineRewind {
             owner: Owner::current(),
             nav: navigator(),
             pending,
-            reverting: computed(move || pending.get() || state.get().reverting),
+            reverting: computed(move || pending.get() || state.get().0),
+            can_operate: computed(move || state.get().1),
             error: signal(None),
             restored_prompt: signal(None),
         }

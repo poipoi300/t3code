@@ -226,21 +226,15 @@ fn chip_data(key: &ThreadKey) -> Memo<ChipData> {
 }
 
 /// ChatView derives the rewind range from confirmed provider turns and the loaded history window.
-fn rewind_inputs(
-    key: ThreadKey,
-    services: &TimelineServices,
-    approvals: &ApprovalContext,
-) -> Memo<MessagesTimelineRowsInput> {
+fn rewind_inputs(key: ThreadKey, services: &TimelineServices) -> Memo<MessagesTimelineRowsInput> {
+    use t3_client::thread_views::threads::checkpoints::derive_thread_checkpoint_summaries;
     use t3_client::view_logic::{
         chat_view::derive_available_revert_turn_counts, session::find_revert_checkpoint,
     };
 
     let events = services.events.clone();
     let run = services.run;
-    let permission = approvals
-        .services
-        .as_ref()
-        .map(|services| services.can_operate.clone());
+    let can_operate = services.rewind.can_operate;
     rt().store.thread_state(key.clone(), move |state| {
         let Some(thread) = state else {
             return Default::default();
@@ -248,38 +242,37 @@ fn rewind_inputs(
         let Some(projection) = &thread.projection else {
             return Default::default();
         };
-        let Some(config) = events.config(&key.environment) else {
-            return Default::default();
-        };
-        let providers = &config.providers.0;
-        let find_provider =
-            |id: &ProviderInstanceId| providers.iter().find(|p| &p.instance_id == id);
-        let provider = run
-            .with(|run| run.provider_instance_id.as_ref().and_then(find_provider))
-            .or_else(|| find_provider(&projection.thread.model_selection.instance_id));
-        let supported = permission
-            .as_ref()
-            .is_some_and(|can_operate| can_operate(&key))
-            && provider.is_some_and(|p| p.supports_conversation_rollback.flatten() != Some(false));
-        if !supported {
-            return Default::default();
-        }
+        let supported = can_operate.get()
+            && events.config(&key.environment).is_some_and(|config| {
+                let providers = &config.providers.0;
+                let find_provider =
+                    |id: &ProviderInstanceId| providers.iter().find(|p| &p.instance_id == id);
+                run.with(|run| run.provider_instance_id.as_ref().and_then(find_provider))
+                    .or_else(|| find_provider(&projection.thread.model_selection.instance_id))
+                    .is_some_and(|p| p.supports_conversation_rollback.flatten() != Some(false))
+            });
         MessagesTimelineRowsInput {
-            supports_conversation_rollback: true,
+            supports_conversation_rollback: supported,
             thread_start_checkpoint_available: !thread.history.has_more
                 && find_revert_checkpoint(&projection.checkpoints, 0).is_some(),
             available_revert_turn_counts: Some(derive_available_revert_turn_counts(Some(
                 projection,
             ))),
-            turn_diff_summaries: projection
-                .checkpoints
-                .iter()
-                .filter_map(|checkpoint| {
-                    Some(serde_json::json!({
-                        "runId": checkpoint.run_id.as_ref()?,
-                        "checkpointTurnCount": checkpoint.app_run_ordinal?,
-                        "status": checkpoint.status,
-                    }))
+            turn_diff_summaries: derive_thread_checkpoint_summaries(projection)
+                .into_iter()
+                .map(|summary| {
+                    let checkpoint = summary.checkpoint;
+                    let mut value = serde_json::json!({
+                        "checkpointId": checkpoint.id, "scopeId": checkpoint.scope_id, "runId": checkpoint.run_id,
+                        "checkpointTurnCount": checkpoint.app_run_ordinal, "checkpointRef": checkpoint.r#ref,
+                        "status": checkpoint.status, "files": checkpoint.files,
+                        "assistantMessageId": summary.assistant_message.map(|message| &message.id),
+                        "completedAt": checkpoint.captured_at,
+                    });
+                    if let Some(total) = &checkpoint.files_total {
+                        value["filesTotal"] = serde_json::json!(total);
+                    }
+                    value
                 })
                 .collect(),
             ..Default::default()
@@ -296,7 +289,7 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
     let groups = services.groups;
     let approvals = ApprovalContext::new(key.clone(), ApprovalRowsState::default());
     let pending_approvals = approvals.pending;
-    let rewind = rewind_inputs(key.clone(), &services, &approvals);
+    let rewind = rewind_inputs(key.clone(), &services);
     let run = services.run;
     let visibility = services.tool_call_visibility;
     let rows = computed(move || {
@@ -336,7 +329,18 @@ pub fn timeline(key: ThreadKey) -> impl IntoElement {
         let key = key.clone();
         thread.header = Some(Rc::new(move || parent_thread_divider(key.clone())));
     }
-    messages_timeline(rows, options)
+    let error = services.rewind.error;
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .child(dynamic(move || {
+            error.get().map(|error| {
+                text(error.message().resolve())
+                    .role(AccessibilityRole::Alert)
+                    .app_class(crate::theme::tw("px-3 py-2 text-destructive"))
+            })
+        }))
+        .child(messages_timeline(rows, options))
 }
 
 /// MessagesTimeline.tsx `listHeaderLeadingContent` with a parent link: the TimelineSystemDivider
@@ -703,3 +707,7 @@ fn plan_context(key: &ThreadKey) -> PlanContext {
     }
     context
 }
+
+#[cfg(test)]
+#[path = "timeline_tests.rs"]
+mod tests;
