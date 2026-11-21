@@ -405,3 +405,73 @@ fn the_core_module_registers_what_it_declares() {
         Some(false)
     );
 }
+
+#[tokio::test]
+async fn environment_themes_streams_initial_replaced_and_removed_palettes_only_to_opted_in_clients()
+{
+    let fx = Fixture::start().await;
+    let directory = fx.temp.path().join("userdata/themes");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("workshop.json");
+    let mut palette =
+        json!({"name":"Workshop","appearance":"dark","canvas":"#123456","accent":"#abcdef"});
+    std::fs::write(&path, palette.to_string()).unwrap();
+    let (mut old_socket, mut old_client) = fx.connect(&fx.cookie, "").await;
+    old_client
+        .start("subscribeServerConfig", json!({}), CallKind::Stream)
+        .unwrap();
+    assert_eq!(
+        chunk(&mut old_socket, &mut old_client).await["type"],
+        "snapshot"
+    );
+    let (mut socket, mut client) = fx.connect(&fx.cookie, "").await;
+    client
+        .start(
+            "subscribeServerConfig",
+            json!({"environmentThemes":true}),
+            CallKind::Stream,
+        )
+        .unwrap();
+    let snapshot = chunk(&mut socket, &mut client).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(
+        snapshot["config"]["environment"]["capabilities"]["environmentThemes"],
+        true
+    );
+    for color in ["#abcdef", "#fedcba"] {
+        palette["accent"] = json!(color);
+        if color == "#fedcba" {
+            std::fs::write(&path, palette.to_string()).unwrap();
+        }
+        let update = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            chunk(&mut socket, &mut client),
+        )
+        .await
+        .expect("subscribed socket should receive a palette");
+        let mut wire = palette.clone();
+        wire["id"] = json!("workshop");
+        assert_eq!(
+            update,
+            json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":[wire]}})
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        chunk(&mut socket, &mut client).await,
+        json!({"version":1,"type":"environmentThemesUpdated","payload":{"themes":[]}})
+    );
+    let (mut calls, mut caller) = fx.connect(&fx.cookie, "").await;
+    unary_ok(
+        &mut calls,
+        &mut caller,
+        "server.updateSettings",
+        json!({"patch":{"defaultAutoPull":true}}),
+    )
+    .await;
+    assert_eq!(
+        chunk(&mut old_socket, &mut old_client).await["type"],
+        "settingsUpdated"
+    );
+    fx.shutdown().await;
+}

@@ -635,6 +635,7 @@ pub async fn config_for(
 pub fn config_stream_for(
     services: Arc<crate::services::ServiceRegistry>,
     secret_references: bool,
+    environment_themes: bool,
 ) -> futures::stream::BoxStream<
     'static,
     Result<ServerConfigStreamEvent, t3_contracts::rpc::WsServerGetConfigError>,
@@ -643,7 +644,7 @@ pub fn config_stream_for(
         use futures::future::Either;
         let adapter=services.domain::<ProvidersAdapter>();
         let mut changes=adapter.as_ref().map(|adapter|adapter.domain.providers.subscribe());
-        let mut existing=crate::adapters::config::config_stream_for(services.clone(),secret_references);
+        let mut existing=crate::adapters::config::config_stream_for(services.clone(),secret_references,environment_themes);
         let Some(first)=existing.next().await else {return;};
         let mut first=first.map_err(|_|config_error(&services))?;
         if let ServerConfigStreamEvent::Snapshot(snapshot)=&mut first && let Some(adapter)=&adapter {snapshot.config.providers=adapter.domain.config_providers().await;}

@@ -98,51 +98,13 @@ async fn session(origin: &str, credential: &Value) -> (String, Value) {
     (cookie, response.json().await.unwrap())
 }
 
-/// Methods no group serves yet, in the default test environment (no Node runtime). A group that
-/// silently drops out, or a method that starts being served, fails here: move it in this list
-/// together with `briefs/server-unserved.md`.
-const UNSERVED_WITHOUT_NODE: &[&str] = &[
-    "device.action",
-    "device.close",
-    "device.configure",
-    "device.detail",
-    "device.easAccount",
-    "device.list",
-    "device.open",
-    "device.shutdown",
-    "device.simlockIdentity",
-    "device.testHost",
-    "guestShare.create",
-    "orchestration.getNativeChildWork",
-    "preview.adjust",
-    "preview.clearProfile",
-    "preview.close",
-    "preview.list",
-    "preview.open",
-    "preview.reportProfiles",
-    "preview.reportStatus",
-    "preview.resize",
-    "preview.stopLocalServer",
-    "provider.chatgpt.handoff.subscribe",
-    "provider.consumeResetCredit",
-    "pullRequests.subscribeLinkedThreadRefreshes",
-    "server.commitDesktopUpdate",
-    "server.getStorageCleanupReport",
-    "server.refreshProviders",
-    "server.runStorageCleanup",
-    "server.updateServer",
-    "server.updateServerWithProgress",
-    "subscribeDeviceState",
-    "subscribeDiscoveredLocalServers",
-    "subscribePreviewEvents",
-];
-/// With Node and the preview edge present, the devices and preview groups are served too.
-const UNSERVED_WITH_NODE: &[&str] = &[
+/// Both default-feature environments must register the same RPCs. Keep this list in sync
+/// with the measured counts and remaining blockers in `briefs/server-unserved.md`.
+const UNSERVED: &[&str] = &[
     "guestShare.create",
     "orchestration.getNativeChildWork",
     "provider.chatgpt.handoff.subscribe",
     "provider.consumeResetCredit",
-    "pullRequests.subscribeLinkedThreadRefreshes",
     "server.commitDesktopUpdate",
     "server.getStorageCleanupReport",
     "server.refreshProviders",
@@ -153,11 +115,10 @@ const UNSERVED_WITH_NODE: &[&str] = &[
 
 #[tokio::test]
 async fn every_served_method_refuses_a_session_missing_one_required_scope() {
-    sweep(Default::default(), UNSERVED_WITHOUT_NODE).await;
+    sweep(Default::default(), UNSERVED).await;
 }
 
-/// The same sweep with the optional groups served: the runner's Node on PATH (devices and
-/// preview) and preview's fake Playwright module, as `composition_preview` uses.
+/// The same registry and scope checks with an available Playwright worker.
 #[tokio::test]
 async fn every_optional_group_is_swept_when_its_runtime_is_present() {
     let name = if cfg!(windows) { "node.exe" } else { "node" };
@@ -215,7 +176,7 @@ exports.chromium=chromium;
         "T3_PREVIEW_PLAYWRIGHT_MODULE".into(),
         module.to_string_lossy().into_owned(),
     );
-    sweep(env, UNSERVED_WITH_NODE).await;
+    sweep(env, UNSERVED).await;
     let _ = std::fs::remove_file(module);
 }
 

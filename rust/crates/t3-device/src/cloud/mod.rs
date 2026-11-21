@@ -188,7 +188,7 @@ impl Accounts for AccountService {
 pub struct NativeHostFactory {
     pub state: PathBuf,
     pub environment_id: String,
-    pub node: String,
+    pub node: crate::io::NodeRuntime,
     pub agent_entry: PathBuf,
     pub tools: Arc<crate::tools::Toolchain>,
     pub http: Arc<dyn Http>,

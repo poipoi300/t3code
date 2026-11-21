@@ -34,7 +34,30 @@ pub enum Error {
 
 impl Error {
     pub fn host(id: &str, label: Option<&str>, reason: impl Into<String>) -> Self {
-        let reason = reason.into();
+        Self::host_with_cause(id, label, reason.into(), None)
+    }
+    pub(crate) fn needs_node(id: &str, label: &str, feature: &str, cause_feature: &str) -> Self {
+        let message = |feature: &str| {
+            format!(
+                "{feature} requires Node.js. Install Node.js and make sure node is on PATH, then retry."
+            )
+        };
+        Self::host_with_cause(
+            id,
+            Some(label),
+            message(feature),
+            Some(serde_json::json!({
+                "name": "NodeRuntimeUnavailableError",
+                "message": message(cause_feature)
+            })),
+        )
+    }
+    fn host_with_cause(
+        id: &str,
+        label: Option<&str>,
+        reason: String,
+        cause: Option<serde_json::Value>,
+    ) -> Self {
         Self::Device {
             wire: Box::new(DeviceError::DeviceHostUnavailableError(
                 DeviceHostUnavailableError {
@@ -42,7 +65,7 @@ impl Error {
                     host_id: id.into(),
                     host_label: label.map(|s| Some(s.into())),
                     reason: reason.clone(),
-                    cause: None,
+                    cause: cause.map(Some),
                 },
             )),
             reason,

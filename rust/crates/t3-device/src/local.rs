@@ -248,7 +248,7 @@ pub async fn platform_reason(
 pub struct LocalOptions {
     pub state: PathBuf,
     pub cwd: PathBuf,
-    pub node: String,
+    pub node: crate::io::NodeRuntime,
     pub tools: Arc<Toolchain>,
     pub http: Arc<dyn Http>,
     pub commands: Arc<dyn Commands>,
@@ -283,13 +283,14 @@ impl LocalDeviceHost {
             if let Some(old) = running.as_ref() {
                 old.cancel.cancel();
             }
-            if self.options.node.is_empty() {
-                return Err(Error::host(
+            let Some(node) = self.options.node.resolve() else {
+                return Err(Error::needs_node(
                     LOCAL_DEVICE_HOST_ID,
-                    Some(LOCAL_DEVICE_HOST_LABEL),
-                    "Local device support requires Node.js. Install Node.js and restart T3 Code.",
+                    LOCAL_DEVICE_HOST_LABEL,
+                    "Local device support",
+                    "Local device support",
                 ));
-            }
+            };
             if !self.options.tools.installed(Tool::Hub).await {
                 phase(DeviceHostStatus::Installing, None);
             }
@@ -309,7 +310,7 @@ impl LocalDeviceHost {
             if self.options.machine.platform() != "darwin" {
                 args.extend(["--platform".into(), "android".into()]);
             }
-            let mut command = Command::new(&self.options.node, args);
+            let mut command = Command::new(&node, args);
             command.cwd = Some(self.options.cwd.clone());
             let sdk = android_sdk(self.options.machine.as_ref()).await;
             let environment = device_environment(
@@ -355,7 +356,7 @@ impl LocalDeviceHost {
             let cli = vendor.join("serve-sim.js");
             let ready = Ready {
                 origin: origin.clone(),
-                node_path: self.options.node.clone(),
+                node_path: node,
                 devices: Arc::new(HubOperations {
                     host_id: LOCAL_DEVICE_HOST_ID.into(),
                     origin: origin.clone(),
@@ -440,7 +441,7 @@ impl LocalDeviceHost {
             }
             let tool = self.options.tools.ensure(Tool::Agent).await?;
             phase(DeviceHostStatus::Starting, None);
-            let endpoint = self.daemon(&tool.entry).await?;
+            let endpoint = self.daemon(&tool.entry, &ready.node_path).await?;
             let _ = self
                 .options
                 .tools
@@ -462,7 +463,7 @@ impl LocalDeviceHost {
         }
         Ok(ready)
     }
-    async fn daemon(&self, entry: &Path) -> Result<AgentEndpoint> {
+    async fn daemon(&self, entry: &Path, node: &str) -> Result<AgentEndpoint> {
         let state = self.options.state.join("device/agent-device");
         let file = state.join("daemon.json");
         if let Some(endpoint) = read_daemon(&file, entry).await
@@ -481,7 +482,7 @@ impl LocalDeviceHost {
             .await
             .map_err(|_| crate::error::invalid("daemon directory"))?;
         let mut command = Command::new(
-            &self.options.node,
+            node,
             [
                 entry.to_string_lossy().into_owned(),
                 "devices".into(),
@@ -591,11 +592,14 @@ impl LocalDeviceHost {
                 .paths(&self.options.tools.base, crate::tools::AGENT_VERSION)
                 .entry;
         }
+        let Some(node) = self.options.node.resolve() else {
+            return Ok(());
+        };
         if !self.options.machine.exists(&entry).await {
             return Ok(());
         }
         let mut command = Command::new(
-            &self.options.node,
+            node,
             [
                 entry.to_string_lossy().into_owned(),
                 "daemon".into(),

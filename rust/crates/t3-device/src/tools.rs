@@ -234,16 +234,24 @@ pub struct Toolchain {
     lock: Mutex<()>,
 }
 pub struct ToolchainAgentCli {
-    pub node: String,
+    pub node: crate::io::NodeRuntime,
     pub tools: Arc<Toolchain>,
 }
 #[async_trait]
 impl crate::host::AgentCliProvider for ToolchainAgentCli {
     async fn ensure(&self) -> Result<crate::host::AgentCli> {
-        crate::error::validate_arg(&self.node, "Node executable")?;
+        let Some(node) = self.node.resolve() else {
+            return Err(Error::needs_node(
+                t3_contracts::device::LOCAL_DEVICE_HOST_ID,
+                t3_contracts::device::LOCAL_DEVICE_HOST_LABEL,
+                "Device automation",
+                "Device automation",
+            ));
+        };
+        crate::error::validate_arg(&node, "Node executable")?;
         let paths = self.tools.ensure(Tool::Agent).await?;
         Ok(crate::host::AgentCli {
-            node: self.node.clone(),
+            node,
             entry: paths.entry,
         })
     }

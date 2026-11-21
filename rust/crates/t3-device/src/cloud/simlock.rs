@@ -102,7 +102,7 @@ pub async fn gateway_json(
 pub struct SimlockOptions {
     pub config: SimlockDeviceHostConfig,
     pub state: PathBuf,
-    pub node: String,
+    pub node: crate::io::NodeRuntime,
     pub agent_entry: PathBuf,
     pub cli_provider: Option<Arc<dyn crate::host::AgentCliProvider>>,
     pub commands: Arc<dyn Commands>,
@@ -564,7 +564,7 @@ impl SimlockHost {
             .cli
             .as_ref()
             .map(|cli| cli.node.clone())
-            .unwrap_or_else(|| self.inner.options.node.clone());
+            .unwrap_or_default();
         Ready {
             origin: self.inner.gateway.clone(),
             node_path: node,
@@ -614,12 +614,20 @@ impl DeviceHost for SimlockHost {
         if self.inner.state.lock().await.ready {
             return Ok(self.ready().await);
         }
+        let Some(node) = self.inner.options.node.resolve() else {
+            return Err(Error::needs_node(
+                self.id(),
+                self.label(),
+                "Local device support",
+                "Device automation",
+            ));
+        };
         phase(DeviceHostStatus::Installing, None);
         let cli = if let Some(provider) = &self.inner.options.cli_provider {
             provider.ensure().await?
         } else {
             crate::host::AgentCli {
-                node: self.inner.options.node.clone(),
+                node,
                 entry: self.inner.options.agent_entry.clone(),
             }
         };

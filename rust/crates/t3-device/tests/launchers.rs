@@ -21,7 +21,7 @@ async fn bound_launcher_preserves_arguments_overrides_environment_and_exit_code(
     tokio::fs::write(&entry,"console.log(JSON.stringify({args:process.argv.slice(2),base:process.env.AGENT_DEVICE_DAEMON_BASE_URL,token:process.env.AGENT_DEVICE_DAEMON_AUTH_TOKEN,config:process.env.AGENT_DEVICE_CONFIG}));process.exitCode=23;").await.unwrap();
     let launchers = FileLaunchers {
         state: dir.path().join("paths with spaces"),
-        node: runtime().await,
+        node: runtime().await.into(),
         entry,
         commands: Arc::new(NativeCommands),
         cli_provider: None,
@@ -164,7 +164,7 @@ async fn launcher_close_distinguishes_missing_sessions_from_failed_releases() {
     let entry = dir.path().join("fake-close.mjs");
     let launchers = FileLaunchers {
         state: dir.path().into(),
-        node: runtime().await,
+        node: runtime().await.into(),
         entry: entry.clone(),
         cli_provider: None,
         commands: Arc::new(NativeCommands),
@@ -213,7 +213,8 @@ async fn missing_bound_runtime_reports_recovery_guidance() {
             .path()
             .join("runtime-gone.exe")
             .to_string_lossy()
-            .into_owned(),
+            .into_owned()
+            .into(),
         entry,
         commands: Arc::new(NativeCommands),
         cli_provider: None,

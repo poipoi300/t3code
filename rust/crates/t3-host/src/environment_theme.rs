@@ -223,8 +223,22 @@ impl EnvironmentThemes {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
-                    let _ = tx.send(());
+                use notify::{
+                    EventKind,
+                    event::{AccessKind, AccessMode},
+                };
+                if let Ok(event) = event {
+                    // A scan opens the directory and its files. Read access must not queue
+                    // another scan, while a flushed write may be the final save event.
+                    let changed = match event.kind {
+                        EventKind::Access(access) => {
+                            matches!(access, AccessKind::Close(AccessMode::Write))
+                        }
+                        _ => true,
+                    };
+                    if changed || event.need_rescan() {
+                        let _ = tx.send(());
+                    }
                 }
             })
             .map_err(|_| Error::Service)?;

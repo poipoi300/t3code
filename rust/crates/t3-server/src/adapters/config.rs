@@ -47,6 +47,7 @@ pub struct LocalServices {
     pub managed_policy: Option<t3_contracts::managed_policy::ManagedPolicyDocument>,
     pub keybindings: Arc<KeybindingsService>,
     pub lifecycle: LifecycleEvents,
+    themes: Arc<t3_host::environment_theme::EnvironmentThemes>,
     database: Database,
     watchers: Vec<Box<dyn std::any::Any + Send + Sync>>,
     owner: std::sync::Mutex<ServerOwner>,
@@ -73,16 +74,21 @@ impl LocalServices {
             "platform": {"os": if cfg!(windows) {"windows"} else if cfg!(target_os="macos") {"darwin"} else {"linux"},
                 "arch": if cfg!(target_arch="aarch64") {"arm64"} else {"x64"}},
             "serverVersion": env!("CARGO_PKG_VERSION"), "orchestrationProtocolVersion":2,
-            "capabilities": {"repositoryIdentity": false, "connectionProbe": true}
+            "capabilities": {"repositoryIdentity": false, "connectionProbe": true, "environmentThemes": true}
         })).map_err(service_error)?;
         let settings =
             SettingsService::with_database(config.paths.settings(), Some(database.clone()));
         let keybindings = KeybindingsService::new(config.paths.keybindings());
         keybindings.sync_defaults().await.map_err(service_error)?;
-        let watchers: Vec<Box<dyn std::any::Any + Send + Sync>> = vec![
+        let themes = t3_host::environment_theme::EnvironmentThemes::new(config.paths.themes());
+        let mut watchers: Vec<Box<dyn std::any::Any + Send + Sync>> = vec![
             Box::new(settings.start().await.map_err(service_error)?),
             Box::new(keybindings.start().await.map_err(service_error)?),
         ];
+        match themes.start().await {
+            Ok(watcher) => watchers.push(Box::new(watcher)),
+            Err(error) => tracing::warn!(%error, "could not watch environment themes"),
+        }
         let immutable_assets = load_immutable_assets(config.static_dir.as_deref()).await;
         // `welcome`, `ready` and the runtime file are published by the composition root once
         // its recovery and listening barriers have passed (`publish_welcome` and friends).
@@ -95,6 +101,7 @@ impl LocalServices {
             managed_policy: policy,
             settings,
             keybindings,
+            themes,
             lifecycle,
             database,
             watchers,
@@ -322,6 +329,7 @@ impl LocalServices {
             managed_policy: _,
             keybindings,
             lifecycle: _,
+            themes: _,
             database,
             watchers,
             owner,
@@ -340,33 +348,74 @@ pub fn config_stream(
     services: Arc<crate::services::ServiceRegistry>,
 ) -> futures::stream::BoxStream<'static, crate::Result<t3_contracts::server::ServerConfigStreamEvent>>
 {
-    config_stream_for(services, false)
+    config_stream_for(services, false, false)
 }
 /// `secret_references` is the socket's `settingsSecretReferences` client capability.
 pub fn config_stream_for(
     services: Arc<crate::services::ServiceRegistry>,
     secret_references: bool,
+    environment_themes: bool,
 ) -> futures::stream::BoxStream<'static, crate::Result<t3_contracts::server::ServerConfigStreamEvent>>
 {
-    use futures::{StreamExt, future::Either};
+    use futures::StreamExt;
     async_stream::try_stream! {
-        let mut settings=services.local.settings.subscribe_changes();
-        let mut keys=services.local.keybindings.subscribe_changes();
-        let config=services.local.get_config_for(secret_references).await?;
-        yield serde_json::from_value(json!({"version":1,"type":"snapshot","config":config})).map_err(service_error)?;
+        let mut settings = services.local.settings.subscribe_changes();
+        let mut keys = services.local.keybindings.subscribe_changes();
+        let config = services.local.get_config_for(secret_references).await?;
+        yield serde_json::from_value(json!({"version": 1, "type": "snapshot", "config": config}))
+            .map_err(service_error)?;
+        let mut themes = if environment_themes {
+            let mut receiver = services.local.themes.stream_changes().await;
+            let initial = receiver.borrow_and_update().clone();
+            yield theme_event(initial);
+            Some(receiver)
+        } else {
+            None
+        };
         loop {
-            let change=tokio::select! {c=settings.recv()=>Either::Left(c),c=keys.recv()=>Either::Right(c)};
-            let event=match change {
-                Either::Left(Some(settings))=>{
-                    let value=redacted_settings(settings,secret_references)?;
-                    json!({"version":1,"type":"settingsUpdated","payload":{"settings":value}})
-                },
-                Either::Right(Some(keys))=>json!({"version":1,"type":"keybindingsUpdated","payload":{"keybindings":keys.keybindings,"issues":keys.issues}}),
-                _=>break,
+            let event = tokio::select! {
+                settings = settings.recv() => settings.map(|settings| {
+                    let value = redacted_settings(settings, secret_references)?;
+                    serde_json::from_value(json!({
+                        "version": 1, "type": "settingsUpdated", "payload": {"settings": value}
+                    })).map_err(service_error)
+                }),
+                keys = keys.recv() => keys.map(|keys| {
+                    serde_json::from_value(json!({
+                        "version": 1, "type": "keybindingsUpdated",
+                        "payload": {"keybindings": keys.keybindings, "issues": keys.issues}
+                    })).map_err(service_error)
+                }),
+                next = async {
+                    let Some(receiver) = &mut themes else {
+                        return std::future::pending().await;
+                    };
+                    receiver.changed().await.ok()?;
+                    Some(receiver.borrow_and_update().clone())
+                } => next.map(|themes| Ok(theme_event(themes))),
             };
-            yield serde_json::from_value(event).map_err(service_error)?;
+            let Some(event) = event else { break };
+            yield event?;
         }
-    }.boxed()
+    }
+    .boxed()
+}
+
+fn theme_event(
+    themes: Vec<t3_contracts::server::EnvironmentTheme>,
+) -> t3_contracts::server::ServerConfigStreamEvent {
+    use t3_contracts::server::{
+        ServerConfigEnvironmentThemesUpdatedPayload,
+        ServerConfigStreamEnvironmentThemesUpdatedEvent,
+        ServerConfigStreamEnvironmentThemesUpdatedType, ServerConfigStreamEvent,
+    };
+    ServerConfigStreamEvent::EnvironmentThemesUpdated(
+        ServerConfigStreamEnvironmentThemesUpdatedEvent {
+            version: t3_contracts::resource_telemetry::WireLiteral,
+            r#type: ServerConfigStreamEnvironmentThemesUpdatedType::EnvironmentThemesUpdated,
+            payload: ServerConfigEnvironmentThemesUpdatedPayload { themes },
+        },
+    )
 }
 
 fn redacted_settings(settings: ServerSettings, secret_references: bool) -> crate::Result<Value> {

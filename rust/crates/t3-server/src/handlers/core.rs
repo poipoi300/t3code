@@ -33,19 +33,24 @@ pub fn register(registry: &mut HandlerRegistry) -> crate::Result<()> {
                 .await
                 .map_err(internal)
         })?;
-        registry.register_stream::<WsSubscribeServerConfigRpc, _, _, _>(|ctx, _| async move {
-            #[cfg(feature = "providers")]
-            return Ok(crate::adapters::providers::config_stream_for(
-                ctx.services,
-                ctx.secret_references,
-            )
-            .map(|v| v.map_err(Failure::Typed)));
-            #[cfg(not(feature = "providers"))]
-            Ok(
-                crate::adapters::config::config_stream_for(ctx.services, ctx.secret_references)
-                    .map(|v| v.map_err(internal)),
-            )
-        })?;
+        registry.register_stream::<WsSubscribeServerConfigRpc, _, _, _>(
+            |ctx, input| async move {
+                #[cfg(feature = "providers")]
+                return Ok(crate::adapters::providers::config_stream_for(
+                    ctx.services,
+                    ctx.secret_references,
+                    input.environment_themes.flatten() == Some(true),
+                )
+                .map(|v| v.map_err(Failure::Typed)));
+                #[cfg(not(feature = "providers"))]
+                Ok(crate::adapters::config::config_stream_for(
+                    ctx.services,
+                    ctx.secret_references,
+                    input.environment_themes.flatten() == Some(true),
+                )
+                .map(|v| v.map_err(internal)))
+            },
+        )?;
         registry.register_stream::<WsSubscribeAuthAccessRpc, _, _, _>(|ctx, _| async move {
             Ok(
                 crate::adapters::auth::access_stream(ctx.services, ctx.session_id)

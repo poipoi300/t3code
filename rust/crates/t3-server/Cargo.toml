@@ -12,6 +12,7 @@ workspace = true
 default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp", "textgen-native"]
 local-services = [
     "dep:t3-auth",
+    "dep:t3-host",
     "dep:t3-config",
     "dep:t3-persistence",
     "dep:clap",

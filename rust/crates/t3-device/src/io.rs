@@ -2,8 +2,55 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use std::{collections::BTreeMap, fmt, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 use t3_process::{ProcessOptions, SpawnedProcess};
+
+/// Device hosts may pin a runtime or look up Node against the server's captured PATH.
+#[derive(Clone)]
+pub enum NodeRuntime {
+    Executable(String),
+    SearchPath(Vec<PathBuf>),
+}
+impl From<String> for NodeRuntime {
+    fn from(value: String) -> Self {
+        Self::Executable(value)
+    }
+}
+impl From<&str> for NodeRuntime {
+    fn from(value: &str) -> Self {
+        Self::Executable(value.into())
+    }
+}
+impl NodeRuntime {
+    pub fn from_search_path(path: Option<&std::ffi::OsStr>) -> Self {
+        Self::SearchPath(
+            path.into_iter()
+                .flat_map(std::env::split_paths)
+                .filter(|directory| directory.is_absolute())
+                .collect(),
+        )
+    }
+    pub fn resolve(&self) -> Option<String> {
+        match self {
+            Self::Executable(node) => (!node.is_empty()).then(|| node.clone()),
+            Self::SearchPath(directories) => {
+                let name = if cfg!(windows) { "node.exe" } else { "node" };
+                let node = directories.iter().map(|dir| dir.join(name)).find(|path| {
+                    path.is_file()
+                        && t3_process::resolve_command_path(path.as_os_str(), &Default::default())
+                            .is_some()
+                })?;
+                // Preserve the invoked alias for version-manager shims, but reject our own
+                // binary (including symlinks and hard links), as TS resolveNodeExecutable does.
+                let server = std::env::current_exe().ok()?;
+                if same_file::is_same_file(&node, server).ok()? {
+                    return None;
+                }
+                Some(node.to_string_lossy().into_owned())
+            }
+        }
+    }
+}
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 

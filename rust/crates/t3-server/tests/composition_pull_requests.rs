@@ -172,7 +172,9 @@ struct Server {
 
 impl Server {
     async fn start() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        Self::start_in(tempfile::tempdir().unwrap()).await
+    }
+    async fn start_in(temp: tempfile::TempDir) -> Self {
         let home = temp.path();
         let env = ["SystemRoot", "ComSpec", "WINDIR"]
             .into_iter()
@@ -569,21 +571,68 @@ async fn writes_reach_the_driver_once_and_notify_refresh_subscribers() {
 }
 
 #[tokio::test]
-async fn only_the_methods_without_a_backend_stay_unserved() {
-    let s = Server::start().await;
-    let mut unserved: Vec<String> = s
-        .runtime
-        .unserved_methods
-        .iter()
-        .filter(|method| method.starts_with("pullRequests."))
-        .map(|method| method.to_string())
-        .collect();
-    unserved.sort();
+async fn renaming_a_persisted_linked_thread_publishes_a_revision_and_reconnecting_replays_it() {
+    let mut s = Server::start().await;
+    let method = "pullRequests.subscribeLinkedThreadRefreshes";
+    assert!(!s.runtime.unserved_methods.contains(&method));
+    s.insert_project("bound", "github-app");
+    ok(s.call("orchestration.dispatchCommand", json!({
+        "type":"thread.create", "commandId":"create", "threadId":"thread", "projectId":"bound",
+        "title":"Linked thread", "modelSelection":{"instanceId":"codex","model":"gpt-5"},
+        "runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,
+        "createdBy":"user","creationSource":"web"
+    })).await);
+    // A link can predate this Rust process (e.g. a TypeScript-created thread).
+    s.runtime.shutdown().await.unwrap();
+    {
+        let db = t3_persistence::rusqlite::Connection::open(
+            s.temp.path().join("userdata/statev2.sqlite"),
+        )
+        .unwrap();
+        let links = json!([{"host":"github.com","repository":"owner/repo","number":7,
+            "url":"https://github.com/owner/repo/pull/7","source":"manual",
+            "linkedAt":"2026-01-01T00:00:00Z","snapshot":null,"stack":null}]);
+        assert_eq!(db.execute("UPDATE orchestration_v2_projection_threads SET payload_json=json_set(payload_json,'$.pullRequests',json(?1)) WHERE thread_id='thread'",[links.to_string()]).unwrap(),1);
+    }
+    let mut s = Server::start_in(s.temp).await;
+    let config = ok(s.call("server.getConfig", json!({})).await);
     assert_eq!(
-        unserved,
-        [
-            "pullRequests.subscribeLinkedThreadRefreshes"
-        ]
+        config["environment"]["capabilities"]["linkedThreadRefreshes"],
+        true
     );
+    s.client.start(method, json!({}), CallKind::Stream).unwrap();
+    let command = s
+        .client
+        .start(
+            "orchestration.dispatchCommand",
+            json!({
+                "type":"thread.metadata.update","commandId":"rename","threadId":"thread","title":"Renamed"
+            }),
+            CallKind::Unary,
+        )
+        .unwrap();
+    let mut revision = None;
+    let mut linked = false;
+    while revision.is_none() || !linked {
+        match s.event().await {
+            CallEvent::Chunk { id, values } => {
+                s.client.acknowledge(id);
+                revision = Some(values[0].clone());
+            }
+            CallEvent::Exit { id, exit } if id == command => {
+                ok(exit);
+                linked = true;
+            }
+            event => panic!("unexpected event {event:?}"),
+        }
+    }
+    assert_eq!(revision, Some(json!(1)));
+    let linked_threads = ok(s
+        .call("pullRequests.linkedThreads", reference("bound", 7))
+        .await);
+    assert_eq!(linked_threads["threads"][0]["title"], "Renamed");
+    s.reconnect().await;
+    s.client.start(method, json!({}), CallKind::Stream).unwrap();
+    assert_eq!(s.chunk().await, json!(1));
     s.runtime.shutdown().await.unwrap();
 }

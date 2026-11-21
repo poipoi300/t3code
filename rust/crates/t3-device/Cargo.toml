@@ -9,6 +9,7 @@ default = []
 mcp = ["dep:t3-mcp"]
 
 [dependencies]
+same-file = "1"
 t3-contracts = { path = "../t3-contracts" }
 t3-process = { path = "../t3-process" }
 t3-mcp = { path = "../t3-mcp", default-features = false, optional = true }

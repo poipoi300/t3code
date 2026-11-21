@@ -680,3 +680,27 @@ fn ssh_bootstrap_and_targets_validate_before_spawning() {
         "'a b '\"'\"'quoted'\"'\"' $(literal)\nnext'"
     );
 }
+
+#[test]
+fn missing_node_can_be_installed_and_removed_while_the_server_runs() {
+    use t3_device::io::NodeRuntime;
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let path = std::env::join_paths([root.path().join("empty"), bin.clone()]).unwrap();
+    let runtime = NodeRuntime::from_search_path(Some(&path));
+    assert!(runtime.resolve().is_none());
+    let node = bin.join(if cfg!(windows) { "node.exe" } else { "node" });
+    std::fs::copy(std::env::current_exe().unwrap(), &node).unwrap();
+    assert_eq!(runtime.resolve().as_deref(), node.to_str());
+    std::fs::remove_file(&node).unwrap();
+    assert!(runtime.resolve().is_none());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &node).unwrap();
+        assert!(
+            runtime.resolve().is_none(),
+            "server alias cannot launch Node tooling"
+        );
+    }
+}

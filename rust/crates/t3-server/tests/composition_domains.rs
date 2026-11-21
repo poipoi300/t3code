@@ -523,35 +523,11 @@ async fn host_database_storage_and_scoped_host_services() {
     s.runtime.shutdown().await.unwrap();
 }
 
-/// Devices: one runtime when a Node runtime is on PATH (here a stand-in file nothing runs),
-/// unsupported without one. Device support stays off, so no host or hub starts.
+/// Device settings and state are native. Only starting a local hub needs Node.
 #[cfg(feature = "device")]
 #[tokio::test]
-async fn devices_are_served_with_a_node_runtime_and_unsupported_without() {
-    let mut absent = Server::start().await;
-    let exit = absent
-        .call("device.list", json!({"inspectOnly": true}))
-        .await;
-    let encoded = serde_json::to_value(&exit).unwrap();
-    assert_eq!(
-        encoded["cause"][0]["defect"], "Unknown request tag: device.list",
-        "{encoded}"
-    );
-    let without_node = absent.runtime.rpc_methods_served;
-    absent.runtime.shutdown().await.unwrap();
-
-    let mut s = Server::start_with(|home| {
-        let bin = home.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let node = if cfg!(windows) { "node.exe" } else { "node" };
-        std::fs::write(bin.join(node), "").unwrap();
-        vec![("PATH".into(), bin.to_string_lossy().into_owned())]
-    })
-    .await;
-    // The eleven device methods are the only difference a Node runtime makes.
-    let with_node = s.runtime.rpc_methods_served;
-    println!("RPC methods served: {without_node} without Node, {with_node} with Node (of 220)");
-    assert_eq!(with_node, without_node + 11);
+async fn devices_serve_state_and_report_local_tool_requirements_without_node() {
+    let mut s = Server::start().await;
     s.client
         .start("subscribeDeviceState", json!({}), CallKind::Stream)
         .unwrap();
@@ -561,6 +537,28 @@ async fn devices_are_served_with_a_node_runtime_and_unsupported_without() {
     assert!(listed["hosts"].is_array(), "{listed}");
     let configured = ok(s.call("device.configure", json!({"enabled": false})).await);
     assert!(configured["hosts"].is_array(), "{configured}");
+
+    ok(s.call("device.configure", json!({"enabled": true})).await);
+    let exit = s
+        .call(
+            "device.detail",
+            json!({"hostId":"local","deviceId":"missing"}),
+        )
+        .await;
+    let wire = serde_json::to_value(exit).unwrap();
+    let error = &wire["cause"][0]["error"];
+    assert_eq!(error["_tag"], "DeviceHostUnavailableError", "{wire}");
+    assert_eq!(error["hostId"], "local");
+    assert_eq!(
+        error["reason"],
+        "Local device support requires Node.js. Install Node.js and make sure node is on PATH, then retry."
+    );
+    assert_eq!(error["hostLabel"], "This machine");
+    assert_eq!(
+        error["cause"],
+        json!({"name": "NodeRuntimeUnavailableError", "message":error["reason"]})
+    );
+    ok(s.call("device.configure", json!({"enabled": false})).await);
 
     // The hub proxy: its policy, then authentication, then readiness (nothing is running).
     let http = reqwest::Client::new();

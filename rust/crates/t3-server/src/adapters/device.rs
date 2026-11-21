@@ -2,14 +2,8 @@
 //!
 //! One `DeviceRuntime` per environment (`device/DeviceService.ts` and `DeviceHubProxy.ts`): its
 //! service serves the device RPCs, its router the hub proxy, and its shutdown retires every
-//! host. It is assembled only when a Node runtime is found on the server's PATH, which the
-//! agent launchers require; without one the device methods answer unsupported.
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    net::IpAddr,
-    path::PathBuf,
-    sync::Arc,
-};
+//! host. A local Node executable is needed only to run the device hub or agent tooling.
+use std::{collections::BTreeSet, net::IpAddr, sync::Arc};
 use t3_contracts::{
     auth::{AuthEnvironmentScope, AuthWebSocketTicketUse},
     settings_secret_value::SettingsSecretValue,
@@ -28,18 +22,18 @@ pub struct DeviceAdapter {
 }
 
 impl DeviceAdapter {
-    /// `None` when no Node runtime is on PATH (`resolveNodeExecutable` fails in TypeScript).
     #[cfg(feature = "local-services")]
     pub async fn start(
         context: &crate::services::DomainContext<'_>,
         workspaces: Arc<crate::workspaces::EnvironmentWorkspaces>,
         resolver: Option<Arc<t3_provider::secrets::SecretResolver>>,
-    ) -> crate::Result<Option<Arc<Self>>> {
-        let Some(node) = resolve_node(&context.environment) else {
-            tracing::info!("device support is unavailable: no Node runtime on PATH");
-            return Ok(None);
-        };
-        let node = node.to_string_lossy().into_owned();
+    ) -> crate::Result<Arc<Self>> {
+        let path = context
+            .environment
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| std::ffi::OsStr::new(value));
+        let node = io::NodeRuntime::from_search_path(path);
         let service = |e: t3_device::Error| crate::Error::Service(e.to_string());
         let config = &context.local.config;
         let base = config.paths.base_dir.clone();
@@ -130,10 +124,10 @@ impl DeviceAdapter {
                 }
             }
         });
-        Ok(Some(Arc::new(Self {
+        Ok(Arc::new(Self {
             runtime,
             workspaces,
-        })))
+        }))
     }
 
     /// The thread's own workspace for `device.open`; never a path from the client.
@@ -157,23 +151,6 @@ impl crate::services::DomainRuntime for DeviceAdapter {
                 .map_err(|e| crate::Error::Service(e.to_string()))
         })
     }
-}
-
-/// `resolveNodeExecutable`: an absolute Node path from the server's environment PATH.
-fn resolve_node(environment: &BTreeMap<String, String>) -> Option<PathBuf> {
-    let path = environment
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value)?;
-    let names: &[&str] = if cfg!(windows) {
-        &["node.exe"]
-    } else {
-        &["node"]
-    };
-    std::env::split_paths(path)
-        .filter(|directory| directory.is_absolute())
-        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
-        .find(|candidate| candidate.is_file())
 }
 
 /// Every assigned interface address, tailnet ones included (`LocalDeviceHostAddresses`).

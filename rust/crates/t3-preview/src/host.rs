@@ -1,11 +1,11 @@
 use crate::{
-    Error, HtmlService, PreviewService, Result,
+    BrowserDriver, Error, HtmlService, PreviewService, Result,
     browser::PreviewOptions,
     desktop::DesktopBrowserChannel,
     discovery::PortDiscovery,
     driver::PlaywrightOptions,
     html::{HtmlOptions, HtmlRenderRecovery},
-    installer::{ManagedBrowserDriver, PreviewBrowser},
+    installer::{ManagedBrowserDriver, PreviewBrowser, UnavailableBrowserDriver},
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -116,6 +116,21 @@ console.log(JSON.stringify({node:process.execPath,module}));}catch(error){consol
         })
     }
 }
+impl HostInputs {
+    fn validate_paths(&self) -> Result<()> {
+        for (name, path) in [
+            ("base_dir", &self.base_dir),
+            ("state_dir", &self.state_dir),
+            ("attachments_dir", &self.attachments_dir),
+            ("secrets_dir", &self.secrets_dir),
+        ] {
+            if !path.is_absolute() {
+                return Err(configuration(format!("{name} must be absolute.")));
+            }
+        }
+        Ok(())
+    }
+}
 impl PreviewHost {
     /// Validates JavaScript dependencies now; Chrome installation remains lazy and managed.
     pub async fn new(input: HostInputs) -> Result<Self> {
@@ -126,44 +141,74 @@ impl PreviewHost {
         .await
     }
     pub async fn new_with_discovery(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
-        let runtime = input.runtime.validate().await?;
-        for (name, path) in [
-            ("base_dir", &input.base_dir),
-            ("state_dir", &input.state_dir),
-            ("attachments_dir", &input.attachments_dir),
-            ("secrets_dir", &input.secrets_dir),
-        ] {
-            if !path.is_absolute() {
-                return Err(configuration(format!("{name} must be absolute.")));
-            }
+        input.validate_paths()?;
+        let runtime = input.runtime.clone().validate().await?;
+        let PreviewServices {
+            preview,
+            html,
+            discovery,
+        } = PreviewServices::build(input, Some(&runtime), discovery_enabled).await?;
+        Ok(Self {
+            runtime,
+            preview,
+            html,
+            discovery,
+        })
+    }
+}
+
+/// Native session management, HTML publication and port discovery outlive browser availability.
+pub struct PreviewServices {
+    pub preview: PreviewService,
+    pub html: HtmlService,
+    pub discovery: PortDiscovery,
+}
+impl PreviewServices {
+    pub async fn start(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
+        input.validate_paths()?;
+        let runtime = input.runtime.clone().validate().await;
+        if let Err(error) = &runtime {
+            tracing::info!(%error, "Server browser worker unavailable");
         }
+        Self::build(input, runtime.as_ref().ok(), discovery_enabled).await
+    }
+
+    async fn build(
+        input: HostInputs,
+        runtime: Option<&ValidatedRuntime>,
+        discovery_enabled: bool,
+    ) -> Result<Self> {
         let profiles = input.state_dir.join("server-browser/profiles");
         let downloads = input.state_dir.join("server-browser/downloads");
-        for directory in [&profiles, &downloads, &input.attachments_dir] {
-            tokio::fs::create_dir_all(directory)
-                .await
-                .map_err(|error| {
-                    configuration(format!(
-                        "Cannot prepare preview directory {}: {error}",
-                        directory.display()
-                    ))
-                })?;
-        }
-        let installer = PreviewBrowser::new(input.base_dir)?;
-        let options = PlaywrightOptions {
-            node: runtime.node.clone(),
-            cwd: input.state_dir.clone(),
-            executable: PathBuf::new(),
-            profiles_dir: profiles,
-            downloads_dir: downloads,
-            attachments_dir: input.attachments_dir.clone(),
-            playwright_module: Some(runtime.playwright_module.clone()),
-            sandbox: input.sandbox,
+        let driver: Arc<dyn BrowserDriver> = if let Some(runtime) = runtime {
+            for directory in [&profiles, &downloads, &input.attachments_dir] {
+                tokio::fs::create_dir_all(directory)
+                    .await
+                    .map_err(|error| {
+                        configuration(format!(
+                            "Cannot prepare preview directory {}: {error}",
+                            directory.display()
+                        ))
+                    })?;
+            }
+            let installer = PreviewBrowser::new(input.base_dir)?;
+            let options = PlaywrightOptions {
+                node: runtime.node.clone(),
+                cwd: input.state_dir.clone(),
+                executable: PathBuf::new(),
+                profiles_dir: profiles,
+                downloads_dir: downloads,
+                attachments_dir: input.attachments_dir.clone(),
+                playwright_module: Some(runtime.playwright_module.clone()),
+                sandbox: input.sandbox,
+            };
+            Arc::new(
+                ManagedBrowserDriver::new(installer, options)
+                    .with_node_environment(runtime.environment.clone()),
+            )
+        } else {
+            Arc::new(UnavailableBrowserDriver { profiles })
         };
-        let driver = Arc::new(
-            ManagedBrowserDriver::new(installer, options)
-                .with_node_environment(runtime.environment.clone()),
-        );
         let preview = PreviewService::new(
             driver.clone(),
             PreviewOptions {
@@ -179,10 +224,9 @@ impl PreviewHost {
                 secrets_dir: input.secrets_dir,
                 recovery: input.recovery,
             },
-            Some(driver),
+            runtime.map(|_| driver),
         );
         Ok(Self {
-            runtime,
             preview,
             html,
             discovery: PortDiscovery::with_options(discovery_enabled, "/proc".into())?,

@@ -281,48 +281,50 @@ fn failure(exit: Exit, tag: &str) -> Value {
 }
 
 #[tokio::test]
-async fn preview_is_optional_without_node_and_all_eleven_methods_are_served_with_it() {
-    let mut absent = Server::start(false).await;
-    for method in METHODS {
-        assert!(absent.runtime.unserved_methods.contains(method), "{method}");
-    }
-    let exit = absent
-        .call("preview.list", json!({"threadId":"thread"}))
+async fn preview_sessions_and_profile_cleanup_work_without_a_browser_worker() {
+    for missing_module in [false, true] {
+        let mut server = Server::start_with(missing_module, |root, env| {
+            if missing_module {
+                env.insert(
+                    "T3_PREVIEW_PLAYWRIGHT_MODULE".into(),
+                    root.join("missing.cjs").to_string_lossy().into_owned(),
+                );
+            }
+        })
         .await;
-    assert_eq!(
-        serde_json::to_value(exit).unwrap()["cause"][0]["defect"],
-        "Unknown request tag: preview.list"
-    );
-    absent.runtime.shutdown().await.unwrap();
-    let missing = Server::start_with(true, |root, environment| {
-        environment.insert(
-            "T3_PREVIEW_PLAYWRIGHT_MODULE".into(),
-            root.join("missing-playwright.cjs")
-                .to_string_lossy()
-                .into_owned(),
+        server.thread("thread");
+        let sessions = success(
+            server
+                .call("preview.list", json!({"threadId":"thread"}))
+                .await,
         );
-    })
-    .await;
-    for method in METHODS {
-        assert!(
-            missing.runtime.unserved_methods.contains(method),
-            "{method}"
+        assert_eq!(sessions["sessions"], json!([]));
+        assert!(sessions["serverEpoch"].is_string());
+        let profile = server
+            .root
+            .path()
+            .join("userdata/server-browser/profiles/work");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("Preferences"), "saved").unwrap();
+        success(
+            server
+                .call("preview.clearProfile", json!({"profileId":"work"}))
+                .await,
         );
+        assert!(!profile.exists());
+        for method in METHODS {
+            assert!(
+                !server.runtime.unserved_methods.contains(method),
+                "{method}"
+            );
+        }
+        server.runtime.shutdown().await.unwrap();
     }
-    missing.runtime.shutdown().await.unwrap();
-    let server = Server::start(true).await;
-    for method in METHODS {
-        assert!(
-            !server.runtime.unserved_methods.contains(method),
-            "{method}"
-        );
-    }
-    server.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn preview_mutations_emit_events_validate_urls_and_refuse_tabs_from_another_thread() {
-    let mut s = Server::start(true).await;
+    let mut s = Server::start(false).await;
     s.thread("one");
     s.thread("two");
     s.client
@@ -409,7 +411,7 @@ async fn preview_mutations_emit_events_validate_urls_and_refuse_tabs_from_anothe
 
 #[tokio::test]
 async fn preview_profiles_clear_real_storage_and_map_failures_without_raw_paths() {
-    let mut s = Server::start(true).await;
+    let mut s = Server::start(false).await;
     success(s.call("preview.reportProfiles",json!({"profiles":[{"id":"work","name":"Work","kind":"persistent"}],"defaultProfileId":"work","recordingFrameRate":30})).await);
     let saved: Value = serde_json::from_slice(
         &std::fs::read(
@@ -547,7 +549,7 @@ server.listen(0, '127.0.0.1', () => console.log(server.address().port));
         .parse()
         .unwrap();
     let url = format!("http://127.0.0.1:{port}/");
-    let mut s = Server::start(true).await;
+    let mut s = Server::start(false).await;
     s.client
         .start(
             "subscribeDiscoveredLocalServers",

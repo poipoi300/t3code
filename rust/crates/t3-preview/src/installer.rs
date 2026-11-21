@@ -504,6 +504,46 @@ pub async fn diagnose_launch_failure(
     None
 }
 
+/// No worker owns a context, so profile cleanup only touches its encoded directory.
+async fn clear_inactive_profile(root: &Path, profile_id: &str) -> Result<()> {
+    crate::profiles::validate_profile_id(profile_id)?;
+    if profile_id != "incognito" {
+        match tokio::fs::remove_dir_all(crate::urls::profile_directory(root, profile_id)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) struct UnavailableBrowserDriver {
+    pub profiles: PathBuf,
+}
+#[async_trait]
+impl BrowserDriver for UnavailableBrowserDriver {
+    async fn call(&self, command: BrowserCommand, _: Duration) -> Result<Value> {
+        match command {
+            BrowserCommand::ClearProfile { profile_id } => {
+                clear_inactive_profile(&self.profiles, &profile_id).await?
+            }
+            BrowserCommand::Shutdown
+            | BrowserCommand::Close { .. }
+            | BrowserCommand::DiscardPopup { .. } => {}
+            _ => {
+                return Err(Error::operation(
+                    "PreviewAutomationExecutionError",
+                    "Server browser automation requires Node.js and playwright-core.",
+                ));
+            }
+        }
+        Ok(Value::Null)
+    }
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<BrowserEvent> {
+        mpsc::unbounded_channel().1
+    }
+}
+
 pub struct ManagedBrowserDriver {
     node_environment: t3_process::Environment,
     generation: std::sync::atomic::AtomicU64,
@@ -588,18 +628,7 @@ impl ManagedBrowserDriver {
             if driver.is_none() {
                 match &command {
                     BrowserCommand::ClearProfile { profile_id } => {
-                        crate::profiles::validate_profile_id(profile_id)?;
-                        if profile_id != "incognito" {
-                            let path = crate::urls::profile_directory(
-                                &self.options.profiles_dir,
-                                profile_id,
-                            );
-                            match tokio::fs::remove_dir_all(path).await {
-                                Ok(()) => {}
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(error) => return Err(error.into()),
-                            }
-                        }
+                        clear_inactive_profile(&self.options.profiles_dir, profile_id).await?;
                         return Ok(Value::Null);
                     }
                     BrowserCommand::Shutdown

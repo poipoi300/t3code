@@ -315,6 +315,22 @@ impl PullRequestAdapter {
         }))
     }
 
+    /// Follow committed changes even while no clients are subscribed, so a reconnect gets the current revision.
+    pub fn follow_linked_threads(
+        &self,
+        events: tokio::sync::broadcast::Receiver<
+            Arc<t3_contracts::application_event::ApplicationStoredEvent>,
+        >,
+    ) {
+        let service = self.service.clone();
+        self.maintenance
+            .spawn(t3_pull_request::linked::follow_changes(
+                events,
+                self.stop.clone(),
+                move || service.notify_linked_threads_changed(),
+            ));
+    }
+
     /// `pullRequests.linkedThreads` (`ws.ts`, `resolvePullRequestSyncKey`): a reference naming
     /// its host and `owner/name` repository keys itself; otherwise the selected project's
     /// binding supplies the canonical key. Unresolvable references have no linked threads.

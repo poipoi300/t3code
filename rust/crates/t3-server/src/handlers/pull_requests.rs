@@ -2,8 +2,6 @@
 //! RPC guard has already applied each method's scope.
 //!
 //! `generateReviewGuide` is registered beside its generator (`handlers/git_actions.rs`).
-//! Unserved even with the adapter: `subscribeLinkedThreadRefreshes` (its only producer,
-//! orchestration's thread pull-request service, is not composed).
 use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
@@ -127,25 +125,30 @@ mod live {
             .set_labels(input));
         // `SubscriptionRef.changes` filtered to revisions above zero: the current revision first
         // when there is one, then each change. Dropping the stream unsubscribes.
-        registry.register_stream::<WsPullRequestsSubscribeRefreshesRpc, _, _, _>(move |_, _| {
-            let mut revisions = adapter.service.subscribe_refreshes();
-            async move {
-                Ok(async_stream::stream! {
+        fn revisions(
+            mut revisions: tokio::sync::watch::Receiver<u64>,
+        ) -> impl futures::Stream<
+            Item = Result<u64, Failure<t3_contracts::auth::EnvironmentAuthorizationError>>,
+        > {
+            async_stream::stream! {
+                loop {
                     let current = *revisions.borrow_and_update();
-                    if current > 0 {
-                        yield Ok(current);
-                    }
-                    while revisions.changed().await.is_ok() {
-                        let revision = *revisions.borrow_and_update();
-                        if revision > 0 {
-                            yield Ok(revision);
-                        }
-                    }
-                })
+                    if current > 0 { yield Ok(current); }
+                    if revisions.changed().await.is_err() { break; }
+                }
             }
+        }
+        let service = adapter.service.clone();
+        registry.register_stream::<WsPullRequestsSubscribeRefreshesRpc, _, _, _>(move |_, _| {
+            let stream = revisions(service.subscribe_refreshes());
+            async move { Ok(stream) }
         })?;
-        // `generateReviewGuide` is registered with the generator (`handlers/git_actions.rs`).
-        registry.unimplemented::<WsPullRequestsSubscribeLinkedThreadRefreshesRpc>()
+        registry.register_stream::<WsPullRequestsSubscribeLinkedThreadRefreshesRpc, _, _, _>(
+            move |_, _| {
+                let stream = revisions(adapter.service.subscribe_linked_thread_refreshes());
+                async move { Ok(stream) }
+            },
+        )
     }
 }
 

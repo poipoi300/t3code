@@ -12,7 +12,7 @@ use t3_contracts::{
 use t3_preview::{
     PreviewService,
     discovery::{DiscoveryRetention, PortDiscovery},
-    host::{HostInputs, PreviewHost, RuntimeInputs},
+    host::{HostInputs, PreviewServices, RuntimeInputs},
     profiles::ProfileReporter,
 };
 
@@ -34,12 +34,8 @@ fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 impl PreviewAdapter {
-    pub async fn start(context: &DomainContext<'_>) -> crate::Result<Option<Arc<Self>>> {
+    pub async fn start(context: &DomainContext<'_>) -> crate::Result<Arc<Self>> {
         let environment = &context.environment;
-        let Some(node) = node(environment) else {
-            tracing::info!("preview support is unavailable: no Node runtime configured or on PATH");
-            return Ok(None);
-        };
         let paths = &context.local.config.paths;
         let module = environment
             .get("T3_PREVIEW_PLAYWRIGHT_MODULE")
@@ -58,16 +54,14 @@ impl PreviewAdapter {
                     .ok()
                     .and_then(|path| path.parent().map(PathBuf::from))
             });
-        let Some(module_root) = root else {
-            return Ok(None);
-        };
+        let module_root = root.unwrap_or_default();
         let discovery_enabled = environment
             .get("T3CODE_PORT_DISCOVERY")
             .is_none_or(|value| value != "0");
-        let host = match PreviewHost::new_with_discovery(
+        let host = PreviewServices::start(
             HostInputs {
                 runtime: RuntimeInputs {
-                    node: Some(node),
+                    node: node(environment),
                     module_root,
                     playwright_module: module,
                     electron_run_as_node: environment
@@ -87,24 +81,11 @@ impl PreviewAdapter {
             discovery_enabled,
         )
         .await
-        {
-            Ok(host) => host,
-            Err(error) if error.tag() == "PreviewHostConfigurationError" => {
-                tracing::info!(
-                    "preview support is unavailable: Node or Playwright startup validation failed"
-                );
-                return Ok(None);
-            }
-            Err(_) => {
-                return Err(crate::Error::Service(
-                    "Preview runtime initialization failed.".into(),
-                ));
-            }
-        };
+        .map_err(|error| crate::Error::Service(error.to_string()))?;
         let retention = host.discovery.retain().await.map_err(|_| {
             crate::Error::Service("Preview discovery initialization failed.".into())
         })?;
-        Ok(Some(Arc::new(Self {
+        Ok(Arc::new(Self {
             browser: host.preview,
             html: host.html,
             discovery: host.discovery,
@@ -115,7 +96,7 @@ impl PreviewAdapter {
             terminal_task: Mutex::new(None),
             #[cfg(feature = "terminal")]
             discovery_enabled,
-        })))
+        }))
     }
     pub async fn require_thread(&self, thread: &str) -> Result<(), EnvironmentAuthorizationError> {
         let thread = thread.to_owned();

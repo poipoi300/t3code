@@ -123,21 +123,32 @@ pub trait Launchers: Send + Sync {
 
 pub struct FileLaunchers {
     pub state: PathBuf,
-    pub node: String,
+    pub node: crate::io::NodeRuntime,
     pub entry: PathBuf,
     pub cli_provider: Option<Arc<dyn crate::host::AgentCliProvider>>,
     pub commands: Arc<dyn crate::io::Commands>,
 }
 impl FileLaunchers {
+    async fn cli(&self) -> Result<crate::host::AgentCli> {
+        if let Some(provider) = &self.cli_provider {
+            return provider.ensure().await;
+        }
+        let node = self.node.resolve().ok_or_else(|| {
+            Error::needs_node(
+                t3_contracts::device::LOCAL_DEVICE_HOST_ID,
+                t3_contracts::device::LOCAL_DEVICE_HOST_LABEL,
+                "Device automation",
+                "Device automation",
+            )
+        })?;
+        Ok(crate::host::AgentCli {
+            node,
+            entry: self.entry.clone(),
+        })
+    }
+
     pub async fn ensure_shim(&self) -> Result<PathBuf> {
-        let cli = if let Some(provider) = &self.cli_provider {
-            provider.ensure().await?
-        } else {
-            crate::host::AgentCli {
-                node: self.node.clone(),
-                entry: self.entry.clone(),
-            }
-        };
+        let cli = self.cli().await?;
         let dir = self.state.join("device/bin");
         self.write_launcher(dir.clone(), &cli, &[]).await?;
         Ok(dir)
@@ -210,25 +221,22 @@ impl Launchers for FileLaunchers {
         {
             return Err(crate::error::invalid("launcher session"));
         }
-        let cli = if let Some(provider) = &self.cli_provider {
-            provider.ensure().await?
-        } else {
-            crate::host::AgentCli {
-                node: self.node.clone(),
-                entry: self.entry.clone(),
-            }
-        };
+        let cli = self.cli().await?;
         self.write_launcher(self.state.join("device/bin"), &cli, &[])
             .await?;
         self.write_launcher(self.state.join("device/targets").join(name), &cli, args)
             .await
     }
     async fn release(&self, launcher: &str) -> Result<()> {
+        // TypeScript treats closing an unreachable agent launcher as best effort.
+        let Some(node) = self.node.resolve() else {
+            return Ok(());
+        };
         let parent = Path::new(launcher)
             .parent()
             .ok_or_else(|| crate::error::invalid("launcher"))?;
         let mut command = crate::io::Command::new(
-            &self.node,
+            node,
             [
                 parent
                     .join("agent-device-launcher.mjs")
