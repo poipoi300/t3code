@@ -395,6 +395,397 @@ fn source_notice_groups_contiguous_actions_claims_shortcut_and_expires() {
 }
 
 #[test]
+fn sidebar_batch_deletes_only_accepted_targets_and_cleans_up_their_drafts() {
+    use futures::FutureExt;
+    let mut h = Harness::new("env");
+    let archived = "orchestration.getArchivedShellSnapshot";
+    h.server()
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push((archived, t3_rpc::CallKind::Unary));
+    let client = paired(&mut h);
+    let service = client.thread_actions();
+    let environment = environment("env");
+    let thread_key = |id| ThreadKey {
+        environment: environment.clone(),
+        thread: thread(id),
+    };
+    let mut snapshot = shell_snapshot(&["t1", "t2", "t3", "side"]);
+    snapshot["snapshotSequence"] = json!(2);
+    snapshot["threads"][3]["lineage"] = json!({
+        "rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":null,"sideChat":true
+    });
+    let session = client.store().snapshot().environments[&environment]
+        .shell
+        .session;
+    client.store().apply_shell(
+        &environment,
+        session,
+        vec![serde_json::from_value(json!({"kind":"snapshot","snapshot":snapshot})).unwrap()],
+    );
+    let drafts = client.composer_drafts();
+    let loading = drafts.clone();
+    h.run(async move { loading.load().await }).unwrap();
+    for id in ["t1", "t2", "t3", "side"] {
+        drafts
+            .set_prompt(&thread_key(id), format!("Draft {id}"), 0)
+            .unwrap();
+        client.terminals().set_open(&thread_key(id), true);
+    }
+    service.bind_confirmation(Rc::new(|message, destructive| {
+        assert!(destructive);
+        assert!(message.contains("Delete 3 threads?"));
+        async { Ok(true) }.boxed_local()
+    }));
+    for sequence in [3, 4] {
+        script(
+            &h,
+            archived,
+            Ok(json!({"schemaVersion":1,"snapshotSequence":sequence,"projects":[],"threads":[]})),
+        );
+    }
+    let dispatch = "orchestration.dispatchCommand";
+    script(&h, dispatch, Ok(json!({"sequence":3})));
+    script(
+        &h,
+        dispatch,
+        Err(
+            json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":"fixture-command","commandType":"thread.delete","message":"Rejected t2"}),
+        ),
+    );
+    script(&h, dispatch, Ok(json!({"sequence":4})));
+    let report = h
+        .run(service.perform_sidebar_batch(
+            vec![thread_key("t1"), thread_key("t2"), thread_key("t3")],
+            "delete".into(),
+            None,
+        ))
+        .unwrap();
+    h.settle();
+    assert_eq!(report.completed, [thread_key("t1"), thread_key("t3")]);
+    assert_eq!(
+        report.failed.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        [&thread_key("t2")]
+    );
+    for id in ["t1", "t3", "side"] {
+        assert!(drafts.view(&thread_key(id)).prompt.is_empty(), "{id} draft");
+    }
+    assert_eq!(drafts.view(&thread_key("t2")).prompt.as_ref(), "Draft t2");
+    assert!(!client.terminals().ui_state(&thread_key("t1")).terminal_open);
+    assert!(!client.terminals().ui_state(&thread_key("t3")).terminal_open);
+    assert!(
+        !client
+            .terminals()
+            .ui_state(&thread_key("side"))
+            .terminal_open
+    );
+    assert!(client.terminals().ui_state(&thread_key("t2")).terminal_open);
+    assert_eq!(
+        service
+            .archived_shell(&environment)
+            .unwrap()
+            .snapshot_sequence,
+        4
+    );
+    assert_eq!(
+        h.server()
+            .state
+            .borrow()
+            .rpc_calls
+            .iter()
+            .filter(|(method, _)| method == archived)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn sidebar_delete_releases_only_uploads_without_a_surviving_draft_owner() {
+    use futures::{FutureExt, StreamExt};
+    use t3_client::thread_views::thread_ops::deletion::DeletionEvent;
+    let mut h = Harness::new("env");
+    let unupload = "attachments.delete";
+    h.server()
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push((unupload, t3_rpc::CallKind::Unary));
+    script(
+        &h,
+        unupload,
+        Err(
+            json!({"_tag":"EnvironmentAuthorizationError","message":"Fixture denied the first upload cleanup","requiredScope":"orchestration:operate"}),
+        ),
+    );
+    script(&h, unupload, Ok(serde_json::Value::Null));
+    let client = paired(&mut h);
+    let drafts = client.composer_drafts();
+    let loading = drafts.clone();
+    h.run(async move { loading.load().await }).unwrap();
+    let first = key();
+    let second = ThreadKey {
+        environment: first.environment.clone(),
+        thread: thread("t2"),
+    };
+    drafts.set_prompt(&first, "one".into(), 0).unwrap();
+    drafts.set_prompt(&second, "two".into(), 0).unwrap();
+    let first_id = drafts.thread_draft_key(&first);
+    let second_id = drafts.thread_draft_key(&second);
+    let upload = |id: &str| {
+        json!({
+            "type":"file","id":id,"name":"notes.txt","mimeType":"text/plain","sizeBytes":1,
+            "uploadedAttachmentId":id,"uploadEnvironmentId":"env"
+        })
+    };
+    drafts
+        .update(|document| {
+            document["draftsByThreadKey"][&first_id]["files"] = json!([
+                upload("unique-first"),
+                upload("unique-second"),
+                upload("shared")
+            ]);
+            document["draftsByThreadKey"][&second_id]["files"] = json!([upload("shared")]);
+            Ok(())
+        })
+        .unwrap();
+    let service = client.thread_actions();
+    let mut events = service.deletion_events();
+    service.bind_confirmation(Rc::new(|_, _| async { Ok(true) }.boxed_local()));
+    script(
+        &h,
+        "orchestration.dispatchCommand",
+        Ok(json!({"sequence":2})),
+    );
+    h.run(service.delete_thread(first)).unwrap();
+    h.settle();
+    let server = h.server();
+    let state = server.state.borrow();
+    let inputs = state
+        .rpc_calls
+        .iter()
+        .filter(|(method, _)| method == unupload)
+        .map(|(_, payload)| &payload["attachmentId"])
+        .collect::<Vec<_>>();
+    assert_eq!(inputs, [&json!("unique-first"), &json!("unique-second")]);
+    assert!(matches!(
+        events.next().now_or_never(),
+        Some(Some(DeletionEvent::Accepted(_)))
+    ));
+    assert!(
+        matches!(events.next().now_or_never(), Some(Some(DeletionEvent::CleanupFailed { title, .. })) if title.contains("drafts and uploads"))
+    );
+    assert!(drafts.view(&second).prompt.starts_with("two"));
+    let document = drafts.document();
+    let document = document.borrow();
+    assert_eq!(
+        document["draftsByThreadKey"][&second_id]["files"][0]["uploadedAttachmentId"],
+        "shared"
+    );
+}
+
+#[test]
+fn sidebar_worktree_cleanup_requires_explicit_confirmation_and_an_accepted_delete() {
+    use futures::FutureExt;
+    let delete = "orchestration.dispatchCommand";
+    let worktree = "vcs.removeWorktree";
+    for (answer, accepted) in [(false, true), (true, false), (true, true)] {
+        let mut h = Harness::new("env");
+        {
+            let server = h.server();
+            let mut settings = server.state.borrow_mut();
+            settings
+                .extra_methods
+                .push((worktree, t3_rpc::CallKind::Unary));
+            settings.permissions = Some(
+                [
+                    "orchestration:read",
+                    "orchestration:operate",
+                    "source-control:write",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            );
+        }
+        script(&h, worktree, Ok(serde_json::Value::Null));
+        let client = paired(&mut h);
+        let thread = key();
+        let mut snapshot = shell_snapshot(&["t1", "t2"]);
+        snapshot["snapshotSequence"] = json!(2);
+        snapshot["threads"][0]["worktreePath"] = json!("/workspace/worktrees/lane");
+        let session = client.store().snapshot().environments[&thread.environment].session;
+        client.store().apply_shell(
+            &thread.environment,
+            session,
+            vec![serde_json::from_value(json!({"kind":"snapshot","snapshot":snapshot})).unwrap()],
+        );
+        let service = client.thread_actions();
+        let confirmations = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = confirmations.clone();
+        service.bind_confirmation(Rc::new(move |message, destructive| {
+            assert!(destructive);
+            let confirm = !message.contains("Delete the worktree too?") || answer;
+            seen.borrow_mut().push(message);
+            async move { Ok(confirm) }.boxed_local()
+        }));
+        script(
+            &h,
+            delete,
+            if accepted {
+                Ok(json!({"sequence":3}))
+            } else {
+                Err(
+                    json!({"_tag":"OrchestrationV2DispatchCommandError","commandId":"fixture-command","commandType":"thread.delete","message":"Rejected deletion"}),
+                )
+            },
+        );
+        assert_eq!(h.run(service.delete_thread(thread)).is_ok(), accepted);
+        h.settle();
+        assert_eq!(confirmations.borrow().len(), 2);
+        assert!(confirmations.borrow()[1].contains("\nlane\n"));
+        let server = h.server();
+        let state = server.state.borrow();
+        let effects = state
+            .rpc_calls
+            .iter()
+            .filter(|(method, _)| method == delete || method == worktree)
+            .collect::<Vec<_>>();
+        assert_eq!(effects.len(), if answer && accepted { 2 } else { 1 });
+        assert_eq!(effects[0].0, delete);
+        if answer && accepted {
+            assert_eq!(effects[1].0, worktree);
+            assert_eq!(
+                effects[1].1,
+                json!({"cwd":"/workspace/project","path":"/workspace/worktrees/lane","force":true})
+            );
+        }
+    }
+}
+
+#[test]
+fn sidebar_deletion_clears_a_side_chat_that_appears_while_the_worktree_prompt_is_open() {
+    use futures::FutureExt;
+    let mut h = Harness::new("env");
+    h.server().state.borrow_mut().permissions = Some(
+        [
+            "orchestration:read",
+            "orchestration:operate",
+            "source-control:write",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+    );
+    h.server()
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push(("vcs.removeWorktree", t3_rpc::CallKind::Unary));
+    let client = paired(&mut h);
+    let parent = key();
+    let child = ThreadKey {
+        environment: parent.environment.clone(),
+        thread: thread("late-child"),
+    };
+    let drafts = client.composer_drafts();
+    let loading = drafts.clone();
+    h.run(async move { loading.load().await }).unwrap();
+    drafts
+        .set_prompt(&child, "New side chat".into(), 0)
+        .unwrap();
+    client.terminals().set_open(&child, true);
+    let mut before = shell_snapshot(&["t1"]);
+    before["snapshotSequence"] = json!(2);
+    before["threads"][0]["worktreePath"] = json!("/workspace/worktrees/lane");
+    let mut during = before.clone();
+    during["snapshotSequence"] = json!(3);
+    let mut side_chat = shell_snapshot(&["late-child"])["threads"][0].clone();
+    side_chat["lineage"] = json!({
+        "rootThreadId":"t1","parentThreadId":"t1","relationshipToParent":null,"sideChat":true
+    });
+    during["threads"].as_array_mut().unwrap().push(side_chat);
+    let store = client.store().clone();
+    let environment = parent.environment.clone();
+    let session = store.snapshot().environments[&environment].session;
+    let publish = move |snapshot| {
+        store.apply_shell(
+            &environment,
+            session,
+            vec![serde_json::from_value(json!({"kind":"snapshot","snapshot":snapshot})).unwrap()],
+        )
+    };
+    publish(before);
+    let service = client.thread_actions();
+    let prompted = Rc::new(std::cell::Cell::new(false));
+    let observed = prompted.clone();
+    service.bind_confirmation(Rc::new(move |message, _| {
+        let worktree_prompt = message.contains("Delete the worktree too?");
+        if worktree_prompt {
+            observed.set(true);
+            publish(during.clone());
+        }
+        async move { Ok(!worktree_prompt) }.boxed_local()
+    }));
+    script(
+        &h,
+        "orchestration.dispatchCommand",
+        Ok(json!({"sequence":4})),
+    );
+    h.run(service.delete_thread(parent)).unwrap();
+    h.settle();
+    assert!(prompted.get());
+    assert!(drafts.view(&child).prompt.is_empty());
+    assert!(!client.terminals().ui_state(&child).terminal_open);
+}
+
+#[test]
+fn sidebar_delete_completes_after_the_waiting_view_is_cancelled() {
+    use futures::{
+        FutureExt,
+        future::{AbortHandle, Abortable},
+    };
+    let mut h = Harness::new("env");
+    let client = paired(&mut h);
+    let target = key();
+    let drafts = client.composer_drafts();
+    let loading = drafts.clone();
+    h.run(async move { loading.load().await }).unwrap();
+    drafts.set_prompt(&target, "Discard me".into(), 0).unwrap();
+    client.terminals().set_open(&target, true);
+    let (ack, response) = futures::channel::oneshot::channel();
+    let receiver = Rc::new(std::cell::RefCell::new(Some(response)));
+    let received = receiver.clone();
+    h.server().state.borrow_mut().extra_rpc = Some(Rc::new(move |request| {
+        if request.tag != "orchestration.dispatchCommand" {
+            return None;
+        }
+        let response = received.borrow_mut().take().unwrap();
+        Some(t3_rpc::HandlerOutput::Unary(
+            async move {
+                response.await.unwrap();
+                t3_rpc::Exit::success(json!({"sequence":2}))
+            }
+            .boxed_local(),
+        ))
+    }));
+    let service = client.thread_actions();
+    service.bind_confirmation(Rc::new(|_, _| async { Ok(true) }.boxed_local()));
+    let pending = service.delete_thread(target.clone());
+    let (cancel, registration) = AbortHandle::new_pair();
+    h.spawn(async move {
+        assert!(Abortable::new(pending, registration).await.is_err());
+    });
+    h.settle();
+    assert!(receiver.borrow().is_none(), "server received the delete");
+    cancel.abort();
+    h.settle();
+    ack.send(())
+        .expect("client still observing the accepted deletion");
+    h.settle();
+    assert!(drafts.view(&target).prompt.is_empty());
+    assert!(!client.terminals().ui_state(&target).terminal_open);
+}
+
+#[test]
 fn destructive_action_waits_for_confirmation_and_rechecks_permission() {
     use futures::FutureExt;
     let mut h = Harness::new("env");

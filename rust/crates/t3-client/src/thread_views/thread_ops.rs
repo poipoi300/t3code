@@ -1,6 +1,7 @@
 //! Composed, destination-guarded operations shared by the sidebar and timeline.
 pub mod actions;
 pub mod approvals;
+pub mod deletion;
 pub mod header;
 pub mod menu;
 pub mod metadata;
@@ -31,6 +32,7 @@ pub struct ThreadOpsState {
     approvals: RefCell<BTreeMap<ThreadKey, approvals::PendingApprovals>>,
     files: ProjectCommands,
     actions: actions::ActionState,
+    deletion: deletion::DeletionState,
     projects: crate::workspace::project_ops::ProjectEntities,
     rewind: rewind::RewindStateStore,
     shells: RefCell<Rc<crate::thread_views::threads::shell::ThreadShellViews>>,

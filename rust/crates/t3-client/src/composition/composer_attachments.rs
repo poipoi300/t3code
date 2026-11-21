@@ -3,7 +3,8 @@ use crate::thread_views::composer::{
     attachment_intake::{AttachmentConnection, AttachmentSession, Capabilities},
     target::ComposerTarget,
 };
-use serde_json::json;
+use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 pub(super) struct RewindIntake<P: Platform + Clone + 'static>(pub(super) std::rc::Weak<Inner<P>>);
 
@@ -74,13 +75,15 @@ impl<P: Platform + Clone + 'static> crate::thread_views::thread_ops::rewind::Rew
 
 pub(super) struct AttachmentDriver {
     pub session: AttachmentSession,
-    task: AbortHandle,
+    task: Option<AbortHandle>,
     active: Rc<std::cell::Cell<bool>>,
 }
 impl Drop for AttachmentDriver {
     fn drop(&mut self) {
         self.active.set(false);
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
@@ -90,6 +93,112 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .borrow_mut()
             .retain(|(_, key), _| !keys.contains(key));
     }
+    pub(crate) async fn discard_deleted_thread_drafts(
+        &self,
+        threads: &[ThreadKey],
+    ) -> Result<(), ClientError> {
+        use crate::thread_views::composer::{mobile_drafts::AttachmentReferences, web_sessions};
+        use t3_contracts::{
+            assets::AttachmentDeleteInput, base_schemas::TrimmedNonEmptyString,
+            rpc::WsAttachmentsDeleteRpc,
+        };
+        let drafts = &self.inner.composer_drafts;
+        if !drafts.loaded() {
+            drafts.load().await?;
+        }
+        let keys = threads
+            .iter()
+            .map(|thread| drafts.thread_draft_key(thread))
+            .collect::<BTreeSet<_>>();
+        let mut candidates = AttachmentReferences::default();
+        drafts.update(|document| {
+            for key in &keys {
+                let attachments = draft_attachment_values(&document["draftsByThreadKey"][key])
+                    .collect::<Vec<_>>();
+                candidates.retain_owner(&json!({"attachments":attachments}));
+                web_sessions::clear(document, key);
+            }
+            Ok(())
+        })?;
+        {
+            let mut drivers = self.inner.composer_attachments.borrow_mut();
+            let retired = drivers
+                .keys()
+                .filter(|(_, key)| keys.contains(key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for identity in retired {
+                if let Some(mut driver) = drivers.remove(&identity) {
+                    candidates
+                        .uploads
+                        .extend(driver.session.uploaded_references());
+                    // Let in-flight calls observe that the draft is gone and release their own upload.
+                    driver.task.take();
+                    driver.session.refresh();
+                }
+            }
+        }
+        drafts.flush().await?;
+        let mut failure = None;
+        for (environment, id) in candidates.uploads {
+            let environment = EnvironmentId(environment);
+            let Some(messages) = self.messages(&environment) else {
+                failure.get_or_insert(ClientError::Disconnected);
+                continue;
+            };
+            match messages.flush_outbox().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    failure.get_or_insert_with(|| {
+                        ClientError::InvalidPayload(
+                            "Could not check pending messages for attachment references.".into(),
+                        )
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    continue;
+                }
+            }
+            let mut retained = AttachmentReferences::default();
+            for owner in messages.attachment_owners() {
+                retained.retain_owner(&owner);
+            }
+            let document = drafts.document();
+            for draft in document.borrow()["draftsByThreadKey"]
+                .as_object()
+                .into_iter()
+                .flat_map(|drafts| drafts.values())
+            {
+                let attachments = draft_attachment_values(draft).collect::<Vec<_>>();
+                retained.retain_owner(&json!({"attachments":attachments}));
+            }
+            if retained
+                .uploads
+                .contains(&(environment.0.clone(), id.clone()))
+            {
+                continue;
+            }
+            let Some(endpoint) = self
+                .client(&environment)
+                .and_then(|client| client.session())
+            else {
+                failure.get_or_insert(ClientError::Disconnected);
+                continue;
+            };
+            if let Err(error) = endpoint
+                .call::<WsAttachmentsDeleteRpc>(AttachmentDeleteInput {
+                    attachment_id: TrimmedNonEmptyString(id),
+                })
+                .await
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
     pub fn composer_attachments(
         &self,
         target: &ComposerTarget,
@@ -159,6 +268,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 .composer_drafts
                 .attachment_owner(key.clone(), active.clone()),
         );
+        let driver_active = active.clone();
         let weak = Rc::downgrade(&self.inner);
         let source = session.clone();
         let drafts = self.inner.composer_drafts.clone();
@@ -190,6 +300,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                             futures::future::select(changes.next(), uploads.next()).await,
                             futures::future::Either::Left((None, _))
                         ) {
+                            break;
+                        }
+                        if !driver_active.get() {
+                            while uploads.next().await.is_some() {}
                             break;
                         }
                         let Some(inner) = weak.upgrade() else {
@@ -281,10 +395,16 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             identity,
             AttachmentDriver {
                 session: session.clone(),
-                task: handle,
+                task: Some(handle),
                 active,
             },
         );
         Ok(session)
     }
+}
+
+fn draft_attachment_values(draft: &Value) -> impl Iterator<Item = &Value> {
+    ["images", "files"]
+        .into_iter()
+        .flat_map(|field| draft[field].as_array().into_iter().flatten())
 }

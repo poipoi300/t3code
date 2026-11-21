@@ -1299,6 +1299,15 @@ impl AttachmentSession {
         persist_attachments(&connection.endpoint, thread, message, attachments).await
     }
 
+    pub(crate) fn uploaded_references(&self) -> Vec<(String, String)> {
+        self.0
+            .uploaded
+            .borrow()
+            .values()
+            .map(|id| (self.0.environment.0.clone(), id.clone()))
+            .collect()
+    }
+
     pub fn draft_attachments(
         &self,
     ) -> Result<Vec<crate::thread_views::outbox::DraftAttachment>, ClientError> {

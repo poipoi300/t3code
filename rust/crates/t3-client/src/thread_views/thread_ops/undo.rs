@@ -23,6 +23,7 @@ pub struct UndoNotice {
 #[derive(Debug, Default)]
 pub struct UndoReport {
     pub restored: usize,
+    pub unarchived: Vec<ThreadKey>,
     pub failures: Vec<ClientError>,
 }
 struct Entry {
@@ -268,14 +269,19 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                         }
                         service.perform_impl(entry.key.clone(), step, false).await?;
                     }
-                    Ok::<_, ClientError>(())
+                    Ok::<_, ClientError>((entry.key, entry.label))
                 }
             }))
             .await;
             let mut report = UndoReport::default();
             for result in results {
                 match result {
-                    Ok(()) => report.restored += 1,
+                    Ok((key, label)) => {
+                        report.restored += 1;
+                        if label == "Archived" {
+                            report.unarchived.push(key);
+                        }
+                    }
                     Err(error) => {
                         if !matches!(error, ClientError::Cancelled) {
                             report.failures.push(error);

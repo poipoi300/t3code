@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use t3_contracts::{
-    orchestration_v2::*, rpc::WsOrchestrationV2DispatchCommandRpc, wire::WireDateTime,
+    orchestration_v2::*,
+    rpc::{
+        Empty, WsOrchestrationV2DispatchCommandRpc, WsOrchestrationV2GetArchivedShellSnapshotRpc,
+    },
+    wire::WireDateTime,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,10 +45,12 @@ struct Queue {
 #[derive(Default)]
 pub struct ActionState {
     queues: RefCell<BTreeMap<EnvironmentId, Rc<Queue>>>,
+    archived: RefCell<BTreeMap<EnvironmentId, Rc<OrchestrationV2ArchivedShellSnapshot>>>,
     listeners: RefCell<Vec<futures::channel::mpsc::UnboundedSender<()>>>,
 }
 impl ActionState {
     pub(super) fn forget_environment(&self, environment: &EnvironmentId) {
+        self.archived.borrow_mut().remove(environment);
         if let Some(queue) = self.queues.borrow_mut().remove(environment) {
             queue.queue.disconnect();
         }
@@ -123,10 +129,12 @@ impl Intent {
             return;
         }
         if matches!(self.action, Action::Delete) {
-            snapshot.threads.retain(|t| t.id != self.key.thread);
-            snapshot
-                .archived_threads
-                .retain(|t| t.id != self.key.thread);
+            snapshot.threads.retain(|t| {
+                t.id != self.key.thread && !super::deletion::is_side_chat_of(t, &self.key.thread)
+            });
+            snapshot.archived_threads.retain(|t| {
+                t.id != self.key.thread && !super::deletion::is_side_chat_of(t, &self.key.thread)
+            });
             return;
         }
         if let Some(row) = snapshot
@@ -230,6 +238,50 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             |view, change, status| change.apply.apply(view, status),
         ))
     }
+    pub fn archived_shell(
+        &self,
+        environment: &EnvironmentId,
+    ) -> Option<Rc<OrchestrationV2ArchivedShellSnapshot>> {
+        self.state
+            .actions
+            .archived
+            .borrow()
+            .get(environment)
+            .cloned()
+    }
+
+    pub(super) async fn refresh_archived_shell(&self, environment: &EnvironmentId, sequence: u64) {
+        const METHOD: &str = "orchestration.getArchivedShellSnapshot";
+        if self.unsupported(environment, METHOD) {
+            return;
+        }
+        let Ok(endpoint) = self.endpoint(environment) else {
+            return;
+        };
+        let session = self.session_generation(environment);
+        match endpoint
+            .call::<WsOrchestrationV2GetArchivedShellSnapshotRpc>(Empty {})
+            .await
+        {
+            Ok(shell)
+                if session == self.session_generation(environment)
+                    && shell.snapshot_sequence >= sequence =>
+            {
+                let mut entries = self.state.actions.archived.borrow_mut();
+                if entries
+                    .get(environment)
+                    .is_none_or(|prior| prior.snapshot_sequence <= shell.snapshot_sequence)
+                {
+                    entries.insert(environment.clone(), Rc::new(shell));
+                    drop(entries);
+                    self.state.actions.notify();
+                }
+            }
+            Err(error) => self.remember_unsupported(environment, METHOD, session, &error),
+            _ => {}
+        }
+    }
+
     pub fn thread_shell(&self, key: &ThreadKey) -> Option<Rc<OrchestrationV2ThreadShell>> {
         let shell = self.shell(&key.environment)?;
         shell
@@ -574,25 +626,64 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             let command = service.command(&key, &action)?;
             let endpoint = service.endpoint(&key.environment)?;
             if !endpoint.available::<WsOrchestrationV2DispatchCommandRpc>(&command) { return Err(ClientError::PermissionDenied { method: "orchestration.dispatchCommand".into() }); }
+            let session = service.session_generation(&key.environment);
+            let deletion = if matches!(action, Action::Delete) {
+                let deletion = service.prepare_deletion(&key, &row, &endpoint).await?;
+                if !service.can_operate(&key) || session != service.session_generation(&key.environment) {
+                    return Err(ClientError::PermissionDenied { method: "orchestration.dispatchCommand".into() });
+                }
+                let current = service.thread_shell(&key).ok_or_else(|| Self::refused("This thread is no longer available."))?;
+                if !confirm_action && current.archived_at != row.archived_at {
+                    return Err(ClientError::Cancelled);
+                }
+                Some(deletion)
+            } else {
+                None
+            };
             let generation = service.runtime.store().snapshot().environments.get(&key.environment).map(|e| e.shell.generation).ok_or(ClientError::Disconnected)?;
             let undo = service.begin_thread_undo(&key,&action,&row,notices);
-            let intent = Intent { key: key.clone(), action:action.clone(), now: WireDateTime(crate::time::iso_from_epoch_ms(service.platform.now_epoch_ms())), now_ms: service.platform.now_epoch_ms() };
-            let queue = service.queue(&key.environment);
-            let id = queue.queue.enqueue::<WsOrchestrationV2DispatchCommandRpc>(&service.platform, &command, ProjectionKey::shell(key.environment.clone()), generation,
-                ViewChange { apply: intent.clone(), revert: intent }).await.map_err(operation_error)?;
-            service.state.actions.notify();
-            let failure = Rc::new(RefCell::new(None));
-            let endpoint = RecordedEndpoint { endpoint, failure: failure.clone() };
-            let session=service.session_generation(&key.environment);
-            let result = queue.queue.dispatch(&service.platform, &endpoint, &id).await;
-            service.state.actions.notify();
-            if let Some(error) = failure.borrow_mut().take() { service.remember_unsupported(&key.environment,"orchestration.dispatchCommand",session,&error); return Err(error); }
-            let report = result.map_err(operation_error)?;
-            if let Some(error) = report.persistence_error { return Err(error); }
-            match report.outcome {
-                CommandOutcome::Accepted { .. } => { service.commit_thread_undo(undo); Ok(()) },
-                CommandOutcome::Rejected { reason } => Err(ClientError::Rejected {message:reason,detail:None}),
-                CommandOutcome::NotSent | CommandOutcome::UnknownAfterDisconnect => Err(ClientError::Disconnected),
+            let runtime = deletion.as_ref().map(|_| service.runtime.clone());
+            let delivery = async move {
+                let intent = Intent { key: key.clone(), action:action.clone(), now: WireDateTime(crate::time::iso_from_epoch_ms(service.platform.now_epoch_ms())), now_ms: service.platform.now_epoch_ms() };
+                let queue = service.queue(&key.environment);
+                let id = queue.queue.enqueue::<WsOrchestrationV2DispatchCommandRpc>(&service.platform, &command, ProjectionKey::shell(key.environment.clone()), generation,
+                    ViewChange { apply: intent.clone(), revert: intent }).await.map_err(operation_error)?;
+                service.state.actions.notify();
+                let failure = Rc::new(RefCell::new(None));
+                let recorded = RecordedEndpoint { endpoint: endpoint.clone(), failure: failure.clone() };
+                let result = queue.queue.dispatch(&service.platform, &recorded, &id).await;
+                service.state.actions.notify();
+                if let Some(error) = failure.borrow_mut().take() { service.remember_unsupported(&key.environment,"orchestration.dispatchCommand",session,&error); return Err(error); }
+                let report = result.map_err(operation_error)?;
+                match report.outcome {
+                    CommandOutcome::Accepted { value, .. } => {
+                        if let Some(deletion) = deletion {
+                            service.accept_deletion(key, deletion, endpoint, value.sequence, report.persistence_error);
+                            return Ok(());
+                        }
+                        if let Some(error) = report.persistence_error {
+                            return Err(error);
+                        }
+                        service.commit_thread_undo(undo);
+                        if matches!(action, Action::Archive | Action::Unarchive) {
+                            let runtime = service.runtime.clone();
+                            runtime.spawn(async move {
+                                service.refresh_archived_shell(&key.environment, value.sequence).await;
+                            }.boxed_local());
+                        }
+                        Ok(())
+                    },
+                    CommandOutcome::Rejected { reason } => Err(report.persistence_error.unwrap_or(ClientError::Rejected {message:reason,detail:None})),
+                    CommandOutcome::NotSent | CommandOutcome::UnknownAfterDisconnect => Err(report.persistence_error.unwrap_or(ClientError::Disconnected)),
+                }
+            };
+            if let Some(runtime) = runtime {
+                // Once submitted, a delete belongs to the client even if the initiating row unmounts.
+                let (reply, observer) = futures::channel::oneshot::channel();
+                runtime.spawn(async move { let _ = reply.send(delivery.await); }.boxed_local());
+                observer.await.map_err(|_| ClientError::Cancelled)?
+            } else {
+                delivery.await
             }
         }.boxed_local()
     }
