@@ -370,6 +370,46 @@ impl PanelHost {
         });
     }
 
+    fn close_from_tabs(self, thread: &ThreadKey, action: Action, registry: PanelRegistry) {
+        let Some(close_browser) = registry
+            .registration(SurfaceKind::Browser)
+            .and_then(|row| row.browser_close.clone())
+        else {
+            self.apply(thread, action);
+            return;
+        };
+
+        let (scope, before) = self.state.with_untracked(|store| {
+            let scope = store.host_ref(thread).clone();
+            let before = store.by_thread.get(&scope).cloned().unwrap_or_default();
+            (scope, before)
+        });
+        self.apply(thread, action);
+        let mut removed = self.state.with_untracked(|store| {
+            let after = store.by_thread.get(&scope);
+            before
+                .surfaces
+                .iter()
+                .filter_map(|surface| {
+                    let SurfaceContent::Preview {
+                        resource_id: Some(tab),
+                    } = &surface.content
+                    else {
+                        return None;
+                    };
+                    let present = after
+                        .is_some_and(|panel| panel.surfaces.iter().any(|s| s.id == surface.id));
+                    (!present && !tab.is_empty())
+                        .then_some((tab, before.active_surface_id.as_ref() == Some(&surface.id)))
+                })
+                .collect::<Vec<_>>()
+        });
+        removed.sort_by_key(|(_, active)| *active);
+        for (tab, _) in removed {
+            close_browser(scope.clone(), tab.clone());
+        }
+    }
+
     pub(crate) fn forget_thread(self, thread: &ThreadKey) {
         self.state.update(|store| store.remove(thread));
         if self
@@ -508,6 +548,7 @@ type SurfaceTitle = Rc<dyn Fn(&Surface) -> SharedString>;
 type SurfacePending = Rc<dyn Fn(&Surface) -> bool>;
 type SurfaceGlyph = Rc<dyn Fn(&Surface) -> AnyElement>;
 type SurfaceView = Rc<dyn Fn(SurfaceContext) -> AnyElement>;
+type BrowserClose = Rc<dyn Fn(ThreadKey, String)>;
 
 pub struct PanelRegistration {
     pub kind: SurfaceKind,
@@ -521,6 +562,7 @@ pub struct PanelRegistration {
     /// Feature controls (for example browser audio) and menu rows precede the shared tab actions.
     pub tab_controls: Option<SurfaceView>,
     pub tab_menu: Option<SurfaceView>,
+    browser_close: Option<BrowserClose>,
 }
 
 impl PanelRegistration {
@@ -540,7 +582,13 @@ impl PanelRegistration {
             glyph: None,
             tab_controls: None,
             tab_menu: None,
+            browser_close: None,
         }
+    }
+
+    pub fn with_browser_close(mut self, close: impl Fn(ThreadKey, String) + 'static) -> Self {
+        self.browser_close = Some(Rc::new(close));
+        self
     }
 }
 
@@ -1236,14 +1284,14 @@ fn right_panel_tab(
                             ..Default::default()
                         },
                         text(I18nText::from(label).resolve().to_string()),
-                        move || host.apply(&thread.get(), action.get()),
+                        move || host.close_from_tabs(&thread.get(), action.get(), registry),
                     )
                 }),
             )
     });
     menu::context_menu(tab(title(), move || active.get(), || false, move || host.apply(&thread.get(), Action::Activate(id.get())),
-        view().on_mouse_up(move |event: &MouseEvent| { if event.button == Some(nsh_core::MouseButton::Middle) { host.apply(&thread.get(), Action::CloseSurface(id.get())); } }).app_class(move || Some(tw(&cn([Some("cursor-pointer group/tab flex h-6 max-w-36 shrink-0 items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs"), Some(if active.get() { "bg-accent text-foreground" } else { "text-muted-foreground hover:bg-accent/60 hover:text-foreground" })]))))
-            .child(panel_tab_close_button(surface_icon(surface, registry), tr("Close {title}", &[("title", Value::Text(title()))]), move || host.apply(&thread.get(), Action::CloseSurface(id.get())), None))
+        view().on_mouse_up(move |event: &MouseEvent| { if event.button == Some(nsh_core::MouseButton::Middle) { host.close_from_tabs(&thread.get(), Action::CloseSurface(id.get()), registry); } }).app_class(move || Some(tw(&cn([Some("cursor-pointer group/tab flex h-6 max-w-36 shrink-0 items-center gap-0.5 rounded-md pr-2 pl-1.5 text-xs"), Some(if active.get() { "bg-accent text-foreground" } else { "text-muted-foreground hover:bg-accent/60 hover:text-foreground" })]))))
+            .child(panel_tab_close_button(surface_icon(surface, registry), tr("Close {title}", &[("title", Value::Text(title()))]), move || host.close_from_tabs(&thread.get(), Action::CloseSurface(id.get()), registry), None))
             .child(controls)
             .child(text(move || SharedString::from(title())).app_class(tw("truncate")))), MenuOptions::default(), || false, menu)
 }
@@ -1435,6 +1483,76 @@ fn surface_icon(surface: ReadSignal<Surface>, registry: PanelRegistry) -> impl I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[component]
+    fn BrowserTabCloseProbe() -> impl IntoElement {
+        let host = PanelHost::new(PanelStore::default(), |_| {});
+        let thread = stored(ThreadKey {
+            environment: t3_client::types::EnvironmentId("environment".into()),
+            thread: t3_client::types::ThreadId("thread".into()),
+        });
+        let log = signal(String::new());
+        let registry = PanelRegistry::new(vec![
+            PanelRegistration::new(
+                SurfaceKind::Browser,
+                Prop::new(None),
+                |_| {},
+                |_| view().into_element(),
+            )
+            .with_browser_close(move |key, tab| {
+                log.update(|log| {
+                    log.push_str(&format!("{}/{}:{tab} ", key.environment.0, key.thread.0))
+                });
+            }),
+        ]);
+        for id in ["tab", "menu", "pane"] {
+            host.apply(&thread.get(), Action::OpenBrowser(Some(id.into())));
+        }
+        close_probe_button(
+            move || {
+                host.close_from_tabs(
+                    &thread.get(),
+                    Action::CloseSurface(Surface::browser(Some("tab")).id),
+                    registry,
+                );
+                host.apply(
+                    &thread.get(),
+                    Action::CloseSurface(Surface::browser(Some("pane")).id),
+                );
+                host.close_from_tabs(&thread.get(), Action::CloseAll, registry);
+                host.close_from_tabs(&thread.get(), Action::CloseAll, registry);
+            },
+            log,
+        )
+    }
+
+    fn close_probe_button(close: impl Fn() + 'static, log: Signal<String>) -> impl IntoElement {
+        view()
+            .child(
+                nsh_base::button()
+                    .accessibility_label(SharedString::from("Run close actions"))
+                    .child(text("Run close actions"))
+                    .on_press(close),
+            )
+            .child(text(move || SharedString::from(log.get())))
+    }
+
+    #[test]
+    fn tab_and_menu_close_release_scoped_browser_tabs_once() {
+        use nsh_engine::{EngineConfig, Root};
+        let mut sets = crate::registries();
+        let mut fixtures = Registry::new();
+        fixtures.register::<BrowserTabCloseProbe>();
+        sets.push(fixtures);
+        let mut app = nsh_testing::Headless::start(EngineConfig {
+            ui_sets: sets,
+            ..EngineConfig::new(Root::of::<BrowserTabCloseProbe>())
+        })
+        .unwrap();
+        app.press("role:button[Run close actions]").unwrap();
+        app.wait_for("text:environment/thread:tab environment/thread:menu")
+            .unwrap();
+    }
 
     #[test]
     fn inline_width_preserves_the_sibling_and_viewport_caps_without_inverting_bounds() {
