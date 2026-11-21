@@ -192,12 +192,12 @@ pub(super) fn header(
                             Some("unread") => "Done",
                             _ => "Working",
                         }))
-                        .app_class(move || Some(tw(match dot.get() {
-                            Some("attention") => "size-1.5 rounded-full bg-warning",
-                            Some("failed") => "size-1.5 rounded-full bg-error",
-                            Some("unread") => "size-1.5 rounded-full bg-success",
-                            _ => "size-1.5 rounded-full bg-info",
-                        })))
+                        .app_class(move || Some(match dot.get() {
+                            Some("attention") => tw("size-1.5 rounded-full bg-warning"),
+                            Some("failed") => tw("size-1.5 rounded-full bg-error"),
+                            Some("unread") => tw("size-1.5 rounded-full bg-success"),
+                            _ => tw("size-1.5 rounded-full bg-info"),
+                        }))
                 }))
                 .child(text(move || hidden_count.get().to_string()).app_class(tw("text-xs tabular-nums text-muted-foreground")))
         }))

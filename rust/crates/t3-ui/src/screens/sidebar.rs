@@ -556,8 +556,8 @@ fn shelf_marker(
             label: Text::from(label),
             count: Prop::bind(move || items.with(|list| count(list))),
             class_name,
-            dragging: dragging.clone(),
-            is_drop_target: highlighted.clone(),
+            dragging,
+            is_drop_target: highlighted,
             toggle: crate::ui::collapsible::CollapsibleHandle::controlled(
                 move || expansion.with(|expansion| expansion.of(marker).unwrap_or(false)),
                 || false,
@@ -575,34 +575,22 @@ fn shelf_marker(
         .into_element()
     };
     match marker {
-        Marker::PinnedHeader => shelves::sidebar_drag_boundary(
-            marker,
-            "Pinned".into(),
-            dragging.clone(),
-            highlighted.clone(),
-        )
-        .into_element(),
-        Marker::PinnedDivider => shelves::sidebar_drag_boundary(
-            marker,
-            "Active".into(),
-            dragging.clone(),
-            highlighted.clone(),
-        )
-        .into_element(),
-        Marker::ActivePlaceholder => shelves::sidebar_section_placeholder(
-            marker,
-            "Active".into(),
-            dragging.clone(),
-            highlighted.clone(),
-        )
-        .into_element(),
-        Marker::SettledPlaceholder => shelves::sidebar_section_placeholder(
-            marker,
-            "Settled".into(),
-            dragging.clone(),
-            highlighted.clone(),
-        )
-        .into_element(),
+        Marker::PinnedHeader => {
+            shelves::sidebar_drag_boundary(marker, "Pinned".into(), dragging, highlighted)
+                .into_element()
+        }
+        Marker::PinnedDivider => {
+            shelves::sidebar_drag_boundary(marker, "Active".into(), dragging, highlighted)
+                .into_element()
+        }
+        Marker::ActivePlaceholder => {
+            shelves::sidebar_section_placeholder(marker, "Active".into(), dragging, highlighted)
+                .into_element()
+        }
+        Marker::SettledPlaceholder => {
+            shelves::sidebar_section_placeholder(marker, "Settled".into(), dragging, highlighted)
+                .into_element()
+        }
         Marker::WorkingHeader => header("Working", |list| list.working_count, |_| true),
         Marker::SnoozedHeader => header(
             "Snoozed",
