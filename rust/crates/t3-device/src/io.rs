@@ -42,13 +42,35 @@ impl NodeRuntime {
                 })?;
                 // Preserve the invoked alias for version-manager shims, but reject our own
                 // binary (including symlinks and hard links), as TS resolveNodeExecutable does.
-                let server = std::env::current_exe().ok()?;
-                if same_file::is_same_file(&node, server).ok()? {
+                if is_server_binary(&node, std::env::current_exe().ok().as_deref()) {
                     return None;
                 }
                 Some(node.to_string_lossy().into_owned())
             }
         }
+    }
+}
+
+/// Whether `node` is this server's own executable. A comparison that cannot be made (the
+/// server binary was replaced while running, so `current_exe` names a deleted file) is
+/// "not the same file", as TS `resolveNodeExecutable` treats a failed stat.
+fn is_server_binary(node: &std::path::Path, server: Option<&std::path::Path>) -> bool {
+    server.is_some_and(|server| same_file::is_same_file(node, server).unwrap_or(false))
+}
+
+#[cfg(test)]
+mod server_binary_tests {
+    use super::is_server_binary;
+
+    // Review R1: an uncomparable server path made every device operation report that
+    // Node.js was missing.
+    #[test]
+    fn an_uncomparable_server_path_does_not_hide_node() {
+        let node = std::env::temp_dir();
+        let gone = node.join("t3-device-server-binary-that-does-not-exist (deleted)");
+        assert!(!is_server_binary(&node, Some(&gone)));
+        assert!(!is_server_binary(&node, None));
+        assert!(is_server_binary(&node, Some(&node)));
     }
 }
 
