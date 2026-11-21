@@ -301,6 +301,10 @@ pub async fn run_codex(
                 ),
                 "--config".into(),
                 "shell_environment_policy.set.GIT_LFS_SKIP_SMUDGE=\"1\"".into(),
+                // Review checkouts are untrusted: load no project instruction documents
+                // (AGENTS.md and any user-configured fallback file names).
+                "--config".into(),
+                "project_doc_max_bytes=0".into(),
             ]);
         }
         args.push("--output-schema".into());

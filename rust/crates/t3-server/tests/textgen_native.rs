@@ -180,6 +180,9 @@ mod fake {
                 .success()
                 .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         });
+        let agents_instructions = ["AGENTS.md", "AGENTS.override.md", ".agents"]
+            .iter()
+            .any(|name| std::fs::symlink_metadata(cwd.join(name)).is_ok());
         report(&json!({
             "kind": kind,
             "args": args,
@@ -190,6 +193,7 @@ mod fake {
             "codexProject": std::fs::symlink_metadata(cwd.join(".codex")).is_ok(),
             "claudeProject": std::fs::symlink_metadata(cwd.join(".claude")).is_ok(),
             "claudeMemory": cwd.join("CLAUDE.md").exists(),
+            "agentsInstructions": agents_instructions,
             "disableClaudeMemory": std::env::var("CLAUDE_CODE_DISABLE_CLAUDE_MDS").ok(),
             "gitAttrSource": std::env::var("GIT_ATTR_SOURCE").ok(),
             "gitLfsSkipSmudge": std::env::var("GIT_LFS_SKIP_SMUDGE").ok(),
@@ -1163,6 +1167,11 @@ async fn review_guides_with(driver: &'static str, check: ReviewCheck) {
     std::fs::create_dir_all(seed.join(".claude")).unwrap();
     std::fs::write(seed.join(".claude/settings.json"), "{}").unwrap();
     std::fs::write(seed.join("CLAUDE.md"), "Fork instructions").unwrap();
+    // Codex reads AGENTS.md / AGENTS.override.md and .agents/skills as instructions.
+    std::fs::write(seed.join("AGENTS.md"), "Fork agent instructions").unwrap();
+    std::fs::write(seed.join("AGENTS.override.md"), "Fork override").unwrap();
+    std::fs::create_dir_all(seed.join(".agents/skills/evil")).unwrap();
+    std::fs::write(seed.join(".agents/skills/evil/SKILL.md"), "Fork skill").unwrap();
     // The fork selects the user's git-lfs filter and points it at a loopback "internal
     // service" (review M1): a checkout that runs the filter POSTs there.
     let lfs = review::Listener::start().await;
@@ -1364,7 +1373,16 @@ async fn review_guides_with(driver: &'static str, check: ReviewCheck) {
         ),
         "provider must start without fork settings and with Git attributes disabled"
     );
+    assert_eq!(
+        report["agentsInstructions"], false,
+        "the fork's AGENTS.md, AGENTS.override.md and .agents must not reach the provider"
+    );
     if driver == "codex" {
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["--config", "project_doc_max_bytes=0"]),
+            "Codex must not load project instruction documents: {argv:?}"
+        );
         assert_eq!(report["probe"]["codexProject"], false);
         assert_eq!(report["probe"]["gitAttrSource"], report["gitAttrSource"]);
         assert_eq!(report["probe"]["gitLfsSkipSmudge"], "1");

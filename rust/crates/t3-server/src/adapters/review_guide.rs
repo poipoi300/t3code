@@ -490,10 +490,15 @@ impl ReviewGuideGenerator {
 }
 
 /// Codex discovers project layers in trusted linked worktrees. Remove the fork's
-/// provider config directories before either CLI starts.
+/// provider config directories and instruction documents (Codex reads `AGENTS.md`,
+/// `AGENTS.override.md` and `.agents/skills`; Claude reads `CLAUDE.md`) before either
+/// CLI starts, so the fork's text never arrives as instructions.
 fn strip_provider_files(checkout: &Path) -> std::io::Result<()> {
     for name in [
         ".codex",
+        ".agents",
+        "AGENTS.md",
+        "AGENTS.override.md",
         ".claude",
         "CLAUDE.md",
         "CLAUDE.local.md",
