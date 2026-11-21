@@ -353,13 +353,12 @@ if (process.argv.includes("--check")) {
 
 const adapters = {
   orchestration:{feature:"orchestration",type:"orchestration::OrchestrationAdapter",tools:["t3_thread_send","t3_thread_wait","t3_thread_interrupt","t3_thread_update","t3_workflow_stop","t3_background_wait","t3_thread_configure","t3_thread_organize","t3_pending_request","t3_thread_transfer","t3_queue","t3_project_read","t3_project_list","t3_thread_send_attachments"]},
-  attachments:{feature:"workspace",type:"attachments::AttachmentAdapter",tools:["t3_attachment_prepare_upload","t3_attachment_discard"]},
   scheduler:{feature:"scheduler",type:"scheduler::SchedulerAdapter",tools:["list_scheduled_tasks","delete_scheduled_task","schedule_task","run_scheduled_task_now"]},
   worktree:{feature:"git",type:"worktree::WorktreeAdapter",tools:["t3_worktree_list"]},
 };
 const nativeMethods:Record<string,string[]> = {
-  t3_attachment_prepare_upload:["t3-workspace::AttachmentStore::issue_upload"],
-  t3_attachment_discard:["t3-workspace::AttachmentStore::delete_pending"],
+  t3_attachment_prepare_upload:["t3-workspace::AttachmentStore::issue_owned_upload"],
+  t3_attachment_discard:["t3-workspace::AttachmentStore::discard_owned"],
   t3_thread_send_attachments:["t3-orchestration::ThreadMessageIntake::send_to_thread"],
   t3_thread_send:["t3-orchestration::ThreadManagementService::send_to_thread"],
   t3_thread_wait:["t3-orchestration::ThreadManagementService::wait_for_thread"],
@@ -402,9 +401,10 @@ if(process.argv.includes("--check")) {
 } else await writeFile(integratedPath,integrated);
 const bindings=Object.fromEntries(Object.entries(methods).flatMap(([kit,tools])=>tools.map(tool=> {
   const route=Object.entries(adapters).find(([_,adapter])=>adapter.tools.includes(tool.name));
+  const host = ["preview","previewControls","device","html"].includes(kit) || kit === "attachment";
   return [tool.name,{toolkit:kit,feature:route?.[1].feature ?? null,adapter:route ? `adapters::${route[1].type}::${tool.name}` : null,
     expectedServiceMethod:`${serviceOwner[kit]}::${tool.name}`, serviceMethods:nativeMethods[tool.name] ?? [],
-    status:["tool_search","send_to_user"].includes(tool.name)?"built-in":route?"adapter": ["preview","previewControls","device","html"].includes(kit)?"host-trait":"missing-service-method"}];
+    status:["tool_search","send_to_user"].includes(tool.name)?"built-in":route?"adapter":host?"host-trait":"missing-service-method"}];
 })));
 const access=await server("mcp/McpToolAccess.ts");
 function declaration(tree:any):any {

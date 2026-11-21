@@ -94,11 +94,11 @@ lineage ownership, bounded model context, its SQLite store, and HTML snapshots
 from `apps/server/src/mcpApps/`. It uses `t3-persistence` for SQLite access.
 
 `adapters::ServiceAdapters` composes concrete sibling bindings without replacing
-one toolkit's other bindings. Enable `orchestration`, `workspace`, `scheduler`,
+one toolkit's other bindings. Enable `orchestration`, `scheduler`,
 `git`, or `forge` independently; none is a default feature. The complete 75-tool
 binding inventory is [fixtures/bindings.json](fixtures/bindings.json).
-There are 21 optional concrete routes (some with unavailable branches), 20
-preview/device/HTML host-trait routes, 32 missing sibling-service routes, and
+There are 19 optional concrete routes (some with unavailable branches), 22
+attachment, preview, device and HTML host-trait routes, 32 missing sibling-service routes, and
 two built-in routes (message and discovery). Each inventory entry lists its actual native
 service calls or the missing method returned by the fallback.
 An absent adapter or unavailable branch returns `isError: true` with
@@ -134,7 +134,7 @@ Available native calls:
 | `OrchestrationAdapter` | workflow stop, background wait | `ThreadStopService::{stop_workflow, await_background_tasks}` |
 | `OrchestrationAdapter` | project list/read | `stores::projects::{list, get}` over `StoreDatabase` |
 | `OrchestrationAdapter` | attachment send | `ThreadMessageIntake::send_to_thread` with `AttachmentBackend` |
-| `AttachmentAdapter` | prepare/discard | `AttachmentStore::{issue_upload, delete_pending}`; discard requires the preparing caller |
+| Server attachment service | prepare, discard, send | The shared ledger signs uploads for a verified MCP thread or OAuth namespace and binds the same principal to the fenced thread intake |
 | `SchedulerAdapter` | list/delete/update/run now | `ScheduledTaskService::{list, get, delete, upsert, run_now}`; bound task modes also use `ProjectionReader::shell` |
 | `WorktreeAdapter` | list | `Git::list_branches` after resolving the target workspace |
 

@@ -7,8 +7,6 @@ use std::sync::Arc;
 pub struct ServiceAdapters {
     #[cfg(feature = "orchestration")]
     pub orchestration: Option<Arc<super::orchestration::OrchestrationAdapter>>,
-    #[cfg(feature = "workspace")]
-    pub attachments: Option<Arc<super::attachments::AttachmentAdapter>>,
     #[cfg(feature = "scheduler")]
     pub scheduler: Option<Arc<super::scheduler::SchedulerAdapter>>,
     #[cfg(feature = "git")]
@@ -63,40 +61,6 @@ impl ProjectService for ServiceAdapters {
 }
 #[async_trait]
 impl AttachmentService for ServiceAdapters {
-    async fn t3_attachment_prepare_upload(
-        &self,
-        _context: CallContext,
-        _input: DecodedInput,
-    ) -> Result<t3_contracts::assets::AttachmentCreateUploadUrlResult> {
-        #[cfg(feature = "workspace")]
-        if let Some(adapter) = &self.attachments {
-            return AttachmentService::t3_attachment_prepare_upload(
-                adapter.as_ref(),
-                _context,
-                _input,
-            )
-            .await;
-        }
-        Err(super::not_available(
-            "t3_attachment_prepare_upload",
-            "t3-workspace::AttachmentStore::t3_attachment_prepare_upload",
-        ))
-    }
-    async fn t3_attachment_discard(
-        &self,
-        _context: CallContext,
-        _input: t3_contracts::assets::AttachmentDeleteInput,
-    ) -> Result<Value> {
-        #[cfg(feature = "workspace")]
-        if let Some(adapter) = &self.attachments {
-            return AttachmentService::t3_attachment_discard(adapter.as_ref(), _context, _input)
-                .await;
-        }
-        Err(super::not_available(
-            "t3_attachment_discard",
-            "t3-workspace::AttachmentStore::t3_attachment_discard",
-        ))
-    }
     async fn t3_thread_send_attachments(
         &self,
         _context: CallContext,

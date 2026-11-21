@@ -1,5 +1,5 @@
-#[cfg(feature = "workspace")]
-pub mod attachments;
+#[cfg(feature = "orchestration")]
+pub mod delegation;
 pub mod integrated;
 #[cfg(feature = "orchestration")]
 pub mod orchestration;
@@ -7,8 +7,6 @@ pub mod orchestration;
 pub mod scheduler;
 #[cfg(feature = "orchestration")]
 pub mod threads;
-#[cfg(feature = "orchestration")]
-pub mod delegation;
 #[cfg(feature = "git")]
 pub mod worktree;
 pub use integrated::ServiceAdapters;
@@ -20,19 +18,11 @@ pub fn not_available(tool: &str, method: &str) -> crate::McpError {
     }
 }
 
-#[cfg(any(
-    feature = "orchestration",
-    feature = "workspace",
-    feature = "scheduler"
-))]
+#[cfg(any(feature = "orchestration", feature = "scheduler"))]
 pub(crate) fn encoded<T: serde::Serialize>(value: T) -> crate::Result<serde_json::Value> {
     serde_json::to_value(value).map_err(|_| crate::McpError::Internal)
 }
-#[cfg(any(
-    feature = "orchestration",
-    feature = "workspace",
-    feature = "scheduler"
-))]
+#[cfg(any(feature = "orchestration", feature = "scheduler"))]
 pub(crate) fn decoded<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
 ) -> crate::Result<T> {

@@ -5588,7 +5588,6 @@ dependencies = [
  "t3-orchestration",
  "t3-persistence",
  "t3-scheduler",
- "t3-workspace",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

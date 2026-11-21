@@ -928,13 +928,13 @@
   },
   "t3_attachment_prepare_upload": {
     "toolkit": "attachment",
-    "feature": "workspace",
-    "adapter": "adapters::attachments::AttachmentAdapter::t3_attachment_prepare_upload",
+    "feature": null,
+    "adapter": null,
     "expectedServiceMethod": "t3-workspace::AttachmentStore::t3_attachment_prepare_upload",
     "serviceMethods": [
-      "t3-workspace::AttachmentStore::issue_upload"
+      "t3-workspace::AttachmentStore::issue_owned_upload"
     ],
-    "status": "adapter",
+    "status": "host-trait",
     "accessDeclaration": {
       "kind": "writes"
     },
@@ -1001,13 +1001,13 @@
   },
   "t3_attachment_discard": {
     "toolkit": "attachment",
-    "feature": "workspace",
-    "adapter": "adapters::attachments::AttachmentAdapter::t3_attachment_discard",
+    "feature": null,
+    "adapter": null,
     "expectedServiceMethod": "t3-workspace::AttachmentStore::t3_attachment_discard",
     "serviceMethods": [
-      "t3-workspace::AttachmentStore::delete_pending"
+      "t3-workspace::AttachmentStore::discard_owned"
     ],
-    "status": "adapter",
+    "status": "host-trait",
     "accessDeclaration": {
       "kind": "writes"
     },

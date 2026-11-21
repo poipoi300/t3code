@@ -8,7 +8,6 @@ publish = false
 default = ["auth"]
 auth = ["dep:t3-auth"]
 orchestration = ["dep:t3-orchestration"]
-workspace = ["dep:t3-workspace"]
 forge = ["dep:t3-forge"]
 scheduler = ["dep:t3-scheduler"]
 git = ["dep:t3-git", "orchestration"]
@@ -18,7 +17,6 @@ t3-contracts = { path = "../t3-contracts" }
 t3-persistence = { path = "../t3-persistence" }
 t3-auth = { path = "../t3-auth", optional = true }
 t3-orchestration = { path = "../t3-orchestration", optional = true }
-t3-workspace = { path = "../t3-workspace", optional = true }
 t3-forge = { path = "../t3-forge", optional = true }
 t3-scheduler = { path = "../t3-scheduler", optional = true }
 t3-git = { path = "../t3-git", optional = true }

@@ -823,9 +823,9 @@
   "packages/ssh/src/errors.ts": "10429ec8710b1e0c007b6d441dcf7d24a0f4a2bb1206d408aae846ccc268a7fb",
   "packages/tailscale/src/index.ts": "86d1c2aa19182a24a4e77036e833d6d069c164bebc1fc5ee96d63fcfe9322629",
   "packages/tailscale/src/tailscale.ts": "8d3e31b8e7f8e18810d576da441cc28b9f95b34b67a91d213239ab9d30ba2689",
-  "rust/crates/t3-mcp/export.ts": "51121bc322c59c2152eadb4dbb68956cb77580720a28e7f6effdc9cfa646600e",
+  "rust/crates/t3-mcp/export.ts": "c86396181006f65ba21b7fb5b2c80d69456cd1f83d70d8ab20eaf4571bb6a31b",
   "rust/crates/t3-mcp/fixtures/tools.json": "d928e05dd6a1be1471698a41e79ffc5bf6c0891f50353809ab67462454982082",
   "rust/crates/t3-mcp/fixtures/decoders.json": "d42d4a4c96f1fbae1bd443d7c94c128e5fe0e7dbb3e0b67bec1017968be8272a",
-  "rust/crates/t3-mcp/fixtures/bindings.json": "dfb9579d95e29adbaf6a549ba5e42e6f21126148abadabd2c1240057f3238aab",
+  "rust/crates/t3-mcp/fixtures/bindings.json": "c3791126213a9c3bcf59b937cdd1938abdcdecae0dfab66a4b47dc592a61e734",
   "rust/crates/t3-mcp/fixtures/instructions.json": "6ee84bced8e65991c933c289345d50d261ee697aa36df01a5b319c4c57b3baa9"
 }

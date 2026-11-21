@@ -44,7 +44,7 @@ dev-policy-overrides = ["t3-config?/dev-policy-overrides"]
 textgen-native = ["git-actions", "providers"]
 project = ["dep:t3-project", "orchestration", "workspace", "dep:t3-process", "dep:async-trait"]
 # The `/mcp` endpoint and per-thread provider credentials (`adapters/mcp.rs`).
-mcp = ["dep:t3-mcp", "t3-mcp/orchestration", "t3-mcp/git", "t3-mcp/scheduler", "t3-mcp/workspace", "local-services", "orchestration", "dep:async-trait", "dep:t3-shared", "t3-device?/mcp"]
+mcp = ["dep:t3-mcp", "t3-mcp/orchestration", "t3-mcp/git", "t3-mcp/scheduler", "local-services", "orchestration", "dep:async-trait", "dep:t3-shared", "t3-device?/mcp"]
 providers = ["dep:t3-provider", "dep:t3-process", "local-services", "workspace", "orchestration", "dep:async-trait", "t3-orchestration/codex-adapter", "t3-orchestration/claude-adapter", "dep:t3-codex-app-server", "dep:t3-claude-cli", "dep:base64"]
 [dependencies]
 t3-contracts = { path = "../t3-contracts" }

@@ -268,83 +268,19 @@ async fn all_unbound_tools_report_the_named_missing_service_as_structured_conten
     assert_eq!(checked, catalog::catalog().tools.len() - 1);
 }
 
-#[cfg(feature = "workspace")]
-mod attachments {
-    use super::*;
-    use std::{future::Future, path::Path, pin::Pin};
-    use t3_mcp::services::AttachmentService;
-    use t3_mcp::{
-        adapters::attachments::AttachmentAdapter,
-        session::{AliveMark, Clock},
-    };
-    use t3_workspace::{
-        assets::AssetSigner,
-        attachments::{AttachmentStore, DocumentText},
-    };
-    struct FixedClock;
-    impl Clock for FixedClock {
-        fn now(&self) -> AliveMark {
-            AliveMark {
-                wall_ms: 1_000,
-                monotonic_ms: 0,
-            }
-        }
-    }
-    struct Documents;
-    impl DocumentText for Documents {
-        fn ensure<'a>(&'a self, _: &'a Path) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
-        }
-    }
-
-    #[tokio::test]
-    async fn native_uploads_are_signed_and_only_the_preparing_caller_can_discard() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(AttachmentStore::new(
-            temp.path().into(),
-            AssetSigner::new(vec![7; 32]).unwrap(),
-            Arc::new(Documents),
-        ));
-        let adapter = AttachmentAdapter::new(store.clone(), Arc::new(FixedClock));
-        let input=decode_input("t3_attachment_prepare_upload",json!({"upload":{"type":"file","name":"notes.txt","mimeType":"text/plain","sizeBytes":5}})).unwrap();
-        let issued = adapter
-            .t3_attachment_prepare_upload(context("alice").await, input)
-            .await
-            .unwrap();
-        let token = issued
-            .relative_url
-            .0
-            .strip_prefix("/api/attachments/upload/")
-            .unwrap();
-        let claims = store.validate_upload(token, 1_000).unwrap();
-        let path = store
-            .upload(token, 1_000, std::io::Cursor::new(b"hello"))
-            .await
-            .unwrap();
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello");
-        let input = serde_json::from_value(json!({"attachmentId":issued.attachment_id})).unwrap();
-        let refused = adapter
-            .t3_attachment_discard(context("bob").await, input)
-            .await
-            .unwrap_err();
-        assert!(matches!(refused,McpError::Failure {ref code,..} if code=="invalid_request"));
-        assert!(path.exists());
-        assert_eq!(claims.attachment_id, issued.attachment_id.0);
-        let input =
-            || serde_json::from_value(json!({"attachmentId":issued.attachment_id})).unwrap();
+#[test]
+fn prepare_and_discard_are_owned_by_the_host_attachment_service() {
+    let bindings: Value = serde_json::from_str(include_str!("../fixtures/bindings.json")).unwrap();
+    for (tool, method) in [
+        ("t3_attachment_prepare_upload", "issue_owned_upload"),
+        ("t3_attachment_discard", "discard_owned"),
+    ] {
+        assert_eq!(bindings[tool]["status"], "host-trait", "{tool}");
+        assert!(bindings[tool]["adapter"].is_null(), "{tool}");
         assert_eq!(
-            adapter
-                .t3_attachment_discard(context("alice").await, input())
-                .await
-                .unwrap(),
-            json!({})
-        );
-        assert!(!path.exists());
-        assert!(
-            adapter
-                .t3_attachment_discard(context("alice").await, input())
-                .await
-                .is_err()
+            bindings[tool]["serviceMethods"],
+            json!([format!("t3-workspace::AttachmentStore::{method}")]),
+            "{tool}"
         );
     }
 }
