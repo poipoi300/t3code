@@ -3667,7 +3667,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "chrono",
  "html5ever",
@@ -3686,7 +3686,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "cap-std",
  "crc32fast",
@@ -3715,7 +3715,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "crossbeam-channel",
  "env_filter",
@@ -3733,7 +3733,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -3746,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-gpui"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3779,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.5.0"
-source = "git+https://github.com/poipoi300/nsh?rev=0fcf1d8922f863ca8e91172968a405494d815f98#0fcf1d8922f863ca8e91172968a405494d815f98"
+source = "git+https://github.com/poipoi300/nsh?rev=d32cff3145f8867b959c1cdbf8a689f715e7b919#d32cff3145f8867b959c1cdbf8a689f715e7b919"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

@@ -10,8 +10,8 @@ publish = false
 
 # The authoritative NSH pin. The installer reads nsh-core; keep all NSH crates identical.
 [dependencies]
-nsh-core = { git = "https://github.com/poipoi300/nsh", rev = "0fcf1d8922f863ca8e91172968a405494d815f98" }
-nsh-base = { git = "https://github.com/poipoi300/nsh", rev = "0fcf1d8922f863ca8e91172968a405494d815f98", default-features = false, features = ["highlight", "rich-editor", "editor", "term"] }
+nsh-core = { git = "https://github.com/poipoi300/nsh", rev = "d32cff3145f8867b959c1cdbf8a689f715e7b919" }
+nsh-base = { git = "https://github.com/poipoi300/nsh", rev = "d32cff3145f8867b959c1cdbf8a689f715e7b919", default-features = false, features = ["highlight", "rich-editor", "editor", "term"] }
 t3-client = { path = "../t3-client" }
 t3-contracts = { path = "../t3-contracts" }
 t3-theme = { path = "../t3-theme" }
@@ -33,14 +33,14 @@ two-face = { version = "0.4.5", default-features = false, features = ["syntect-f
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-nsh = { package = "nsh-platform-android", git = "https://github.com/poipoi300/nsh", rev = "0fcf1d8922f863ca8e91172968a405494d815f98", default-features = false }
+nsh = { package = "nsh-platform-android", git = "https://github.com/poipoi300/nsh", rev = "d32cff3145f8867b959c1cdbf8a689f715e7b919", default-features = false }
 
 [dev-dependencies]
 # The connectable fake environment (`t3_client::testing::environment`) for UI tests only.
 t3-client = { path = "../t3-client", features = ["testing"] }
 futures = { version = "0.3", features = ["executor"] }
-nsh-engine = { git = "https://github.com/poipoi300/nsh", rev = "0fcf1d8922f863ca8e91172968a405494d815f98" }
-nsh-testing = { git = "https://github.com/poipoi300/nsh", rev = "0fcf1d8922f863ca8e91172968a405494d815f98", default-features = false }
+nsh-engine = { git = "https://github.com/poipoi300/nsh", rev = "d32cff3145f8867b959c1cdbf8a689f715e7b919" }
+nsh-testing = { git = "https://github.com/poipoi300/nsh", rev = "d32cff3145f8867b959c1cdbf8a689f715e7b919", default-features = false }
 
 [lints.rust]
 unsafe_code = "deny"
