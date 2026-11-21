@@ -129,34 +129,6 @@ fn title_image_paths(
         .collect()
 }
 
-#[cfg(test)]
-mod attachment_review_tests {
-    use super::*;
-    #[test]
-    fn title_image_uses_a_private_snapshot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let image=serde_json::from_value(serde_json::json!({"type":"image","id":"thread-00000000-0000-4000-8000-000000000001","mimeType":"image/png","name":"a.png","sizeBytes":1})).unwrap();
-        let raw = t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
-            tmp.path(),
-            &image,
-        )
-        .unwrap();
-        std::fs::write(&raw, b"x").unwrap();
-        let delivery = AttachmentDelivery::new(tmp.path().into());
-        let paths = title_image_paths(&delivery, tmp.path(), std::slice::from_ref(&image));
-        assert_eq!(paths.len(), 1);
-        assert!(
-            !paths[0].starts_with(tmp.path()),
-            "original path passed to title provider"
-        );
-        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"x");
-        std::fs::hard_link(&raw, tmp.path().join("second.png")).unwrap();
-        assert!(title_image_paths(&delivery, tmp.path(), &[image]).is_empty());
-        drop(delivery);
-        assert!(!paths[0].exists());
-    }
-}
-
 /// `makeCodexTextGeneration` for a direct (`existing`) instance.
 async fn codex(
     domain: &Arc<ProviderDomain>,
@@ -346,4 +318,39 @@ fn managed_mcp_config(platform: Platform) -> bool {
         Platform::Linux => "/etc/claude-code/managed-mcp.json",
     };
     Path::new(path).exists()
+}
+
+#[cfg(test)]
+mod attachment_review_tests {
+    use super::*;
+    #[test]
+    fn title_image_uses_a_private_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = serde_json::from_value(serde_json::json!({
+            "type": "image",
+            "id": "thread-00000000-0000-4000-8000-000000000001",
+            "mimeType": "image/png",
+            "name": "a.png",
+            "sizeBytes": 1
+        }))
+        .unwrap();
+        let raw = t3_orchestration::ports::runs_ingestion::attachment_claims::attachment_path(
+            tmp.path(),
+            &image,
+        )
+        .unwrap();
+        std::fs::write(&raw, b"x").unwrap();
+        let delivery = AttachmentDelivery::new(tmp.path().into());
+        let paths = title_image_paths(&delivery, tmp.path(), std::slice::from_ref(&image));
+        assert_eq!(paths.len(), 1);
+        assert!(
+            !paths[0].starts_with(tmp.path()),
+            "original path passed to title provider"
+        );
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"x");
+        std::fs::hard_link(&raw, tmp.path().join("second.png")).unwrap();
+        assert!(title_image_paths(&delivery, tmp.path(), &[image]).is_empty());
+        drop(delivery);
+        assert!(!paths[0].exists());
+    }
 }
