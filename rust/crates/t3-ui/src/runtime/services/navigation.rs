@@ -8,7 +8,7 @@ use std::{cell::RefCell, rc::Rc};
 use t3_client::{composition::ClientRuntime, platform::Platform};
 struct UrlBinding<P> {
     client: t3_client::navigation::UrlClient<P>,
-    failure: Rc<RefCell<Option<Text>>>,
+    failure: Rc<RefCell<Option<t3_client::ClientError>>>,
 }
 pub fn url_client<P: Platform + Clone + 'static>(runtime: &ClientRuntime<P>) -> Rc<dyn UrlClient> {
     Rc::new(UrlBinding {
@@ -24,13 +24,15 @@ impl<P: Platform + Clone + 'static> UrlClient for UrlBinding<P> {
         let failure = self.failure.clone();
         self.client
             .watch()
-            .inspect(move |item| {
-                if let Err(cause) = item {
-                    *failure.borrow_mut() = Some(error_ref(cause));
+            .map(move |item| match item {
+                Ok(snapshot) => Some(snapshot),
+                Err(cause) => {
+                    *failure.borrow_mut() = Some(cause);
+                    None
                 }
             })
-            .take_while(|item| futures::future::ready(item.is_ok()))
-            .filter_map(|item| async { item.ok() })
+            .take_while(|item| futures::future::ready(item.is_some()))
+            .filter_map(futures::future::ready)
             .boxed_local()
     }
     fn navigate(&self, request: UrlRequest) -> LocalBoxFuture<'static, Result<(), Text>> {
@@ -38,7 +40,18 @@ impl<P: Platform + Clone + 'static> UrlClient for UrlBinding<P> {
         async move { operation.await.map_err(error) }.boxed_local()
     }
     fn stream_error(&self) -> Option<Text> {
-        self.failure.borrow().clone()
+        self.failure.borrow().as_ref().map(error_ref)
+    }
+    fn boot_error(&self) -> Option<Text> {
+        self.failure
+            .borrow()
+            .as_ref()
+            .and_then(|cause| match cause {
+                t3_client::ClientError::Platform(
+                    t3_client::platform::PlatformError::Unsupported(_),
+                ) => None,
+                _ => Some(error_ref(cause)),
+            })
     }
 }
 fn error_ref(error: &t3_client::ClientError) -> Text {

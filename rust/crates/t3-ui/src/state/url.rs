@@ -25,6 +25,36 @@ pub trait UrlClient {
     fn stream_error(&self) -> Option<Text> {
         None
     }
+    fn boot_error(&self) -> Option<Text> {
+        self.stream_error()
+    }
+}
+
+/// The same current-first subscription supplies the boot route and every subsequent change.
+pub(crate) struct UrlHistory {
+    pub(crate) location: Location,
+    client: Rc<dyn UrlClient>,
+    changes: LocalBoxStream<'static, UrlSnapshot>,
+}
+
+impl UrlHistory {
+    pub(crate) async fn read(client: Rc<dyn UrlClient>) -> Result<Option<Self>, Text> {
+        let mut changes = client.watch();
+        let Some(first) = changes.next().await else {
+            return client.boot_error().map_or(Ok(None), Err);
+        };
+        let location = Location::resolve(&first.path, first.policy);
+        let changes = futures::stream::iter([first]).chain(changes).boxed_local();
+        Ok(Some(Self {
+            location,
+            client,
+            changes,
+        }))
+    }
+
+    pub(crate) fn install(self, navigator: Navigator) -> UrlState {
+        UrlState::install_stream(self.location, navigator, self.client, self.changes)
+    }
 }
 
 /// Root-owned navigation: tasks and the service lease end with App. Host history remains the
@@ -44,6 +74,16 @@ pub struct UrlState {
 
 impl UrlState {
     pub fn install(location: Location, navigator: Navigator, client: Rc<dyn UrlClient>) -> Self {
+        let changes = client.watch();
+        Self::install_stream(location, navigator, client, changes)
+    }
+
+    fn install_stream(
+        location: Location,
+        navigator: Navigator,
+        client: Rc<dyn UrlClient>,
+        mut changes: LocalBoxStream<'static, UrlSnapshot>,
+    ) -> Self {
         let (requests, mut receiver) = mpsc::unbounded();
         let state = Self {
             location: signal(location),
@@ -56,7 +96,6 @@ impl UrlState {
             tracker: stored(MainAppLocation::default()),
             requests: stored(requests),
         };
-        let mut changes = client.watch();
         let observer = client.clone();
         crate::runtime::tasks::watch(async move {
             while let Some(request) = receiver.next().await {
@@ -222,4 +261,51 @@ pub fn root_route_not_found_view() -> impl IntoElement {
             .child(text(move || tr("This link doesn't point to a page in {appName}. Go home to choose a project or start a thread.", &[("appName", t3_i18n::Value::Text("T3 Code".into()))])).app_class(tw("text-sm text-muted-foreground")))
             // A closed URL service disables navigation; its client error is exposed on UrlState.
             .child(button(ButtonContent::Label(t("Go home")), ButtonVariant::Default, ButtonSize::Default, move || !urls.available.get(), move || urls.request(UrlRequest::Replace("/".into())))))
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::{UrlClient, UrlHistory};
+    use t3_client::{ClientStore, composition::ClientRuntime, testing::FakePlatform};
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+    #[test]
+    fn a_failed_first_snapshot_exposes_the_startup_error() {
+        struct Failed;
+        impl super::UrlClient for Failed {
+            fn watch(&self) -> super::LocalBoxStream<'static, super::UrlSnapshot> {
+                futures::stream::empty().boxed_local()
+            }
+            fn navigate(
+                &self,
+                _: super::UrlRequest,
+            ) -> super::LocalBoxFuture<'static, Result<(), super::Text>> {
+                panic!("a failed subscription cannot navigate")
+            }
+            fn stream_error(&self) -> Option<super::Text> {
+                Some(super::Text::content("Could not replace history entry"))
+            }
+        }
+        use futures::StreamExt;
+        assert_eq!(
+            futures::executor::block_on(UrlHistory::read(std::rc::Rc::new(Failed))).err(),
+            Failed.stream_error()
+        );
+    }
+
+    #[test]
+    fn a_host_without_history_keeps_navigator_only_routing() {
+        let client = ClientRuntime::new(
+            FakePlatform::default(),
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            std::rc::Rc::new(|_| {}),
+        );
+        let urls = crate::runtime::services::navigation::url_client(&client);
+        assert!(
+            futures::executor::block_on(UrlHistory::read(urls))
+                .expect("unsupported history")
+                .is_none()
+        );
+    }
 }

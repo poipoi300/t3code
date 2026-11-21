@@ -673,6 +673,92 @@ fn start_host_tree(window: (f32, f32), page: SettingsPage) -> Headless {
     app
 }
 
+fn packaged_app_root() -> Root {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../shells/nsh.json")).expect("shell manifest");
+    let schemes: Vec<String> =
+        serde_json::from_value(config["schemes"].clone()).expect("claimed schemes");
+    Root::of::<t3_ui::App>().url_schemes(schemes)
+}
+
+#[test]
+fn an_unknown_launch_address_uses_host_history_to_return_to_pairing() {
+    let mut config = config(DESKTOP, Some(Os::Linux), packaged_app_root());
+    config.data_dir = Some(fresh_data_dir());
+    let mut app = Headless::start_with_link(config, "t3code-dev://unknown-path")
+        .expect("start from the cold link");
+    app.wait_for_within("Page not found", Duration::from_secs(30))
+        .expect("host kept the launch address");
+    app.press("role:button[Go home]")
+        .expect("replace the unknown address");
+    app.wait_for("Connect to T3 Code")
+        .expect("unpaired home resolves to Pair");
+    app.open_with_url("t3code-dev://another-unknown-path")
+        .expect("deliver a warm link");
+    app.wait_for("Page not found")
+        .expect("the same history receives the warm link");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[test]
+fn a_cold_pairing_link_prompts_once_when_an_environment_is_already_saved() {
+    use t3_client::connection::{ConnectionMode, Route as ServerRoute, Time};
+    use t3_client::environment::{EnvironmentRegistration, EnvironmentRegistry};
+    use t3_client::platform::NetworkStatus;
+    use t3_platform::{NativeConfig, NativePlatform};
+    let dir = fresh_data_dir();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("storage runtime");
+    runtime.block_on(async {
+        let platform = NativePlatform::open(NativeConfig::desktop(dir.join("client")))
+            .await
+            .expect("storage");
+        let mut registry =
+            EnvironmentRegistry::<()>::load(&platform, NetworkStatus::Offline, Time::default())
+                .await
+                .expect("catalog");
+        let id = EnvironmentId("saved".into());
+        registry
+            .register(
+                EnvironmentRegistration {
+                    id: id.clone(),
+                    label: "Saved backend".into(),
+                    enabled: false,
+                    routes: vec![ServerRoute {
+                        id: "direct".into(),
+                        environment: id,
+                        mode: ConnectionMode::Remote,
+                        http_base: "http://127.0.0.1:1/".into(),
+                        ws_base: "ws://127.0.0.1:1/".into(),
+                    }],
+                },
+                false,
+                NetworkStatus::Offline,
+                Time::default(),
+            )
+            .expect("registration");
+        registry
+            .save(&platform)
+            .await
+            .expect("persist disabled backend");
+    });
+    let mut config = config(DESKTOP, Some(Os::Linux), packaged_app_root());
+    config.data_dir = Some(dir);
+    let mut app = Headless::start_with_link(
+        config,
+        "t3code-dev://pair?pairingUrl=wss%3A%2F%2Fbox.test%2Fpair%23token%3Dtest",
+    )
+    .expect("app starts");
+    let prompt = "Add the backend at https://box.test?";
+    app.wait_for_within(prompt, Duration::from_secs(30))
+        .expect("cold pairing request");
+    app.press("role:button[Cancel]").expect("decline");
+    app.wait_for_gone(prompt, Duration::from_secs(5))
+        .expect("only one confirmation");
+}
+
 #[test]
 fn a_settings_route_renders_the_shell_with_its_navigation_and_pages() {
     for window in [DESKTOP, PHONE] {
@@ -968,6 +1054,32 @@ fn a_snoozed_thread_finishing_in_the_background_is_not_announced() {
         "a snoozed thread stays quiet: {:?}",
         announced(&app)
     );
+}
+
+#[test]
+fn switching_away_from_a_running_thread_can_recycle_its_sidebar_row() {
+    let mut app = start_app_tree_with(DESKTOP, None, Route::Thread(key()), "running", 1);
+    app.press("role:button[Settled]")
+        .expect("show the second thread");
+    app.wait_for("Old thread 00").expect("settled row");
+    for _ in 0..3 {
+        app.press("id:sidebar-threads >> text:Old thread 00")
+            .expect("leave running thread");
+        app.wait_for("role:button[Working]")
+            .expect("running thread moved to its shelf");
+        if !app
+            .screen()
+            .matches("id:sidebar-threads >> text:Fix the build")
+            .expect("working row")
+        {
+            app.press("role:button[Working]")
+                .expect("expand working shelf");
+        }
+        app.press("id:sidebar-threads >> text:Fix the build")
+            .expect("return to running thread");
+        app.wait_for("role:button[Thread actions for Fix the build]")
+            .expect("running thread header");
+    }
 }
 
 #[test]

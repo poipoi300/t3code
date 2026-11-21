@@ -3,5 +3,7 @@
   "id": "codes.t3.dev",
   "rust": "../crates/t3-ui",
   "root": "App",
+  "schemes": ["t3code-dev"],
+  "web": { "base": "/" },
   "singleInstance": true
 }

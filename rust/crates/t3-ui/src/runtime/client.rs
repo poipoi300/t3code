@@ -59,6 +59,48 @@ pub fn start(store: ClientStore) -> LocalBoxFuture<'static, Started> {
     .boxed_local()
 }
 
+/// Filled by the native host during boot. The root consumes it after its link subscribers mount.
+#[cfg(not(target_arch = "wasm32"))]
+type PendingNativeLinks = Stored<Option<(t3_platform::NativePlatform, Option<String>)>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn prepare_native_links() {
+    let slot: PendingNativeLinks = stored(None);
+    provide_context(slot);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn follow_native_links(pair_screen: bool) {
+    use t3_client::connection::pairing_link::{PairingLaunch, read_pairing_launch};
+    use t3_client::platform::PlatformEvent;
+    let Some((platform, mut launch)) =
+        use_context::<PendingNativeLinks>().and_then(|slot| slot.with(Option::take))
+    else {
+        return;
+    };
+    watch(async move {
+        loop {
+            let link = next_url_scheme_open().await;
+            let cold = launch.take().as_ref() == Some(&link);
+            if cold && pair_screen {
+                // The pairing screen reads and strips its own cold launch.
+                continue;
+            }
+            let request = read_pairing_launch(&link);
+            if matches!(request.launch, PairingLaunch::AppLink { .. }) {
+                if let Some(clean) = request.stripped {
+                    let _ = set_app_url(clean);
+                }
+                platform
+                    .event_sender()
+                    .emit(PlatformEvent::OpenedLink(link));
+            } else if !cold {
+                platform.open_link(link);
+            }
+        }
+    });
+}
+
 /// The client over an opened platform. The saved environments are restored first: restoring
 /// settles the catalog (a damaged one is set aside, and the runtime keeps that for its one-time
 /// storage notice), and starts each environment's connection without waiting for its server.
@@ -136,13 +178,23 @@ mod host {
         let runtime = runtime()?;
         let (mut config, lasting) = config(dir);
         config.presentation = Some(presentation_for_host());
-        Entered {
+        let launch = nsh_core::prelude::app_url().await;
+        config.launch_url = launch
+            .as_deref()
+            .and_then(|address| {
+                t3_client::connection::pairing_link::read_pairing_launch(address).stripped
+            })
+            .or_else(|| launch.clone());
+        let platform = Entered {
             handle: runtime.handle().clone(),
             future: Box::pin(NativePlatform::open(config)),
         }
         .await
-        .map(|platform| (platform, lasting))
-        .map_err(|error| format!("The client's storage did not open: {error}"))
+        .map_err(|error| format!("The client's storage did not open: {error}"))?;
+        if let Some(slot) = nsh_core::prelude::use_context::<super::PendingNativeLinks>() {
+            slot.with(|slot| *slot = Some((platform.clone(), launch)));
+        }
+        Ok((platform, lasting))
     }
 
     /// A release build sets it; development builds report `0.0.0`, which the host does not show.

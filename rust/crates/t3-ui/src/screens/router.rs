@@ -11,8 +11,10 @@ use crate::state::nav::{Route, ThreadPanel};
 use crate::ui::placeholder::not_built;
 
 pub fn screen(route: &Route) -> AnyElement {
+    let has_history = use_context::<crate::state::url::UrlState>().is_some();
     match route {
         Route::Home => home::screen(),
+        Route::NewThread | Route::NotFound(_) if has_history => crate::state::url::screen(route),
         Route::NewThread => new_thread::screen(None),
         Route::Draft(id) => new_thread::screen(Some(id)),
         Route::Thread(key) => thread::screen(key.clone()),
@@ -24,6 +26,8 @@ pub fn screen(route: &Route) -> AnyElement {
             ThreadPanel::Device => "Device",
             ThreadPanel::PullRequest => "Pull request",
         }),
+        // The history service resolves this link (including its query) and replaces the entry.
+        Route::ProjectLink(_) if has_history => view().into_element(),
         Route::ProjectLink(key) => project_link::screen(key),
         Route::AddProject => add_project::screen(),
         Route::PullRequests => pull_requests::list::screen(),

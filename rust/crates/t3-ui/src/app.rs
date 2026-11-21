@@ -1,7 +1,6 @@
 //! The root: reads the launch address, builds the runtime and UI state once, then shows the
 //! standalone or workspace layout.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use nsh_core::prelude::*;
@@ -15,6 +14,7 @@ use crate::screens::{router, shell};
 use crate::state::clock;
 use crate::state::nav::{Navigator, Route, initial_route};
 use crate::state::panels::Panels;
+use crate::state::url::{UrlHistory, UrlState};
 use crate::theme::{self, ThemeChoice, palette};
 
 use crate::runtime::tasks::watch;
@@ -25,45 +25,100 @@ pub fn App() -> impl IntoElement {
     // (the real client, or the demo when asked). This also keeps token installation and task
     // spawns out of the root's first synchronous render, which aborts NSH's web runtime ("a prop
     // read or written after its owner was disposed").
-    let address = signal(None::<Option<String>>);
-    let slot: Rc<RefCell<Option<(ClientStore, Started)>>> = Rc::new(RefCell::new(None));
-    let filling = slot.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::runtime::client::prepare_native_links();
+    let ready = signal(false);
+    let slot = stored(None);
     watch(async move {
         let launched = app_url().await;
         let store = ClientStore::default();
         let started = host::start(store.clone(), host::launch_choice(launched.as_deref())).await;
-        *filling.borrow_mut() = Some((store, started));
-        address.set(Some(launched));
+        let history = match started.backend.client() {
+            Some(client) => {
+                UrlHistory::read(crate::runtime::services::navigation::url_client(&client)).await
+            }
+            None => Ok(None),
+        };
+        let (history, failure) = match history {
+            Ok(history) => (history, None),
+            Err(error) => (None, Some(error)),
+        };
+        let route = history.as_ref().map_or_else(
+            || {
+                initial_route(
+                    launched.as_deref(),
+                    started.paired || !started.backend.environments().is_empty(),
+                )
+            },
+            |history| history.location.route.clone(),
+        );
+        slot.with(|slot| *slot = Some((route, store, started, history, failure)));
+        ready.set(true);
     });
-    // Untracked: root builds the runtime once; a signal it happens to read must not rebuild it.
-    // `address` is set once, so this runs once with the slot filled.
     view().w_full().h_full().child(dynamic(move || {
-        address.get().and_then(|launched| {
-            let (store, started) = slot.borrow_mut().take()?;
-            Some(untracked(|| root(launched.as_deref(), store, started)))
-        })
+        if !ready.get() {
+            return None;
+        }
+        let (route, store, started, history, failure) = slot.with(Option::take)?;
+        Some(untracked(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            let pair_screen = route == Route::Pair;
+            let tree = booted_with_history(route, store, started, history);
+            if let Some(error) = failure {
+                navigation_error(error);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::runtime::client::follow_native_links(pair_screen);
+            tree
+        }))
     }))
-}
-
-fn root(address: Option<&str>, store: ClientStore, started: Started) -> AnyElement {
-    let paired = started.paired;
-    let has_environments = !started.backend.environments().is_empty();
-    booted_tree(initial_route(address, paired || has_environments), store, started)
 }
 
 /// The app once its backend has started, opened at `route`: what `App` shows after the launch
 /// address is read. Tests boot the host's client (`runtime::client::start`) and mount this.
 pub fn booted_tree(route: Route, store: ClientStore, started: Started) -> AnyElement {
+    booted_with_history(route, store, started, None)
+}
+
+fn booted_with_history(
+    route: Route,
+    store: ClientStore,
+    started: Started,
+    history: Option<UrlHistory>,
+) -> AnyElement {
     let runtime = Rt::new(store, started.backend, started.choice);
     let client = runtime.backend().client();
-    app_tree(runtime, route, move || match client {
-        Some(client) => provide_client_services(&client),
-        None => provide_without_client(),
+    app_tree(runtime, route, move || {
+        if let Some(history) = history {
+            let urls = history.install(crate::state::nav::navigator());
+            show_navigation_errors(urls);
+        }
+        match client {
+            Some(client) => provide_client_services(&client),
+            None => provide_without_client(),
+        }
     })
 }
 
+fn show_navigation_errors(urls: UrlState) {
+    effect(move || {
+        if let Some(error) = urls.error.get() {
+            navigation_error(error);
+        }
+    });
+}
+
+fn navigation_error(error: crate::i18n::Text) {
+    use crate::ui::toast::{ToastOptions, Variant, toast_manager};
+    toast_manager().add(ToastOptions {
+        variant: Variant::Error,
+        title: error,
+        ..ToastOptions::default()
+    });
+}
+
 /// Everything below the boot: contexts, client services (`provide_services`), the routes and
-/// the root hosts. Tests mount it with a fake-platform client, as `root` does with the host's.
+/// the root hosts. Tests mount it with a fake-platform client, as `App` does with the host's.
 pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> AnyElement {
     theme::install(&ThemeChoice::default());
     provide_context(theme::text_view_parts());
@@ -72,9 +127,9 @@ pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> A
     }
     crate::i18n::set_language("system", &[locale().to_string()]);
     provide_context(runtime);
-    provide_services();
     let nav = Navigator::new(route);
     provide_context(nav);
+    provide_services();
     let panels = Panels::new();
     provide_context(panels);
     clock::start();
