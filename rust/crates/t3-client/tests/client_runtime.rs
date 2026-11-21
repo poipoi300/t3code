@@ -1464,6 +1464,79 @@ fn an_environment_removed_while_it_reconnects_does_not_come_back_into_the_store(
 }
 
 #[test]
+fn first_run_does_not_choose_the_first_remote_computer_as_primary() {
+    use t3_client::view_logic::onboarding::FirstRunDecision;
+    let mut harness = Harness::new(ENV);
+    let client = runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness.run(client.pair(pairing())).unwrap();
+    harness.settle();
+    assert!(client.settings().primary_environment().is_none());
+    let status = client.first_run().snapshot();
+    assert!(status.target.is_none());
+    assert_eq!(status.gate.decision, FirstRunDecision::App);
+    assert!(!status.persist_completion);
+}
+
+#[test]
+fn first_run_completion_merges_the_durable_settings_read_for_the_write() {
+    use t3_client::{
+        persistence::{Record, decode_record},
+        platform::{StorageKey, StorageWrite},
+    };
+    use t3_contracts::settings::ClientSettingsSchema;
+
+    let mut harness = Harness::new(ENV);
+    let client = runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness.settle();
+    let preferences = client.composer_preferences();
+    assert!(preferences.snapshot().confirm_thread_delete);
+    let platform = harness.platform.clone();
+    let gate = client.first_run();
+    harness.run(async move {
+        let key = StorageKey::new("client-settings", None, "t3code:client-settings:v1");
+        let external = ClientSettingsSchema {
+            confirm_thread_delete: false,
+            onboarding_completed_at: Some("2001-01-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let record = Record::new("client-settings", None, key.record.clone(), 1, external);
+        platform
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: key.clone(),
+                    value: Some(record.encode().unwrap()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(preferences.snapshot().confirm_thread_delete);
+        gate.complete().await.unwrap();
+        let bytes = platform
+            .get(StorageArea::Ordinary, key.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let saved = decode_record::<ClientSettingsSchema>(&bytes, &key, 1)
+            .unwrap()
+            .payload;
+        assert!(
+            !saved.confirm_thread_delete,
+            "completion overwrote another writer's edit"
+        );
+        assert_eq!(
+            saved.onboarding_completed_at.as_deref(),
+            Some("2001-01-01T00:00:00Z")
+        );
+        assert_eq!(preferences.snapshot().as_ref(), &saved);
+    });
+}
+
+// A Local route comes from the host, never from a stored remote pairing.
+#[cfg(feature = "testing")]
+#[test]
 fn first_run_policy_waits_for_the_servers_bootstrap_provenance() {
     use futures::{StreamExt, channel::mpsc};
     use serde_json::json;
@@ -1501,7 +1574,8 @@ fn first_run_policy_waits_for_the_servers_bootstrap_provenance() {
     }));
     let client = runtime(&harness);
     harness.run(client.restore()).unwrap();
-    harness.run(client.pair(pairing())).unwrap();
+    let primary = harness.run(client.pair(pairing())).unwrap();
+    client.supply_test_primary_route(&primary);
     harness.settle();
     assert!(!client.route_policy().unwrap().first_run);
     let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));

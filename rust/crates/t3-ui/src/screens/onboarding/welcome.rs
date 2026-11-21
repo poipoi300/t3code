@@ -63,56 +63,70 @@ fn gate_view<P: Platform + Clone + 'static>(client: ClientRuntime<P>) -> AnyElem
     let nav = navigator();
     let mut changes = service.watch();
     watch(async move {
-        let mut attempted = None;
         while let Some(next) = changes.next().await {
-            let persist = next.persist_completion
-                && !matches!(untracked(|| nav.top()), Route::Welcome | Route::Pair)
-                && next.gate.decision != FirstRunDecision::Wizard
-                && next.target != attempted;
-            if persist {
-                attempted = next.target.clone();
-            }
             status.set(next);
-            if persist {
-                let _ = service.complete().await;
-            }
         }
     });
+    watch(async move { service.follow_completion().await });
     let urls = use_context::<UrlState>();
     effect(move || {
         let decision = status.with(|s| s.gate.decision);
         if urls.is_none() && decision == FirstRunDecision::Wizard && nav.top() == Route::Home {
-            nav.open(Route::Welcome);
+            // This gate replaces the sole Home entry. Back at Welcome must stay put.
+            nav.stack.set(vec![Route::Welcome]);
         }
     });
     let tasks = TaskOwner::here();
     dynamic(move || {
         let status = status.get();
         let route = nav.top();
-        if status.target.is_none() || matches!(route, Route::Pair | Route::Welcome) {
+        if status.catalog_ready && status.target.is_none() {
             return None;
         }
         let failed = matches!(status.hydration, SettingsHydration::Failed | SettingsHydration::Retrying);
-        if !failed && status.gate.decision != FirstRunDecision::Pending {
+        let pending = status.gate.decision == FirstRunDecision::Pending
+            || (status.gate.decision == FirstRunDecision::Wizard && route == Route::Home);
+        if !failed && !pending {
             return None;
         }
-        let client = client.clone();
         Some(untracked(|| {
-            let mut cover = view().test_id("first-run-gate").app_class(tw("absolute inset-0 flex min-h-0 items-center justify-center bg-background px-6 text-foreground"));
+            let mut cover = view().test_id("first-run-gate").app_class(tw(
+                "absolute inset-0 flex min-h-0 items-center justify-center bg-background px-6 text-foreground",
+            ));
             if failed || status.gate.stalled {
-                let title = if failed { "Could not read settings" } else { "Still connecting" };
-                let reason = if failed { "Your saved settings could not be loaded." } else { "T3 Code could not confirm this workspace." };
-                cover = cover.child(view().app_class(tw("flex max-w-sm flex-col items-center text-center"))
-                    .child(text(t(title)).role(AccessibilityRole::Header).app_class(tw("text-lg font-semibold")))
-                    .child(text(t(reason)).app_class(tw("mt-2 text-sm text-muted-foreground")))
-                    .child(button(ButtonContent::Label(t(if failed {"Retry"} else {"Reload"})),ButtonVariant::Outline, ButtonSize::Sm, move || status.hydration == SettingsHydration::Retrying, move || {
+                let client = client.clone();
+                let retrying = status.hydration == SettingsHydration::Retrying;
+                let (title, reason, action) = if failed {
+                    ("Could not read settings", "Your saved settings could not be loaded.", "Retry")
+                } else {
+                    ("Still connecting", "T3 Code could not confirm this workspace.", "Reload")
+                };
+                let action = button(
+                    ButtonContent::IconLabel {
+                        icon: if retrying { crate::ui::icon::Icon::LoaderCircle } else { crate::ui::icon::Icon::RefreshCw },
+                        label: t(action),
+                    },
+                    ButtonVariant::Outline,
+                    ButtonSize::Sm,
+                    move || retrying,
+                    move || {
                         let client = client.clone();
                         let target = status.target.clone();
                         tasks.spawn(async move {
-                            if failed {client.composer_preferences().retry().await;}
-                            else if let Some(target) = target {let _ = client.reconnect(&target).await;}
+                            if failed {
+                                client.composer_preferences().retry().await;
+                            } else if let Some(target) = target {
+                                let _ = client.reconnect(&target).await;
+                            }
                         });
-                    })));
+                    },
+                );
+                cover = cover.child(
+                    view().app_class(tw("flex max-w-sm flex-col items-center text-center"))
+                        .child(text(t(title)).role(AccessibilityRole::Header).app_class(tw("text-lg font-semibold")))
+                        .child(text(t(reason)).app_class(tw("mt-2 text-sm text-muted-foreground")))
+                        .child(view().app_class(tw("mt-5")).child(action)),
+                );
             }
             cover.into_element()
         }))
@@ -130,18 +144,23 @@ fn welcome_page<P: Platform + Clone + 'static>(client: ClientRuntime<P>) -> AnyE
                 urls.location
                     .with(|loc| loc.hash.strip_prefix("#agents:").map(str::to_owned))
             });
-            environments
+            let first_run = client.first_run();
+            let primary = first_run.target();
+            let waiting = !first_run.catalog_ready() && (resume.is_some() || primary.is_none());
+            let target = environments
                 .iter()
                 .find(|entry| Some(&entry.id.0) == resume.as_ref())
                 .map(|entry| entry.id.clone())
-                .or_else(|| client.first_run().target())
+                .or(primary);
+            (waiting, target)
         }
     });
     dynamic(move || {
-        let id = target.get();
-        untracked(|| match id {
-            Some(id) => page_for(client.clone(), id),
-            None => crate::screens::home::screen(),
+        let target = target.get();
+        untracked(|| match target {
+            (true, _) => view().into_element(),
+            (false, Some(id)) => page_for(client.clone(), id),
+            (false, None) => crate::screens::home::screen(),
         })
     })
     .into_element()

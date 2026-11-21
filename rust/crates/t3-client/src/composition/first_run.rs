@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     thread_views::{
-        composer::preferences::SettingsHydration,
+        composer::preferences::{ComposerPreferences, SettingsHydration},
         threads::pending_work::background_work_holds_completion,
     },
     types::SyncStatus,
@@ -36,6 +36,7 @@ pub struct FirstRun<P: Platform + Clone + 'static>(ClientRuntime<P>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirstRunStatus {
     pub target: Option<EnvironmentId>,
+    pub catalog_ready: bool,
     pub hydration: SettingsHydration,
     pub gate: FirstRunGate,
     pub persist_completion: bool,
@@ -44,6 +45,27 @@ pub struct FirstRunStatus {
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     pub fn first_run(&self) -> FirstRun<P> {
         FirstRun(self.clone())
+    }
+
+    /// Test hosts have no native primary discovery. Supply the host route of their real,
+    /// already paired supervisor without treating arbitrary saved computers as primary.
+    #[cfg(feature = "testing")]
+    pub fn supply_test_primary_route(&self, environment: &EnvironmentId) {
+        let mut entries = self.inner.environments.borrow_mut();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| &entry.id == environment)
+            .expect("test server was paired");
+        let mut local = entry
+            .routes
+            .first()
+            .expect("test server has a route")
+            .clone();
+        local.mode = crate::connection::ConnectionMode::Local;
+        local.id = "test-primary".into();
+        entry.routes.insert(0, local);
+        drop(entries);
+        self.notify();
     }
 
     pub(super) fn follow_welcome(&self, environment: &EnvironmentId) -> AbortHandle {
@@ -94,18 +116,18 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 
 impl<P: Platform + Clone + 'static> FirstRun<P> {
     pub fn target(&self) -> Option<EnvironmentId> {
-        self.0.settings().primary_environment().or_else(|| {
-            self.0
-                .inner
-                .environments
-                .borrow()
-                .first()
-                .map(|entry| entry.id.clone())
-        })
+        self.0.settings().primary_environment()
+    }
+
+    pub fn catalog_ready(&self) -> bool {
+        self.0.inner.restored.get()
     }
 
     pub async fn complete(&self) -> Result<(), ClientError> {
         let prefs = self.0.composer_preferences();
+        // A writer without a hydrated cache merges the very record used as its CAS condition.
+        // The mounted cache may predate an edit from another window.
+        let writer = ComposerPreferences::new(Rc::new(self.0.inner.platform.clone()));
         let date = crate::time::iso_from_epoch_ms(self.0.inner.platform.now_epoch_ms());
         // Host navigation may unmount Welcome during a disk write. The runtime owns the
         // update through commit or rollback, even when its original waiter is gone.
@@ -113,12 +135,12 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
         (self.0.inner.spawn)(
             async move {
                 let result = async {
-                    if prefs.hydration() != SettingsHydration::Ready {
-                        prefs.load().await?;
-                    }
-                    prefs
-                        .update(move |settings| settings.onboarding_completed_at = Some(date))
-                        .await
+                    writer
+                        .update(move |settings| {
+                            settings.onboarding_completed_at.get_or_insert(date);
+                        })
+                        .await?;
+                    prefs.load().await
                 }
                 .await;
                 let _ = reply.send(result);
@@ -126,6 +148,32 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
             .boxed_local(),
         );
         saved.await.map_err(|_| ClientError::Cancelled)?
+    }
+
+    /// Persist a populated workspace even when its welcome page or pairing route is open.
+    /// Retry a failed conditional write while the same primary still qualifies.
+    pub async fn follow_completion(&self) {
+        let mut changes = self.changes();
+        loop {
+            let status = self.snapshot();
+            if status.persist_completion && status.gate.decision == FirstRunDecision::App {
+                let mut delay = 1000;
+                while self.complete().await.is_err() {
+                    self.0.inner.platform.sleep(delay).await;
+                    delay = (delay * 2).min(60_000);
+                    let next = self.snapshot();
+                    if next.target != status.target
+                        || !next.persist_completion
+                        || next.gate.decision != FirstRunDecision::App
+                    {
+                        break;
+                    }
+                }
+            }
+            if changes.next().await.is_none() {
+                return;
+            }
+        }
     }
 
     pub(super) fn changes(&self) -> LocalBoxStream<'static, ()> {
@@ -148,10 +196,11 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
         let hydration = prefs.hydration();
         let target = self.target();
         let mut input = FirstRunInput {
-            enabled: target.is_some(),
+            // Before restore we cannot distinguish a primary from a remote-only catalog.
+            enabled: target.is_some() || !self.catalog_ready(),
             hydrated: hydration == SettingsHydration::Ready,
             completed: prefs.snapshot().onboarding_completed_at.is_some(),
-            catalog_ready: self.0.inner.restored.get(),
+            catalog_ready: self.catalog_ready(),
             ..Default::default()
         };
         if let Some(target) = target
@@ -173,6 +222,7 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
         };
         *previous = target.clone().map(|id| (id, gate));
         FirstRunStatus {
+            catalog_ready: input.catalog_ready,
             target,
             hydration,
             gate,
@@ -198,12 +248,7 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
                 .environments
                 .get(&entry.id)
                 .is_some_and(|env| env.shell.snapshot.is_some())
-                || match entry.state.phase {
-                    Phase::Blocked | Phase::Offline => true,
-                    Phase::Backoff => !entry.state.desired || entry.state.attempt > 2,
-                    Phase::Available => !entry.state.desired,
-                    Phase::Connecting | Phase::Connected => false,
-                }
+                || disconnected_shell_is_settled(&entry.state)
         });
         let mut workspace = FirstRunWorkspace {
             primary_environment: Some(&target.0),
@@ -286,6 +331,7 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
                     let platform = &service.0.inner.platform;
                     let now = platform.monotonic_ms();
                     if next.gate.decision == FirstRunDecision::Pending
+                        && next.target.is_some()
                         && next.hydration == SettingsHydration::Ready
                     {
                         let end = *deadline.get_or_insert_with(|| now.saturating_add(4000));
@@ -755,5 +801,42 @@ impl<P: Platform + Clone + 'static> FirstRun<P> {
             .await?;
         let _ = self.refresh_providers(environment, None).await;
         Ok(())
+    }
+}
+
+fn disconnected_shell_is_settled(state: &ConnectionState) -> bool {
+    match state.phase {
+        Phase::Blocked | Phase::Offline => true,
+        Phase::Backoff => !state.desired || state.attempt > 2,
+        Phase::Available => true,
+        Phase::Connecting | Phase::Connected => false,
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn shell_bootstrap_uses_the_catalog_connection_projection() {
+        for (phase, desired, attempt, settled) in [
+            (Phase::Available, true, 0, true),
+            (Phase::Available, false, 0, true),
+            (Phase::Connecting, true, 1, false),
+            (Phase::Connected, true, 1, false),
+            (Phase::Backoff, true, 2, false),
+            (Phase::Backoff, false, 1, true),
+            (Phase::Backoff, true, 3, true),
+            (Phase::Blocked, true, 1, true),
+            (Phase::Offline, true, 1, true),
+        ] {
+            let state = ConnectionState {
+                phase,
+                desired,
+                attempt,
+                ..Default::default()
+            };
+            assert_eq!(disconnected_shell_is_settled(&state), settled, "{state:?}");
+        }
     }
 }

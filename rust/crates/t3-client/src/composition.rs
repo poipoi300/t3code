@@ -529,6 +529,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     }
                 }
                 if !this.inner.restored.replace(true) {
+                    this.notify();
                     this.follow_route_policy();
                     let notice = StorageNotice {
                         storage: this.inner.platform.storage_report(),
