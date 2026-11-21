@@ -292,7 +292,7 @@ fn preview_panel<P: Platform + Clone + 'static>(
                             store
                                 .threads
                                 .get(&key.get())
-                                .map_or_else(Vec::new, |state| recent_urls(state))
+                                .map_or_else(Vec::new, recent_urls)
                         });
                         preview_empty_state(servers.get(), recents, open)
                     }
