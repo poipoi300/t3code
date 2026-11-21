@@ -424,7 +424,8 @@ if(process.argv.includes("--check")) {if(await readFile(bindingsPath,"utf8")!==b
 else await writeFile(bindingsPath,bindingsText);
 for(const relative of ["rust/crates/t3-mcp/export.ts","apps/server/src/provider/agentContextBudget.json"]) sourcePaths.add(resolve(root,relative));
 const hashes:Record<string,string>={};
-for(const path of [...sourcePaths].sort()) hashes[path.slice(root.length).replaceAll("\\","/")]=createHash("sha256").update((await readFile(path,"utf8")).replaceAll("\r\n","\n")).digest("hex");
+const relativeSources=[...sourcePaths].map(path=>path.slice(root.length).replaceAll("\\","/")).sort();
+for(const relative of relativeSources) hashes[relative]=createHash("sha256").update((await readFile(resolve(root,relative),"utf8")).replaceAll("\r\n","\n")).digest("hex");
 for(const relative of ["tools.json","decoders.json","bindings.json","instructions.json"]) hashes[`rust/crates/t3-mcp/fixtures/${relative}`]=createHash("sha256").update((await readFile(resolve(dest,relative),"utf8")).replaceAll("\r\n","\n")).digest("hex");
 const manifest=JSON.stringify(hashes,null,2)+"\n";
 const manifestPath=resolve(dest,"source-hashes.json");
