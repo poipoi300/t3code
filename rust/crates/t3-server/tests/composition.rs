@@ -404,10 +404,12 @@ async fn binary_serves_health_bootstrap_and_core_rpc_then_stops_and_releases_its
 
     // Stop with a live WebSocket and an open subscription.
     stop(&mut child, &runtime_file).await;
-    assert!(matches!(
-        socket.next().await,
-        None | Some(Ok(Message::Close(_))) | Some(Err(_))
-    ));
+    // Config changes and heartbeats queued before SIGTERM precede the closing frame.
+    while let Some(Ok(message)) = socket.next().await {
+        if matches!(message, Message::Close(_)) {
+            break;
+        }
+    }
     // Ownership and the database were released: the same home starts again.
     let restarted = t3_server::runtime::start(inputs(home)).await.unwrap();
     restarted.shutdown().await.unwrap();

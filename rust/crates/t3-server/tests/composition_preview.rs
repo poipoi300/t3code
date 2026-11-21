@@ -531,7 +531,12 @@ async fn discovered_servers_stream_starts_and_updates_from_a_real_local_http_lis
             let _ = received.send(());
         }
     });
-    let mut s = Server::start(true).await;
+    // Probe the explicitly configured URL. Scanning agent processes would attribute the
+    // test listener to the outer T3 thread when the runner itself is an agent process.
+    let mut s = Server::start_with(true, |_, env| {
+        env.insert("T3CODE_PORT_DISCOVERY".into(), "0".into());
+    })
+    .await;
     s.client
         .start(
             "subscribeDiscoveredLocalServers",

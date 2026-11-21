@@ -378,7 +378,14 @@ async fn workspace_files_follow_the_environment_authority_and_deny_everything_el
 
 #[tokio::test]
 async fn terminals_attach_per_socket_and_stream_while_the_client_acknowledges() {
-    let mut s = Server::start().await;
+    let mut s = Server::start_with(|_| {
+        if cfg!(unix) {
+            vec![("SHELL".into(), "/bin/sh".into())]
+        } else {
+            Vec::new()
+        }
+    })
+    .await;
     let managed = s.home().join("worktrees").join("term");
     std::fs::create_dir_all(&managed).unwrap();
     let session = json!({"threadId": "thread-t", "terminalId": "term-1"});
@@ -386,7 +393,8 @@ async fn terminals_attach_per_socket_and_stream_while_the_client_acknowledges() 
     open["cwd"] = json!(managed.to_string_lossy());
     open["cols"] = json!(80);
     open["rows"] = json!(24);
-    ok(s.unary("terminal.open", open).await);
+    let opened = ok(s.unary("terminal.open", open).await);
+    assert_eq!(opened["status"], "running", "{opened}");
     s.client
         .start("terminal.attach", session.clone(), CallKind::Stream)
         .unwrap();
