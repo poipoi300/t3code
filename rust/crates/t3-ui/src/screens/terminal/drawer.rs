@@ -25,7 +25,7 @@ use t3_client::{
     },
 };
 
-use super::session::terminal_viewport;
+use super::session::{ViewportFocus, terminal_viewport};
 use crate::{
     i18n::{Value, t, tr},
     keys::bindings::{Keybindings, Scope},
@@ -48,17 +48,30 @@ pub fn terminal_registration(
     services: TerminalServices,
     key: ThreadKey,
 ) -> crate::screens::panel::TerminalRegistration {
+    let focus_request = signal(None);
     crate::screens::panel::TerminalRegistration {
-        control: terminal_control(services.clone(), key),
-        render: Rc::new(move |key| thread_terminal_drawer(services.clone(), key).into_element()),
+        control: terminal_control(services.clone(), key, focus_request),
+        render: Rc::new(move |key| {
+            thread_terminal_drawer(services.clone(), key, focus_request).into_element()
+        }),
     }
+}
+
+fn toggle_drawer(
+    services: &TerminalServices,
+    key: &ThreadKey,
+    focus_request: Signal<Option<String>>,
+) {
+    services.0.toggle(key);
+    focus_request.set(services.0.active_terminal(key));
 }
 
 /// The header's terminal toggle for `key`: open while the thread's drawer is, available with read
 /// or operate access, as the web's `terminal.toggle` is.
-pub fn terminal_control(
+fn terminal_control(
     services: TerminalServices,
     key: ThreadKey,
+    focus_request: Signal<Option<String>>,
 ) -> crate::screens::thread::header::TerminalControl {
     let state = {
         let key = key.clone();
@@ -88,7 +101,7 @@ pub fn terminal_control(
     crate::screens::thread::header::TerminalControl {
         open: Prop::bind(move || current.get().0),
         available: Prop::bind(move || current.get().1),
-        on_toggle: Rc::new(move || services.0.toggle(&key)),
+        on_toggle: Rc::new(move || toggle_drawer(&services, &key, focus_request)),
     }
 }
 
@@ -200,6 +213,7 @@ struct Drawer {
     key: ThreadKey,
     view: Signal<Rc<TerminalDrawerView>>,
     presentation: Memo<Rc<DrawerPresentation>>,
+    focus_request: Signal<Option<String>>,
     // Tabs and toolbar controls go with the terminals they open and close.
     tasks: crate::runtime::tasks::TaskOwner,
 }
@@ -215,7 +229,8 @@ impl Drawer {
         if !self.services.0.can_operate(&self.key) {
             return;
         }
-        if let Some((_, opened)) = self.services.0.launch(&self.key, placement, None) {
+        if let Some((terminal, opened)) = self.services.0.launch(&self.key, placement, None) {
+            self.focus_request.set(Some(terminal));
             self.tasks.spawn(async move {
                 let _ = opened.await;
             });
@@ -233,10 +248,14 @@ impl Drawer {
     }
     fn activate(&self, terminal: &str) {
         self.services.0.activate(&self.key, terminal);
+        self.focus_request
+            .set(self.services.0.active_terminal(&self.key));
     }
     /// Closes without asking: the shell already ended.
     fn close(&self, terminal: &str) {
         if let Some(closing) = self.services.0.close_terminal(&self.key, terminal) {
+            self.focus_request
+                .set(self.services.0.active_terminal(&self.key));
             self.tasks.spawn(closing);
         }
     }
@@ -270,7 +289,11 @@ impl Drawer {
 }
 
 /// The drawer of the thread `key`: shown while its drawer is open and its project resolves.
-pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> impl IntoElement {
+fn thread_terminal_drawer(
+    services: TerminalServices,
+    key: ThreadKey,
+    focus_request: Signal<Option<String>>,
+) -> impl IntoElement {
     {
         let services = services.clone();
         watch(async move {
@@ -306,6 +329,7 @@ pub fn thread_terminal_drawer(services: TerminalServices, key: ThreadKey) -> imp
         key,
         view: state,
         presentation,
+        focus_request,
         tasks: crate::runtime::tasks::TaskOwner::here(),
     };
     let keys = use_context::<Keybindings>();
@@ -353,7 +377,7 @@ fn register_commands(keys: Keybindings, drawer: Drawer) {
                     return false;
                 }
                 event.claim();
-                toggle.services.0.toggle(&toggle.key);
+                toggle_drawer(&toggle.services, &toggle.key, toggle.focus_request);
                 true
             })
             .command("terminal.split", move |event| {
@@ -720,8 +744,12 @@ fn terminal_split_panes(drawer: Drawer) -> impl IntoElement {
                     let terminal = terminal.clone();
                     Rc::new(move || drawer.close(&terminal)) as Rc<dyn Fn()>
                 };
-                let focus = computed(move || {
-                    pane.with(|pane| pane.active) && view_signal.with(|view| view.can_operate)
+                let target = terminal.clone();
+                let pending = drawer.focus_request;
+                let ready = computed(move || {
+                    pending.with(|request| request.as_deref() == Some(target.as_str()))
+                        && pane.with(|pane| pane.active)
+                        && view_signal.with(|view| view.can_operate)
                 });
                 let content = match first.launch {
                     Some(launch) => terminal_viewport(
@@ -730,7 +758,10 @@ fn terminal_split_panes(drawer: Drawer) -> impl IntoElement {
                         terminal.clone(),
                         first.label.clone(),
                         launch,
-                        focus,
+                        ViewportFocus {
+                            ready,
+                            pending: Some(pending),
+                        },
                         exited,
                     )
                     .into_element(),

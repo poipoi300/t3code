@@ -95,9 +95,12 @@ impl TerminalSurface {
             .and_then(|terminal| terminal.api::<TerminalApi>())
     }
     /// Takes the keyboard focus (showing the software keyboard).
-    pub fn focus(&self) {
+    pub fn focus(&self) -> bool {
         if let Some(api) = self.api() {
             api.focus();
+            true
+        } else {
+            false
         }
     }
 }

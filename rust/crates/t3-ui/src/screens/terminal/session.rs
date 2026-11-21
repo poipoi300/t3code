@@ -171,6 +171,21 @@ fn report(surface: &TerminalSurface, error: ClientError, fallback: String) {
     surface.clone().write(&system_message(&message));
 }
 
+/// The drawer consumes a request only once. The setup terminal can opt into automatic focus.
+pub struct ViewportFocus {
+    pub(super) ready: Memo<bool>,
+    pub(super) pending: Option<Signal<Option<String>>>,
+}
+
+impl From<Memo<bool>> for ViewportFocus {
+    fn from(ready: Memo<bool>) -> Self {
+        Self {
+            ready,
+            pending: None,
+        }
+    }
+}
+
 /// One pane: the session of `terminal`, attached where it launches. A new launch (another
 /// directory or environment) is a new session, as the web keys its viewport.
 pub fn terminal_viewport(
@@ -179,7 +194,7 @@ pub fn terminal_viewport(
     terminal: String,
     label: String,
     launch: TerminalLaunch,
-    focus: Memo<bool>,
+    focus: impl Into<ViewportFocus>,
     on_session_exited: Rc<dyn Fn()>,
 ) -> impl IntoElement {
     let lease = services.0.session(&key, &terminal, &launch);
@@ -285,13 +300,20 @@ pub fn terminal_viewport(
         });
     }
     let terminal = terminal_surface(surface.clone(), label);
+    let ViewportFocus { ready, pending } = focus.into();
     effect(move || {
-        if focus.get() {
+        if ready.get() {
             let surface = surface.clone();
+            let services = services.clone();
+            let key = key.clone();
             // The input belongs to the Terminal component, which mounts in this commit.
             after_answer(move || {
-                if focus.get_untracked() {
-                    surface.focus();
+                if ready.get_untracked()
+                    && (pending.is_none() || services.0.can_operate(&key))
+                    && surface.focus()
+                    && let Some(pending) = pending
+                {
+                    pending.set(None);
                 }
             });
         }

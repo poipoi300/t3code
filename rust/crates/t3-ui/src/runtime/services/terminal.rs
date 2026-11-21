@@ -29,6 +29,8 @@ pub trait TerminalClient {
     fn can_read(&self, key: &ThreadKey) -> bool;
     /// Whether the thread's drawer is open (its persisted tabs).
     fn is_open(&self, key: &ThreadKey) -> bool;
+    /// The active tab of an open drawer, read synchronously after a user action.
+    fn active_terminal(&self, key: &ThreadKey) -> Option<String>;
     /// Fires when any thread's tabs change.
     fn ui_changes(&self) -> LocalBoxStream<'static, ()>;
     fn set_open(&self, key: &ThreadKey, open: bool);
@@ -88,6 +90,10 @@ impl<P: Platform + Clone + 'static> TerminalClient for TerminalSessions<P> {
     }
     fn is_open(&self, key: &ThreadKey) -> bool {
         self.ui_state(key).terminal_open
+    }
+    fn active_terminal(&self, key: &ThreadKey) -> Option<String> {
+        let ui = self.ui_state(key);
+        ui.terminal_open.then_some(ui.active_terminal_id)
     }
     fn ui_changes(&self) -> LocalBoxStream<'static, ()> {
         TerminalSessions::ui_changes(self)

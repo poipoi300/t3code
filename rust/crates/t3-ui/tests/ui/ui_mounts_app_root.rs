@@ -242,6 +242,9 @@ impl<T: t3_ui::runtime::services::terminal::TerminalClient>
     fn is_open(&self, key: &ThreadKey) -> bool {
         self.0.is_open(key)
     }
+    fn active_terminal(&self, key: &ThreadKey) -> Option<String> {
+        self.0.active_terminal(key)
+    }
     fn ui_changes(&self) -> futures::stream::LocalBoxStream<'static, ()> {
         self.0.ui_changes()
     }
@@ -414,11 +417,18 @@ fn the_header_toggle_opens_and_closes_the_terminal_drawer() {
     );
 }
 
+#[derive(Clone, PartialEq, Props)]
+struct TerminalWorkspaceProps {
+    stored_open: bool,
+}
+
 #[component]
-fn TerminalWorkspace() -> impl IntoElement {
+fn TerminalWorkspace(props: TerminalWorkspaceProps) -> impl IntoElement {
     use std::cell::Cell;
 
+    use t3_client::platform::{Storage, StorageArea, StorageKey, StorageWrite};
     use t3_client::testing::environment::{FakeEnvironment, TerminalStream, shell};
+    use t3_client::view_logic::shell::terminal_state::{STORAGE_KEY, TerminalStore};
 
     let store = ClientStore::default();
     let owner = Owner::current();
@@ -445,21 +455,77 @@ fn TerminalWorkspace() -> impl IntoElement {
             }}))
             .expect("scripted snapshot");
     }
+    let platform = server.platform();
     let client = ClientRuntime::new(
-        server.platform(),
+        platform.clone(),
         store.clone(),
         OrchestrationV2CreationSource::Web,
         spawner,
     );
     let pairing = client.pair(server.pairing());
     spawn(async move {
+        if props.stored_open {
+            let mut persisted = TerminalStore::default();
+            persisted.set_open(&key(), true);
+            platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![StorageWrite {
+                        key: StorageKey::new("terminal-state", None, STORAGE_KEY),
+                        value: Some(persisted.encode().expect("saved drawer").into_bytes()),
+                    }],
+                )
+                .await
+                .expect("persist the open drawer before entering the thread");
+        }
         pairing.await.expect("paired");
     });
     let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
     let writes = server.clone();
+    let unexpected_input = server.clone();
+    let input_report = signal("");
+    let grants = client.clone();
+    let can_operate = signal(true);
     view()
         .w_full()
         .h_full()
+        .child(
+            nsh_base::button()
+                .child(text("Check shell input"))
+                .on_press(move || {
+                    input_report.set(if unexpected_input.calls("terminal.write").is_empty() {
+                        "No shell input"
+                    } else {
+                        "Shell received input"
+                    });
+                }),
+        )
+        .child(text(move || input_report.get()))
+        .child(
+            nsh_base::button()
+                .child(text("Change terminal grant"))
+                .on_press(move || {
+                    let operate = !can_operate.get_untracked();
+                    let mut scopes = vec!["orchestration:read".into(), "terminal:read".into()];
+                    if operate {
+                        scopes.push("terminal:operate".into());
+                    }
+                    grants
+                        .client(&environment())
+                        .and_then(|client| client.session())
+                        .expect("terminal endpoint")
+                        .update_grants(t3_client::permissions::SessionGrants {
+                            valid: true,
+                            scopes: scopes.into_iter().collect(),
+                        });
+                    assert_eq!(grants.terminals().can_operate(&environment()), operate);
+                    // A drawer notice lets the UI observe the grant without changing sessions.
+                    grants
+                        .terminals()
+                        .set_height(&key(), if operate { 300.0 } else { 320.0 });
+                    can_operate.set(operate);
+                }),
+        )
         .child(
             nsh_base::button()
                 .child(text("Release first terminal write"))
@@ -489,7 +555,10 @@ fn TerminalWorkspace() -> impl IntoElement {
                         [Some("o"), Some("k"), Some("\r"), Some("p")]
                     );
                     assert!(writes.iter().all(|write| write["terminalId"] == "term-1"));
-                    outputs[1]
+                    let attach_count = server.calls("terminal.attach").len();
+                    outputs[..attach_count]
+                        .last()
+                        .expect("an attached terminal")
                         .unbounded_send(json!({
                             "type":"output","threadId":"t1","terminalId":"term-1",
                             "data":"input received\r\n"
@@ -502,13 +571,81 @@ fn TerminalWorkspace() -> impl IntoElement {
         }))
 }
 
-#[test]
-fn panels_terminal_drawer_opens_and_focuses_a_live_session() {
-    let mut app = Headless::start(config(DESKTOP, None, Root::of::<TerminalWorkspace>()))
-        .expect("paired workspace");
+fn open_terminal_workspace(stored_open: bool) -> Headless {
+    let root = Root::new::<TerminalWorkspace>(move || TerminalWorkspaceProps { stored_open });
+    let mut app = Headless::start(config(DESKTOP, None, root)).expect("paired workspace");
     app.wait_for("Terminal test").expect("thread listed");
     app.press("role:button[/^Terminal test/]")
         .expect("open thread");
+    app
+}
+
+#[test]
+fn panels_terminal_does_not_focus_a_persisted_open_drawer_on_thread_entry() {
+    let mut app = open_terminal_workspace(true);
+    app.wait_for("text:shell ready")
+        .expect("persisted drawer attached");
+    app.press_key("q").expect("type after thread entry");
+    app.settle();
+    app.press("role:button[Check shell input]")
+        .expect("check captured writes");
+    assert!(
+        app.screen().shows("No shell input"),
+        "thread entry focused the terminal"
+    );
+}
+
+#[test]
+fn panels_terminal_regrant_does_not_replay_consumed_focus() {
+    let mut app = open_terminal_workspace(false);
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("open");
+    app.wait_for("text:shell ready").expect("attached");
+    app.press("role:button[Change terminal grant]")
+        .expect("revoke operate");
+    app.wait_for_gone("text:shell ready", Duration::from_secs(1))
+        .expect("drawer entered its read-only state without terminal metadata");
+    app.type_text("id:composer-editor", "")
+        .expect("focus the composer");
+    app.press("role:button[Change terminal grant]")
+        .expect("restore operate");
+    app.wait_for("text:shell ready")
+        .expect("terminal available again");
+    app.press_key("q")
+        .expect("type into the composer after regrant");
+    assert!(
+        app.screen()
+            .input_text("id:composer-editor")
+            .expect("composer input")
+            .is_some_and(|value| value.contains('q')),
+        "a regrant must leave the composer focused"
+    );
+}
+
+#[test]
+fn panels_terminal_regrant_consumes_a_waiting_toggle_request() {
+    let mut app = open_terminal_workspace(false);
+    app.press("role:button[Change terminal grant]")
+        .expect("revoke operate");
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("open with read access");
+    app.wait_for("id:thread-terminal-drawer")
+        .expect("drawer opened");
+    app.press("role:button[Change terminal grant]")
+        .expect("restore operate");
+    app.wait_for("text:shell ready")
+        .expect("attached after the grant");
+    app.press_key("q")
+        .expect("type into the requested terminal");
+    app.settle();
+    app.press("role:button[Check shell input]")
+        .expect("check captured writes");
+    assert!(app.screen().shows("Shell received input"));
+}
+
+#[test]
+fn panels_terminal_drawer_opens_and_focuses_a_live_session() {
+    let mut app = open_terminal_workspace(false);
     app.press("role:button[Toggle terminal drawer]")
         .expect("toggle terminal");
     app.wait_for("id:thread-terminal-drawer")
