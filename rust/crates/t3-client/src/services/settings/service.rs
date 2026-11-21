@@ -235,6 +235,55 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         .boxed_local()
     }
 
+    /// Preferences stored separately by the web, such as the theme and separate fonts.
+    pub fn read_device_preference(
+        &self,
+        key: &'static str,
+    ) -> LocalBoxFuture<'static, Option<Value>> {
+        let platform = self.platform.clone();
+        async move {
+            let bytes = platform
+                .get(
+                    StorageArea::Ordinary,
+                    StorageKey::new("ui-preference", None, key),
+                )
+                .await
+                .ok()
+                .flatten()?;
+            if key == "t3code:typography-advanced" {
+                serde_json::from_slice(&bytes).ok()
+            } else {
+                String::from_utf8(bytes).ok().map(Value::String)
+            }
+        }
+        .boxed_local()
+    }
+
+    /// Writes a device preference in the web's storage format.
+    pub fn write_device_preference(
+        &self,
+        key: &'static str,
+        value: Value,
+    ) -> LocalBoxFuture<'static, ()> {
+        let platform = self.platform.clone();
+        async move {
+            let value = match value {
+                Value::String(text) => text.into_bytes(),
+                value => value.to_string().into_bytes(),
+            };
+            let _ = platform
+                .write(
+                    StorageArea::Ordinary,
+                    vec![StorageWrite {
+                        key: StorageKey::new("ui-preference", None, key),
+                        value: Some(value),
+                    }],
+                )
+                .await;
+        }
+        .boxed_local()
+    }
+
     /// Fires whenever any read below may answer differently. Coalesce and re-read.
     /// Thread streams are not read here, so their changes are skipped.
     pub fn changes(&self) -> LocalBoxStream<'static, ()> {

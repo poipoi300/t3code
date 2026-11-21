@@ -286,7 +286,7 @@ pub fn clear_project_settings_overrides(
 }
 
 /// `resolveWorktreeCleanup` over wire JSON.
-fn resolve_worktree_cleanup(settings: &Value, effective: &Value) -> Value {
+pub fn resolve_worktree_cleanup(settings: &Value, effective: &Value) -> Value {
     let storage = &settings["storageCleanup"];
     let policy = &effective["worktreeCleanup"];
     match policy["mode"].as_str() {

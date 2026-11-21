@@ -591,6 +591,77 @@ pub fn sort_snooze_rows<K: Clone>(
     )
 }
 
+/// Port of shared/path.ts `resolvePastedPath`: accept a pasted host path even after
+/// a prefilled directory, while leaving ordinary typing and relative text alone.
+pub fn resolve_pasted_path(previous: &str, next: &str) -> String {
+    use crate::view_logic::session::links::{is_absolute, is_windows_absolute};
+
+    fn host_path(value: &str) -> bool {
+        is_absolute(value) || value.starts_with("~/")
+    }
+
+    if next
+        .strip_prefix(previous)
+        .is_some_and(|suffix| suffix.encode_utf16().count() == 1)
+        || previous.starts_with(next)
+    {
+        return next.to_owned();
+    }
+
+    let trimmed = next.trim_end();
+    if let Some(quote @ ('\'' | '"')) = trimmed.chars().last() {
+        let quoted = &trimmed[..trimmed.len() - 1];
+        for (index, _) in quoted.match_indices(quote) {
+            let inner = &quoted[index + 1..];
+            if inner.is_empty() || !previous.starts_with(quoted[..index].trim_end()) {
+                continue;
+            }
+            let candidate = if quote == '\'' {
+                if inner.split("'\\''").any(|part| part.contains('\'')) {
+                    continue;
+                }
+                inner.replace("'\\''", "'")
+            } else {
+                if inner.contains('"') {
+                    continue;
+                }
+                inner.to_owned()
+            };
+            if host_path(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    let path = if previous.ends_with(['/', '\\']) {
+        next.strip_prefix(previous).unwrap_or(next)
+    } else {
+        next
+    };
+    if !host_path(path) {
+        return next.to_owned();
+    }
+    if is_windows_absolute(path) {
+        return path.to_owned();
+    }
+
+    let mut chars = path.chars().peekable();
+    let mut decoded = String::with_capacity(path.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && chars
+                .peek()
+                .is_some_and(|ch| ch.is_whitespace() || r#"'"\()[]{}<>|&;$`!*?#~^="#.contains(*ch))
+            && let Some(escaped) = chars.next()
+        {
+            decoded.push(escaped);
+        } else {
+            decoded.push(ch);
+        }
+    }
+    decoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
