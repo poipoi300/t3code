@@ -68,12 +68,8 @@ fn ReadOnly() -> impl IntoElement {
 
 fn fixture(read_only: bool) -> impl IntoElement {
     crate::theme::install(&Default::default());
-    let owner = Owner::current();
-    let spawner: Spawner = Rc::new(move |future| {
-        owner.run(|| {
-            spawn(future);
-        })
-    });
+    let owner = crate::runtime::tasks::TaskOwner::here();
+    let spawner: Spawner = Rc::new(move |future| owner.spawn(future));
     let server = environment::FakeEnvironment::new("env", spawner.clone());
     if read_only {
         server.set_permissions(&["orchestration:read"]);
@@ -132,7 +128,7 @@ fn fixture(read_only: bool) -> impl IntoElement {
                         true
                     });
                 })
-                .child(text("Use cached thread")),
+                .child(text(t("Use cached thread"))),
         )
         .child(text(move || {
             serde_json::to_string(&input.get().turn_diff_summaries).expect("summaries")
