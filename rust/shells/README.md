@@ -57,8 +57,9 @@ prints their paths; `capture.ps1` drives the slice on each target and saves scre
 ([ONE-CHANGE.md](ONE-CHANGE.md) is the procedure). The desktop templates enable NSH's `svg`
 feature (icons are SVG assets).
 
-The GPUI shell does not resolve today (`gpui-fast`, through `icu_segmenter` 2.3, and `t3-i18n`'s ICU 2.x
-dependencies do not resolve together); `check` leaves it out until that is fixed.
+Both check scripts include the GPUI shell. On Linux, generate the manifests and build it with
+`cargo build --locked --manifest-path rust/shells/gpui/Cargo.toml`. For a Cargo build, copy
+`rust/crates/t3-ui/assets` to `assets/@t3-ui` beside the binary so it can load fonts and icons.
 
 `ui.ps1 check` formats/checks only handwritten crates, runs Clippy with warnings
 denied, and checks the shared crate for wasm. CLI-generated runners are excluded

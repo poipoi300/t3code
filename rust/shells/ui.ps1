@@ -182,10 +182,7 @@ try {
         }
         'check' {
             Initialize-Wasm
-            # The GPUI shell is left out: gpui-fast (icu_segmenter 2.3) and t3-i18n's ICU 2.x dependencies do not
-            # resolve together (2026-11-13; cargo backtracks t3-i18n's icu to 2.0 and fails). It is a secondary, unshipped backend; restore it here once
-            # 'cargo metadata --manifest-path gpui/Cargo.toml' resolves.
-            foreach ($manifest in @($uiManifest, (Join-Path $shellRoot 'desktop/Cargo.toml'))) {
+            foreach ($manifest in @($uiManifest, (Join-Path $shellRoot 'desktop/Cargo.toml'), (Join-Path $shellRoot 'gpui/Cargo.toml'))) {
                 Invoke-Checked cargo @('fmt', '--manifest-path', $manifest, '--check')
                 Invoke-Checked cargo @('clippy', '--locked', '--manifest-path', $manifest, '--all-targets', '--', '-D', 'warnings')
             }

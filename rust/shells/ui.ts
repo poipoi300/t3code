@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const shellRoot = fileURLToPath(new URL(".", import.meta.url));
 const uiManifest = join(shellRoot, "../crates/t3-ui/Cargo.toml");
 const desktopManifest = join(shellRoot, "desktop/Cargo.toml");
+const gpuiManifest = join(shellRoot, "gpui/Cargo.toml");
 // As in ui.ps1: T3_SHELLS_TARGET or shells/target, never an ambient CARGO_TARGET_DIR, so the UI and
 // shell workspaces stay independent of rust/target.
 const target = resolve(process.env.T3_SHELLS_TARGET || join(shellRoot, "target"));
@@ -64,7 +65,7 @@ function main(): void {
   }
 
   const { url, revision } = nshPin();
-  for (const manifest of [desktopManifest, join(shellRoot, "gpui/Cargo.toml")]) {
+  for (const manifest of [desktopManifest, gpuiManifest]) {
     const template = readFileSync(`${manifest}.in`, "utf8");
     writeFileSync(
       manifest,
@@ -91,8 +92,7 @@ function main(): void {
   }
 
   if (action === "check") {
-    // GPUI's ICU dependencies currently do not resolve with t3-i18n's.
-    for (const manifest of [uiManifest, desktopManifest]) {
+    for (const manifest of [uiManifest, desktopManifest, gpuiManifest]) {
       cargo(["fmt", "--manifest-path", manifest, "--check"]);
       cargo([
         "clippy",

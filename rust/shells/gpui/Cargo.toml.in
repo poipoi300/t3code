@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 t3-ui = { path = "../../crates/t3-ui" }
 
-nsh-platform-gpui = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false }
+nsh-platform-gpui = { git = "@NSH_GIT@", rev = "@NSH_REV@", default-features = false, features = ["svg"] }
 
 [profile.dev]
 debug = 0
