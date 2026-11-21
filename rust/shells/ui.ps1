@@ -182,7 +182,7 @@ try {
         }
         'check' {
             Initialize-Wasm
-            foreach ($manifest in @($uiManifest, (Join-Path $shellRoot 'desktop/Cargo.toml'), (Join-Path $shellRoot 'gpui/Cargo.toml'))) {
+            foreach ($manifest in @((Join-Path $shellRoot 'gpui/Cargo.toml'), $uiManifest, (Join-Path $shellRoot 'desktop/Cargo.toml'))) {
                 Invoke-Checked cargo @('fmt', '--manifest-path', $manifest, '--check')
                 Invoke-Checked cargo @('clippy', '--locked', '--manifest-path', $manifest, '--all-targets', '--', '-D', 'warnings')
             }

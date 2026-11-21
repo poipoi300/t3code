@@ -92,7 +92,7 @@ function main(): void {
   }
 
   if (action === "check") {
-    for (const manifest of [uiManifest, desktopManifest, gpuiManifest]) {
+    for (const manifest of [gpuiManifest, uiManifest, desktopManifest]) {
       cargo(["fmt", "--manifest-path", manifest, "--check"]);
       cargo([
         "clippy",
