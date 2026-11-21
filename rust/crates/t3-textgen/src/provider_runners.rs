@@ -390,6 +390,21 @@ pub fn claude_args(
     investigate: bool,
     no_session_persistence: bool,
 ) -> Vec<String> {
+    claude_args_with_settings(
+        run,
+        schema,
+        investigate,
+        no_session_persistence,
+        claude_settings(run).to_string(),
+    )
+}
+fn claude_args_with_settings(
+    run: &ClaudeRun,
+    schema: &str,
+    investigate: bool,
+    no_session_persistence: bool,
+    settings: String,
+) -> Vec<String> {
     let mut args: Vec<String> = ["-p", "--output-format", "json", "--json-schema"]
         .map(str::to_owned)
         .to_vec();
@@ -401,7 +416,7 @@ pub fn claude_args(
         args.push(effort.clone());
     }
     args.push("--settings".into());
-    args.push(claude_settings(run).to_string());
+    args.push(settings);
     // Headless Claude skips workspace trust. For review, even the user's standing Bash
     // permissions would merge with the narrow Git allow list, so use the explicit launch
     // environment and CLI settings alone. Ordinary generation still uses user settings.
@@ -433,6 +448,90 @@ pub fn claude_args(
     }
     args.extend(["--permission-mode", "dontAsk"].map(str::to_owned));
     args
+}
+
+/// The review CLI disables all implicit settings sources. Carry only user-level provider
+/// configuration into a private file so credentials never appear in the command line.
+fn claude_review_settings(
+    run: &ClaudeRun,
+) -> Result<Option<tempfile::NamedTempFile>, GenerationError> {
+    let absolute = |key: &str| {
+        run.environment
+            .get(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let home = absolute("CLAUDE_CONFIG_DIR").or_else(|| {
+        absolute("HOME")
+            .or_else(|| absolute("USERPROFILE"))
+            .map(|path| path.join(".claude"))
+    });
+    let Some(home) = home else { return Ok(None) };
+    let user = match std::fs::read(home.join("settings.json")) {
+        Ok(bytes) => {
+            serde_json::from_slice::<Value>(&bytes).map_err(|_| GenerationError::Provider)?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(GenerationError::Provider),
+    };
+    let mut settings = claude_settings(run);
+    let mut copied = false;
+    if let Some(env) = user["env"].as_object() {
+        let env: serde_json::Map<_, _> = env
+            .iter()
+            .filter(|(key, value)| {
+                value.is_string() && {
+                    let name = key.to_ascii_uppercase();
+                    name.starts_with("ANTHROPIC_")
+                        || name.starts_with("AWS_")
+                        || name.starts_with("GOOGLE_")
+                        || name.starts_with("CLOUD_ML_")
+                        || name.starts_with("VERTEX_REGION_")
+                        || matches!(
+                            name.as_str(),
+                            "HTTPS_PROXY"
+                                | "HTTP_PROXY"
+                                | "NO_PROXY"
+                                | "ALL_PROXY"
+                                | "NODE_EXTRA_CA_CERTS"
+                                | "CLAUDE_CODE_USE_BEDROCK"
+                                | "CLAUDE_CODE_USE_VERTEX"
+                                | "CLAUDE_CODE_USE_FOUNDRY"
+                                | "CLAUDE_CODE_SKIP_BEDROCK_AUTH"
+                                | "CLAUDE_CODE_SKIP_VERTEX_AUTH"
+                                | "CLAUDE_CODE_SKIP_FOUNDRY_AUTH"
+                                | "CLAUDE_CODE_OAUTH_TOKEN"
+                        )
+                }
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !env.is_empty() {
+            settings["env"] = Value::Object(env);
+            copied = true;
+        }
+    }
+    for key in [
+        "apiKeyHelper",
+        "awsAuthRefresh",
+        "awsCredentialExport",
+        "gcpAuthRefresh",
+    ] {
+        if user[key].is_string() {
+            settings[key] = user[key].clone();
+            copied = true;
+        }
+    }
+    if !copied {
+        return Ok(None);
+    }
+    let file = tempfile::Builder::new()
+        .prefix("t3-claude-settings-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|_| GenerationError::Provider)?;
+    serde_json::to_writer(file.as_file(), &settings).map_err(|_| GenerationError::Provider)?;
+    Ok(Some(file))
 }
 
 /// The structured output of a `--output-format json` reply: the envelope, or the last
@@ -491,14 +590,18 @@ pub async fn run_claude(
             // demand from subdirectories. In review it must be read as repository data.
             set_environment(&mut environment, "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1");
         }
+        let settings = if investigate {
+            claude_review_settings(run)?
+        } else {
+            None
+        };
         let attempt = |persistence: bool| {
-            let mut options = process(
-                &run.program,
-                claude_args(run, &schema, investigate, persistence),
-                &environment,
-                cwd.clone(),
-                &cancellation,
+            let document = settings.as_ref().map_or_else(
+                || claude_settings(run).to_string(),
+                |file| file.path().to_string_lossy().into_owned(),
             );
+            let args = claude_args_with_settings(run, &schema, investigate, persistence, document);
+            let mut options = process(&run.program, args, &environment, cwd.clone(), &cancellation);
             options.stdin = Some(request.prompt.clone().into_bytes());
             t3_process::run(options)
         };

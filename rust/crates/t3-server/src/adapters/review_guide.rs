@@ -204,6 +204,9 @@ impl ReviewGuideGenerator {
     /// Before review runs had journals, only the exact scratch directory and numeric ref
     /// formats identified leftovers. Discover those registrations from saved project roots.
     async fn sweep_legacy(&self, mut directories: HashSet<PathBuf>) {
+        if directories.is_empty() {
+            return;
+        }
         let Ok(projects) = self
             .projects
             .database()
@@ -239,27 +242,26 @@ impl ReviewGuideGenerator {
                     .path
                     .file_name()
                     .is_some_and(|name| name == "checkout")
-                    && directory.parent() == Some(self.worktrees.as_path())
-                    && directory
+                    && directories.remove(directory)
+                    && let Some(id) = directory
                         .file_name()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| name.strip_prefix(DIRECTORY_PREFIX))
-                        .is_some_and(legacy_directory)
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix(DIRECTORY_PREFIX))
+                        .and_then(|suffix| suffix.split_once('-'))
+                        .map(|(id, _)| id)
                 {
-                    // Leave any registered directory for which Git refuses targeted removal.
-                    directories.remove(directory);
+                    // Only this registration ties the home's numeric run ID to a repository.
                     if (worktree.detached || worktree.locked.as_deref() == Some("initializing"))
                         && directory_or_missing(directory)
                         && directory_or_missing(&worktree.path)
                         && contains_only_checkout(directory)
+                        && let Some(refs) = read_guide_refs(&git, &format!("{REF_ROOT}{id}/")).await
                         && force_remove_worktree(&git, &worktree.path).await
+                        && delete_refs(&git, &refs).await
                     {
                         remove_run_files(directory, false).await;
                     }
                 }
-            }
-            if let Some(refs) = read_guide_refs(&git, REF_ROOT).await {
-                delete_refs(&git, &refs).await;
             }
         }
         if listings_complete {
@@ -584,16 +586,7 @@ async fn read_guide_refs(git: &Git, prefix: &str) -> Option<Vec<String>> {
                 if !symref.is_empty() {
                     return None;
                 }
-                let suffix = name.strip_prefix(prefix)?;
-                let leaf = if prefix == REF_ROOT {
-                    let (id, leaf) = suffix.split_once('/')?;
-                    if !generated_number(id) {
-                        return None;
-                    }
-                    leaf
-                } else {
-                    suffix
-                };
+                let leaf = name.strip_prefix(prefix)?;
                 (leaf == "base" || leaf.strip_prefix("head-").is_some_and(generated_number))
                     .then(|| name.to_owned())
             })
@@ -670,6 +663,8 @@ async fn force_remove_worktree(git: &Git, worktree: &Path) -> bool {
                 .stderr_text()
                 .trim_end()
                 .ends_with("is not a working tree")
+                && fs::symlink_metadata(worktree.join(".git"))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     })
 }
 
@@ -1170,5 +1165,19 @@ mod tests {
         let listed = git(&repo, temp.path(), &["worktree", "list", "--porcelain"]);
         assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
         assert!(!checkout.exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_an_unregistered_checkout_with_git_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), temp.path(), &["init", "-q"]);
+        let run = temp.path().join("run");
+        let checkout = run.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        git(&checkout, temp.path(), &["init", "-q"]);
+        fs::write(run.join(BINDING_FILE), "{}").unwrap();
+        finish_checkout(&Git::new(temp.path()), &run, &[]).await;
+        assert!(checkout.join(".git").is_dir());
+        assert!(run.join(BINDING_FILE).exists());
     }
 }

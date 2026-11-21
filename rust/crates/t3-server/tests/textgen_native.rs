@@ -51,6 +51,10 @@ fn main() -> ExitCode {
         ("review_cleanup_refuses_a_replaced_repository", || {
             Box::pin(review_guides_with("codex", ReviewCheck::ReplacedRepository))
         }),
+        #[cfg(target_os = "linux")]
+        ("drop_guard_owns_the_listening_daemon", || {
+            Box::pin(review::drop_guard_owns_the_listening_daemon())
+        }),
         ("review_startup_sweeps_only_guide_leftovers", || {
             Box::pin(review_startup_sweep())
         }),
@@ -194,6 +198,9 @@ mod fake {
             "claudeProject": std::fs::symlink_metadata(cwd.join(".claude")).is_ok(),
             "claudeMemory": cwd.join("CLAUDE.md").exists(),
             "agentsInstructions": agents_instructions,
+            "reviewSettings": args.windows(2).find(|p| p[0] == "--settings")
+                .and_then(|p| std::fs::read(&p[1]).ok())
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
             "disableClaudeMemory": std::env::var("CLAUDE_CODE_DISABLE_CLAUDE_MDS").ok(),
             "gitAttrSource": std::env::var("GIT_ATTR_SOURCE").ok(),
             "gitLfsSkipSmudge": std::env::var("GIT_LFS_SKIP_SMUDGE").ok(),
@@ -1027,9 +1034,18 @@ mod review {
                 .local_addr()
                 .unwrap()
                 .port();
-            let mut child = tokio::process::Command::new("git")
+            // git is a wrapper on some platforms. Own the process that actually listens,
+            // including while awaiting readiness (Child::kill_on_drop).
+            let exec_path = tokio::process::Command::new("git")
+                .arg("--exec-path")
+                .output()
+                .await
+                .unwrap();
+            assert!(exec_path.status.success());
+            let executable = Path::new(std::str::from_utf8(&exec_path.stdout).unwrap().trim_end())
+                .join(format!("git-daemon{}", std::env::consts::EXE_SUFFIX));
+            let mut child = tokio::process::Command::new(executable)
                 .args([
-                    "daemon",
                     "--verbose",
                     "--reuseaddr",
                     "--export-all",
@@ -1052,6 +1068,33 @@ mod review {
             tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
             Self { child, port }
         }
+    }
+    #[cfg(target_os = "linux")]
+    pub async fn drop_guard_owns_the_listening_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(root.path()).await;
+        let pid = daemon.child.id().unwrap();
+        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
+        let port = daemon.port;
+        drop(daemon);
+        // Clean up even when testing a git wrapper that leaves its own daemon behind.
+        for child in children.split_whitespace() {
+            std::process::Command::new("kill")
+                .arg(child)
+                .status()
+                .unwrap();
+        }
+        assert!(
+            children.trim().is_empty(),
+            "the guard owns git, its child owns the listener"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("listener released on drop");
     }
     impl Drop for Daemon {
         fn drop(&mut self) {
@@ -1274,6 +1317,12 @@ async fn review_guides_with(driver: &'static str, check: ReviewCheck) {
         "reviewGuidesEnabled": true,
     });
     if driver == "claudeAgent" {
+        let home = temp.path().join("claudeAgent-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("settings.json"), json!({
+            "env":{"ANTHROPIC_BASE_URL":"https://fixture.invalid","CLAUDE_CODE_DISABLE_CLAUDE_MDS":"0"},
+            "apiKeyHelper":"fixture-helper", "permissions":{"allow":["Bash"]},"hooks":{}
+        }).to_string()).unwrap();
         settings["textGenerationModelSelection"] =
             json!({"instanceId": "claudeAgent", "model": "claude-haiku-5-5"});
     }
@@ -1403,6 +1452,15 @@ async fn review_guides_with(driver: &'static str, check: ReviewCheck) {
             argv[at + 1].clone()
         };
         assert_eq!(value("--setting-sources"), "", "{argv:?}");
+        let settings = &report["reviewSettings"];
+        assert_eq!(
+            settings["env"],
+            json!({"ANTHROPIC_BASE_URL":"https://fixture.invalid"})
+        );
+        assert_eq!(settings["apiKeyHelper"], "fixture-helper");
+        assert_eq!(settings["disableAllHooks"], true);
+        assert!(settings.get("hooks").is_none() && settings.get("permissions").is_none());
+        assert!(!argv.iter().any(|arg| arg.contains("fixture-helper")));
         assert_eq!(report["disableClaudeMemory"], "1");
         assert_eq!(value("--tools"), "Read,Grep,Glob,Bash");
         assert_eq!(
@@ -1612,6 +1670,7 @@ async fn review_startup_sweep() {
             .lines()
             .collect::<Vec<_>>(),
         [
+            "refs/t3/review-guide/10/base",
             "refs/t3/review-guide/9/head-8",
             "refs/t3/review-guide/9/user",
             "refs/t3/review-guide/archive/base",
