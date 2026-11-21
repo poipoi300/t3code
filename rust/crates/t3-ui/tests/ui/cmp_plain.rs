@@ -141,7 +141,9 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
             "completedAt":(status == "interrupted").then_some(at),"checkpointId":null,"contextHandoffId":null}]);
         if status == "queued" {
             detail["messages"] = json!([{"id":"message-1","threadId":"thread-a","runId":"run-1",
-                "nodeId":null,"role":"user","text":"Follow up after the running turn","attachments":[],
+                "nodeId":null,"role":"user","text":"Raw relay prompt wrapper",
+                "attachments":[{"type":"file","id":"report","name":"follow-up.pdf","mimeType":"application/pdf","sizeBytes":12}],
+                "context":{"version":1,"guest":{"guestMessageId":"guest-msg","name":"Guest","text":"Follow up after the running turn"},"records":[]},
                 "streaming":false,"createdBy":"user","creationSource":"web","createdAt":at,"updatedAt":at}]);
         }
     }
@@ -630,8 +632,13 @@ fn resume_continues_the_interrupted_run_through_the_client() {
 #[test]
 fn a_queued_follow_up_is_visible_after_the_server_projects_it() {
     let mut app = start_with(DESKTOP, true, false, Some("queued"), None);
+    app.wait_for("role:group[Queued message 1 of 1, not sent]")
+        .expect("queue footer row");
     app.wait_for("Follow up after the running turn")
         .expect("queued prompt");
+    app.wait_for("follow-up.pdf")
+        .expect("attachment from the resolved message");
+    assert!(!app.screen().shows("Raw relay prompt wrapper"));
 }
 
 #[test]
@@ -831,6 +838,23 @@ fn review_picker_displays_unreadable_files_and_keeps_readable_ones() {
         .expect("readable selection kept");
     app.wait_for("'missing.txt' is empty or could not be read.")
         .expect("read failure is visible");
+}
+
+#[test]
+fn review_picker_keeps_the_first_reported_error() {
+    let mut app = review_picker(
+        None,
+        vec![
+            picked_file("too-big.txt", "text/plain", vec![b'x'; 2048]),
+            nsh_core::picker::PickedFile::unreadable("missing.txt"),
+        ],
+    );
+    app.wait_for("'too-big.txt' exceeds the 1 KB attachment limit.")
+        .expect("the intake error remains visible");
+    assert!(
+        !app.screen()
+            .shows("'missing.txt' is empty or could not be read.")
+    );
 }
 
 #[test]

@@ -185,8 +185,9 @@ impl ComposerAttachments {
             let before = client.draft()["prompt"].clone();
             let intake = client.intake_bytes(files).await;
             let has_picker_error = picker_error.is_some() || intake.is_err();
-            self.report(intake);
-            if let Some(error) = picker_error {
+            if intake.is_err() {
+                self.report(intake);
+            } else if let Some(error) = picker_error {
                 self.error.set(Some(error));
             }
             client.save_images().await;
