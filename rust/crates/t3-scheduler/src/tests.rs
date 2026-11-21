@@ -2394,6 +2394,19 @@ async fn startup_refreshes_calendar_slots_using_current_zone_rules() {
 #[tokio::test]
 async fn bundled_zone_rules_match_the_real_typescript_scheduler() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The TypeScript scheduler reads Node's ICU zone data. An older release than
+    // the bundled tzdb gives different answers for zones that changed since
+    // (Africa/Casablanca in 2026e), which is a stale runtime, not a Rust bug.
+    let mut version = t3_process::ProcessOptions::new("node").args(["-p", "process.versions.tz"]);
+    version.check_exit = false;
+    let node_tz = t3_process::run(version).await.unwrap().stdout_text();
+    let node_tz = node_tz.trim();
+    assert!(
+        jiff_tzdb::VERSION.is_some_and(|bundled| node_tz >= bundled),
+        "Node's zone data ({node_tz}) is older than the bundled tzdb ({:?}); \
+         update Node or its ICU to compare calendars",
+        jiff_tzdb::VERSION
+    );
     let mut samples = Vec::new();
     let zones = [
         "Africa/Casablanca",
