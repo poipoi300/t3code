@@ -66,6 +66,19 @@ pub struct ThreadActionMenu {
     pub items: Vec<t3_contracts::ipc::ContextMenuItemSchema>,
     pub unavailable_reason: Option<String>,
 }
+#[derive(Default)]
+pub struct BatchReport {
+    pub completed: Vec<ThreadKey>,
+    pub failed: Vec<(ThreadKey, ClientError)>,
+}
+
+#[derive(Clone, Copy)]
+enum MenuSurface {
+    Header,
+    Sidebar,
+    Batch,
+}
+
 pub type ConfirmationPort =
     Rc<dyn Fn(String, bool) -> LocalBoxFuture<'static, Result<bool, ClientError>>>;
 
@@ -228,6 +241,23 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             .map(Rc::new)
     }
     pub fn thread_action_menu(&self, key: &ThreadKey) -> ThreadActionMenu {
+        self.action_menu(key, None, MenuSurface::Header)
+    }
+
+    pub fn sidebar_action_menu(
+        &self,
+        key: &ThreadKey,
+        calendar: &crate::thread_views::shelves::SnoozeCalendar<'_>,
+    ) -> ThreadActionMenu {
+        self.action_menu(key, Some(calendar), MenuSurface::Sidebar)
+    }
+
+    fn action_menu(
+        &self,
+        key: &ThreadKey,
+        calendar: Option<&crate::thread_views::shelves::SnoozeCalendar<'_>>,
+        surface: MenuSurface,
+    ) -> ThreadActionMenu {
         let Some(row) = self.thread_shell(key) else {
             return ThreadActionMenu {
                 items: vec![],
@@ -262,10 +292,11 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 .auto_settle_disabled_at
                 .as_ref()
                 .is_none_or(Option::is_none),
-            snoozed: crate::thread_views::shelves::effective_snoozed(
-                &shelf,
-                self.platform.now_epoch_ms() as i64,
-            ),
+            snoozed: !matches!(surface, MenuSurface::Batch)
+                && crate::thread_views::shelves::effective_snoozed(
+                    &shelf,
+                    self.platform.now_epoch_ms() as i64,
+                ),
             can_snooze: crate::thread_views::shelves::can_snooze(
                 &shelf,
                 self.platform.now_epoch_ms() as i64,
@@ -278,11 +309,16 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             pinning: capabilities.is_some_and(|c| c.thread_pinning == Some(true)),
             title_regeneration: capabilities
                 .is_some_and(|c| c.thread_title_regeneration == Some(true)),
+            regenerating: row.title_regeneration.as_ref().is_some_and(Option::is_some),
+            presets: calendar.map_or_else(Vec::new, |calendar| {
+                self.resolve_snooze_presets(&key.environment, calendar)
+            }),
             ..Default::default()
         };
         let mut items = menu::build(&state);
         for item in &mut items {
-            if item.id == "snooze"
+            if calendar.is_none()
+                && item.id == "snooze"
                 && let Some(children) = &mut item.children
             {
                 for child in children {
@@ -302,7 +338,9 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 item.label = "Unarchive thread".into();
                 item.disabled = Some(!state.can_operate);
             }
-            if matches!(item.id.as_str(), "archive" | "unarchive" | "delete") {
+            if matches!(surface, MenuSurface::Header)
+                && matches!(item.id.as_str(), "archive" | "unarchive" | "delete")
+            {
                 item.disabled = Some(true);
                 item.detail = Some("Thread actions are not available on this client.".into());
             }
@@ -315,6 +353,97 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 .map(|_| "This environment is not connected.".into()),
         }
     }
+    pub fn sidebar_batch_menu(
+        &self,
+        keys: &[ThreadKey],
+        calendar: &crate::thread_views::shelves::SnoozeCalendar<'_>,
+    ) -> ThreadActionMenu {
+        menu::build_batch(&self.sidebar_batch_menus(keys, Some(calendar)))
+    }
+
+    fn sidebar_batch_menus(
+        &self,
+        keys: &[ThreadKey],
+        calendar: Option<&crate::thread_views::shelves::SnoozeCalendar<'_>>,
+    ) -> Vec<(ThreadKey, ThreadActionMenu)> {
+        keys.iter()
+            .filter(|key| {
+                self.thread_shell(key)
+                    .is_some_and(|row| row.archived_at.is_none() && row.deleted_at.is_none())
+            })
+            .map(|key| {
+                (
+                    key.clone(),
+                    self.action_menu(key, calendar, MenuSurface::Batch),
+                )
+            })
+            .collect()
+    }
+
+    pub fn perform_sidebar_batch(
+        &self,
+        keys: Vec<ThreadKey>,
+        id: String,
+        until: Option<WireDateTime>,
+    ) -> LocalBoxFuture<'static, Result<BatchReport, ClientError>> {
+        use ThreadLifecycleAction::*;
+        let service = self.clone();
+        async move {
+            let action = match id.as_str() {
+                "unpin" => Action::Lifecycle(Unpin),
+                "settle" => Action::Lifecycle(Settle),
+                "snooze" => Action::Lifecycle(Snooze {
+                    until: until.ok_or_else(|| Self::refused("Choose a snooze time."))?,
+                }),
+                "regenerate-title" => Action::RegenerateTitle,
+                "mark-unread" => Action::MarkUnread,
+                "delete" => Action::Delete,
+                _ => return Err(ClientError::Unsupported("this batch action")),
+            };
+            let targets = menu::batch_targets(&service.sidebar_batch_menus(&keys, None), &id)?;
+            let settings = service.runtime.composer_preferences().snapshot();
+            let count = targets.len();
+            let confirmation = match id.as_str() {
+                "delete" if settings.confirm_thread_delete => Some((
+                    format!("Delete {count} {}?\nThis permanently clears conversation history for these threads.", if count == 1 { "thread" } else { "threads" }),
+                    true,
+                )),
+                "unpin" if settings.confirm_thread_unpin => Some((
+                    format!("Unpin {count} {}?\nThis will move the threads out of your pinned section.", if count == 1 { "thread" } else { "threads" }),
+                    false,
+                )),
+                _ => None,
+            };
+            if let Some((message, destructive)) = confirmation {
+                let confirm = service.state.confirmation.borrow().clone()
+                    .ok_or(ClientError::Unsupported("thread action confirmation"))?;
+                if !confirm(message, destructive).await? {
+                    return Err(ClientError::Cancelled);
+                }
+            }
+            let targets = menu::batch_targets(&service.sidebar_batch_menus(&targets, None), &id)?;
+            let mut report = BatchReport::default();
+            for key in targets {
+                match menu::batch_targets(
+                    &service.sidebar_batch_menus(std::slice::from_ref(&key), None),
+                    &id,
+                ) {
+                    Ok(keys) if keys.is_empty() => continue,
+                    Err(error) => {
+                        report.failed.push((key, error));
+                        continue;
+                    }
+                    Ok(_) => {}
+                }
+                match service.dispatch_action(key.clone(), action.clone(), false, true).await {
+                    Ok(()) => report.completed.push(key),
+                    Err(error) => report.failed.push((key, error)),
+                }
+            }
+            Ok(report)
+        }.boxed_local()
+    }
+
     fn command(
         &self,
         key: &ThreadKey,
@@ -377,7 +506,17 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     pub(super) fn perform_impl(
         &self,
         key: ThreadKey,
+        action: Action,
+        notices: bool,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        self.dispatch_action(key, action, notices, notices)
+    }
+
+    fn dispatch_action(
+        &self,
+        key: ThreadKey,
         mut action: Action,
+        confirm_action: bool,
         notices: bool,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let service = self.clone();
@@ -385,7 +524,7 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
             let row = service.thread_shell(&key).ok_or_else(|| Self::refused("This thread is no longer available."))?;
             if service.unsupported(&key.environment,"orchestration.dispatchCommand") { return Err(ClientError::Unsupported("orchestration.dispatchCommand")); }
             if !matches!(action,Action::MarkRead|Action::MarkUnread) && !service.can_operate(&key) {return Err(ClientError::PermissionDenied{method:"orchestration.dispatchCommand".into()});}
-            if notices {
+            if confirm_action {
                 let settings = service.runtime.composer_preferences().snapshot();
                 let request = match &action {
                     Action::Delete if settings.confirm_thread_delete => Some((format!("Delete thread \"{}\"?\nThis permanently clears conversation history for this thread.",row.title),true)),

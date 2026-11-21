@@ -252,3 +252,76 @@ mod tests {
         }
     }
 }
+
+fn batch_item<'a>(menu: &'a super::actions::ThreadActionMenu, id: &str) -> Option<&'a Item> {
+    menu.items.iter().find(|item| item.id == id)
+}
+
+pub(super) fn batch_targets(
+    menus: &[(crate::types::ThreadKey, super::actions::ThreadActionMenu)],
+    id: &str,
+) -> Result<Vec<crate::types::ThreadKey>, crate::ClientError> {
+    let eligible = menus
+        .iter()
+        .filter_map(|(key, menu)| {
+            let item = batch_item(menu, id)?;
+            let disabled = item.disabled == Some(true) || menu.unavailable_reason.is_some();
+            if disabled && id == "regenerate-title" && item.label == "Regenerating…" {
+                return None;
+            }
+            Some((key, disabled))
+        })
+        .collect::<Vec<_>>();
+    if (id == "snooze" && eligible.len() != menus.len())
+        || eligible.iter().any(|(_, disabled)| *disabled)
+    {
+        return Err(crate::ClientError::PermissionDenied {
+            method: "orchestration.dispatchCommand".into(),
+        });
+    }
+    Ok(eligible.into_iter().map(|(key, _)| key.clone()).collect())
+}
+
+pub(super) fn build_batch(
+    menus: &[(crate::types::ThreadKey, super::actions::ThreadActionMenu)],
+) -> super::actions::ThreadActionMenu {
+    let count = menus.len();
+    let mut items = Vec::new();
+    for (id, label) in [
+        ("unpin", "Unpin"),
+        ("settle", "Settle"),
+        ("snooze", "Snooze"),
+        ("regenerate-title", "Regenerate title"),
+        ("mark-unread", "Mark unread"),
+        ("delete", "Delete"),
+    ] {
+        let matching: Vec<_> = menus
+            .iter()
+            .filter_map(|(_, menu)| batch_item(menu, id))
+            .collect();
+        if matches!(id, "unpin" | "regenerate-title") && matching.is_empty() {
+            continue;
+        }
+        if id == "snooze"
+            && (matching.len() != count || matching.iter().any(|item| item.disabled == Some(true)))
+        {
+            continue;
+        }
+        let matching_count = if matches!(id, "unpin" | "regenerate-title") {
+            matching.len()
+        } else {
+            count
+        };
+        let mut row = item(id, &format!("{label} ({matching_count})"), "");
+        row.disabled = Some(batch_targets(menus, id).map_or(true, |keys| keys.is_empty()));
+        row.destructive = Some(id == "delete");
+        if id == "snooze" {
+            row.children = matching.first().and_then(|item| item.children.clone());
+        }
+        items.push(row);
+    }
+    super::actions::ThreadActionMenu {
+        items,
+        unavailable_reason: None,
+    }
+}
