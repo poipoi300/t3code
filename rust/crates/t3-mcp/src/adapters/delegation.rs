@@ -7,12 +7,10 @@
 //! parent's (`resolveRuntimeMode`, `resolveInteractionMode`, refused again by the runtime as
 //! `CallerRefused::Escalation`); the runtime caps them at the managed ceiling; a fenced link may
 //! not start work outside its link (runtime `OutsideLink`); a task is read and acknowledged only by
-//! the thread that owns it, and its result is acknowledged once (`completion-delivery.acknowledge`
-//! with a stable command id).
+//! the thread that owns it, and later reads skip a committed completion acknowledgement.
 //!
 //! Not served yet, answered as `available: false` with the missing method: `mode: "wait"` (needs
-//! the stored-event stream), a task whose finished result a restart may still hold
-//! (`delegatedTaskResultPending`), cancellation (`cancelDelegatedTask`), remote targets
+//! the stored-event stream), cancellation (`cancelDelegatedTask`), remote targets
 //! (`RemoteDelegation`) and `isolation: "worktree"`.
 use super::{decoded, encoded, not_available, orchestration::OrchestrationAdapter};
 use crate::{services::OrchestratorService, *};
@@ -29,13 +27,14 @@ use t3_contracts::{
 use t3_orchestration::{
     api::*,
     ports::{
-        decisions::orchestrator::{delegated_task_progress, derived_id},
+        decisions::orchestrator::{delegated_result_pending, delegated_task_progress, derived_id},
         runs_ingestion::restart_background_note::{
             delegated_task_awaits_work, delegated_task_result_run_from, delegated_task_runs,
             run_outcome, run_ran_after,
         },
         thread_project::thread_management_service::{is_active_run, is_terminal_run},
     },
+    runtime::dispatch::load_restart_continuations,
 };
 
 /// What delegation reads from the host: provider status snapshots (TS `ProviderRegistry`), the
@@ -86,7 +85,11 @@ fn thread_title(parent: &str, prompt: Option<&str>, title: Option<&str>, index: 
     let detail = title
         .map(t3_contracts::wire::trim_js)
         .filter(|t| !t.is_empty())
-        .or_else(|| prompt.map(t3_contracts::wire::trim_js).filter(|t| !t.is_empty()));
+        .or_else(|| {
+            prompt
+                .map(t3_contracts::wire::trim_js)
+                .filter(|t| !t.is_empty())
+        });
     let Some(detail) = detail else {
         return format!("{parent} thread {}", index + 1);
     };
@@ -586,6 +589,9 @@ impl DelegationAdapter {
         wait_timed_out: bool,
         acknowledge_terminal: bool,
     ) -> Result<Value> {
+        context
+            .scope
+            .require_capability(Capability::Orchestration)?;
         let caller = context.scope.require_thread("task_status")?;
         let parent = caller.thread_id.clone();
         let task = self
@@ -701,15 +707,51 @@ impl DelegationAdapter {
         child.messages.extend(result_records.messages);
         child.turn_items = result_records.turn_items;
         let task_result = task.get("result").filter(|r| !r.is_null()).cloned();
-        if task_result.is_none() && task_work_state == "result_available" {
-            // TS `delegatedTaskResultPending`: a restart may still hold this result.
-            return Err(not_available(
-                "task_status",
-                "ThreadManagementService::delegated_task_result_pending",
-            ));
-        }
+        let held_for_restart = if task_result.is_none() && task_work_state == "result_available" {
+            let delegated_task_id = child_run
+                .as_ref()
+                .map(|run| decoded::<Option<NodeId>>(id_value(&run.delegated_task_id)))
+                .transpose()?
+                .flatten();
+            let current = threads
+                .query_records(ProjectionRecordQuery {
+                    thread_id: child_id.clone(),
+                    fields: vec![
+                        RecordKind::Runs,
+                        RecordKind::Messages,
+                        RecordKind::Subagents,
+                        RecordKind::ProviderThreads,
+                        RecordKind::ProviderTurns,
+                        RecordKind::Attempts,
+                    ],
+                    filter: RecordFilter::default(),
+                    messages: MessageFilter {
+                        roles: Some(vec![decoded(json!("user"))?]),
+                        ..Default::default()
+                    },
+                    run_statuses: None,
+                    include_latest_run: false,
+                })
+                .await
+                .map_err(management_failure)?;
+            let restarts = load_restart_continuations(
+                &self.orchestration.database,
+                std::slice::from_ref(&current),
+            )
+            .await
+            .map_err(management_failure)?;
+            let [(_, pending_runs)] = restarts.as_slice() else {
+                return Err(McpError::Internal);
+            };
+            delegated_result_pending(&current, delegated_task_id.as_ref(), pending_runs)
+                .map_err(management_failure)?
+        } else {
+            false
+        };
         let work_state = if task_result.is_some() {
             "result_available"
+        } else if held_for_restart {
+            "working"
         } else {
             task_work_state
         };
@@ -944,14 +986,21 @@ impl DelegationAdapter {
         parent: &Value,
         target: &Value,
         skip_enablement: bool,
+        providers: &[Value],
     ) -> Result<ResolvedTarget> {
-        let instance = target["providerInstanceId"].as_str().map(str::to_owned).or_else(|| {
-            target["driverKind"]
-                .is_null()
-                .then(|| parent["modelSelection"]["instanceId"].as_str().map(str::to_owned))
-                .flatten()
-        });
-        let providers = self.host.providers().await?;
+        let instance = target["providerInstanceId"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                target["driverKind"]
+                    .is_null()
+                    .then(|| {
+                        parent["modelSelection"]["instanceId"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            });
         match self
             .resolve_target_with(providers, parent, target, skip_enablement)
             .await
@@ -964,7 +1013,7 @@ impl DelegationAdapter {
                     .host
                     .refresh_instance(instance.as_deref().unwrap_or_default())
                     .await?;
-                self.resolve_target_with(providers, parent, target, skip_enablement)
+                self.resolve_target_with(&providers, parent, target, skip_enablement)
                     .await
             }
             resolved => resolved,
@@ -974,7 +1023,7 @@ impl DelegationAdapter {
     /// `resolveTarget`.
     async fn resolve_target_with(
         &self,
-        providers: Vec<Value>,
+        providers: &[Value],
         parent: &Value,
         target: &Value,
         skip_enablement: bool,
@@ -1239,6 +1288,9 @@ impl OrchestratorService for DelegationAdapter {
                 "ThreadLaunchService::prepare_run",
             ));
         }
+        context
+            .scope
+            .require_capability(Capability::Orchestration)?;
         let caller = context.scope.require_thread("delegate_task")?.clone();
         let threads = self.threads(&context)?;
         let parent = threads
@@ -1283,7 +1335,10 @@ impl OrchestratorService for DelegationAdapter {
         let retry = threads
             .has_receipt(t3_contracts::base_schemas::CommandId(command_id.clone()))
             .await;
-        let resolved = self.resolve_target(&parent_thread, &target, retry).await?;
+        let providers = self.host.providers().await?;
+        let resolved = self
+            .resolve_target(&parent_thread, &target, retry, &providers)
+            .await?;
         let runtime_mode = resolve_runtime_mode(
             parent_thread["runtimeMode"]
                 .as_str()
@@ -1365,6 +1420,9 @@ impl OrchestratorService for DelegationAdapter {
         input: OrchestratorMcpCreateThreadsInput,
     ) -> Result<OrchestratorMcpCreateThreadsResult> {
         let input = encoded(input)?;
+        context
+            .scope
+            .require_capability(Capability::Orchestration)?;
         let caller = context.scope.require_thread("create_threads")?.clone();
         let threads = self.threads(&context)?;
         let parent = threads
@@ -1398,9 +1456,20 @@ impl OrchestratorService for DelegationAdapter {
             })?;
         let key = request_key(&input);
         let ns = stable_part(&context.scope.request_namespace);
-        let project = ProjectId(parent_thread["projectId"].as_str().unwrap_or_default().into());
+        let project = ProjectId(
+            parent_thread["projectId"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+        );
+        let providers = self.host.providers().await?;
         let mut created = Vec::new();
-        for (index, request) in input["threads"].as_array().into_iter().flatten().enumerate() {
+        for (index, request) in input["threads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
             let number = index + 1;
             let command_id = format!(
                 "{}:{index}",
@@ -1420,17 +1489,25 @@ impl OrchestratorService for DelegationAdapter {
             {
                 target["providerInstanceId"] = id_value(&committed.model_selection.instance_id);
             }
-            let resolved = self.resolve_target(&parent_thread, &target, retry).await?;
+            let resolved = self
+                .resolve_target(&parent_thread, &target, retry, &providers)
+                .await?;
             let runtime_mode = resolve_runtime_mode(
-                parent_thread["runtimeMode"].as_str().unwrap_or("approval-required"),
+                parent_thread["runtimeMode"]
+                    .as_str()
+                    .unwrap_or("approval-required"),
                 request["runtimeMode"].as_str(),
                 Some((
-                    resolved.model_selection["instanceId"].as_str().unwrap_or_default(),
+                    resolved.model_selection["instanceId"]
+                        .as_str()
+                        .unwrap_or_default(),
                     &resolved.supported_runtime_modes,
                 )),
             )?;
             let interaction_mode = resolve_interaction_mode(
-                parent_thread["interactionMode"].as_str().unwrap_or("default"),
+                parent_thread["interactionMode"]
+                    .as_str()
+                    .unwrap_or("default"),
                 request["interactionMode"].as_str(),
             )?;
             threads
@@ -1492,19 +1569,26 @@ impl OrchestratorService for DelegationAdapter {
                     "modelSelection": selection,
                     "dispatchMode": {"type": "start_immediately"},
                 });
-                threads.dispatch(decoded(dispatch)?).await.map_err(|error| {
-                    if is_instance_disabled(&error) {
-                        management_failure(error)
-                    } else {
-                        failure(
-                            "orchestration_error",
-                            format!("Unable to start thread {number}: {error}"),
-                        )
-                    }
-                })?;
+                threads
+                    .dispatch(decoded(dispatch)?)
+                    .await
+                    .map_err(|error| {
+                        if is_instance_disabled(&error) {
+                            management_failure(error)
+                        } else {
+                            failure(
+                                "orchestration_error",
+                                format!("Unable to start thread {number}: {error}"),
+                            )
+                        }
+                    })?;
             }
             let projection = threads
-                .records(thread_id.clone(), vec![RecordKind::Runs], RecordFilter::default())
+                .records(
+                    thread_id.clone(),
+                    vec![RecordKind::Runs],
+                    RecordFilter::default(),
+                )
                 .await
                 .map_err(|error| {
                     failure(

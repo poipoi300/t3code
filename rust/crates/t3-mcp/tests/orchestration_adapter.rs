@@ -374,7 +374,7 @@ async fn dispatch_failures_keep_typescripts_codes_and_cut() {
             &self,
             caller: CommandCaller,
         ) -> t3_orchestration::ports::thread_project::thread_management_service::ThreadManagementService
-        {
+{
             self.0.threads(caller)
         }
         fn dispatcher(&self, _: CommandCaller) -> Arc<dyn CommandDispatcher> {
@@ -383,8 +383,9 @@ async fn dispatch_failures_keep_typescripts_codes_and_cut() {
         fn intake(
             &self,
             caller: CommandCaller,
-        ) -> Option<t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake>
-        {
+        ) -> Option<
+            t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake,
+        > {
             self.0.intake(caller)
         }
         fn stop(
@@ -415,16 +416,27 @@ async fn dispatch_failures_keep_typescripts_codes_and_cut() {
     };
     let long = organize(|_| error::Error::Rejected {
         command_id: t3_contracts::base_schemas::CommandId("command".into()),
-        reason: "é".repeat(1500),
+        reason: "😀".repeat(1500),
     })
     .await;
     match long {
         McpError::Failure { code, message } => {
             assert_eq!(code, "orchestration_error");
-            assert_eq!(message.chars().count(), 1000);
+            assert_eq!(message, "😀".repeat(1000));
         }
         other => panic!("{other}"),
     }
+    let ceiling = organize(|_| error::Error::Rejected {
+        command_id: t3_contracts::base_schemas::CommandId("command".into()),
+        reason: "Acme limits threads to Auto. Switch this thread's mode to continue.".into(),
+    })
+    .await;
+    assert!(matches!(
+        ceiling,
+        McpError::Failure { code, message }
+            if code == "invalid_request"
+                && message == "Acme limits threads to Auto. Switch this thread's mode to continue."
+    ));
     let disabled = organize(|_| error::Error::Service {
         operation: "ThreadManagementProviderInstanceDisabledError",
         detail: "Provider instance \"codex\" is disabled for project project.".into(),

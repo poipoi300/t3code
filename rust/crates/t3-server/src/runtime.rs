@@ -757,7 +757,9 @@ async fn start_domains(
     )?;
     // Last: it binds the tools of every domain above.
     #[cfg(feature = "mcp")]
-    if let Some(mcp) = crate::adapters::mcp::McpAdapter::start(&context, domains).await? {
+    if let Some(mcp) =
+        crate::adapters::mcp::McpAdapter::start(&context, domains, options.dev_replay).await?
+    {
         domains.insert_runtime(mcp)?;
     }
     let _ = (&context, domains, options);

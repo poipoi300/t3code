@@ -955,14 +955,44 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         peer["result"]["structuredContent"]["thread"]["title"], "Renamed by caller",
         "{peer}"
     );
+    let no_turn = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId":PEER,"message":"Hello","mode":"steer"}),
+        )
+        .await;
+    assert!(
+        is_error(&no_turn)
+            && no_turn.to_string().contains("thread_not_sendable")
+            && no_turn.to_string().contains(&format!(
+                "Thread {PEER} has no running turn that can be steered."
+            )),
+        "{no_turn}"
+    );
     let sent_peer = mcp
         .call(
             &token,
             "t3_thread_send",
-            json!({"threadId":PEER,"message":"Hello peer"}),
+            json!({"threadId":PEER,"message":"Hello peer","clientRequestId":"peer-first-message"}),
         )
         .await;
     assert!(!is_error(&sent_peer), "{sent_peer}");
+    let conflicting_send = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId":CALLER,"message":"Hello caller","clientRequestId":"peer-first-message"}),
+        )
+        .await;
+    assert!(
+        is_error(&conflicting_send)
+            && conflicting_send.to_string().contains("orchestration_error")
+            && conflicting_send
+                .to_string()
+                .contains(&format!("Unable to send to thread {CALLER}:")),
+        "{conflicting_send}"
+    );
     let raised_send = mcp
         .call(
             &token,
@@ -1054,7 +1084,6 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         )
         .await;
     assert!(is_error(&missing_project), "{missing_project}");
-    // Attachment sends need the runtime's attachment backend, which the server does not bind.
     let attachments = mcp
         .call(
             &token,
@@ -1074,20 +1103,24 @@ async fn provider_sessions_get_a_thread_credential_and_tools_act_as_that_thread_
         "{attachments}"
     );
     // Review L3: TypeScript's not-found texts.
-    let absent_send = mcp
-        .call(
-            &token,
+    for (tool, input) in [
+        (
             "t3_thread_send",
             json!({"threadId":"thread:absent","message":"Hello"}),
-        )
-        .await;
-    assert!(
-        absent_send.to_string().contains("thread_not_found")
-            && absent_send
-                .to_string()
-                .contains("Thread thread:absent was not found."),
-        "{absent_send}"
-    );
+        ),
+        ("t3_thread_wait", json!({"threadId":"thread:absent"})),
+        ("t3_thread_interrupt", json!({"threadId":"thread:absent"})),
+    ] {
+        let absent = mcp.call(&token, tool, input).await;
+        assert!(
+            is_error(&absent)
+                && absent.to_string().contains("thread_not_found")
+                && absent
+                    .to_string()
+                    .contains("Thread thread:absent was not found."),
+            "{tool}: {absent}"
+        );
+    }
     let absent_request = mcp
         .call(
             &token,
@@ -1341,47 +1374,6 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         "{again}"
     );
 
-    // create_threads: an ordinary thread on Replay in the parent's project, idempotent per request,
-    // never broader than the parent.
-    let created = mcp
-        .call(
-            &token,
-            "create_threads",
-            json!({"threads":[{"prompt":"Write the changelog","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}],"clientRequestId":"create-1"}),
-        )
-        .await;
-    assert!(!is_error(&created), "{created}");
-    let first = created["result"]["structuredContent"]["threads"][0].clone();
-    assert_eq!(first["providerInstanceId"], "devReplay", "{first}");
-    assert_eq!(first["model"], "multi-turn", "{first}");
-    assert_eq!(first["title"], "Write the changelog", "{first}");
-    assert_eq!(first["createdBy"], "agent", "{first}");
-    assert_eq!(first["creationSource"], "mcp", "{first}");
-    let again_created = mcp
-        .call(
-            &token,
-            "create_threads",
-            json!({"threads":[{"prompt":"Write the changelog","target":{"providerInstanceId":"devReplay","model":"multi-turn"}}],"clientRequestId":"create-1"}),
-        )
-        .await;
-    assert_eq!(
-        again_created["result"]["structuredContent"]["threads"][0]["threadId"], first["threadId"],
-        "{again_created}"
-    );
-    let broader_created = mcp
-        .call(
-            &token,
-            "create_threads",
-            json!({"threads":[{"title":"Broader","target":{"providerInstanceId":"devReplay","model":"multi-turn"},"runtimeMode":"full-access"}]}),
-        )
-        .await;
-    assert!(
-        broader_created.to_string().contains(
-            "Child runtime mode full-access is broader than parent mode approval-required."
-        ),
-        "{broader_created}"
-    );
-
     // The child runs to completion on Replay.
     let watched = client
         .start(
@@ -1404,36 +1396,102 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         }
     }
 
-    // task_status at completion needs `delegatedTaskResultPending` (Request 2 in
-    // server-seam-requests.md): until it lands the tool names it instead of guessing.
-    let status = mcp
+    let database = t3_persistence::rusqlite::Connection::open(layout.database()).unwrap();
+    let acknowledgements = || -> u32 {
+        database
+            .query_row(
+                "SELECT count(*) FROM orchestration_command_receipts
+                 WHERE aggregate_id = ?1 AND command_type = 'delegated_task.completion-delivery.acknowledge'",
+                [PARENT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(acknowledgements(), 0);
+    for _ in 0..2 {
+        let response = mcp
+            .call(&token, "task_status", json!({"taskId": task_id}))
+            .await;
+        assert!(!is_error(&response), "{response}");
+        let status = &response["result"]["structuredContent"];
+        assert_eq!(status["taskId"], task_id, "{status}");
+        assert_eq!(status["status"], "completed", "{status}");
+        assert_eq!(status["workState"], "result_available", "{status}");
+        assert_eq!(status["summary"], "first fixture turn complete", "{status}");
+        assert_eq!(acknowledgements(), 1);
+        let delivery: String = database
+            .query_row(
+                "SELECT completion_delivery_state FROM orchestration_v2_projection_subagents
+                 WHERE thread_id = ?1 AND subagent_id = ?2",
+                [PARENT, &task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delivery, "acknowledged");
+    }
+    // A settled child can still owe a continuation. Model the durable state in which the
+    // worker has recorded that obligation but has not published the result.
+    let old_task: String = database
+        .query_row(
+            "SELECT payload_json FROM orchestration_v2_projection_subagents WHERE subagent_id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut held_task: Value = serde_json::from_str(&old_task).unwrap();
+    held_task["result"] = Value::Null;
+    held_task["completionDelivery"] = json!({"state":"pending","observedByRunId":null});
+    database
+        .execute(
+            "UPDATE orchestration_v2_projection_subagents
+         SET payload_json = ?1, completion_delivery_state = ?2 WHERE subagent_id = ?3",
+            [&held_task.to_string(), "pending", &task_id],
+        )
+        .unwrap();
+    let completed_run =
+        t3_contracts::base_schemas::RunId(task["childRunId"].as_str().unwrap().into());
+    let effect_id = format!("effect:restart-continuation:{}", completed_run.0);
+    t3_orchestration::stores::outbox::enqueue(
+        &database,
+        &[t3_orchestration::effects::PendingEffect {
+            id: effect_id.clone(),
+            command_id: t3_contracts::base_schemas::CommandId("test:held-restart".into()),
+            thread_id: ThreadId(child.clone()),
+            request: t3_orchestration::effects::EffectRequest::Continue {
+                source_run_id: completed_run,
+            },
+            available_at: Some("2099-01-01T00:00:00.000Z".into()),
+        }],
+        NOW,
+    )
+    .unwrap();
+    let response = mcp
         .call(&token, "task_status", json!({"taskId": task_id}))
         .await;
+    assert!(!is_error(&response), "{response}");
+    let held = &response["result"]["structuredContent"];
+    assert_eq!(held["status"], "running", "{held}");
+    assert_eq!(held["workState"], "working", "{held}");
+    assert!(held["summary"].is_null(), "{held}");
     assert_eq!(
-        status["result"]["structuredContent"]["missingServiceMethod"],
-        "ThreadManagementService::delegated_task_result_pending",
-        "{status}"
+        acknowledgements(),
+        1,
+        "a held result creates no acknowledgement"
     );
-    // Review L2: a follow-up to the delegated child is a task run, and says which task.
-    let follow_up = mcp
-        .call(
-            &token,
-            "t3_thread_send",
-            json!({"threadId": child, "message": "One more thing"}),
+    database
+        .execute(
+            "DELETE FROM orchestration_v2_effect_outbox WHERE effect_id = ?1",
+            [&effect_id],
         )
-        .await;
-    assert!(!is_error(&follow_up), "{follow_up}");
-    let follow_up_task = follow_up["result"]["structuredContent"]["taskId"]
-        .as_str()
-        .expect("a follow-up names its task")
-        .to_owned();
-    let follow_up_status = mcp
-        .call(&token, "task_status", json!({"taskId": follow_up_task}))
-        .await;
-    assert!(
-        !follow_up_status.to_string().contains("task_not_found"),
-        "{follow_up_status}"
-    );
+        .unwrap();
+    database
+        .execute(
+            "UPDATE orchestration_v2_projection_subagents
+         SET payload_json = ?1, completion_delivery_state = ?2 WHERE subagent_id = ?3",
+            [&old_task, "acknowledged", &task_id],
+        )
+        .unwrap();
+
     // Another live thread cannot read this task: it is not its owner.
     const NEIGHBOUR: &str = "thread:mcp-neighbour";
     command(&mut socket, &mut client, json!({"type":"thread.create","commandId":"create:neighbour","threadId":NEIGHBOUR,"projectId":"project:mcp","title":"Neighbour","modelSelection":{"instanceId":"replay","model":"replay-model"},"runtimeMode":"approval-required","interactionMode":"default","branch":null,"worktreePath":null,"createdBy":"user","creationSource":"web"})).await;
@@ -1486,14 +1544,35 @@ async fn a_live_thread_delegates_to_replay_and_reads_the_result_once() {
         )
         .await;
     assert!(
-        idle_create.to_string().contains(
-            "Thread creation requires an active run owned by this MCP provider session."
-        ),
+        is_error(&idle_create)
+            && idle_create.to_string().contains("parent_not_active")
+            && idle_create
+                .to_string()
+                .contains("The calling provider no longer owns an active thread run."),
         "{idle_create}"
+    );
+    // Review L2: a follow-up to the delegated child is a task run, and says which task.
+    let follow_up = mcp
+        .call(
+            &token,
+            "t3_thread_send",
+            json!({"threadId": child, "message": "One more thing"}),
+        )
+        .await;
+    assert!(!is_error(&follow_up), "{follow_up}");
+    let follow_up_task = follow_up["result"]["structuredContent"]["taskId"]
+        .as_str()
+        .expect("a follow-up names its task")
+        .to_owned();
+    let follow_up_status = mcp
+        .call(&token, "task_status", json!({"taskId": follow_up_task}))
+        .await;
+    assert!(
+        !follow_up_status.to_string().contains("task_not_found"),
+        "{follow_up_status}"
     );
     runtime.shutdown().await.unwrap();
 }
-
 
 /// A server running a live parent thread on the holding stand-in, with Replay (dev) available as a
 /// child provider and, optionally, a managed policy file.
@@ -1631,6 +1710,138 @@ async fn delegation_world(parent: &str, mode: &str, policy: Option<&str>) -> Del
     }
 }
 
+#[cfg(feature = "providers")]
+#[tokio::test]
+async fn configure_refuses_a_busy_provider_switch_as_invalid_request() {
+    const PARENT: &str = "thread:mcp-busy-parent";
+    let world = delegation_world(PARENT, "approval-required", None).await;
+    let busy = world.mcp
+        .call(
+            &world.token,
+            "t3_thread_configure",
+            json!({"threadId": PARENT, "modelSelection": {"instanceId":"devReplay","model":"multi-turn"}}),
+        )
+        .await;
+    assert!(
+        is_error(&busy)
+            && busy.to_string().contains("invalid_request")
+            && busy.to_string().contains(&format!(
+                "Thread {PARENT} has an active turn. Wait for it to finish, then retry the provider selection change."
+            )),
+        "{busy}"
+    );
+    world.runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "providers")]
+#[tokio::test]
+async fn create_threads_records_an_ordered_batch_and_retries_a_partially_started_thread() {
+    const PARENT: &str = "thread:mcp-create-parent";
+    let world = delegation_world(PARENT, "approval-required", None).await;
+    let (mcp, token) = (&world.mcp, world.token.as_str());
+    let target = json!({"providerInstanceId":"devReplay","model":"multi-turn"});
+    let broader = mcp
+        .call(
+            token,
+            "create_threads",
+            json!({"threads":[{"target":target,"runtimeMode":"full-access"}]}),
+        )
+        .await;
+    assert!(
+        is_error(&broader)
+            && broader
+                .to_string()
+                .contains("runtime_mode_escalation_denied")
+            && broader.to_string().contains(
+                "Child runtime mode full-access is broader than parent mode approval-required."
+            ),
+        "{broader}"
+    );
+
+    let prompt = format!("{}😀 and more work.", "a".repeat(76));
+    let mut input = json!({
+        "threads": [{"target": target}, {"target": target, "prompt": prompt}],
+        "clientRequestId": "create batch:/",
+    });
+    let response = mcp.call(token, "create_threads", input.clone()).await;
+    assert!(!is_error(&response), "{response}");
+    let created = response["result"]["structuredContent"]["threads"]
+        .as_array()
+        .unwrap();
+    assert_eq!(created.len(), 2);
+    let [idle, started] = &created[..] else {
+        unreachable!()
+    };
+    assert_eq!(idle["title"], "Parent thread 1");
+    assert_eq!(idle["status"], "idle");
+    assert!(idle["runId"].is_null());
+    assert_eq!(started["title"], format!("{}...", "a".repeat(76)));
+    assert!(started["runId"].is_string());
+    for thread in created {
+        assert_eq!(thread["providerInstanceId"], "devReplay");
+        assert_eq!(thread["model"], "multi-turn");
+        assert_eq!(thread["createdBy"], "agent");
+        assert_eq!(thread["creationSource"], "mcp");
+    }
+    assert_ne!(idle["threadId"], started["threadId"]);
+    assert!(
+        idle["threadId"]
+            .as_str()
+            .unwrap()
+            .ends_with(":create%20batch%3A%2F:0")
+    );
+    assert!(
+        started["threadId"]
+            .as_str()
+            .unwrap()
+            .ends_with(":create%20batch%3A%2F:1")
+    );
+
+    // The first thread's creation was committed, but its prompt is new on retry.
+    input["threads"][0]["prompt"] = json!("Start work.");
+    let retry = mcp.call(token, "create_threads", input.clone()).await;
+    assert!(!is_error(&retry), "{retry}");
+    let retried = &retry["result"]["structuredContent"]["threads"];
+    assert_eq!(retried[0]["threadId"], idle["threadId"]);
+    assert_eq!(retried[0]["title"], idle["title"]);
+    assert!(retried[0]["runId"].is_string());
+    assert_eq!(retried[1]["threadId"], started["threadId"]);
+    assert_eq!(retried[1]["runId"], started["runId"]);
+
+    let repeated = mcp.call(token, "create_threads", input).await;
+    assert!(!is_error(&repeated), "{repeated}");
+    let repeated = &repeated["result"]["structuredContent"]["threads"];
+    assert_eq!(repeated[0]["runId"], retried[0]["runId"]);
+    assert_eq!(repeated[1]["runId"], retried[1]["runId"]);
+
+    let database = t3_persistence::rusqlite::Connection::open(&world.database).unwrap();
+    let records: u32 = database
+        .query_row(
+            "SELECT count(*) FROM orchestration_v2_projection_turn_items
+             WHERE thread_id = ?1 AND type = 'thread_created'",
+            [PARENT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        records, 2,
+        "each thread is recorded once in the parent timeline"
+    );
+    for thread in [idle, started] {
+        let row: (String, String, u32) = database
+            .query_row(
+                "SELECT project_id, runtime_mode, (SELECT count(*) FROM orchestration_v2_projection_runs
+                       WHERE thread_id = t.thread_id)
+                 FROM orchestration_v2_projection_threads t WHERE thread_id = ?1",
+                [thread["threadId"].as_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("project:mcp".into(), "approval-required".into(), 1));
+    }
+    world.runtime.shutdown().await.unwrap();
+}
+
 /// The organisation's managed ceiling bounds what a delegating thread starts: the parent runs at the
 /// ceiling, its child inherits no more, and asking for more is refused before anything starts. (A
 /// parent cannot run above the ceiling, so the runtime's ceiling check on the child's creation event
@@ -1750,20 +1961,37 @@ async fn a_delegated_child_inherits_its_parents_link_fence() {
         )
         .await;
     assert!(!is_error(&renamed), "{renamed}");
-    let fenced = mcp
-        .call(
-            token,
+    for (tool, input) in [
+        (
             "t3_thread_update",
             json!({"threadId": USER_THREAD, "action":"rename", "title":"Not yours"}),
-        )
-        .await;
-    assert!(
-        is_error(&fenced)
-            && fenced.to_string().contains("capability_denied")
-            && fenced.to_string().contains(
-                "This work was started from Laptop through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way."
-            ),
-        "{fenced}"
-    );
+        ),
+        (
+            "t3_thread_transfer",
+            json!({"threadId": USER_THREAD, "action":"fork"}),
+        ),
+        (
+            "t3_thread_transfer",
+            json!({"threadId": USER_THREAD, "action":"merge_back", "targetThreadId": PARENT}),
+        ),
+        (
+            "t3_thread_transfer",
+            json!({"threadId": child, "action":"merge_back", "targetThreadId": USER_THREAD}),
+        ),
+        (
+            "t3_workflow_stop",
+            json!({"threadId": USER_THREAD, "subagentId":"workflow-coordinator"}),
+        ),
+    ] {
+        let fenced = mcp.call(token, tool, input).await;
+        assert!(
+            is_error(&fenced)
+                && fenced.to_string().contains("capability_denied")
+                && fenced.to_string().contains(
+                    "This work was started from Laptop through a linked environment, so it may change only threads that link started. A link paired with full access is not limited this way."
+                ),
+            "{tool}: {fenced}"
+        );
+    }
     world.runtime.shutdown().await.unwrap();
 }

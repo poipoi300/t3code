@@ -201,6 +201,21 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
     }
 }
 
+fn is_managed_ceiling_refusal(reason: &str) -> bool {
+    let reason = reason
+        .strip_suffix(" Switch this thread's mode to continue.")
+        .unwrap_or(reason);
+    reason
+        .rsplit_once(" limits threads to ")
+        .is_some_and(|(organization, limit)| {
+            !organization.is_empty()
+                && matches!(
+                    limit,
+                    "Supervised." | "Auto-accept edits." | "Auto." | "Full access."
+                )
+        })
+}
+
 fn failure(error: t3_orchestration::error::Error) -> McpError {
     match error {
         t3_orchestration::error::Error::Unsupported(method) => {
@@ -209,9 +224,17 @@ fn failure(error: t3_orchestration::error::Error) -> McpError {
         t3_orchestration::error::Error::ThreadNotFound(_) => {
             McpError::failure("thread_not_found", "The thread was not found.")
         }
+        t3_orchestration::error::Error::Rejected { reason, .. }
+            if is_managed_ceiling_refusal(&reason) =>
+        {
+            McpError::failure("invalid_request", reason)
+        }
         // TS `dispatchFailure` (threadAccess.ts): the cause, cut at 1,000 characters.
         t3_orchestration::error::Error::Rejected { reason, .. } if !reason.is_empty() => {
-            McpError::failure("orchestration_error", reason.chars().take(1000).collect::<String>())
+            McpError::failure(
+                "orchestration_error",
+                reason.chars().take(1000).collect::<String>(),
+            )
         }
         t3_orchestration::error::Error::Service { operation, detail }
             if operation == "ThreadManagementProviderInstanceDisabledError" =>
@@ -303,15 +326,54 @@ pub fn user_facing(error: &t3_orchestration::error::Error) -> String {
     }
 }
 
-/// A thread-management error (TS `isThreadManagementError`), mapped by `failure`.
-fn is_management_error(error: &t3_orchestration::error::Error) -> bool {
+fn send_failure(
+    thread: &ThreadId,
+    mode: SendMode,
+    error: t3_orchestration::error::Error,
+) -> McpError {
+    use t3_orchestration::error::Error;
     match error {
-        t3_orchestration::error::Error::ThreadNotFound(_)
-        | t3_orchestration::error::Error::CallerRefused { .. } => true,
-        t3_orchestration::error::Error::Service { operation, .. } => {
-            operation.starts_with("ThreadManagement")
+        Error::ThreadNotFound(_) | Error::CallerRefused { .. } => failure(error),
+        Error::Service { operation, detail } if operation.starts_with("ThreadManagement") => {
+            match operation {
+                "ThreadManagementThreadArchivedError" => McpError::failure(
+                    "thread_not_sendable",
+                    format!(
+                        "Thread {} is archived and cannot receive messages.",
+                        thread.0
+                    ),
+                ),
+                "ThreadManagementNoSteerableRunError" => {
+                    let verb = if mode == SendMode::Steer {
+                        "steered"
+                    } else {
+                        "restarted"
+                    };
+                    McpError::failure(
+                        "thread_not_sendable",
+                        format!(
+                            "Thread {} has no running turn that can be {verb}.",
+                            thread.0
+                        ),
+                    )
+                }
+                "ThreadManagementWorktreeRestoreError" => {
+                    McpError::failure("thread_not_sendable", detail)
+                }
+                "ThreadManagementProviderInstanceDisabledError" => {
+                    McpError::failure("invalid_request", detail)
+                }
+                _ => McpError::failure("orchestration_error", detail),
+            }
         }
-        _ => false,
+        error => McpError::failure(
+            "orchestration_error",
+            format!(
+                "Unable to send to thread {}: {}",
+                thread.0,
+                user_facing(&error)
+            ),
+        ),
     }
 }
 
@@ -484,12 +546,29 @@ impl OrchestrationAdapter {
         if command.get("commandId").is_none() {
             command["commandId"] = encoded(command_id())?;
         }
+        let provider_selection_busy = matches!(
+            command["type"].as_str(),
+            Some("thread.model-selection.set" | "provider.switch")
+        )
+        .then(|| {
+            format!(
+                "Thread {} has an active turn. Wait for it to finish, then retry the provider selection change.",
+                command["threadId"].as_str().unwrap_or_default()
+            )
+        });
         let receipt = self
             .commands
             .dispatcher(command_caller(context)?)
             .dispatch(decoded(command)?)
             .await
-            .map_err(|error| legacy_mode_refusal(context, error))?;
+            .map_err(|error| match &error {
+                t3_orchestration::error::Error::Rejected { reason, .. }
+                    if provider_selection_busy.as_ref() == Some(reason) =>
+                {
+                    McpError::failure("invalid_request", reason)
+                }
+                _ => legacy_mode_refusal(context, error),
+            })?;
         Ok(json!({"sequence":receipt.result_sequence}))
     }
     pub fn install(self: Arc<Self>, services: &mut Services) {
@@ -578,6 +657,11 @@ impl OrchestratorService for OrchestrationAdapter {
             component(&context.scope.request_namespace),
             component(&key)
         ));
+        let mode = input
+            .get("mode")
+            .map(|v| decoded(v.clone()))
+            .transpose()?
+            .unwrap_or(SendMode::Auto);
         let result = self
             .management(&context)?
             .send_to_thread(SendInput {
@@ -587,11 +671,7 @@ impl OrchestratorService for OrchestrationAdapter {
                 message_id: message,
                 text: input["message"].as_str().ok_or(McpError::Internal)?.into(),
                 attachments: vec![],
-                mode: input
-                    .get("mode")
-                    .map(|v| decoded(v.clone()))
-                    .transpose()?
-                    .unwrap_or(SendMode::Auto),
+                mode,
                 fresh_context: input["freshContext"] == true,
                 model_selection: None,
                 scheduled_task_id: None,
@@ -607,16 +687,7 @@ impl OrchestratorService for OrchestrationAdapter {
                 creation_source: decoded(json!("mcp"))?,
             })
             .await
-            .map_err(|error| {
-                if is_management_error(&error) {
-                    failure(error)
-                } else {
-                    McpError::failure(
-                        "orchestration_error",
-                        format!("Unable to send to thread {}: {}", thread.0, user_facing(&error)),
-                    )
-                }
-            })?;
+            .map_err(|error| send_failure(&thread, mode, error))?;
         let run = encoded(&result.run)?;
         let mut answer = json!({"threadId":thread,"link":link(&context,&thread,shell["title"].as_str().unwrap_or("Thread")),"messageId":result.message.id,"runId":result.run.id});
         // A follow-up to a delegated child runs for its task (TS `taskId`).
@@ -877,7 +948,7 @@ impl ThreadService for OrchestrationAdapter {
             .into_iter()
             .flatten()
             .find(|i| i["type"] == "user_input_request" && i["requestId"] == request_id);
-        let (Some(request), Some(_)) = (request, question) else {
+        let (Some(request), Some(question)) = (request, question) else {
             return Err(McpError::failure(
                 "invalid_request",
                 "The pending user-input request was not found.",
@@ -899,18 +970,7 @@ impl ThreadService for OrchestrationAdapter {
         if input["action"] == "respond" {
             return self.dispatch(&context,json!({"type":"runtime-request.respond","threadId":target(&context,&input)?,"requestId":request["id"],"answers":required(&input,"answers")?})).await;
         }
-        let item = records["turnItems"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|i| i["type"] == "user_input_request" && i["requestId"] == request_id)
-            .ok_or_else(|| {
-                McpError::failure(
-                    "invalid_request",
-                    "The pending user-input request was not found.",
-                )
-            })?;
-        Ok(json!({"requestId":request_id,"questions":item["questions"]}))
+        Ok(json!({"requestId":request_id,"questions":question["questions"]}))
     }
     async fn t3_thread_transfer(&self, context: CallContext, input: DecodedInput) -> Result<Value> {
         let input = input.into_value();

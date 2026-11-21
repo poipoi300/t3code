@@ -297,6 +297,7 @@ impl McpAdapter {
     pub async fn start(
         context: &DomainContext<'_>,
         domains: &Domains,
+        dev_replay: bool,
     ) -> crate::Result<Option<Arc<Self>>> {
         let Some(sessions) = domains.get::<McpSessions>() else {
             return Ok(None);
@@ -355,6 +356,7 @@ impl McpAdapter {
                     orchestration_adapter.clone(),
                     domains,
                     context,
+                    dev_replay,
                     services.orchestrator.clone(),
                 ),
                 rest: services.orchestrator.clone(),
@@ -709,6 +711,7 @@ fn delegation(
     orchestration: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
     domains: &Domains,
     context: &DomainContext<'_>,
+    dev_replay: bool,
     fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
 ) -> Arc<dyn t3_mcp::services::OrchestratorService> {
     let (Some(providers), Some(source)) = (
@@ -725,6 +728,7 @@ fn delegation(
             providers,
             source,
             settings: context.local.settings.clone(),
+            dev_replay,
         }),
     })
 }
@@ -733,6 +737,7 @@ fn delegation(
     _: Arc<t3_mcp::adapters::orchestration::OrchestrationAdapter>,
     _: &Domains,
     _: &DomainContext<'_>,
+    _: bool,
     fallback: Arc<dyn t3_mcp::services::OrchestratorService>,
 ) -> Arc<dyn t3_mcp::services::OrchestratorService> {
     fallback
@@ -743,6 +748,7 @@ struct DelegationHost {
     providers: Arc<t3_provider::domain::ProviderDomain>,
     source: Arc<crate::adapters::native_providers::ProviderSource>,
     settings: Arc<t3_config::settings::SettingsService>,
+    dev_replay: bool,
 }
 
 #[cfg(feature = "providers")]
@@ -755,7 +761,28 @@ impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
             .await
             .0
             .iter()
-            .map(|provider| serde_json::to_value(provider).map_err(|_| McpError::Internal))
+            .map(|provider| {
+                let mut snapshot = serde_json::to_value(provider).map_err(|_| McpError::Internal)?;
+                if self.dev_replay
+                    && provider.instance_id.0 == t3_orchestration::adapters::acp::DEV_REPLAY_INSTANCE_ID
+                    && snapshot["driver"] == "acpRegistry"
+                    && snapshot["enabled"] == true
+                    && snapshot["availability"] != "unavailable"
+                    && snapshot["status"] == "warning"
+                    && snapshot["installed"] == false
+                {
+                    // This adapter replays fixtures in process even when policy locks ACP launch paths.
+                    snapshot["installed"] = true.into();
+                    snapshot["status"] = "ready".into();
+                    snapshot["models"] = serde_json::Value::Array(
+                        t3_orchestration::testing::replay::DEV_SCENARIOS
+                            .iter()
+                            .map(|(slug, name, _)| serde_json::json!({"slug":slug,"name":name,"isCustom":false}))
+                            .collect(),
+                    );
+                }
+                Ok(snapshot)
+            })
             .collect()
     }
     async fn orchestration_instances(&self) -> t3_mcp::Result<BTreeSet<String>> {
@@ -787,8 +814,9 @@ impl t3_mcp::adapters::delegation::DelegationHost for DelegationHost {
         .map_err(|_| McpError::unavailable())
     }
     async fn refresh_instance(&self, instance: &str) -> t3_mcp::Result<Vec<serde_json::Value>> {
-        let input = serde_json::from_value(serde_json::json!({ "instanceId": instance, "fresh": true }))
-            .map_err(|_| McpError::Internal)?;
+        let input =
+            serde_json::from_value(serde_json::json!({ "instanceId": instance, "fresh": true }))
+                .map_err(|_| McpError::Internal)?;
         self.providers
             .providers
             .refresh_providers(input)
@@ -906,8 +934,12 @@ impl t3_mcp::services::OrchestratorService for Orchestrator {
         context: t3_mcp::CallContext,
         input: t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsInput,
     ) -> t3_mcp::Result<t3_contracts::orchestrator_mcp::OrchestratorMcpCreateThreadsResult> {
-        t3_mcp::services::OrchestratorService::create_threads(self.delegation.as_ref(), context, input)
-            .await
+        t3_mcp::services::OrchestratorService::create_threads(
+            self.delegation.as_ref(),
+            context,
+            input,
+        )
+        .await
     }
     async fn t3_thread_list(
         &self,
