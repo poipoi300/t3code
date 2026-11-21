@@ -4,7 +4,10 @@
 mod support {
     pub mod fake_server;
 }
-use futures::{FutureExt, StreamExt, channel::mpsc};
+use futures::{
+    FutureExt, StreamExt,
+    channel::{mpsc, oneshot},
+};
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use support::fake_server::*;
@@ -39,6 +42,7 @@ struct Terminal {
     failing: RefCell<Vec<&'static str>>,
     held_resizes: RefCell<Vec<futures::channel::oneshot::Sender<()>>>,
     hold_resizes: std::cell::Cell<bool>,
+    hold_next_write: RefCell<Option<oneshot::Receiver<()>>>,
 }
 
 fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<Terminal>) {
@@ -97,6 +101,18 @@ fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<T
                     let snapshot = snapshot(request.payload["terminalId"].as_str().unwrap(), "");
                     HandlerOutput::Unary(async move { Exit::success(snapshot) }.boxed_local())
                 }
+                "terminal.write" => {
+                    let received = handler.hold_next_write.borrow_mut().take();
+                    HandlerOutput::Unary(
+                        async move {
+                            if let Some(received) = received {
+                                received.await.unwrap();
+                            }
+                            Exit::success(Value::Null)
+                        }
+                        .boxed_local(),
+                    )
+                }
                 "terminal.resize" if handler.hold_resizes.get() => {
                     let (send, receive) = futures::channel::oneshot::channel();
                     handler.held_resizes.borrow_mut().push(send);
@@ -125,6 +141,11 @@ fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<T
     .unwrap();
     h.settle();
     // Grants as the session states them; operate implies read, as the server's grants do.
+    set_grants(&runtime, scopes);
+    (runtime, terminal)
+}
+
+fn set_grants(runtime: &ClientRuntime<TestPlatform>, scopes: &[&str]) {
     runtime
         .client(&environment("env"))
         .unwrap()
@@ -142,7 +163,6 @@ fn setup(h: &mut Harness, scopes: &[&str]) -> (ClientRuntime<TestPlatform>, Rc<T
                 )
                 .collect(),
         });
-    (runtime, terminal)
 }
 
 fn key() -> ThreadKey {
@@ -450,6 +470,84 @@ fn a_read_only_viewer_observes_and_a_failure_shows_as_an_error() {
         "{refused:?}"
     );
     assert!(requests(&terminal, "terminal.write").is_empty());
+}
+
+#[test]
+fn writes_recheck_permission_before_dispatch_and_require_it_at_enqueue() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "first".into());
+    let (done, first_result) = oneshot::channel();
+    h.spawn(async move { done.send(first.await).unwrap() });
+    h.settle();
+    assert_eq!(requests(&terminal, "terminal.write").len(), 1);
+    let queued = terminals.write(&key(), "term-1", "before revoke".into());
+    set_grants(&runtime, READ);
+    let refused = terminals.write(&key(), "term-1", "after revoke".into());
+    release.send(()).unwrap();
+    h.run(first_result).unwrap().unwrap();
+    assert!(matches!(
+        h.run(queued),
+        Err(ClientError::PermissionDenied { .. })
+    ));
+    set_grants(&runtime, OPERATE);
+    assert!(matches!(
+        h.run(refused),
+        Err(ClientError::PermissionDenied { .. })
+    ));
+    assert_eq!(requests(&terminal, "terminal.write").len(), 1);
+}
+
+#[test]
+fn closing_a_terminal_cancels_queued_input_and_other_terminals_keep_writing() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "first".into());
+    let (done, first_result) = oneshot::channel();
+    h.spawn(async move { done.send(first.await).unwrap() });
+    h.settle();
+    assert_eq!(requests(&terminal, "terminal.write").len(), 1);
+    let queued = terminals.write(&key(), "term-1", "pending".into());
+    h.run(terminals.write(&key(), "term-2", "another shell".into()))
+        .unwrap();
+    h.run(terminals.close(&key(), "term-1", true)).unwrap();
+    assert!(matches!(h.run(queued), Err(ClientError::Cancelled)));
+    release.send(()).unwrap();
+    h.run(first_result).unwrap().unwrap();
+    assert_eq!(
+        requests(&terminal, "terminal.write"),
+        [
+            json!({"threadId":"t1","terminalId":"term-1","data":"first"}),
+            json!({"threadId":"t1","terminalId":"term-2","data":"another shell"}),
+        ]
+    );
+}
+
+#[test]
+fn dropping_a_close_future_leaves_queued_input_untouched() {
+    let mut h = Harness::new("env");
+    let (runtime, terminal) = setup(&mut h, OPERATE);
+    let terminals = runtime.terminals();
+    let (release, receive) = oneshot::channel();
+    terminal.hold_next_write.replace(Some(receive));
+    let first = terminals.write(&key(), "term-1", "first".into());
+    let (done, first_result) = oneshot::channel();
+    h.spawn(async move { done.send(first.await).unwrap() });
+    h.settle();
+    assert_eq!(requests(&terminal, "terminal.write").len(), 1);
+    let queued = terminals.write(&key(), "term-1", "pending".into());
+    drop(terminals.close(&key(), "term-1", true));
+    release.send(()).unwrap();
+    h.run(first_result).unwrap().unwrap();
+    h.run(queued).unwrap();
+    assert!(requests(&terminal, "terminal.close").is_empty());
+    assert_eq!(requests(&terminal, "terminal.write")[1]["data"], "pending");
 }
 
 #[test]

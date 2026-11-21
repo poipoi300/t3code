@@ -29,7 +29,7 @@ use crate::{
 };
 use futures::{
     FutureExt, StreamExt,
-    channel::mpsc,
+    channel::{mpsc, oneshot},
     future::{AbortHandle, LocalBoxFuture},
     lock::Mutex,
     stream::LocalBoxStream,
@@ -37,7 +37,7 @@ use futures::{
 use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     rc::{Rc, Weak},
 };
 use t3_contracts::{
@@ -94,6 +94,10 @@ struct UiState {
 }
 
 type ResizeSlots = Rc<RefCell<BTreeMap<(ThreadKey, String), Option<TerminalGrid>>>>;
+type InputWrite = (
+    LocalBoxFuture<'static, Result<(), ClientError>>,
+    oneshot::Sender<Result<(), ClientError>>,
+);
 
 /// Shared by every [`TerminalSessions`] handle of one runtime.
 #[derive(Default)]
@@ -105,6 +109,7 @@ pub struct TerminalSessionsState {
     sessions: RefCell<BTreeMap<String, Weak<SessionShared>>>,
     generations: Rc<RefCell<AttachGenerations>>,
     lifecycle: RefCell<BTreeMap<ThreadKey, Rc<Mutex<()>>>>,
+    input: RefCell<BTreeMap<(ThreadKey, String), VecDeque<InputWrite>>>,
     resizes: ResizeSlots,
 }
 
@@ -758,6 +763,16 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
 
     // ---- Commands ----
 
+    fn require_operate<M: RpcMethod>(endpoint: &SessionEndpoint) -> Result<(), ClientError> {
+        if grants(endpoint, AuthEnvironmentScope::TerminalOperate) {
+            Ok(())
+        } else {
+            Err(ClientError::PermissionDenied {
+                method: M::NAME.into(),
+            })
+        }
+    }
+
     fn guarded<M>(
         &self,
         environment: &EnvironmentId,
@@ -772,11 +787,7 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         async move {
             let endpoint = endpoint?;
             // Read right before the command, so revoking operate stops it at once.
-            if !grants(&endpoint, AuthEnvironmentScope::TerminalOperate) {
-                return Err(ClientError::PermissionDenied {
-                    method: <M as RpcMethod>::NAME.into(),
-                });
-            }
+            Self::require_operate::<M>(&endpoint)?;
             endpoint
                 .command::<M>(input)
                 .await
@@ -786,6 +797,12 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
     }
 
     /// `terminal.open`, `terminal.clear` and `terminal.close` of one thread run one at a time.
+    fn lifecycle_lane(&self, key: &ThreadKey) -> Rc<Mutex<()>> {
+        let mut lanes = self.state.lifecycle.borrow_mut();
+        lanes.retain(|_, lane| Rc::strong_count(lane) > 1);
+        lanes.entry(key.clone()).or_default().clone()
+    }
+
     fn lifecycle<M>(
         &self,
         key: &ThreadKey,
@@ -796,11 +813,7 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         M::Input: 'static,
         M::Output: 'static,
     {
-        let lane = {
-            let mut lanes = self.state.lifecycle.borrow_mut();
-            lanes.retain(|_, lane| Rc::strong_count(lane) > 1);
-            lanes.entry(key.clone()).or_default().clone()
-        };
+        let lane = self.lifecycle_lane(key);
         let service = self.clone();
         let environment = key.environment.clone();
         async move {
@@ -818,20 +831,61 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         self.lifecycle::<WsTerminalOpenRpc>(key, input)
     }
 
+    /// Queue input immediately and return its result. A terminal's writes keep their order
+    /// even when its viewport is hidden while a write is in flight.
     pub fn write(
         &self,
         key: &ThreadKey,
         terminal: &str,
         data: String,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        self.guarded::<WsTerminalWriteRpc>(
+        let allowed = self
+            .endpoint(&key.environment)
+            .and_then(|endpoint| Self::require_operate::<WsTerminalWriteRpc>(&endpoint));
+        if let Err(error) = allowed {
+            return futures::future::ready(Err(error)).boxed_local();
+        }
+        let command = self.guarded::<WsTerminalWriteRpc>(
             &key.environment,
             TerminalWriteInput {
                 thread_id: text(&key.thread.0),
                 terminal_id: text(terminal),
                 data,
             },
-        )
+        );
+        let slot = (key.clone(), terminal.to_owned());
+        let (reply, result) = oneshot::channel();
+        let start = match self.state.input.borrow_mut().entry(slot.clone()) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push_back((command, reply));
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(VecDeque::from([(command, reply)]));
+                true
+            }
+        };
+        if start {
+            let state = self.state.clone();
+            self.runtime.spawn(
+                async move {
+                    loop {
+                        let next = state
+                            .input
+                            .borrow_mut()
+                            .get_mut(&slot)
+                            .and_then(VecDeque::pop_front);
+                        let Some((command, reply)) = next else {
+                            state.input.borrow_mut().remove(&slot);
+                            break;
+                        };
+                        let _ = reply.send(command.await);
+                    }
+                }
+                .boxed_local(),
+            );
+        }
+        async move { result.await.unwrap_or(Err(ClientError::Cancelled)) }.boxed_local()
     }
 
     pub fn clear(
@@ -854,14 +908,27 @@ impl<P: Platform + Clone + 'static> TerminalSessions<P> {
         terminal: &str,
         delete_history: bool,
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
-        self.lifecycle::<WsTerminalCloseRpc>(
-            key,
-            TerminalCloseInput {
-                thread_id: text(&key.thread.0),
-                terminal_id: Some(Some(text(terminal))),
-                delete_history: delete_history.then_some(Some(true)),
-            },
-        )
+        let lane = self.lifecycle_lane(key);
+        let service = self.clone();
+        let slot = (key.clone(), terminal.to_owned());
+        let input = TerminalCloseInput {
+            thread_id: text(&key.thread.0),
+            terminal_id: Some(Some(text(terminal))),
+            delete_history: delete_history.then_some(Some(true)),
+        };
+        async move {
+            let _turn = lane.lock().await;
+            let endpoint = service.endpoint(&slot.0.environment)?;
+            Self::require_operate::<WsTerminalCloseRpc>(&endpoint)?;
+            if let Some(queue) = service.state.input.borrow_mut().get_mut(&slot) {
+                queue.clear();
+            }
+            endpoint
+                .command::<WsTerminalCloseRpc>(input)
+                .await
+                .map_err(RpcCallError::into_client_error)
+        }
+        .boxed_local()
     }
 
     /// Resizes a terminal. While one resize of it is in flight, only the latest next grid is

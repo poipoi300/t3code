@@ -416,6 +416,8 @@ fn the_header_toggle_opens_and_closes_the_terminal_drawer() {
 
 #[component]
 fn TerminalWorkspace() -> impl IntoElement {
+    use std::cell::Cell;
+
     use t3_client::testing::environment::{FakeEnvironment, TerminalStream, shell};
 
     let store = ClientStore::default();
@@ -429,14 +431,20 @@ fn TerminalWorkspace() -> impl IntoElement {
     server.set_shell(shell(&[("t1", "Terminal test")]));
     server.edit_config(|config| config["environment"]["capabilities"]["terminal"] = json!(true));
     server.set_permissions(&["orchestration:read", "terminal:read", "terminal:operate"]);
-    let output = server.terminal_stream(TerminalStream::Attach);
-    output
-        .unbounded_send(json!({"type":"snapshot","snapshot":{
-            "threadId":"t1","terminalId":"term-1","cwd":"/workspace/project",
-            "worktreePath":null,"status":"running","pid":1,"history":"shell ready\r\n",
-            "exitCode":null,"exitSignal":null,"label":"","updatedAt":NOW
-        }}))
-        .expect("scripted snapshot");
+    let first_write = Cell::new(Some(server.defer_reply("terminal.write")));
+    let outputs = [
+        server.terminal_stream(TerminalStream::Attach),
+        server.terminal_stream(TerminalStream::Attach),
+    ];
+    for output in &outputs {
+        output
+            .unbounded_send(json!({"type":"snapshot","snapshot":{
+                "threadId":"t1","terminalId":"term-1","cwd":"/workspace/project",
+                "worktreePath":null,"status":"running","pid":1,"history":"shell ready\r\n",
+                "exitCode":null,"exitSignal":null,"label":"","updatedAt":NOW
+            }}))
+            .expect("scripted snapshot");
+    }
     let client = ClientRuntime::new(
         server.platform(),
         store.clone(),
@@ -448,22 +456,50 @@ fn TerminalWorkspace() -> impl IntoElement {
         pairing.await.expect("paired");
     });
     let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
-    view().w_full().h_full().child(
-        nsh_base::button()
-            .child(text("Return shell output"))
-            .on_press(move || {
-                let writes = server.calls("terminal.write");
-                if !matches!(writes.as_slice(), [write] if write["terminalId"] == "term-1" && write["data"] == "\r") {
-                    return;
-                }
-                output.unbounded_send(json!({
-                    "type":"output","threadId":"t1","terminalId":"term-1",
-                    "data":"input received\r\n"
-                })).expect("attached output");
-            }),
-    ).child(t3_ui::app::app_tree(runtime, Route::Home, move || {
-        t3_ui::app::provide_client_services(&client);
-    }))
+    let writes = server.clone();
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            nsh_base::button()
+                .child(text("Release first terminal write"))
+                .on_press(move || {
+                    let requests = writes.calls("terminal.write");
+                    assert!(
+                        matches!(requests.as_slice(), [first] if first["data"] == "o"),
+                        "later terminal writes overtook the unacknowledged first key: {requests:?}"
+                    );
+                    first_write
+                        .take()
+                        .expect("first write still held")
+                        .send(Ok(json!(null)))
+                        .expect("first write still waiting");
+                }),
+        )
+        .child(
+            nsh_base::button()
+                .child(text("Return shell output"))
+                .on_press(move || {
+                    let writes = server.calls("terminal.write");
+                    assert_eq!(
+                        writes
+                            .iter()
+                            .map(|write| write["data"].as_str().unwrap())
+                            .collect::<Vec<_>>(),
+                        ["o", "k", "\r", "p"]
+                    );
+                    assert!(writes.iter().all(|write| write["terminalId"] == "term-1"));
+                    outputs[1]
+                        .unbounded_send(json!({
+                            "type":"output","threadId":"t1","terminalId":"term-1",
+                            "data":"input received\r\n"
+                        }))
+                        .expect("attached output");
+                }),
+        )
+        .child(t3_ui::app::app_tree(runtime, Route::Home, move || {
+            t3_ui::app::provide_client_services(&client);
+        }))
 }
 
 #[test]
@@ -479,8 +515,21 @@ fn panels_terminal_drawer_opens_and_focuses_a_live_session() {
         .expect("drawer opened");
     app.wait_for("text:shell ready")
         .expect("attached snapshot rendered");
-    app.press_key("Enter")
-        .expect("send to the focused terminal");
+    for key in ["o", "k", "Enter"] {
+        app.press_key(key).expect("send to the focused terminal");
+    }
+    app.settle();
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("hide drawer with input waiting");
+    app.wait_for_gone("id:thread-terminal-drawer", Duration::from_secs(1))
+        .expect("drawer was hidden");
+    app.press("role:button[Toggle terminal drawer]")
+        .expect("reopen drawer before the first write completes");
+    app.wait_for("text:shell ready").expect("reattached shell replay");
+    app.press_key("p").expect("send input after remount");
+    app.settle();
+    app.press("role:button[Release first terminal write]")
+        .expect("later keys wait for the first terminal write");
     app.settle();
     app.press("role:button[Return shell output]")
         .expect("shell replies");
