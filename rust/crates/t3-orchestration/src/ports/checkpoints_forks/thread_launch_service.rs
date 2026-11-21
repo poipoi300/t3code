@@ -1107,6 +1107,7 @@ impl ThreadLaunchService {
         let mut created: Option<Workspace> = None;
         let mut recorded = false;
         let mut released = false;
+        let mut checkout_claim = None;
         let mut terminal = None;
         let result = async {
             if cancellation.is_cancelled() { return Err(Error::Cancelled) }
@@ -1115,6 +1116,10 @@ impl ThreadLaunchService {
             let reservation = reserve_claim(&strategy, &project.workspace_root, &cancellation).await?;
             let mut workspace = self.0.preparation.prepare(input.project_id.clone(),input.thread_id.clone(),strategy.clone(),observer.clone(),cancellation.clone()).await.map_err(|e| if cancellation.is_cancelled() {Error::Cancelled} else {failure("provision-worktree",e)})?;
             if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {created = Some(workspace.clone());}
+            if let Some(path) = &workspace.worktree_path {
+                use super::checkpoint_restore_safety::{ReservationKind, WorkspaceReservations};
+                checkout_claim = Some(WorkspaceReservations::global().reserve(path, ReservationKind::TurnStart, &cancellation).await?);
+            }
             if matches!(strategy,OrchestrationV2ThreadLaunchWorkspaceStrategy::Worktree(_)) {observer.status(SetupStage::Checkout,StageStatus::Done).await?;}
             if !input.reused {
                 self.dispatch(json!({"type":"thread.metadata.update","commandId":format!("{}:workspace",input.command_id.0),"threadId":input.thread_id,"branch":workspace.branch,"worktreePath":workspace.worktree_path}),None).await.map_err(|e| failure("update-thread",e))?;
@@ -1198,6 +1203,7 @@ impl ThreadLaunchService {
                 let _ = self.dispatch(json!({"type":"thread.metadata.update","commandId":format!("{}:cancel-workspace",input.command_id.0),"threadId":input.thread_id,"worktreePath":null,"branch":null}),None).await;
             }
         }
+        drop(checkout_claim);
         result
     }
 

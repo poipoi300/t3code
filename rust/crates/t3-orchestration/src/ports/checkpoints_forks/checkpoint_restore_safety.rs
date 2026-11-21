@@ -306,6 +306,48 @@ impl WorkspaceReservations {
             .clone()
     }
 
+    /// Maintenance skips an occupied checkout instead of queuing a deletion behind its writer.
+    pub fn try_reserve_cleanup(
+        self: &std::sync::Arc<Self>,
+        cwd: &Path,
+    ) -> Result<Option<WorkspaceReservation>> {
+        let keys = workspace_keys(cwd)?
+            .into_iter()
+            .map(RestoreFolder::from_resolved)
+            .collect::<Vec<_>>();
+        self.claim(
+            &mut self.state.lock().unwrap_or_else(|e| e.into_inner()),
+            &keys,
+            ReservationKind::Restore,
+        )
+    }
+
+    fn claim(
+        self: &std::sync::Arc<Self>,
+        state: &mut Reservations,
+        keys: &[RestoreFolder],
+        kind: ReservationKind,
+    ) -> Result<Option<WorkspaceReservation>> {
+        if state.held.iter().any(|(_, path, held_kind)| {
+            (kind == ReservationKind::Restore || *held_kind == ReservationKind::Restore)
+                && keys.iter().any(|key| path.overlaps(key))
+        }) {
+            return Ok(None);
+        }
+        let id = state.next;
+        state.next = state.next.checked_add(1).ok_or_else(|| Error::Service {
+            operation: "workspace.reserve",
+            detail: "Reservation identity exhausted".into(),
+        })?;
+        state
+            .held
+            .extend(keys.iter().cloned().map(|key| (id, key, kind)));
+        Ok(Some(WorkspaceReservation {
+            owner: self.clone(),
+            id,
+        }))
+    }
+
     pub async fn reserve(
         self: &std::sync::Arc<Self>,
         cwd: &Path,
@@ -324,22 +366,8 @@ impl WorkspaceReservations {
                 .collect();
             {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if !state.held.iter().any(|(_, path, held_kind)| {
-                    (kind == ReservationKind::Restore || *held_kind == ReservationKind::Restore)
-                        && keys.iter().any(|key| path.overlaps(key))
-                }) {
-                    let id = state.next;
-                    state.next = state.next.checked_add(1).ok_or_else(|| Error::Service {
-                        operation: "workspace.reserve",
-                        detail: "Reservation identity exhausted".into(),
-                    })?;
-                    state
-                        .held
-                        .extend(keys.into_iter().map(|key| (id, key, kind)));
-                    return Ok(WorkspaceReservation {
-                        owner: self.clone(),
-                        id,
-                    });
+                if let Some(guard) = self.claim(&mut state, &keys, kind)? {
+                    return Ok(guard);
                 }
                 if waiting.is_none() {
                     let id = state.next;

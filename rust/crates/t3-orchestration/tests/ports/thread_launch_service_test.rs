@@ -220,6 +220,7 @@ mod support {
         pub setup_entered: Semaphore,
         pub setup_gate: Mutex<Option<Arc<Gate>>>,
         pub preflight_gate: Mutex<Option<Arc<Gate>>>,
+        pub rename_gate: Mutex<Option<Arc<Gate>>>,
         pub naming_gate: Mutex<Option<Arc<Gate>>>,
         pub setup_completion: Mutex<Option<(bool, SetupCompletion)>>,
         pub rename_failure: AtomicBool,
@@ -245,6 +246,7 @@ mod support {
                 setup_entered: Semaphore::new(0),
                 setup_gate: Mutex::new(None),
                 preflight_gate: Mutex::new(None),
+                rename_gate: Mutex::new(None),
                 naming_gate: Mutex::new(None),
                 setup_completion: Mutex::new(None),
                 rename_failure: AtomicBool::new(false),
@@ -350,8 +352,10 @@ mod support {
             _: PathBuf,
             _: &str,
             generated: GeneratedBranch,
-            _: CancellationToken,
+            cancellation: CancellationToken,
         ) -> Result<String> {
+            let wait = self.rename_gate.lock().expect("rename").clone();
+            gate(wait, cancellation).await?;
             Ok(generated.branch)
         }
         async fn setup(&self, _: SetupInput, cancellation: CancellationToken) -> Result<SetupRun> {
@@ -755,7 +759,7 @@ async fn worktree_base_validation_matches_git_exceptions_and_branch_namespace_co
 async fn setup_exit_and_branch_rename_finish_before_releasing_run() -> Result<()> {
     let h = LaunchHarness::new().await?;
     let gate = blocked();
-    *h.environment.naming_gate.lock().expect("naming") = Some(gate.clone());
+    *h.environment.rename_gate.lock().expect("rename") = Some(gate.clone());
     let (finish, completion) = tokio::sync::oneshot::channel();
     *h.environment.setup_completion.lock().expect("completion") = Some((false, completion));
     let result = h
@@ -770,6 +774,19 @@ async fn setup_exit_and_branch_rename_finish_before_releasing_run() -> Result<()
             .forget();
     })
     .await?;
+    // Exercise the same nonblocking reservation cleanup takes while the rename is in flight.
+    use t3_orchestration::ports::checkpoints_forks::checkpoint_restore_safety::WorkspaceReservations;
+    let path = h.workspaces.root.join(result.thread_id.0.replace(':', "-"));
+    std::fs::create_dir_all(&path)?;
+    let sentinel = path.join("keep");
+    std::fs::write(&sentinel, "keep")?;
+    if let Some(_permit) = WorkspaceReservations::global().try_reserve_cleanup(&path)? {
+        std::fs::remove_file(&sentinel)?;
+    }
+    assert!(
+        sentinel.exists(),
+        "cleanup obtained deletion permission during branch rename"
+    );
     finish.send(Ok(Some(0))).expect("setup completion");
     assert!(
         !h.commands

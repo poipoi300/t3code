@@ -977,10 +977,15 @@ impl OrchestrationRuntime {
         Arc::new(self.worker.clone())
     }
 
-    /// The dispatcher's thread lanes, for host services (such as project deletion) whose
-    /// cascades must not race thread commands.
-    /// The dispatcher's thread lanes, for host services (`ProjectService`) that must serialize
-    /// with thread commands.
+    /// Query the same live agent process scope used by checkpoint rollback.
+    pub async fn has_agent_processes(&self, thread: &ThreadId) -> Result<bool> {
+        match &self.ingestor.agent_scope {
+            Some(scope) => Ok(scope.live_processes(thread.clone()).await?.unwrap_or(0) != 0),
+            None => Ok(false),
+        }
+    }
+
+    /// The dispatcher's lanes for host operations that must serialize with thread commands.
     pub fn thread_lanes(&self) -> Arc<KeyedLanes> {
         self.thread_lanes.clone()
     }

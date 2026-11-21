@@ -24,7 +24,7 @@ impl WorkspaceLocks {
     }
 
     pub async fn acquire(&self, cwd: &Path) -> Result<OwnedMutexGuard<()>> {
-        Ok(self.lock_key(canonicalize_missing(cwd)?).await)
+        Ok(self.lock_for(canonicalize_missing(cwd)?).lock_owned().await)
     }
 
     /// A linked leftover can be unlinked during recreation. Hold both the current
@@ -34,24 +34,28 @@ impl WorkspaceLocks {
         let keys = super::checkpoint_restore_safety::workspace_keys(cwd)?;
         let mut held = Vec::with_capacity(keys.len());
         for key in keys {
-            held.push(self.lock_key(key).await);
+            held.push(self.lock_for(key).lock_owned().await);
         }
         Ok(held)
     }
 
-    async fn lock_key(&self, key: PathBuf) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            locks.retain(|_, value| value.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(AsyncMutex::new(()));
-                locks.insert(key, Arc::downgrade(&lock));
-                lock
-            }
-        };
-        lock.lock_owned().await
+    pub fn try_acquire(&self, cwd: &Path) -> Result<Option<OwnedMutexGuard<()>>> {
+        Ok(self
+            .lock_for(canonicalize_missing(cwd)?)
+            .try_lock_owned()
+            .ok())
+    }
+
+    fn lock_for(&self, key: PathBuf) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, value| value.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(AsyncMutex::new(()));
+            locks.insert(key, Arc::downgrade(&lock));
+            lock
+        }
     }
 }
 
