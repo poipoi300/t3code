@@ -1,6 +1,8 @@
 //! Native orchestration server core. This crate does not target wasm32-unknown-unknown.
 pub mod adapters;
 pub mod api;
+mod assistant_citations;
+mod composer_context;
 pub mod composition;
 pub mod decision;
 pub mod effects;

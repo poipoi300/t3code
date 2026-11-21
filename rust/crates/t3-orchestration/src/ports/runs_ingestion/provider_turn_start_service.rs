@@ -33,7 +33,7 @@ pub struct ProviderTurnStartService {
     pub ids: Arc<dyn IdGenerator>,
 }
 
-// seam-shim: shared composer/citation projection is supplied by the server host.
+// Optional host override for provider-bound composer context.
 pub trait ComposerContextProjector: Send + Sync {
     fn project(&self, message: &OrchestrationV2ConversationMessage) -> Result<String>;
 }
@@ -2016,18 +2016,12 @@ pub fn turn_message_with_projector(
     let text = if let Some(projector) = projector {
         projector.project(message)?
     } else {
-        if message.text.contains("t3-context://")
-            || message
-                .context
-                .as_ref()
-                .and_then(Option::as_ref)
-                .is_some_and(|context| !context.records.is_empty())
-        {
-            return Err(Error::Unsupported(
-                "composer context projection for provider input",
-            ));
-        }
-        message.text.clone()
+        let records = message
+            .context
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map_or(&[][..], |context| context.records.as_slice());
+        crate::composer_context::project(&message.text, records)?
     };
     Ok(TurnMessage {
         message_id: expanded_id(&message.id)?,

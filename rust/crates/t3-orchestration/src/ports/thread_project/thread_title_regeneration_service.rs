@@ -1,6 +1,7 @@
 use super::thread_management_service::ThreadManagementService;
 use crate::{
     api::*,
+    assistant_citations::to_plain_text as citations_to_plain_text,
     effects::TitleKind,
     error::{Error, Result},
     ports::runs_ingestion::provider_event_ingestor::expanded_id,
@@ -27,132 +28,6 @@ fn js_whitespace(character: char) -> bool {
 
 fn trim_js(text: &str) -> &str {
     text.trim_matches(js_whitespace)
-}
-
-fn decode_url_component(text: &str, form: bool) -> Option<String> {
-    let mut decoded = Vec::with_capacity(text.len());
-    let mut bytes = text.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'%' {
-            let next = bytes.clone().take(2).collect::<Vec<_>>();
-            let digit = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
-            if next.len() == 2
-                && let Some((high, low)) = digit(next[0]).zip(digit(next[1]))
-            {
-                decoded.push(high * 16 + low);
-                bytes.next();
-                bytes.next();
-            } else if form {
-                decoded.push(byte);
-            } else {
-                return None;
-            }
-        } else {
-            decoded.push(if form && byte == b'+' { b' ' } else { byte });
-        }
-    }
-    if form {
-        Some(String::from_utf8_lossy(&decoded).into_owned())
-    } else {
-        String::from_utf8(decoded).ok()
-    }
-}
-
-fn citation(href: &str) -> Option<t3_contracts::assistant_citations::AssistantCitation> {
-    use t3_contracts::assistant_citations::*;
-    const MAX_HREF: usize = 9
-        * (ASSISTANT_CITATION_MAX_TEXT_LENGTH
-            + ASSISTANT_CITATION_MAX_COMMENT_LENGTH
-            + 3 * ASSISTANT_CITATION_MAX_ID_LENGTH
-            + 2 * ASSISTANT_CITATION_CONTEXT_LENGTH)
-        + 1000;
-    if utf16_len(href) > MAX_HREF || href.contains('#') || href.chars().any(js_whitespace) {
-        return None;
-    }
-    let (path, query) = href.strip_prefix("t3-citation://v1/")?.split_once('?')?;
-    let ids = path
-        .split('/')
-        .map(|part| decode_url_component(part, false))
-        .collect::<Option<Vec<_>>>()?;
-    if ids.len() != 3
-        || ids
-            .iter()
-            .any(|id| id.is_empty() || utf16_len(id) > ASSISTANT_CITATION_MAX_ID_LENGTH)
-    {
-        return None;
-    }
-    let mut params = BTreeMap::new();
-    for part in query.split('&').filter(|part| !part.is_empty()) {
-        let (key, value) = part.split_once('=').unwrap_or((part, ""));
-        if params
-            .insert(
-                decode_url_component(key, true)?,
-                decode_url_component(value, true)?,
-            )
-            .is_some()
-        {
-            return None;
-        }
-    }
-    let comment = params.get("comment");
-    if params.len() != 5 + usize::from(comment.is_some()) {
-        return None;
-    }
-    let number = |key: &str| -> Option<u64> {
-        let value = params.get(key)?;
-        if value.is_empty() || value.len() > 16 || !value.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return None;
-        }
-        value
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value <= 9_007_199_254_740_991)
-    };
-    let (start, end) = (number("start")?, number("end")?);
-    let text = params.get("text")?;
-    let prefix = params.get("prefix")?;
-    let suffix = params.get("suffix")?;
-    if end <= start
-        || trim_js(text).is_empty()
-        || utf16_len(text) > ASSISTANT_CITATION_MAX_TEXT_LENGTH
-        || comment.is_some_and(|comment| utf16_len(comment) > ASSISTANT_CITATION_MAX_COMMENT_LENGTH)
-        || utf16_len(prefix) > ASSISTANT_CITATION_CONTEXT_LENGTH
-        || utf16_len(suffix) > ASSISTANT_CITATION_CONTEXT_LENGTH
-    {
-        return None;
-    }
-    let mut value = json!({"version":1,"environmentId":ids[0],"threadId":ids[1],"messageId":ids[2],"text":text,"start":start,"end":end,"prefix":prefix,"suffix":suffix});
-    if let Some(comment) = comment {
-        value["comment"] = json!(comment);
-    }
-    serde_json::from_value(value).ok()
-}
-
-fn citations_to_plain_text(text: &str) -> String {
-    const OPEN: &str = "[Assistant quote](";
-    let mut result = String::new();
-    let mut remaining = text;
-    while let Some(start) = remaining.find(OPEN) {
-        let href = &remaining[start + OPEN.len()..];
-        let Some(end) = href.find(')') else {
-            break;
-        };
-        result.push_str(&remaining[..start]);
-        match citation(&href[..end]) {
-            Some(citation) => {
-                result.push_str(&citation.text);
-                if let Some(comment) = citation.comment.flatten() {
-                    result.push_str("\nComment: ");
-                    result.push_str(&comment);
-                }
-            }
-            None => result.push_str(&remaining[start..start + OPEN.len() + end + 1]),
-        }
-        remaining = &href[end + 1..];
-    }
-    result.push_str(remaining);
-    result
 }
 
 pub fn is_attachment_only_bootstrap_prompt(text: &str) -> bool {
