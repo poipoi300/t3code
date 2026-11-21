@@ -53,6 +53,31 @@ pub fn bind<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> ListCli
     }))
 }
 
+use crate::screens::panel::{self, Action, PanelRegistry, Surface, SurfaceContent};
+use t3_client::types::{ThreadId, ThreadKey};
+
+/// The utility route uses the same persistent panel key as rightPanelStore.ts.
+fn panel_key() -> ThreadKey {
+    ThreadKey {
+        environment: EnvironmentId("pull-requests-panel".into()),
+        thread: ThreadId("pull-requests-panel".into()),
+    }
+}
+
+pub fn supported() -> Prop<bool> {
+    let runtime = rt();
+    Prop::bind(move || {
+        runtime.store.track_environments();
+        let snapshot = runtime.store.store().snapshot();
+        runtime.environments().iter().any(|entry| {
+            snapshot
+                .environments
+                .get(&entry.id)
+                .is_some_and(|s| s.config.is_some())
+        })
+    })
+}
+
 type Choices = &'static [(&'static str, &'static str, Icon)];
 const STATE: Choices = &[
     ("all", "All", Icon::Layers),
@@ -113,6 +138,53 @@ impl Filters {
         Self { search, urls }
     }
 
+    fn select(self, surface: Option<&Surface>) {
+        let mut next = self.search.get_untracked();
+        for key in [
+            "repository",
+            "number",
+            "selectedProjectId",
+            "selectedEnvironmentId",
+            "selectedHost",
+            "selectedUrl",
+        ] {
+            next.set(key, "");
+        }
+        if let Some(Surface {
+            content:
+                SurfaceContent::PullRequest {
+                    environment_id,
+                    project_id,
+                    host,
+                    repository,
+                    number,
+                    ..
+                },
+            ..
+        }) = surface
+        {
+            next.set("repository", repository);
+            next.set("number", &number.to_string());
+            next.set("selectedProjectId", project_id);
+            next.set(
+                "selectedEnvironmentId",
+                environment_id.as_deref().unwrap_or_default(),
+            );
+            next.set("selectedHost", host.as_deref().unwrap_or_default());
+        }
+        self.replace(next);
+    }
+
+    fn replace(self, next: ListSearch) {
+        if self.search.get_untracked() == next {
+            return;
+        }
+        if let Some(urls) = self.urls {
+            urls.request(UrlRequest::Replace(next.href()));
+        }
+        self.search.set(next);
+    }
+
     fn set(self, key: &str, value: &str) {
         let mut next = self.search.get_untracked();
         if (if key == "draft" {
@@ -124,10 +196,7 @@ impl Filters {
             return;
         }
         next.set(key, value);
-        if let Some(urls) = self.urls {
-            urls.request(UrlRequest::Replace(next.href()));
-        }
-        self.search.set(next);
+        self.replace(next);
     }
 }
 
@@ -332,18 +401,11 @@ pub fn screen() -> AnyElement {
             })
             .collect::<Vec<_>>()
     });
-    let scope = computed(move || {
+    let checkouts = computed(move || {
         use t3_client::workspace::{
             git_panel::details::is_scratch_project, projects::EnvironmentProject,
         };
         let shells = shells.get();
-        let environments = shells
-            .iter()
-            .map(|(env, ..)| env.clone())
-            .collect::<Vec<_>>();
-        if environments.is_empty() {
-            return None;
-        }
         let mut projects = Vec::new();
         let mut known = true;
         for (env, _, _, scratch, shell) in &shells {
@@ -360,6 +422,18 @@ pub fn screen() -> AnyElement {
                 known = false;
             }
         }
+        (projects, known)
+    });
+    let scope = computed(move || {
+        let shells = shells.get();
+        let environments = shells
+            .iter()
+            .map(|(env, ..)| env.clone())
+            .collect::<Vec<_>>();
+        if environments.is_empty() {
+            return None;
+        }
+        let (projects, known) = checkouts.get();
         let project = input.with(|i| i.project_id.clone().flatten());
         let targets = pr_list::list_targets(
             &environments,
@@ -378,6 +452,32 @@ pub fn screen() -> AnyElement {
                 })
                 .collect::<Vec<_>>(),
         )
+    });
+    let host = panel::workspace_panel_host();
+    let panel_key = stored(panel_key());
+    let panel_state = host.panel(panel_key.get());
+    // Hydrate a shared link only after the configured server owns its project.
+    let route_target = computed(move || {
+        filters.search.with(|search| {
+            checkouts.with(|(projects, known)| search.detail_surface(projects, *known))
+        })
+    });
+    let last_route = stored(None::<Option<Surface>>);
+    effect(move || {
+        let wanted = route_target.get();
+        let active = panel_state.with(|p| p.active().cloned());
+        if last_route.get().as_ref() != Some(&wanted) {
+            last_route.with(|last| *last = Some(wanted.clone()));
+            if active.as_ref().map(|s| &s.id) != wanted.as_ref().map(|s| &s.id) {
+                if let Some(s) = wanted {
+                    host.apply(&panel_key.get(), Action::OpenSurface(s));
+                } else if active.is_some() {
+                    host.apply(&panel_key.get(), Action::Close);
+                }
+            }
+        } else if active.as_ref().map(|s| &s.id) != wanted.as_ref().map(|s| &s.id) {
+            filters.select(active.as_ref());
+        }
     });
     let replies = signal(Replies::new());
     let more = signal(0u64);
@@ -439,13 +539,16 @@ pub fn screen() -> AnyElement {
                     &input,
                     &typed,
                     sort,
-                    reload,
-                    move || more.update(|n| *n += 1),
+                    ListActions {
+                        filters,
+                        refresh,
+                        more,
+                    },
                 )
             })
         })
     });
-    view()
+    let workspace = view()
         .flex_1()
         .min_h(px(0.0))
         .app_class(tw("flex min-w-0 flex-col bg-background"))
@@ -479,7 +582,42 @@ pub fn screen() -> AnyElement {
                     .child(content),
             ),
         )
+        .into_element();
+    let Some(registry) = use_context::<PanelRegistry>() else {
+        return workspace;
+    };
+    let width = signal(540f32);
+    let row = signal(0f32);
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .on_layout(move |b: &Bounds<Points>| row.set(b.size.width.0))
+        .child(
+            panel::chat_right_panel(
+                host,
+                panel_key.get(),
+                Prop::bind(move || row.get()),
+                Prop::bind(move || width.get()),
+                150,
+                move |w| width.set(w),
+            )
+            .fill("workspace", workspace)
+            .child(panel::right_panel_tabs(
+                host,
+                panel_key.get(),
+                registry,
+                view(),
+            )),
+        )
         .into_element()
+}
+
+#[derive(Clone, Copy)]
+struct ListActions {
+    filters: Filters,
+    refresh: Signal<u64>,
+    more: Signal<u64>,
 }
 
 fn list_body(
@@ -488,9 +626,10 @@ fn list_body(
     input: &PullRequestListInput,
     typed: &str,
     sort: ListSort,
-    reload: impl Fn() + Copy + 'static,
-    load_more: impl Fn() + Copy + 'static,
+    actions: ListActions,
 ) -> AnyElement {
+    let reload = move || actions.refresh.update(|r| *r += 1);
+    let load_more = move || actions.more.update(|r| *r += 1);
     let Some(expected) = expected else {
         return text(t("Loading pull requests…")).into_element();
     };
@@ -593,7 +732,20 @@ fn list_body(
             );
         }
         for row in group.entries {
-            body = body.child(list_row(&row.entry));
+            let e = &row.entry;
+            let selected = Surface::pull_request(
+                Some(&row.environment.0),
+                &e.project_id.0,
+                Some(&e.host.0),
+                &e.repository.0,
+                e.number,
+            );
+            body = body.child(
+                nsh_base::button()
+                    .accessibility_label(format!("{} #{}", t("Open pull request"), e.number))
+                    .on_press(move || actions.filters.select(Some(&selected)))
+                    .child(list_row(e)),
+            );
         }
     }
     if replies.values().any(|p| p.next.is_some()) {

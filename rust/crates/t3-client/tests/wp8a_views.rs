@@ -1234,3 +1234,72 @@ fn base_freshness_exposes_only_the_intersection_of_offered_and_permitted_updates
     );
     assert!(is_stacked_base("main", &refs));
 }
+
+#[test]
+fn repository_breadcrumb_preserves_the_forge_origin_and_namespace() {
+    for (raw, expected) in [
+        (
+            "https://dev.azure.com/org/proj/_git/repo/pullrequest/14",
+            Some("https://dev.azure.com/org/proj/_git/repo"),
+        ),
+        (
+            "https://github.com/team/widget/pull/14#conversation",
+            Some("https://github.com/team/widget"),
+        ),
+        (
+            "https://forge.example:8443/group/sub/widget/-/merge_requests/14?view=1",
+            Some("https://forge.example:8443/group/sub/widget"),
+        ),
+        (
+            "https://codeberg.org/team/widget/pulls/14",
+            Some("https://codeberg.org/team/widget"),
+        ),
+        ("https://forge.example/team/widget/pull/12", None),
+        ("https://forge.example/team/widget/issues/14", None),
+        ("https://token@forge.example/team/widget/pull/14", None),
+        ("javascript:alert(14)", None),
+    ] {
+        assert_eq!(repository_link(raw, 14).as_deref(), expected, "{raw}");
+    }
+}
+
+#[test]
+fn deep_link_resolution_preserves_server_and_host_scope() {
+    use t3_client::{view_logic::shell::panels::Surface, workspace::projects::EnvironmentProject};
+    let checkout = |env: &str| EnvironmentProject {
+        environment: EnvironmentId(env.into()),
+        is_scratch: false,
+        project: decode(json!({
+            "id":"shared","title":"Widget","workspaceRoot":"/widget",
+            "repositoryIdentity":{"canonicalKey":"forge.example/team/widget","displayName":"team/widget","locator":{"source":"git-remote","remoteName":"origin","remoteUrl":"https://forge.example/team/widget.git"}},
+            "defaultModelSelection":null,"scripts":[],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"
+        })),
+    };
+    let first = checkout("first");
+    let second = checkout("second");
+    let query =
+        |extra: &str| ListSearch::parse(&format!("?repository=team%2Fwidget&number=14&{extra}"));
+    let scoped = query("selectedProjectId=shared&environmentId=second&host=forge.example");
+    assert!(
+        scoped
+            .detail_surface(std::slice::from_ref(&first), false)
+            .is_none()
+    );
+    let projects = [first, second];
+    let expected = Some(Surface::pull_request(
+        Some("second"),
+        "shared",
+        Some("forge.example"),
+        "team/widget",
+        14,
+    ));
+    assert_eq!(scoped.detail_surface(&projects, true), expected);
+    assert_eq!(query("selectedEnvironmentId=second&environmentId=first&selectedHost=forge.example&host=elsewhere").detail_surface(&projects,true),expected);
+    assert!(
+        query("selectedEnvironmentId=second&host=elsewhere")
+            .detail_surface(&projects, true)
+            .is_none()
+    );
+    assert!(query("").detail_surface(&projects, true).is_none());
+    assert!(query("").detail_surface(&projects[..1], false).is_none());
+}

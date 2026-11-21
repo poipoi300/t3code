@@ -518,6 +518,8 @@ impl Platform for EnvironmentPlatform {
                     (WsProjectsSearchEntriesRpc::TAG, CallKind::Unary),
                     (WsProjectsSearchContentsRpc::TAG, CallKind::Unary),
                     (WsPullRequestsListRpc::TAG, CallKind::Unary),
+                    (WsPullRequestsDetailRpc::TAG, CallKind::Unary),
+                    (WsPullRequestsLinkedThreadsRpc::TAG, CallKind::Unary),
                     (WsTerminalOpenRpc::TAG, CallKind::Unary),
                     (WsTerminalWriteRpc::TAG, CallKind::Unary),
                     (WsTerminalResizeRpc::TAG, CallKind::Unary),

@@ -150,6 +150,97 @@ impl ListSearch {
         }
     }
 
+    /// Resolve a URL selection against known, non-scratch checkouts. A named server can
+    /// still be pairing, so its project must never be resolved on a different server.
+    pub fn detail_surface(
+        &self,
+        projects: &[crate::workspace::projects::EnvironmentProject],
+        all_shells_known: bool,
+    ) -> Option<crate::view_logic::shell::panels::Surface> {
+        let prefer = |selection, filter| {
+            let a = self.value(selection);
+            if a.is_empty() { self.value(filter) } else { a }
+        };
+        let environment = prefer("selectedEnvironmentId", "environmentId");
+        let host = prefer("selectedHost", "host");
+        let project = prefer("selectedProjectId", "projectId");
+        let repository = self.value("repository").trim();
+        let number = self
+            .value("number")
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991)?;
+        if repository.is_empty() || (environment.is_empty() && !all_shells_known) {
+            return None;
+        }
+        let mut matches = projects.iter().filter(|candidate| {
+            if candidate.is_scratch
+                || (!environment.is_empty() && candidate.environment.0 != environment)
+            {
+                return false;
+            }
+            if !project.is_empty() {
+                return candidate.project.id.0 == project;
+            }
+            candidate
+                .project
+                .repository_identity
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|identity| {
+                    let identity_host = identity
+                        .canonical_key
+                        .0
+                        .split('/')
+                        .next()
+                        .unwrap_or_default();
+                    if !host.is_empty() && !identity_host.eq_ignore_ascii_case(host) {
+                        return false;
+                    }
+                    let selector = if identity
+                        .provider
+                        .as_ref()
+                        .is_some_and(|p| p.0 == "azure-devops")
+                    {
+                        identity
+                            .name
+                            .as_ref()
+                            .map(|n| n.0.as_str())
+                            .or_else(|| identity.display_name.as_ref()?.0.rsplit('/').next())
+                            .map(|n| {
+                                percent_encoding::percent_decode_str(n)
+                                    .decode_utf8_lossy()
+                                    .into_owned()
+                            })
+                    } else {
+                        identity
+                            .display_name
+                            .as_ref()
+                            .map(|n| n.0.clone())
+                            .or_else(|| {
+                                Some(format!(
+                                    "{}/{}",
+                                    identity.owner.as_ref()?.0,
+                                    identity.name.as_ref()?.0
+                                ))
+                            })
+                    };
+                    selector.is_some_and(|r| r.eq_ignore_ascii_case(repository))
+                })
+        });
+        let owner = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(crate::view_logic::shell::panels::Surface::pull_request(
+            Some(&owner.environment.0),
+            &owner.project.id.0,
+            (!host.is_empty()).then_some(host),
+            repository,
+            number,
+        ))
+    }
+
     pub fn href(&self) -> String {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(&self.0)

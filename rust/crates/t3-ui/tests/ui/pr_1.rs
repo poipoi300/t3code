@@ -18,7 +18,7 @@ use t3_ui::{
     state::nav::Route,
 };
 
-fn entry(number: u64, title: &str, state: &str, size: u64) -> Value {
+pub(super) fn entry(number: u64, title: &str, state: &str, size: u64) -> Value {
     json!({"provider":"github","host":"github.com","projectId":"project","projectTitle":"Project",
         "repository":"team/widget","number":number,"title":title,"url":format!("https://github.com/team/widget/pull/{number}"),
         "author":{"login":"alice","name":null,"avatarUrl":null},"headBranch":"feature","baseBranch":"main",
@@ -27,7 +27,7 @@ fn entry(number: u64, title: &str, state: &str, size: u64) -> Value {
         "viewerReviewRequested":false,"labels":[]})
 }
 
-fn answer(entries: Vec<Value>) -> Value {
+pub(super) fn answer(entries: Vec<Value>) -> Value {
     json!({"viewers":{"github.com":"alice"},"providers":[],"entries":entries,"errors":[],"truncated":false,"nextCursors":{}})
 }
 
@@ -164,7 +164,7 @@ fn phone_browses_filters_and_sorts_pull_requests() {
     browse(PHONE);
 }
 
-struct StaticUrl;
+pub(super) struct StaticUrl;
 impl t3_ui::state::url::UrlClient for StaticUrl {
     fn watch(&self) -> futures::stream::LocalBoxStream<'static, t3_ui::state::url::UrlSnapshot> {
         Box::pin(futures::stream::pending())

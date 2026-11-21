@@ -397,10 +397,39 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
         input: PullRequestListInput,
     ) -> Result<PullRequestListResult, RpcCallError> {
         use crate::rpc::RpcEndpoint;
-        let session = self
-            .client(environment)
+        self.pr_session(environment)?
+            .command::<WsPullRequestsListRpc>(input)
+            .await
+    }
+
+    fn pr_session(
+        &self,
+        environment: &EnvironmentId,
+    ) -> Result<crate::rpc::SessionEndpoint, RpcCallError> {
+        self.client(environment)
             .and_then(|client| client.session())
-            .ok_or(RpcCallError::NotSent(crate::ClientError::Disconnected))?;
-        session.command::<WsPullRequestsListRpc>(input).await
+            .ok_or(RpcCallError::NotSent(crate::ClientError::Disconnected))
+    }
+
+    pub async fn pull_request_detail(
+        &self,
+        env: &EnvironmentId,
+        reference: PullRequestRef,
+    ) -> Result<PullRequestDetail, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.pr_session(env)?
+            .command::<WsPullRequestsDetailRpc>(reference)
+            .await
+    }
+
+    pub async fn pull_request_linked_threads(
+        &self,
+        env: &EnvironmentId,
+        reference: PullRequestRef,
+    ) -> Result<PullRequestLinkedThreadsResult, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.pr_session(env)?
+            .command::<WsPullRequestsLinkedThreadsRpc>(reference)
+            .await
     }
 }

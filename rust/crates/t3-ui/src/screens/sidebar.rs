@@ -989,7 +989,7 @@ pub fn sidebar() -> impl IntoElement {
         }))
         .child(list)
         .child(snooze_dialog)
-        .child(chrome::sidebar_chrome_footer(false.into(), Route::Home.into(), chrome::ChromeFooterSlots {
+        .child(chrome::sidebar_chrome_footer(crate::screens::pull_requests::list::supported(), Route::Home.into(), chrome::ChromeFooterSlots {
             undo_notice,
             ..Default::default()
         }))

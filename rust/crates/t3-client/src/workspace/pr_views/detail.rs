@@ -954,3 +954,39 @@ pub fn summary_is_stale(
         &serde_json::to_value(summary)?,
     ))
 }
+
+/// Repository breadcrumb for the web forge PR URL shapes. Preserve the enterprise origin
+/// and nested namespaces, and reject unrelated paths rather than inventing a link.
+pub fn repository_link(raw: &str, number: u64) -> Option<String> {
+    let mut url = url::Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let path = url.path().trim_end_matches('/');
+    let (prefix, last) = path.rsplit_once('/')?;
+    if last.parse::<u64>().ok()? != number {
+        return None;
+    }
+    let repo = [
+        "/-/merge_requests",
+        "/pullrequest",
+        "/pull",
+        "/pulls",
+        "/pull-requests",
+        "/merge_requests",
+    ]
+    .iter()
+    .find_map(|suffix| prefix.strip_suffix(suffix))?
+    .to_owned();
+    if repo.trim_matches('/').is_empty() {
+        return None;
+    }
+    url.set_path(&repo);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.into())
+}
