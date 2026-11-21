@@ -36,9 +36,36 @@ pub fn has_pending_migrations(connection: &Connection) -> Result<bool> {
             .any(|row| matches!(row.id, 53 | 54) && row.name == "OrchestrationV2"))
 }
 
+type LogSink = fn(&str, &[(&str, String)]);
+static LOG_SINK: std::sync::OnceLock<LogSink> = std::sync::OnceLock::new();
+
+/// Where the three migration lines below go. The server installs one before it opens the
+/// database, because its tracing subscriber exists only after that, and the desktop reads these
+/// lines from the server's output. Without a sink nothing is logged (repair tooling, tests).
+pub fn set_log_sink(sink: LogSink) {
+    let _ = LOG_SINK.set(sink);
+}
+
+fn log(message: &str, fields: &[(&str, String)]) {
+    if let Some(sink) = LOG_SINK.get() {
+        sink(message, fields);
+    }
+}
+
+/// The lines the desktop reads from the server's output to tell a database that is still
+/// migrating from a server that never started (`databaseMigrationLog.ts`). Keep the text.
+pub const MIGRATIONS_STARTED_MESSAGE: &str = "Running database migrations";
+pub const MIGRATION_PROGRESS_MESSAGE: &str = "Upgrading database";
+pub const MIGRATIONS_FINISHED_MESSAGE: &str = "Migrations ran successfully";
+
 /// Runs only genuine incremental steps on existing databases. `through` supports repair tooling.
 pub fn run_migrations(connection: &mut Connection, through: Option<u32>) -> Result<Vec<Migration>> {
     let through = through.unwrap_or(LATEST_HEAD);
+    // The desktop waits past its readiness budget until the finished line follows this one.
+    let announced = has_pending_migrations(connection)?;
+    if announced {
+        log(MIGRATIONS_STARTED_MESSAGE, &[]);
+    }
     let initial = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let rows = history(&initial)?;
     let mut head = rows.last().map_or(0, |row| row.id);
@@ -107,10 +134,22 @@ pub fn run_migrations(connection: &mut Connection, through: Option<u32>) -> Resu
         head = MINIMUM_SUPPORTED_HEAD;
     }
     initial.commit()?;
-    for &(id, name) in MANIFEST
+    // A database that already had a ledger reports each step; a new one runs its baseline above.
+    let report_progress = !empty;
+    let pending: Vec<_> = MANIFEST
         .iter()
         .filter(|&&(id, _)| id > head && id <= through)
-    {
+        .collect();
+    for (index, &&(id, name)) in pending.iter().enumerate() {
+        if report_progress {
+            log(
+                MIGRATION_PROGRESS_MESSAGE,
+                &[
+                    ("migration", format!("{id}_{name}")),
+                    ("progress", format!("{} of {}", index + 1, pending.len())),
+                ],
+            );
+        }
         let result = (|| -> Result<bool> {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -143,6 +182,17 @@ pub fn run_migrations(connection: &mut Connection, through: Option<u32>) -> Resu
                 name: name.to_owned(),
             });
         }
+    }
+    // A started line is always closed, also when another process applied the steps first.
+    if announced || !executed.is_empty() {
+        let names: Vec<String> = executed
+            .iter()
+            .map(|migration| format!("{}_{}", migration.id, migration.name))
+            .collect();
+        log(
+            MIGRATIONS_FINISHED_MESSAGE,
+            &[("migrations", names.join(","))],
+        );
     }
     Ok(executed)
 }

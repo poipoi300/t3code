@@ -16,20 +16,22 @@ pub enum BootstrapError {
 }
 
 /// The one Windows module that allows `unsafe`: it maps the inherited CRT descriptor to a handle.
-#[cfg(windows)]
+/// It needs the UCRT (`_get_osfhandle`, the thread-local invalid-parameter handler), which only the
+/// MSVC targets link; `windows-gnu` keeps the unsupported error.
+#[cfg(all(windows, target_env = "msvc"))]
 #[allow(unsafe_code)]
 mod windows;
 
 /// The envelope is a few hundred bytes; a longer line is not one.
-#[cfg(any(unix, windows))]
+#[cfg(any(unix, all(windows, target_env = "msvc")))]
 const MAX_ENVELOPE_BYTES: usize = 1 << 20;
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(unix, all(windows, target_env = "msvc"))))]
 pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, BootstrapError> {
     Err(BootstrapError::Unsupported(fd))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, target_env = "msvc"))]
 pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, BootstrapError> {
     use std::time::Duration;
     use windows::Failure;
@@ -43,7 +45,7 @@ pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, Bootstrap
 }
 
 /// The envelope on the first line, validated. The decoder's error is dropped: it can quote input.
-#[cfg(any(unix, windows))]
+#[cfg(any(unix, all(windows, target_env = "msvc")))]
 fn decode(fd: i64, line: &[u8]) -> Result<DesktopBackendBootstrap, BootstrapError> {
     let envelope: DesktopBackendBootstrap =
         serde_json::from_slice(line).map_err(|_| BootstrapError::Decode(fd))?;
@@ -61,6 +63,87 @@ fn decode(fd: i64, line: &[u8]) -> Result<DesktopBackendBootstrap, BootstrapErro
     }
     Ok(envelope)
 }
+
+/// The environment switch with which a desktop parent asks the server to exit once the parent's end
+/// of the descriptor closes. Unix only: on Windows the parent's kill-on-close job object ends the
+/// server with it (`t3-process`). The variable stays in the process environment (changing it is
+/// `unsafe`), so a nested `t3 serve --bootstrap-fd 0` with a piped stdin would arm it too. Only a parent that keeps the pipe open sets it (the Rust desktop's
+/// supervisor does; Electron's stream ends after the line, which must not stop the server).
+pub(crate) const EXIT_ON_PARENT_CLOSE_ENV: &str = "T3CODE_DESKTOP_EXIT_ON_STDIN_CLOSE";
+
+#[cfg(unix)]
+static PARENT_PIPE: std::sync::Mutex<Option<filedescriptor::FileDescriptor>> =
+    std::sync::Mutex::new(None);
+
+/// Duplicates the descriptor the envelope came from, to watch it later (`exit_when_parent_closes`).
+/// Only stdin can be watched: that is the descriptor a supervisor holds open.
+#[cfg(unix)]
+pub(crate) fn keep_parent_pipe(fd: i64) {
+    use std::os::fd::{AsRawFd, RawFd};
+    struct Inherited(RawFd);
+    impl AsRawFd for Inherited {
+        fn as_raw_fd(&self) -> RawFd {
+            self.0
+        }
+    }
+    let Ok(raw) = RawFd::try_from(fd) else {
+        return;
+    };
+    if let (Ok(pipe), Ok(mut slot)) = (
+        filedescriptor::FileDescriptor::dup(&Inherited(raw)),
+        PARENT_PIPE.lock(),
+    ) {
+        *slot = Some(pipe);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn keep_parent_pipe(_fd: i64) {}
+
+/// Runs `on_close` once the watched pipe reaches end of stream or fails, which is what the
+/// parent's death does to its end. A parent killed by a signal cannot clean up after itself.
+#[cfg(unix)]
+pub(crate) fn exit_when_parent_closes(on_close: impl FnOnce() + Send + 'static) {
+    use filedescriptor::{POLLIN, poll, pollfd};
+    use std::{io::Read, os::fd::AsRawFd};
+    let Some(mut pipe) = PARENT_PIPE.lock().ok().and_then(|mut slot| slot.take()) else {
+        return;
+    };
+    // A thread, not a runtime task: a blocked read must not hold the runtime's shutdown.
+    std::thread::spawn(move || {
+        let mut sink = [0u8; 512];
+        loop {
+            let mut interest = [pollfd {
+                fd: pipe.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            }];
+            match poll(&mut interest, None) {
+                Ok(_) => {}
+                Err(filedescriptor::Error::Poll(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    continue;
+                }
+                Err(_) => break,
+            }
+            match pipe.read(&mut sink) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+        on_close();
+    });
+}
+
+#[cfg(not(unix))]
+pub(crate) fn exit_when_parent_closes(_on_close: impl FnOnce() + Send + 'static) {}
 
 #[cfg(unix)]
 pub(crate) fn read(fd: i64) -> Result<Option<DesktopBackendBootstrap>, BootstrapError> {

@@ -738,7 +738,16 @@ pub(crate) fn hydrate_bootstrap(inputs: &mut ConfigInputs) -> crate::Result<()> 
     if let Some(fd) = fd {
         if let Some(envelope) = bootstrap::read(fd)? {
             inputs.bootstrap = Some(envelope);
+            if fd == 0
+                && inputs
+                    .env
+                    .get(bootstrap::EXIT_ON_PARENT_CLOSE_ENV)
+                    .is_some_and(|value| value == "1")
+            {
+                bootstrap::keep_parent_pipe(fd);
+            }
         }
+        inputs.env.remove(bootstrap::EXIT_ON_PARENT_CLOSE_ENV);
         inputs.flags.bootstrap_fd = None;
         inputs.env.remove("T3CODE_BOOTSTRAP_FD");
     }
@@ -758,6 +767,11 @@ pub async fn run(invocation: Invocation) -> Result<(), CliError> {
                     "Server stopped before becoming ready".into(),
                 ));
             }
+            // A supervising parent that dies leaves only this end of the pipe: stop with it.
+            bootstrap::exit_when_parent_closes({
+                let token = server.shutdown_token();
+                move || token.cancel()
+            });
             if !headless && config.mode == RuntimeMode::Desktop {
                 server.run_until_signal().await?;
                 return Ok(());

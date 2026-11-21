@@ -691,7 +691,7 @@ async fn status_reads_settings_without_opening_a_database() {
     assert!(invalid.stdout.is_empty());
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(any(unix, all(windows, target_env = "msvc")))]
 #[tokio::test]
 async fn desktop_bootstrap_closed_and_malformed_descriptors() {
     let root = TempDir::new().unwrap();
@@ -772,4 +772,119 @@ async fn desktop_bootstrap_socket_starts_server_and_authenticates_without_eof() 
     assert_ne!(announced, secret);
     assert_ne!(announced, "superseded-fixture");
     child.kill().await.unwrap();
+}
+
+/// The desktop reads these lines from the server's output to wait past its readiness budget
+/// while a large database migrates (`packages/shared/src/databaseMigrationLog.ts`, written by
+/// `Migrations.ts`). A new database runs the baseline, so the started line is followed by the
+/// finished line.
+#[tokio::test]
+async fn serve_logs_the_migration_markers_the_desktop_waits_for() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("server");
+    let mut cmd = command(root.path());
+    cmd.args([
+        "serve",
+        "--home-dir",
+        home.to_str().unwrap(),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut readers = Vec::new();
+    let streams: [Box<dyn tokio::io::AsyncRead + Unpin + Send>; 2] = [
+        Box::new(child.stdout.take().unwrap()),
+        Box::new(child.stderr.take().unwrap()),
+    ];
+    for stream in streams {
+        let log = log.clone();
+        readers.push(tokio::spawn(async move {
+            let mut lines = BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut log = log.lock().unwrap();
+                log.push_str(&line);
+                log.push('\n');
+            }
+        }));
+    }
+    // Ready once the pairing output is complete.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if log.lock().unwrap().contains("App link: ") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("server did not announce readiness");
+    child.kill().await.unwrap();
+    for reader in readers {
+        let _ = reader.await;
+    }
+    let log = log.lock().unwrap().clone();
+    let started = log.find("Running database migrations");
+    let finished = log.find("Migrations ran successfully");
+    assert!(
+        started.is_some() && finished.is_some() && started < finished,
+        "{log}"
+    );
+}
+
+/// A supervising desktop keeps the server's stdin open after the envelope. When that parent dies,
+/// the pipe closes and the server must stop instead of staying behind with its port and home. A
+/// parent that closes the stream after the line (Electron) must not stop it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_server_stops_when_its_supervisor_closes_stdin_only_if_asked() {
+    use tokio::io::AsyncWriteExt;
+    for exit_on_close in [true, false] {
+        let root = TempDir::new().unwrap();
+        let home = root.path().join("desktop");
+        let mut cmd = command(root.path());
+        cmd.args(["--bootstrap-fd", "0", "serve", "--port", "0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if exit_on_close {
+            cmd.env("T3CODE_DESKTOP_EXIT_ON_STDIN_CLOSE", "1");
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let envelope = json!({"mode":"desktop","noBrowser":true,"port":3773,"host":"127.0.0.1",
+            "desktopBootstrapToken":"fixture","t3Home":home,
+            "tailscaleServeEnabled":false,"tailscaleServePort":443});
+        stdin
+            .write_all(format!("{envelope}\n").as_bytes())
+            .await
+            .unwrap();
+        stdin.flush().await.unwrap();
+        // Ready once the server published its runtime file; the pipe is still open.
+        let runtime = home.join("userdata/server-runtime.json");
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !runtime.is_file() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("server did not publish its runtime file");
+        drop(stdin);
+        let exited = tokio::time::timeout(
+            Duration::from_secs(if exit_on_close { 30 } else { 2 }),
+            child.wait(),
+        )
+        .await;
+        if exit_on_close {
+            let status = exited.expect("the server outlived its supervisor").unwrap();
+            assert!(status.success(), "{status:?}");
+        } else {
+            assert!(exited.is_err(), "closing stdin alone stopped the server");
+            child.kill().await.unwrap();
+        }
+    }
 }

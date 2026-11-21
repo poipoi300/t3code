@@ -20,6 +20,10 @@ pub struct RunningServer {
     task: Option<tokio::task::JoinHandle<crate::Result<()>>>,
 }
 impl RunningServer {
+    /// Cancelling it stops the server as [`Self::cancel`] does, from another thread.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
     pub fn cancel(&self) {
         self.shutdown.cancel();
     }
@@ -141,6 +145,51 @@ pub async fn start_with_global_tracing(
     start_configured(inputs, StartOptions::default(), true).await
 }
 
+/// One line in the format of the server's log output, for lines logged before it exists.
+fn print_migration_log(message: &str, fields: &[(&str, String)]) {
+    use std::io::Write;
+    let mut line = serde_json::Map::new();
+    line.insert("message".into(), message.into());
+    for (key, value) in fields {
+        line.insert((*key).into(), value.as_str().into());
+    }
+    // A closed stderr must not panic the migration.
+    let _ = writeln!(
+        std::io::stderr(),
+        "{} INFO {}",
+        utc_timestamp(std::time::SystemTime::now()),
+        serde_json::Value::Object(line)
+    );
+}
+
+/// `2026-11-21T22:21:16.813Z`, from days since the epoch (Hinnant's civil-from-days).
+fn utc_timestamp(now: std::time::SystemTime) -> String {
+    let since = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let (days, seconds) = (since.as_secs() / 86_400, since.as_secs() % 86_400);
+    let shifted = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let day_of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60,
+        since.subsec_millis()
+    )
+}
+
 async fn start_configured(
     mut inputs: crate::adapters::config::ConfigInputs,
     options: StartOptions,
@@ -178,6 +227,11 @@ async fn start_configured(
     };
     let address = listener.local_addr()?;
     let (account_home, environment) = (inputs.home.clone(), inputs.env.clone());
+    if install_global_tracing {
+        // The tracing subscriber is installed after the database opens, so the migration lines
+        // the desktop waits on would be lost: print them as the subscriber does.
+        t3_persistence::migrations::set_log_sink(print_migration_log);
+    }
     let local = LocalServices::open(config, address.port(), policy).await?;
     // Dev mode is `--dev-url` / `VITE_DEV_SERVER_URL`, as in TypeScript; it keeps the free
     // Replay (dev) provider (`seedDevReplayInstance` in ProviderInstanceRegistryHydration.ts).
@@ -990,4 +1044,30 @@ async fn close(services: ServiceRegistry) -> Vec<String> {
         errors.push(format!("local services: {error}"));
     }
     errors
+}
+
+#[cfg(test)]
+mod migration_log_tests {
+    use super::utc_timestamp;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn timestamps_are_utc_iso_with_milliseconds() {
+        let at =
+            |seconds: u64, millis: u32| UNIX_EPOCH + Duration::new(seconds, millis * 1_000_000);
+        assert_eq!(utc_timestamp(at(0, 0)), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            utc_timestamp(at(1_700_000_000, 5)),
+            "2023-11-14T22:13:20.005Z"
+        );
+        // A leap day, and the end of a year.
+        assert_eq!(
+            utc_timestamp(at(1_709_164_800, 0)),
+            "2024-02-29T00:00:00.000Z"
+        );
+        assert_eq!(
+            utc_timestamp(at(1_767_225_599, 999)),
+            "2025-12-31T23:59:59.999Z"
+        );
+    }
 }
