@@ -1,5 +1,8 @@
 //! Guest entry URLs, independent of the authenticated workspace and its navigation history.
 
+pub mod session;
+pub mod transport;
+
 use t3_contracts::guest_share::GUEST_SHARE_PARAM;
 use url::Url;
 
