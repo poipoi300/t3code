@@ -312,6 +312,14 @@ fn wall_ms() -> u64 {
 }
 
 async fn start(home: &Path, received: mpsc::UnboundedSender<Received>) -> Server {
+    start_on_port(home, received, 0).await
+}
+
+async fn start_on_port(
+    home: &Path,
+    received: mpsc::UnboundedSender<Received>,
+    port: u16,
+) -> Server {
     std::fs::create_dir_all(home.join("userdata")).unwrap();
     std::fs::write(
         home.join("userdata/settings.json"),
@@ -322,8 +330,10 @@ async fn start(home: &Path, received: mpsc::UnboundedSender<Received>) -> Server
     // Starts at the wall clock so uploaded files' modification times line up with it.
     let clock = Arc::new(AtomicU64::new(wall_ms()));
     let read = clock.clone();
+    let mut config = inputs(home);
+    config.flags.port = Some(port);
     let runtime = t3_server::runtime::start_with(
-        inputs(home),
+        config,
         StartOptions {
             providers: vec![Arc::new(Recording {
                 instance: ProviderInstanceId("replay".into()),
@@ -664,6 +674,32 @@ async fn claims_are_once_only_and_only_by_the_uploading_session_for_its_own_thre
     .await);
     assert_eq!(handed.recv().await.unwrap().thread, OTHER_THREAD);
 
+    // Replaying a still-valid upload URL cannot reopen a consumed attachment after discard.
+    ok(unary(
+        &mut socket,
+        &mut client,
+        "attachments.delete",
+        json!({"attachmentId": pending}),
+    )
+    .await);
+    assert!(
+        server.stored().contains(&format!("{pending}.png.owner")),
+        "discard removed a consumed upload's owner record"
+    );
+
+    // Initial messages with existing files must identify the target thread for a membership check.
+    let launch = unary(&mut socket, &mut client, "orchestration.launchThread", json!({
+        "commandId":"launch-without-an-attachment-target", "projectId":"project:attachments",
+        "title":"Attachment launch", "modelSelection":{"instanceId":"replay","model":"replay-model"},
+        "runtimeMode":"full-access", "interactionMode":"default", "workspaceStrategy":{"type":"root"},
+        "initialMessage":{"text":"Use image", "attachments":[image(&claimed)]}
+    })).await;
+    let launch_error = failure(launch);
+    assert!(
+        launch_error.to_string().contains("thread id at launch"),
+        "{launch_error}"
+    );
+
     // Thread A's claimed attachment cannot be sent through thread B; on thread A it can.
     refused(
         send(
@@ -681,11 +717,16 @@ async fn claims_are_once_only_and_only_by_the_uploading_session_for_its_own_thre
         &mut client,
         THREAD,
         "again",
-        vec![image(&claimed)],
+        vec![{
+            let mut altered = image(&claimed);
+            altered["name"] = "client-renamed.png".into();
+            altered
+        }],
     )
     .await);
     let again = handed.recv().await.unwrap();
     assert_eq!(again.thread, THREAD);
+    assert_eq!(again.attachment["name"], "pixel.png");
     assert_eq!(again.attachment["id"], claimed.as_str());
 
     // An upload whose stored file is swapped for a link is not followed: the claim refuses it
@@ -901,11 +942,13 @@ async fn an_upload_survives_a_restart_for_its_own_session_only() {
     let theirs = server
         .upload(&mut their_socket, &mut their_client, "theirs.png")
         .await;
+    let port = server.runtime.address.port();
     drop((socket, their_socket));
     server.runtime.shutdown().await.unwrap();
 
-    // The same state directory, a new process: the sessions' cookies still hold.
-    let server = start(temp.path(), received).await;
+    // Local browser cookie names include the port. Restart the same endpoint with the
+    // same state directory so the original cookie authenticates the original session.
+    let server = start_on_port(temp.path(), received, port).await;
     let (mut socket, mut client) = server.socket(&mine_cookie).await;
     refused(
         send(
@@ -945,5 +988,34 @@ async fn an_upload_survives_a_restart_for_its_own_session_only() {
             .unwrap()
             .starts_with("thread-attachments-")
     );
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_sends_from_one_session_claim_one_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let (received, mut handed) = mpsc::unbounded_channel();
+    let server = start(temp.path(), received).await;
+    let (mut a, mut ca) = server.socket(&server.admin).await;
+    let (mut b, mut cb) = server.socket(&server.admin).await;
+    create_thread(&mut a, &mut ca, THREAD).await;
+    create_thread(&mut b, &mut cb, OTHER_THREAD).await;
+    let id = server.upload(&mut a, &mut ca, "pixel.png").await;
+    let (first, second) = tokio::join!(
+        send(&mut a, &mut ca, THREAD, "left", vec![image(&id)]),
+        send(&mut b, &mut cb, OTHER_THREAD, "right", vec![image(&id)])
+    );
+    let winner = match (first, second) {
+        (Exit::Success { .. }, failure) => {
+            refused(failure, "attachment not found");
+            THREAD
+        }
+        (failure, Exit::Success { .. }) => {
+            refused(failure, "attachment not found");
+            OTHER_THREAD
+        }
+        exits => panic!("expected one successful send: {exits:?}"),
+    };
+    assert_eq!(handed.recv().await.unwrap().thread, winner);
     server.runtime.shutdown().await.unwrap();
 }

@@ -146,7 +146,7 @@ mod live {
                 if let Err(refused) = ctx.services.lifecycle.admit_command() {
                     return Err(refuse(refused.to_string(), None));
                 }
-                a.dispatch_command(command).await.map_err(|error| {
+                a.dispatch_command(&ctx, command).await.map_err(|error| {
                     refuse(
                         "Failed to dispatch orchestration V2 command".into(),
                         Some(error.to_string()),

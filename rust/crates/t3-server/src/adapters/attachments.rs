@@ -8,9 +8,8 @@
 //! record is marked claimed, and a claim the runtime rolls back unmarks it. A missing, unreadable
 //! or malformed record refuses the claim.
 //!
-//! The claimer is the task-local [`CLAIMER`], set for every unary client call in `registry.rs`;
-//! a claim with no claimer is refused. The runtime's `claim_pending` does not take the caller
-//! yet (orchestration seam request).
+//! Each intake gets a backend bound to the authenticated caller. The shared runtime backend
+//! has no pending-upload authority.
 use std::sync::Arc;
 
 /// Who issued, and may claim, a pending upload: an identity that survives a restart.
@@ -18,8 +17,10 @@ use std::sync::Arc;
 pub enum Principal {
     /// A client's auth session (its stored session id).
     Session(String),
-    /// An MCP caller: the thread its token is scoped to, else its request namespace.
-    Mcp(String),
+    /// The source thread bound to the verified MCP token.
+    McpThread(String),
+    /// The verified request namespace for an unthreaded MCP caller.
+    McpNamespace(String),
 }
 
 impl Principal {
@@ -27,19 +28,36 @@ impl Principal {
     pub fn record(&self) -> String {
         match self {
             Self::Session(id) => format!("session:{id}"),
-            Self::Mcp(owner) => format!("mcp:{owner}"),
+            Self::McpThread(id) => format!("mcp:thread:{id}"),
+            Self::McpNamespace(id) => format!("mcp:namespace:{id}"),
         }
     }
 }
 
-tokio::task_local! {
-    /// The caller a claim made in this task acts for.
-    pub static CLAIMER: Principal;
-}
-
-/// Runs `future` with `principal` as the claimer of any pending upload it sends.
-pub async fn as_claimer<F: std::future::Future>(principal: Principal, future: F) -> F::Output {
-    CLAIMER.scope(principal, future).await
+#[cfg(feature = "orchestration")]
+pub(crate) fn session_intake(
+    ctx: &crate::registry::Context,
+    base: &t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake,
+) -> t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake {
+    use t3_orchestration::ports::runs_ingestion::thread_message_intake::ThreadMessageIntake;
+    #[cfg(feature = "workspace")]
+    let attachments = ctx.services.domain::<AttachmentsAdapter>().map_or_else(
+        || base.attachments.clone(),
+        |adapter| -> Arc<dyn t3_orchestration::api::AttachmentBackend> {
+            adapter.for_caller(Principal::Session(ctx.session_id.0.clone()))
+        },
+    );
+    #[cfg(not(feature = "workspace"))]
+    let attachments = {
+        let _ = ctx;
+        base.attachments.clone()
+    };
+    ThreadMessageIntake {
+        attachments,
+        threads: base.threads.clone(),
+        launches: base.launches.clone(),
+        projections: base.projections.clone(),
+    }
 }
 
 /// Milliseconds since the epoch; tests drive it.
@@ -56,7 +74,7 @@ pub use claims::*;
 
 #[cfg(all(feature = "workspace", feature = "orchestration"))]
 mod claims {
-    use super::{AttachmentOptions, CLAIMER, Now, Principal};
+    use super::{AttachmentOptions, Now, Principal};
     use async_trait::async_trait;
     use std::{
         collections::HashMap,
@@ -66,6 +84,9 @@ mod claims {
     use t3_contracts::{
         assets::{AttachmentCreateUploadUrlInput, AttachmentCreateUploadUrlResult},
         chat_attachment::{ChatAttachment, PROVIDER_SEND_TURN_MAX_ATTACHMENTS},
+    };
+    use t3_orchestration::ports::runs_ingestion::thread_message_intake::{
+        AttachmentReference, AttachmentReferenceResolver,
     };
     use t3_orchestration::{
         api::{
@@ -93,12 +114,11 @@ mod claims {
         claimed: bool,
     }
 
-    /// In memory: the per-issuer allowance (a limit, so it may restart empty) and each claimed
-    /// copy's pending id, which a rollback in this process needs. Its lock also serializes claims.
+    /// Per-issuer allowance. The sidecars supply durable claim authority.
+    /// This lock serializes caller decisions across intakes.
     #[derive(Default)]
     struct Ledger {
         issued: HashMap<String, Issued>,
-        copies: HashMap<PathBuf, String>,
     }
 
     impl Ledger {
@@ -121,11 +141,15 @@ mod claims {
         Store(#[from] t3_workspace::Error),
     }
 
+    #[derive(Clone)]
     pub struct AttachmentsAdapter {
         store: AttachmentStore,
         claims: AttachmentClaimService,
-        ledger: tokio::sync::Mutex<Ledger>,
-        projections: OnceLock<Arc<dyn ProjectionReader>>,
+        ledger: Arc<tokio::sync::Mutex<Ledger>>,
+        projections: Arc<OnceLock<Arc<dyn ProjectionReader>>>,
+        principal: Option<Principal>,
+        // Only this intake can roll back its copies. Accepted entries die with the request.
+        copies: Arc<tokio::sync::Mutex<HashMap<PathBuf, String>>>,
         now: Now,
     }
 
@@ -140,8 +164,18 @@ mod claims {
                 store,
                 claims,
                 ledger: Default::default(),
-                projections: OnceLock::new(),
+                projections: Default::default(),
+                principal: None,
+                copies: Default::default(),
                 now: options.clock.unwrap_or_else(|| Arc::new(system_ms)),
+            })
+        }
+
+        pub fn for_caller(&self, principal: Principal) -> Arc<Self> {
+            Arc::new(Self {
+                principal: Some(principal),
+                copies: Default::default(),
+                ..self.clone()
             })
         }
 
@@ -155,7 +189,7 @@ mod claims {
         }
 
         /// An upload URL whose upload records `issuer` as its owner, within the issuer's
-        /// allowance. `attachments.createUploadUrl`; MCP's prepare tool uses it too.
+        /// allowance for outstanding uploads.
         pub async fn create_upload_url(
             &self,
             issuer: Principal,
@@ -196,22 +230,29 @@ mod claims {
         ) -> Result<(), t3_workspace::Error> {
             let mut ledger = self.ledger.lock().await;
             let recorded = self.store.owner(attachment_id).await;
-            let owned = match &recorded {
-                Some(record) => record.owner == issuer.record(),
-                None => ledger
-                    .issued
-                    .get(attachment_id)
-                    .is_some_and(|entry| entry.issuer == *issuer),
-            };
-            if !owned {
+            if recorded.as_ref().is_some_and(|record| record.claimed) {
                 return Ok(());
             }
-            self.store.delete_pending(attachment_id).await?;
+            if let Some(record) = recorded {
+                if record.owner != issuer.record() {
+                    return Ok(());
+                }
+                self.store.delete_pending(attachment_id).await?;
+            } else if !ledger
+                .issued
+                .get(attachment_id)
+                .is_some_and(|entry| entry.issuer == *issuer && !entry.claimed)
+            {
+                return Ok(());
+            }
             ledger.issued.remove(attachment_id);
             Ok(())
         }
 
-        async fn thread_attachment_ids(&self, thread: &ThreadId) -> RuntimeResult<Vec<String>> {
+        async fn thread_attachments(
+            &self,
+            thread: &ThreadId,
+        ) -> RuntimeResult<HashMap<String, ChatAttachment>> {
             let projections = self.projections.get().ok_or(RuntimeError::Unsupported(
                 "AttachmentBackend.thread_records",
             ))?;
@@ -225,18 +266,26 @@ mod claims {
                     include_latest_run: false,
                 })
                 .await?;
-            Ok(records
-                .records
-                .into_iter()
-                .flat_map(|set| match set {
-                    ProjectionRecordSet::Messages(messages) => messages
-                        .into_iter()
-                        .flat_map(|message| message.attachments)
-                        .map(|attachment| attachment_id(&attachment).to_owned())
-                        .collect(),
-                    _ => vec![],
-                })
-                .collect())
+            let mut owned = HashMap::new();
+            if let Some(share) = records.thread.guest_share.flatten() {
+                for message in share.messages {
+                    if message.status
+                        == t3_contracts::guest_share::ThreadGuestMessageStatus::Pending
+                    {
+                        for attachment in message.attachments.flatten().unwrap_or_default() {
+                            owned.insert(attachment_id(&attachment).to_owned(), attachment);
+                        }
+                    }
+                }
+            }
+            for set in records.records {
+                if let ProjectionRecordSet::Messages(messages) = set {
+                    for attachment in messages.into_iter().flat_map(|message| message.attachments) {
+                        owned.insert(attachment_id(&attachment).to_owned(), attachment);
+                    }
+                }
+            }
+            Ok(owned)
         }
 
         /// Marks `ids` claimed (or not) in their owner records; on a failed write, the ones
@@ -269,32 +318,33 @@ mod claims {
         }
     }
 
-    #[async_trait]
-    impl AttachmentBackend for AttachmentsAdapter {
-        async fn claim_pending(
+    struct ClaimDelivery {
+        adapter: AttachmentsAdapter,
+        claimed: Option<ClaimedAttachments>,
+    }
+    impl ClaimDelivery {
+        fn take(mut self) -> RuntimeResult<ClaimedAttachments> {
+            self.claimed.take().ok_or(RuntimeError::Cancelled)
+        }
+    }
+    impl Drop for ClaimDelivery {
+        fn drop(&mut self) {
+            if let Some(claimed) = self.claimed.take() {
+                let adapter = self.adapter.clone();
+                tokio::spawn(async move {
+                    let _ = adapter.release_claimed_paths(claimed.claimed_paths).await;
+                });
+            }
+        }
+    }
+
+    impl AttachmentsAdapter {
+        async fn claim_uploads(
             &self,
             thread_id: ThreadId,
             attachments: Vec<ChatAttachment>,
         ) -> RuntimeResult<ClaimedAttachments> {
-            let claimer = CLAIMER.try_with(Clone::clone).map_err(|_| {
-                claim_error(
-                    "Uploaded attachments can be sent only by the caller that uploaded them.",
-                )
-            })?;
-            // A reference to an existing attachment must already be on the target thread, so one
-            // thread's files never reach another thread's provider (MCP applies the same rule).
-            if attachments.iter().any(|a| !attachment_is_pending_upload(a)) {
-                let owned = self.thread_attachment_ids(&thread_id).await?;
-                if let Some(foreign) = attachments.iter().find(|a| {
-                    !attachment_is_pending_upload(a)
-                        && !owned.iter().any(|id| id == attachment_id(a))
-                }) {
-                    return Err(claim_error(format!(
-                        "Attachment '{}' cannot be sent: it does not belong to this thread.",
-                        attachment_name(foreign)
-                    )));
-                }
-            }
+            let claimer = self.principal.as_ref();
             let pending: Vec<String> = attachments
                 .iter()
                 .filter(|a| attachment_is_pending_upload(a))
@@ -306,7 +356,17 @@ mod claims {
                 .filter(|a| attachment_is_pending_upload(a))
             {
                 // Missing, unreadable, another caller's and already claimed read the same.
-                let record = self.store.owner(attachment_id(attachment)).await;
+                let claimer = claimer.ok_or_else(|| {
+                    claim_error(
+                        "Uploaded attachments can be sent only by the caller that uploaded them.",
+                    )
+                })?;
+                let id = attachment_id(attachment);
+                let record = if id.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    None
+                } else {
+                    self.store.owner(id).await
+                };
                 if record.is_none_or(|record| record.owner != claimer.record() || record.claimed) {
                     return Err(claim_error(format!(
                         "Attachment '{}' cannot be sent: attachment not found (removed or expired).",
@@ -323,12 +383,12 @@ mod claims {
                 .await
             {
                 Ok(claimed) => {
-                    let mut ledger = self.ledger.lock().await;
+                    let mut copies = self.copies.lock().await;
                     for (before, after) in attachments.iter().zip(&claimed.attachments) {
                         if attachment_is_pending_upload(before)
                             && let Some(path) = attachment_path(&self.store.base, after)
                         {
-                            ledger.copies.insert(path, attachment_id(before).to_owned());
+                            copies.insert(path, attachment_id(before).to_owned());
                         }
                     }
                     Ok(claimed)
@@ -341,14 +401,58 @@ mod claims {
                 }
             }
         }
+    }
+
+    #[async_trait]
+    impl AttachmentBackend for AttachmentsAdapter {
+        async fn claim_pending(
+            &self,
+            thread_id: ThreadId,
+            mut attachments: Vec<ChatAttachment>,
+        ) -> RuntimeResult<ClaimedAttachments> {
+            // A reference to an existing attachment must already be on the target thread, so one
+            // thread's files never reach another thread's provider (MCP applies the same rule).
+            if attachments.iter().any(|a| !attachment_is_pending_upload(a)) {
+                let owned = self.thread_attachments(&thread_id).await?;
+                for attachment in attachments
+                    .iter_mut()
+                    .filter(|a| !attachment_is_pending_upload(a))
+                {
+                    *attachment = owned.get(attachment_id(attachment)).ok_or_else(|| {
+                        claim_error(format!("Attachment '{}' cannot be sent: it does not belong to this thread.", attachment_name(attachment)))
+                    })?.clone();
+                }
+                t3_orchestration::ports::runs_ingestion::attachment_claims::validate_attachment_limits(&attachments)?;
+            }
+            if !attachments.iter().any(attachment_is_pending_upload) {
+                return Ok(ClaimedAttachments {
+                    attachments,
+                    claimed_paths: vec![],
+                });
+            }
+            let adapter = self.clone();
+            // Finish the disk transaction even if the RPC goes away. A result that never
+            // reaches intake owns its rollback until the receiver takes it.
+            let delivery = tokio::spawn(async move {
+                let claimed = adapter.claim_uploads(thread_id, attachments).await?;
+                Ok::<_, RuntimeError>(ClaimDelivery {
+                    adapter,
+                    claimed: Some(claimed),
+                })
+            })
+            .await
+            .map_err(|e| claim_error(e.to_string()))??;
+            delivery.take()
+        }
 
         /// A rollback reopens the uploads its copies came from.
         async fn release_claimed_paths(&self, paths: Vec<PathBuf>) -> RuntimeResult<()> {
             {
                 let mut ledger = self.ledger.lock().await;
+                let mut copies = self.copies.lock().await;
                 let reopened: Vec<String> = paths
                     .iter()
-                    .filter_map(|path| ledger.copies.remove(path))
+                    .filter_map(|path| copies.remove(path))
                     .collect();
                 let _ = self.set_claimed(&reopened, false).await;
                 reopened.iter().for_each(|id| ledger.mark(id, false));
@@ -379,6 +483,50 @@ mod claims {
         }
     }
 
+    #[async_trait]
+    impl AttachmentReferenceResolver for AttachmentsAdapter {
+        async fn reference(
+            &self,
+            attachment: &ChatAttachment,
+        ) -> RuntimeResult<AttachmentReference> {
+            let base = self.store.base.clone();
+            let path = attachment_path(&base, attachment)
+                .ok_or_else(|| claim_error("Invalid attachment reference."))?;
+            let document = matches!(attachment, ChatAttachment::File(_));
+            tokio::task::spawn_blocking(move || {
+                let files = ContainedFiles::new(base);
+                checked_source(&files, &path).map_err(|_| {
+                    claim_error("Attachment is no longer available. Attach it again.")
+                })?;
+                let mut text = path.as_os_str().to_owned();
+                text.push(".txt");
+                let text = PathBuf::from(text);
+                let extracted_path =
+                    (document && checked_source(&files, &text).is_ok()).then_some(text);
+                Ok(AttachmentReference {
+                    path,
+                    extracted_path,
+                })
+            })
+            .await
+            .map_err(|e| claim_error(e.to_string()))?
+        }
+    }
+
+    fn checked_source(
+        files: &ContainedFiles,
+        path: &Path,
+    ) -> std::io::Result<t3_workspace::contained_files::ContainedFile> {
+        let source = files.open(&files.realpath(path)?)?;
+        let stat = source.stat()?;
+        if !stat.regular || files.lstat_identity(path)? != stat.identity {
+            return Err(std::io::Error::other(
+                "attachment is not a regular file of its own",
+            ));
+        }
+        Ok(source)
+    }
+
     /// Copies a pending upload through a handle opened under the attachments directory without
     /// following a link (`ContainedFiles`); the opened file must be the entry itself, and the
     /// destination is created exclusively.
@@ -398,13 +546,8 @@ mod claims {
     fn copy_contained(files: &ContainedFiles, from: &Path, to: &Path) -> std::io::Result<()> {
         use std::io::Write;
         const CHUNK: usize = 64 * 1024;
-        let source = files.open(&files.realpath(from)?)?;
+        let source = checked_source(files, from)?;
         let stat = source.stat()?;
-        if !stat.regular || files.lstat_identity(from)? != stat.identity {
-            return Err(std::io::Error::other(
-                "attachment is not a regular file of its own",
-            ));
-        }
         let mut target = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

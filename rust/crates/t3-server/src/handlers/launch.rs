@@ -107,7 +107,8 @@ mod live {
                         None,
                     )
                 })?;
-                let mut result = runtime.launch_client_thread(input).await.map_err(|error| {
+                let intake = crate::adapters::attachments::session_intake(&ctx, &runtime.intake);
+                let mut result = runtime.launch_client_thread_with_intake(input, &intake).await.map_err(|error| {
                     refused(
                         command_id.clone(),
                         project_id.clone(),

@@ -410,6 +410,7 @@ impl OrchestrationAdapter {
     /// `orchestration.dispatchCommand`: the client command with user provenance, through intake.
     pub async fn dispatch_command(
         &self,
+        ctx: &crate::registry::Context,
         command: OrchestrationV2Command,
     ) -> OrchestrationResult<OrchestrationV2DispatchCommandResult> {
         use t3_orchestration::ports::thread_project::thread_management_service::with_creation_provenance;
@@ -425,7 +426,23 @@ impl OrchestrationAdapter {
         )?;
         let command: OrchestrationV2ServerCommand =
             serde_json::from_value(serde_json::to_value(command)?)?;
-        let receipt = self.runtime()?.dispatch_command(command).await?;
+        #[cfg(feature = "workspace")]
+        use t3_orchestration::ports::runs_ingestion::thread_message_intake::AttachmentReferenceResolver;
+
+        let intake = super::attachments::session_intake(ctx, &self.runtime()?.intake);
+        #[cfg(feature = "workspace")]
+        let resolver = ctx
+            .services
+            .domain::<super::attachments::AttachmentsAdapter>();
+        #[cfg(feature = "workspace")]
+        let resolver = resolver
+            .as_deref()
+            .map(|adapter| adapter as &dyn AttachmentReferenceResolver);
+        #[cfg(not(feature = "workspace"))]
+        let resolver = None;
+        let receipt = intake
+            .dispatch_command_with_resolver(command, resolver)
+            .await?;
         Ok(serde_json::from_value(
             serde_json::json!({"sequence": receipt.result_sequence}),
         )?)
