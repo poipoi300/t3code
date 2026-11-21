@@ -42,18 +42,20 @@ pub fn tw(classes: &str) -> SharedString {
 /// `classes` for an element in `scope` carrying `attrs` (`("data-active", "true")`,
 /// `("aria-current", "page")`), as the TSX sets them.
 pub fn tw_with(scope: Scope, classes: &str, attrs: &[(&str, &str)]) -> SharedString {
-    // The class names refer to tokens. NSH reapplies the colours when those values change.
+    // A class built before install must resolve again when the application's token names
+    // become available. After that first installation the class keeps its semantic names:
+    // NSH repaints their values on a theme switch without rebuilding the element's parent.
     let installed = nsh_core::prelude::untracked(super::current_tokens);
-    // set_tokens takes effect after the first render. The stock schema includes the
-    // semantic names (including sidebar aliases) that class strings need on that render.
-    static STOCK: std::sync::LazyLock<nsh_core::element::Tokens> =
-        std::sync::LazyLock::new(|| super::tokens_for(&Default::default()));
-    let installing = installed.number("theme-catalogue-light").is_none();
+    let tokens = if installed.number("theme-catalogue-light").is_none() {
+        super::current_tokens()
+    } else {
+        installed
+    };
     rewrite(
         classes,
         scope,
         attrs,
-        &|name| installed.color(name).is_some() || (installing && STOCK.color(name).is_some()),
+        &|name| tokens.color(name).is_some(),
         false,
     )
     .into()
