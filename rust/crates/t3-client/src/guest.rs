@@ -1,5 +1,6 @@
 //! Guest entry URLs, independent of the authenticated workspace and its navigation history.
 
+pub mod http;
 pub mod session;
 pub mod transport;
 

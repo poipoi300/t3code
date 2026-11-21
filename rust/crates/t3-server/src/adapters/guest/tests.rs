@@ -479,3 +479,110 @@ async fn a_guest_credential_reaches_only_its_share_and_never_owner_routes() {
     assert!(tokio_tungstenite::connect_async(upgrade).await.is_err());
     h.finish().await;
 }
+
+/// The production client path end to end: the shared guest HTTP transport over a native host
+/// against the real routes, with the cookie held by the host as a browser would hold it.
+#[tokio::test]
+async fn the_guest_client_joins_reads_and_submits_over_the_real_routes() {
+    use std::rc::Rc;
+    use t3_client::guest::{
+        http::HttpGuestTransport,
+        session::{GuestClient, GuestCredential, GuestEnd, GuestPhase, GuestSession},
+    };
+    use t3_platform::guest::NativeGuestHttp;
+
+    let Harness {
+        http,
+        base,
+        id,
+        credential,
+        runtime,
+        server,
+        _root,
+    } = harness(Arc::new(t3_cloud::SystemClock)).await;
+    let origin: url::Url = base.parse().unwrap();
+    let browser = |origin: &url::Url| {
+        Rc::new(HttpGuestTransport::new(NativeGuestHttp::new(
+            http.clone(),
+            origin.clone(),
+        )))
+    };
+    let wake = Rc::new(tokio::sync::Notify::new());
+    let until = |client: GuestClient, ready: fn(&GuestSession) -> bool| {
+        let wake = wake.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !client.snapshot(ready) {
+                    wake.notified().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    };
+    let notify = {
+        let wake = wake.clone();
+        move |_: &GuestSession| wake.notify_one()
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let first = browser(&origin);
+            let client = GuestClient::new(
+                first.clone(),
+                &id,
+                Some(GuestCredential::new(credential.clone())),
+                notify.clone(),
+            );
+            client.start().await;
+            assert!(client.snapshot(|s| matches!(s.phase, GuestPhase::NeedsName { .. })));
+            client.join("Guest").await;
+            assert!(client.snapshot(|s| s.phase == GuestPhase::Connecting));
+
+            // The invite works once: another browser is told so, and nothing is leaked into it.
+            let other = GuestClient::new(
+                browser(&origin),
+                &id,
+                Some(GuestCredential::new(credential.clone())),
+                |_| {},
+            );
+            other.start().await;
+            other.join("Intruder").await;
+            assert!(other.snapshot(|s| s.phase == GuestPhase::Ended(GuestEnd::Used)));
+
+            let running = tokio::task::spawn_local({
+                let client = client.clone();
+                async move { client.run().await }
+            });
+            until(client.clone(), |s| s.phase == GuestPhase::Live).await;
+            assert_eq!(client.snapshot(|s| s.view.as_ref().unwrap().title.clone()), "Shared");
+
+            client.submit("A pending guest message").await.unwrap();
+            until(client.clone(), |s| s.pending_count() == 1).await;
+
+            // Returning to the page with the cookie but no invite resumes the same session.
+            let returning = GuestClient::new(first, &id, None, |_| {});
+            returning.start().await;
+            assert!(returning.snapshot(|s| s.phase == GuestPhase::Connecting));
+            let stranger = GuestClient::new(browser(&origin), &id, None, |_| {});
+            stranger.start().await;
+            assert!(stranger.snapshot(|s| s.phase == GuestPhase::Ended(GuestEnd::Invalid)));
+
+            command(
+                &runtime,
+                json!({"type":"thread.guest-share.close","commandId":"test:e2e-close","threadId":"thread:shared"}),
+            )
+            .await;
+            until(client.clone(), |s| {
+                s.phase == GuestPhase::Ended(GuestEnd::Inactive)
+            })
+            .await;
+            tokio::time::timeout(Duration::from_secs(10), running)
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await;
+    server.abort();
+    let _ = server.await;
+    runtime.shutdown().await.unwrap();
+}

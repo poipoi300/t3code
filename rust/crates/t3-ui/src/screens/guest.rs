@@ -58,6 +58,9 @@ fn transport(share: &str) -> Option<Rc<dyn GuestTransport>> {
 }
 
 pub(crate) fn boot(mut location: Option<GuestAddress>) -> AnyElement {
+    // The browser reaches its own origin with its own cookie jar; nothing else can serve a guest.
+    #[cfg(target_arch = "wasm32")]
+    install_transport(Arc::new(t3_platform::guest::browser_transport));
     i18n::set_language("system", &[locale().to_string()]);
     if let Some(location) = location.as_mut()
         && location.share_id().is_some()

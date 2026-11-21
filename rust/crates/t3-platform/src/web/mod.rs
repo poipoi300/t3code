@@ -2,6 +2,7 @@
 //!
 //! Storage is the IndexedDB database `t3code:client`; the TypeScript client's databases are
 //! read-only legacy sources (see the README for the mapping).
+mod guest;
 mod history;
 mod host;
 mod http;
@@ -21,6 +22,8 @@ use t3_client::platform::{
 use t3_contracts::auth::AuthClientPresentationMetadata;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{BroadcastChannel, IdbDatabase, IdbFactory, MessageEvent, VisibilityState, Window};
+
+pub use guest::{BrowserGuestHttp, browser_transport};
 
 pub const DEFAULT_DATABASE: &str = "t3code:client";
 /// The legacy source name the web host answers for.

@@ -5,6 +5,7 @@
 //! `t3-client`.
 
 mod common;
+pub mod guest;
 mod socket_ingress;
 
 pub use common::{EventSender, HostExtension};
