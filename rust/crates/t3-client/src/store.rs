@@ -21,6 +21,7 @@ pub struct EnvironmentState {
     pub session: Generation,
     pub config: Option<Rc<t3_contracts::server::ServerConfig>>,
     pub connection: Option<Rc<crate::connection::ConnectionState>>,
+    pub welcome: Option<Rc<t3_contracts::server::ServerLifecycleWelcomePayload>>,
 }
 #[derive(Debug, Clone, Default)]
 pub struct StoreSnapshot {
@@ -135,6 +136,32 @@ impl ClientStore {
         }
         self.publish(BTreeSet::from([Scope::Environment(environment)]));
     }
+    /// The lifecycle welcome belongs to one store session. A new subscription starts without
+    /// provenance, even if the previous socket belonged to the same computer.
+    pub fn set_welcome(
+        &self,
+        environment: &EnvironmentId,
+        session: Generation,
+        welcome: Option<t3_contracts::server::ServerLifecycleWelcomePayload>,
+    ) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            let Some(state) = inner.snapshot.environments.get_mut(environment) else {
+                return;
+            };
+            if state.session != session
+                || welcome
+                    .as_ref()
+                    .is_some_and(|value| &value.environment.environment_id != environment)
+                || state.welcome.as_deref() == welcome.as_ref()
+            {
+                return;
+            }
+            Rc::make_mut(state).welcome = welcome.map(Rc::new);
+        }
+        self.publish(BTreeSet::from([Scope::Environment(environment.clone())]));
+    }
+
     pub fn set_config(
         &self,
         environment: &EnvironmentId,
@@ -479,6 +506,7 @@ impl ClientStore {
                     .entry(environment.clone())
                     .or_default(),
             );
+            env.welcome = None;
             env.session.0 += 1;
             Rc::make_mut(&mut env.shell).begin_session(env.session);
             for thread in env.threads.values_mut() {
@@ -499,6 +527,7 @@ impl ClientStore {
             if env.session != session {
                 return SyncAction::StaleSession;
             }
+            env.welcome = None;
             env.session.0 += 1;
             let shell = Rc::make_mut(&mut env.shell);
             shell.session = env.session;

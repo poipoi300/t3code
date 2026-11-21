@@ -1416,3 +1416,201 @@ fn an_environment_removed_while_it_reconnects_does_not_come_back_into_the_store(
     harness.server().state.borrow_mut().refuse_sockets = false;
     removed_and_stays_removed(&mut harness, &client);
 }
+
+#[test]
+fn first_run_policy_waits_for_the_servers_bootstrap_provenance() {
+    use futures::{StreamExt, channel::mpsc};
+    use serde_json::json;
+    use t3_contracts::rpc::{
+        RpcMethod, WsOrchestrationV2SubscribeShellRpc, WsSubscribeServerLifecycleRpc,
+    };
+    let mut harness = Harness::new(ENV);
+    let (events, receiver) = mpsc::unbounded();
+    let receiver = std::cell::RefCell::new(Some(receiver));
+    let server = harness.server();
+    server
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push((WsSubscribeServerLifecycleRpc::TAG, t3_rpc::CallKind::Stream));
+    server.state.borrow_mut().extra_rpc = Some(std::rc::Rc::new(move |request| {
+        if request.tag == WsSubscribeServerLifecycleRpc::TAG {
+            return Some(t3_rpc::HandlerOutput::Stream(
+                receiver.borrow_mut().take()?.boxed_local(),
+            ));
+        }
+        if request.tag == WsOrchestrationV2SubscribeShellRpc::TAG {
+            let mut shell = shell_snapshot(&[]);
+            shell["projects"] = json!([]);
+            return Some(t3_rpc::HandlerOutput::Stream(
+                futures::stream::iter([Ok(vec![
+                    json!({"kind":"snapshot","snapshot":shell}),
+                    json!({"kind":"synchronized"}),
+                ])])
+                .chain(futures::stream::pending())
+                .boxed_local(),
+            ));
+        }
+        None
+    }));
+    let client = runtime(&harness);
+    harness.run(client.restore()).unwrap();
+    harness.run(client.pair(pairing())).unwrap();
+    harness.settle();
+    assert!(!client.route_policy().unwrap().first_run);
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorder = observed.clone();
+    let mut changes = client.first_run().watch();
+    harness.spawn(async move {
+        while let Some(next) = changes.next().await {
+            recorder.borrow_mut().push(next);
+        }
+    });
+    harness.settle();
+    assert!(!observed.borrow().last().unwrap().gate.stalled);
+    harness.advance(4000);
+    assert!(observed.borrow().last().unwrap().gate.stalled);
+    for status in ["pending", "complete"] {
+        events.unbounded_send(Ok(vec![json!({"type":"welcome","version":1,"sequence":1,"payload":{"environment":config(ENV)["environment"],"cwd":"/workspace/project","projectName":"Project","bootstrapStatus":status}})])).unwrap();
+        harness.settle();
+        assert_eq!(
+            client.route_policy().unwrap().first_run,
+            status == "complete"
+        );
+    }
+    assert_eq!(
+        observed.borrow().last().unwrap().gate.decision,
+        t3_client::view_logic::onboarding::FirstRunDecision::Wizard
+    );
+    let id = environment(ENV);
+    let generation = client.store().snapshot().environments[&id].session;
+    client.store().set_welcome(&id, generation, None);
+    harness.settle();
+    assert!(
+        client.route_policy().unwrap().first_run,
+        "temporary loss of provenance must hold the wizard"
+    );
+    let first_run = client.first_run();
+    harness
+        .run(async move { first_run.complete().await })
+        .unwrap();
+    assert!(!client.route_policy().unwrap().first_run);
+}
+
+#[test]
+fn local_codex_setup_installs_before_sign_in_and_ignores_other_flows() {
+    use futures::{FutureExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::{cell::RefCell, rc::Rc};
+    use t3_contracts::{
+        provider_instance::ProviderInstanceId,
+        rpc::{
+            RpcMethod, WsProviderAuthStartRpc, WsProviderAuthSubscribeRpc,
+            WsProviderInstallStartRpc, WsProviderInstallSubscribeRpc,
+        },
+    };
+    use t3_rpc::{CallKind, Exit, HandlerOutput};
+    let mut harness = Harness::new(ENV);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let seen = calls.clone();
+    let install = |phase: &str, operation: Option<&str>, version: Option<&str>| {
+        json!({
+            "driver":"codex", "operationId":operation, "phase":phase, "downloadedBytes":0,
+            "totalBytes":null, "version":"1", "installedVersion":version, "canRemove":false, "message":null
+        })
+    };
+    let auth = |phase: &str, flow: &str, page: Option<&str>| {
+        json!({
+            "instanceId":"codex","phase":phase,"flowId":flow,"authorizationUrl":page,"expiresAt":null,"message":null
+        })
+    };
+    let target = "https://example.test/sign-in";
+    {
+        let mut server = harness.server().state.borrow_mut();
+        server.extra_methods.extend([
+            (WsProviderInstallStartRpc::TAG, CallKind::Unary),
+            (WsProviderInstallSubscribeRpc::TAG, CallKind::Stream),
+            (WsProviderAuthStartRpc::TAG, CallKind::Unary),
+            (WsProviderAuthSubscribeRpc::TAG, CallKind::Stream),
+        ]);
+        server.extra_rpc = Some(Rc::new(move |request| {
+            let unary = |answer: Value| {
+                HandlerOutput::Unary(async move { Exit::success(answer) }.boxed_local())
+            };
+            let stream = |answers: Vec<Value>| {
+                HandlerOutput::Stream(
+                    futures::stream::iter(answers.into_iter().map(|v| Ok(vec![v])))
+                        .chain(futures::stream::pending())
+                        .boxed_local(),
+                )
+            };
+            let result = match request.tag.as_str() {
+                WsProviderInstallSubscribeRpc::TAG => stream(vec![
+                    install("idle", None, None),
+                    install("failed", Some("old"), None),
+                    install("succeeded", Some("setup"), Some("1")),
+                ]),
+                WsProviderInstallStartRpc::TAG => {
+                    unary(install("downloading", Some("setup"), None))
+                }
+                WsProviderAuthStartRpc::TAG => unary(auth("starting", "new", None)),
+                WsProviderAuthSubscribeRpc::TAG => stream(vec![
+                    auth("waiting", "old", Some("https://example.test/old")),
+                    auth("waiting", "new", Some(target)),
+                ]),
+                _ => return None,
+            };
+            seen.borrow_mut().push(request.tag.clone());
+            Some(result)
+        }));
+    }
+    let client = runtime(&harness);
+    let id = harness
+        .run(client.pair(PairingInput {
+            pairing_url: Some("http://127.0.0.1/pair#token=pairing-token".into()),
+            ..PairingInput::default()
+        }))
+        .unwrap();
+    harness.settle();
+    client
+        .client(&id)
+        .unwrap()
+        .session()
+        .unwrap()
+        .update_grants(t3_client::permissions::SessionGrants {
+            valid: true,
+            scopes: ["providers:manage".to_owned()].into_iter().collect(),
+        });
+    let mut cfg = config(ENV);
+    cfg["settings"] =
+        serde_json::to_value(t3_contracts::settings::ServerSettings::default()).unwrap();
+    cfg["settings"]["providerInstances"]["codex"] =
+        json!({"driver":"codex","enabled":true,"config":{"setupMode":"managed"}});
+    cfg["providers"] = json!([{"instanceId":"codex","driver":"codex","enabled":true,"installed":false,"version":null,
+        "status":"ready","auth":{"status":"unauthenticated"},"checkedAt":"2026-08-23T00:00:00.000Z",
+        "setup":{"canAuthenticate":true,"canInstall":true},"models":[],"slashCommands":[],"skills":[]}]);
+    let generation = client.store().snapshot().environments[&id].session;
+    assert!(
+        client
+            .store()
+            .set_config(&id, generation, serde_json::from_value(cfg).unwrap())
+    );
+    let first_run = client.first_run();
+    let page = harness
+        .run(async move {
+            first_run
+                .sign_in_page(&id, ProviderInstanceId("codex".into()))
+                .await
+        })
+        .unwrap();
+    assert_eq!(page, target);
+    assert_eq!(
+        *calls.borrow(),
+        [
+            WsProviderInstallSubscribeRpc::TAG,
+            WsProviderInstallStartRpc::TAG,
+            WsProviderAuthStartRpc::TAG,
+            WsProviderAuthSubscribeRpc::TAG
+        ]
+    );
+}

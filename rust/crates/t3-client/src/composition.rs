@@ -7,6 +7,7 @@
 mod composer;
 mod composer_attachments;
 mod composer_updates;
+pub mod first_run;
 mod settings;
 use crate::{
     ClientError, ClientStore,
@@ -143,6 +144,7 @@ struct Inner<P: Platform + Clone + 'static> {
     /// Built by the first restore, taken once by the UI.
     storage_notice: RefCell<Option<StorageNotice>>,
     restored: std::cell::Cell<bool>,
+    first_run_gate: RefCell<Option<(EnvironmentId, crate::view_logic::onboarding::FirstRunGate)>>,
     composer_drafts: Rc<crate::thread_views::composer::draft_service::ComposerDraftService<P>>,
     composer_preferences: Rc<crate::thread_views::composer::preferences::ComposerPreferences<P>>,
     composer_models: Rc<crate::thread_views::composer::model_service::ComposerModelState>,
@@ -308,6 +310,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 damaged: RefCell::default(),
                 storage_notice: RefCell::default(),
                 restored: std::cell::Cell::default(),
+                first_run_gate: Default::default(),
             }),
         };
         runtime.timeline_rewind().bind_rewind_attachments(Rc::new(
@@ -566,9 +569,16 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
     /// The route policy (`RoutePolicy::for_client`) once the first restore has read the saved
     /// environments; `None` before, when no route guard may act on a guess.
     pub fn route_policy(&self) -> Option<crate::navigation::RoutePolicy> {
-        self.inner.restored.get().then(|| {
-            crate::navigation::RoutePolicy::for_client(!self.inner.environments.borrow().is_empty())
-        })
+        self.inner
+            .restored
+            .get()
+            .then(|| crate::navigation::RoutePolicy {
+                first_run: self.first_run().snapshot().gate.decision
+                    == crate::view_logic::onboarding::FirstRunDecision::Wizard,
+                ..crate::navigation::RoutePolicy::for_client(
+                    !self.inner.environments.borrow().is_empty(),
+                )
+            })
     }
 
     /// Hands the platform the route policy now and on every change while the runtime lives, so
@@ -579,7 +589,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         };
         self.inner.platform.set_route_policy(last);
         let inner = Rc::downgrade(&self.inner);
-        let mut changes = self.changes();
+        let mut changes = self.first_run().changes();
         (self.inner.spawn)(
             async move {
                 while changes.next().await.is_some() {
@@ -1601,6 +1611,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         let mut message_changes = send.changes();
         let message_listeners = self.inner.message_listeners.clone();
         let tasks = vec![
+            self.follow_welcome(&id),
             self.spawn(
                 async move {
                     while message_changes.next().await.is_some() {
