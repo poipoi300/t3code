@@ -205,8 +205,8 @@ pub async fn save_shelf_expanded(
 ) -> Result<(), PlatformError> {
     let key = shelf_key(marker)
         .ok_or_else(|| PlatformError::InvalidData(format!("{} is not a shelf", marker.name())))?;
-    let value =
-        serde_json::to_vec(&expanded).map_err(|error| PlatformError::InvalidData(error.to_string()))?;
+    let value = serde_json::to_vec(&expanded)
+        .map_err(|error| PlatformError::InvalidData(error.to_string()))?;
     storage
         .write(
             StorageArea::Ordinary,
@@ -234,6 +234,69 @@ impl<P: crate::platform::Platform + Clone + 'static> SidebarShelves<P> {
         Box::pin(async move { load_shelf_expansion(&platform).await })
     }
 
+    pub fn project_expansion(
+        &self,
+    ) -> futures::future::LocalBoxFuture<'static, std::collections::BTreeMap<String, bool>> {
+        let platform = self.platform.clone();
+        Box::pin(async move {
+            super::ui_state::UiPreferences::load(&platform)
+                .await
+                .map_or_else(
+                    |_| Default::default(),
+                    |prefs| prefs.state.project_expanded_by_id,
+                )
+        })
+    }
+
+    pub fn save_project_expansion(
+        &self,
+        aliases: Vec<String>,
+        expanded: bool,
+    ) -> futures::future::LocalBoxFuture<'static, Result<(), PlatformError>> {
+        use super::ui_state::{STORAGE_KEY, UiPreferences, UiState};
+        use crate::platform::{StorageCondition, StorageTransaction};
+        let platform = self.platform.clone();
+        Box::pin(async move {
+            let key = StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY);
+            let invalid =
+                |error: &dyn std::fmt::Display| PlatformError::InvalidData(error.to_string());
+            for _ in 0..3 {
+                let expected = platform.get(StorageArea::Ordinary, key.clone()).await?;
+                let mut state = if let Some(raw) = expected.as_deref() {
+                    let raw = std::str::from_utf8(raw).map_err(|error| invalid(&error))?;
+                    UiState::decode(raw, &crate::time::epoch_ms).map_err(|error| invalid(&error))?
+                } else {
+                    UiPreferences::load(&platform).await?.state
+                };
+                state.set_project_expanded(&aliases, expanded);
+                let value = state
+                    .encode()
+                    .map_err(|error| invalid(&error))?
+                    .into_bytes();
+                if platform
+                    .transaction(StorageTransaction {
+                        conditions: vec![StorageCondition {
+                            area: StorageArea::Ordinary,
+                            key: key.clone(),
+                            expected,
+                        }],
+                        ordinary: vec![StorageWrite {
+                            key: key.clone(),
+                            value: Some(value),
+                        }],
+                        secure: vec![],
+                    })
+                    .await?
+                {
+                    return Ok(());
+                }
+            }
+            Err(PlatformError::Storage(
+                "Project expansion changed repeatedly while saving.".into(),
+            ))
+        })
+    }
+
     pub fn save(
         &self,
         marker: Marker,
@@ -248,8 +311,42 @@ impl<P: crate::platform::Platform + Clone + 'static> SidebarShelves<P> {
 mod tests {
     use super::*;
     use crate::testing::FakePlatform;
-    use futures::executor::block_on;
     use Section::*;
+    use futures::executor::block_on;
+
+    #[test]
+    fn writing_project_expansion_preserves_the_other_sidebar_records() {
+        let platform = FakePlatform::default();
+        block_on(async {
+            let preferences = super::super::ui_state::UiPreferences {
+                sidebar_width: Some(336.0),
+                settled_shelf_expanded: true,
+                ..Default::default()
+            };
+            preferences
+                .save(&platform)
+                .await
+                .expect("seed other settings");
+            let shelves = SidebarShelves::new(platform.clone());
+            shelves
+                .save_project_expansion(vec!["group".into(), "checkout".into()], false)
+                .await
+                .expect("save folder expansion");
+            let stored = super::super::ui_state::UiPreferences::load(&platform)
+                .await
+                .expect("read sidebar preferences");
+            assert_eq!(stored.sidebar_width, Some(336.0));
+            assert!(stored.settled_shelf_expanded);
+            assert_eq!(
+                stored.state.project_expanded_by_id.get("group"),
+                Some(&false)
+            );
+            assert_eq!(
+                stored.state.project_expanded_by_id.get("checkout"),
+                Some(&false)
+            );
+        });
+    }
 
     fn markers(list: &SidebarListItems) -> Vec<String> {
         list.items
@@ -281,7 +378,10 @@ mod tests {
                 "settled-placeholder",
             ]
         );
-        assert_eq!((list.working_count, list.snoozed_count, list.settled_count), (2, 1, 2));
+        assert_eq!(
+            (list.working_count, list.snoozed_count, list.settled_count),
+            (2, 1, 2)
+        );
         let open = sidebar_list_items(
             &sections,
             None,
@@ -322,7 +422,11 @@ mod tests {
                 "settled-placeholder"
             ]
         );
-        assert!(sidebar_list_items(&[], None, ShelfExpansion::default(), 10).items.is_empty());
+        assert!(
+            sidebar_list_items(&[], None, ShelfExpansion::default(), 10)
+                .items
+                .is_empty()
+        );
     }
 
     #[test]
@@ -348,7 +452,10 @@ mod tests {
     #[test]
     fn each_shelf_flag_is_its_own_record() {
         let platform = FakePlatform::default();
-        assert_eq!(block_on(load_shelf_expansion(&platform)), ShelfExpansion::default());
+        assert_eq!(
+            block_on(load_shelf_expansion(&platform)),
+            ShelfExpansion::default()
+        );
         block_on(save_shelf_expanded(&platform, Marker::SnoozedHeader, true)).expect("save");
         assert_eq!(
             block_on(load_shelf_expansion(&platform)),

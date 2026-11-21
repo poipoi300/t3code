@@ -287,14 +287,18 @@ pub fn plan_thread_drop(input: DropInput<'_>) -> DropPlan {
             .cloned()
             .collect::<Vec<_>>();
         let assignments = plan_pinned_reorder(&filtered, keys, input.active_key);
-        if assignments.iter().any(|(id, _)| !writable.contains(id)) {
+        let assigned_ids = assignments
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<BTreeSet<_>>();
+        if assigned_ids.iter().any(|id| !writable.contains(*id)) {
             return None;
         }
         let mut frozen_before = false;
         let mut assigned_before = false;
         for id in order {
             let frozen = !writable.contains(id) && keys.get(id).is_none_or(Option::is_none);
-            let assigned = assignments.iter().any(|(key, _)| key == id);
+            let assigned = assigned_ids.contains(id.as_str());
             if (to == Section::Active && frozen && assigned_before)
                 || (to == Section::Pinned && assigned && frozen_before)
             {

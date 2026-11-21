@@ -10,7 +10,11 @@ use crate::{
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 use t3_contracts::{
     orchestration_v2::*,
     rpc::{
@@ -83,6 +87,15 @@ enum MenuSurface {
     Header,
     Sidebar,
     Batch,
+}
+
+/// The visual order at the drop and the scoped client identities behind its row IDs.
+pub struct SidebarDrop {
+    pub items: Vec<crate::view_logic::shell::sidebar::ListItem>,
+    pub threads: BTreeMap<String, ThreadKey>,
+    pub source: String,
+    pub destination: String,
+    pub active_time_ordered: bool,
 }
 
 pub type ConfirmationPort =
@@ -430,6 +443,245 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
                 )
             })
             .collect()
+    }
+
+    pub fn can_drag_thread(&self, key: &ThreadKey) -> bool {
+        self.can_operate(key)
+            && self
+                .runtime
+                .store()
+                .snapshot()
+                .environments
+                .get(&key.environment)
+                .and_then(|env| env.config.as_ref())
+                .is_some_and(|config| {
+                    let caps = &config.environment.capabilities;
+                    caps.thread_pinning == Some(true)
+                        || caps.thread_settlement == Some(true)
+                        || caps.thread_active_reorder == Some(true)
+                })
+    }
+
+    fn sidebar_drop_plan(
+        &self,
+        drop: &SidebarDrop,
+    ) -> Result<Vec<(ThreadKey, ThreadLifecycleAction)>, ClientError> {
+        use crate::view_logic::shell::sidebar::{
+            DropInput, DropPlan, ListItem, Section, plan_thread_drop, resolve_drop_target,
+        };
+        use ThreadLifecycleAction::*;
+        use t3_contracts::base_schemas::TrimmedNonEmptyString;
+
+        let Some(source) = drop.threads.get(&drop.source) else {
+            return Ok(vec![]);
+        };
+        if !self.can_drag_thread(source) {
+            return Ok(vec![]);
+        }
+        let Some(section) = drop.items.iter().find_map(|item| match item {
+            ListItem::Thread { key, section } if key == &drop.source => Some(*section),
+            _ => None,
+        }) else {
+            return Ok(vec![]);
+        };
+        let Some(target) = resolve_drop_target(&drop.items, &drop.source, &drop.destination) else {
+            return Ok(vec![]);
+        };
+        let snapshot = self.runtime.store().snapshot();
+        let caps = |key: &ThreadKey| {
+            snapshot
+                .environments
+                .get(&key.environment)
+                .and_then(|env| env.config.as_ref())
+                .map(|config| &config.environment.capabilities)
+        };
+        let Some(source_caps) = caps(source) else {
+            return Ok(vec![]);
+        };
+        if target.section == Section::Pinned && source_caps.thread_pinning != Some(true) {
+            return Ok(vec![]);
+        }
+        // Snapshot each environment's projected shell once per hover or release.
+        let shells = drop
+            .threads
+            .values()
+            .map(|key| &key.environment)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|environment| self.shell(environment).map(|shell| (environment, shell)))
+            .collect::<Vec<_>>();
+        let rows = shells
+            .iter()
+            .flat_map(|(environment, shell)| {
+                shell
+                    .threads
+                    .iter()
+                    .filter(|row| row.archived_at.is_none() && row.deleted_at.is_none())
+                    .map(|row| ((*environment, &row.id), row))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let Some(current) = rows.get(&(&source.environment, &source.thread)) else {
+            return Ok(vec![]);
+        };
+        if drop
+            .threads
+            .get(&drop.destination)
+            .is_some_and(|key| !rows.contains_key(&(&key.environment, &key.thread)))
+        {
+            return Ok(vec![]);
+        }
+        let mut pin_writable = BTreeSet::new();
+        let mut active_writable = BTreeSet::new();
+        let mut pin_keys = BTreeMap::new();
+        let mut active_keys = BTreeMap::new();
+        for (id, key) in &drop.threads {
+            let Some(row) = rows.get(&(&key.environment, &key.thread)) else {
+                continue;
+            };
+            pin_keys.insert(
+                id.clone(),
+                row.pin_order_key.clone().flatten().map(|key| key.0),
+            );
+            active_keys.insert(
+                id.clone(),
+                row.active_order_key.clone().flatten().map(|key| key.0),
+            );
+            if let Some(caps) = caps(key).filter(|_| self.can_operate(key)) {
+                if caps.thread_pin_reorder == Some(true)
+                    || (id == &drop.source && section != Section::Pinned)
+                {
+                    pin_writable.insert(id.clone());
+                }
+                if caps.thread_active_reorder == Some(true) {
+                    active_writable.insert(id.clone());
+                }
+            }
+        }
+        let order = |section| {
+            drop.items
+                .iter()
+                .filter_map(|item| match item {
+                    ListItem::Thread {
+                        key,
+                        section: found,
+                    } if *found == section => Some(key.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let plan = plan_thread_drop(DropInput {
+            active_key: &drop.source,
+            active_section: section,
+            active_pinned: Some(current.pinned_at.as_ref().is_some_and(Option::is_some)),
+            active_settled: Some(
+                current.settled_override == Some(AppThreadSettledOverride::Settled),
+            ),
+            supports_settlement: source_caps.thread_settlement == Some(true),
+            target: &target,
+            pinned_order: &order(Section::Pinned),
+            pinned_keys: &pin_keys,
+            reorderable: Some(&pin_writable),
+            active_order: &order(Section::Active),
+            active_keys: &active_keys,
+            active_reorderable: Some(&active_writable),
+            active_time_ordered: drop.active_time_ordered,
+        });
+        let mut operations = vec![];
+        let mut reorder = |assignments: Vec<(String, String)>, active: bool| {
+            for (id, order_key) in assignments {
+                if let Some(key) = drop.threads.get(&id) {
+                    let order_key = TrimmedNonEmptyString(order_key);
+                    operations.push((
+                        key.clone(),
+                        if active {
+                            ReorderActive { order_key }
+                        } else {
+                            ReorderPin { order_key }
+                        },
+                    ));
+                }
+            }
+        };
+        match plan {
+            DropPlan::None => return Ok(vec![]),
+            DropPlan::Settle => operations.push((source.clone(), Settle)),
+            DropPlan::ReorderPinned { assignments, .. } => reorder(assignments, false),
+            DropPlan::Pin {
+                order_key,
+                extra_assignments,
+                ..
+            } => {
+                // A new pin receives its key atomically with the lifecycle change.
+                let pin = (
+                    source.clone(),
+                    Pin {
+                        order_key: order_key.map(TrimmedNonEmptyString),
+                    },
+                );
+                reorder(extra_assignments, false);
+                operations.insert(0, pin);
+            }
+            DropPlan::MoveActive {
+                assignments,
+                unpin,
+                unsettle,
+                unsnooze,
+                ..
+            } => {
+                reorder(assignments, true);
+                let placement = [(unpin, Unpin), (unsettle, Unsettle), (unsnooze, Unsnooze)];
+                operations.splice(
+                    0..0,
+                    placement
+                        .into_iter()
+                        .filter_map(|(apply, action)| apply.then(|| (source.clone(), action))),
+                );
+            }
+        }
+        // Refuse a known unavailable operation before changing any placement. Dispatch still
+        // rechecks permissions and capabilities for each individual command.
+        for (key, action) in &operations {
+            let writable = self.can_operate(key)
+                && caps(key).is_some_and(|caps| match action {
+                    Pin { .. } | Unpin => caps.thread_pinning == Some(true),
+                    ReorderPin { .. } => caps.thread_pin_reorder == Some(true),
+                    ReorderActive { .. } => caps.thread_active_reorder == Some(true),
+                    Settle | Unsettle => caps.thread_settlement == Some(true),
+                    Unsnooze => caps.thread_snooze == Some(true),
+                    _ => false,
+                });
+            if !writable {
+                return Err(ClientError::PermissionDenied {
+                    method: "orchestration.dispatchCommand".into(),
+                });
+            }
+        }
+        Ok(operations)
+    }
+
+    pub fn can_sidebar_drop(&self, drop: &SidebarDrop) -> bool {
+        self.sidebar_drop_plan(drop)
+            .is_ok_and(|operations| !operations.is_empty())
+    }
+
+    pub fn perform_sidebar_drop(
+        &self,
+        drop: SidebarDrop,
+    ) -> LocalBoxFuture<'static, Result<bool, ClientError>> {
+        let service = self.clone();
+        async move {
+            let operations = service.sidebar_drop_plan(&drop)?;
+            let settled = operations
+                .iter()
+                .any(|(_, action)| matches!(action, ThreadLifecycleAction::Settle));
+            for (key, action) in operations {
+                service
+                    .dispatch_action(key, Action::Lifecycle(action), false, true)
+                    .await?;
+            }
+            Ok(settled)
+        }
+        .boxed_local()
     }
 
     pub fn perform_sidebar_batch(
