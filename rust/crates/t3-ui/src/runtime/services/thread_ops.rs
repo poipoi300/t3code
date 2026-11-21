@@ -300,6 +300,9 @@ impl<P: Platform + Clone + 'static> crate::screens::thread::rewind::TimelineRewi
                 }),
         }
     }
+    fn cancel_confirmation(&self, key: &ThreadKey) {
+        self.0.cancel_rewind(key);
+    }
     fn changes(&self, key: &ThreadKey) -> LocalBoxStream<'static, ()> {
         self.0.changes(key)
     }

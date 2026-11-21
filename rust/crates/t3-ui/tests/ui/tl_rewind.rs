@@ -471,6 +471,11 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
         {"position":0,"visibility":"local","sourceThreadId":"parent","sourceItemId":"user-item","item":prompt},
         {"position":1,"visibility":"local","sourceThreadId":"parent","sourceItemId":"assistant-item","item":answer}
     ]);
+    projection["messages"] = json!([{
+        "id":"prompt", "threadId":"parent", "runId":"run", "nodeId":null, "role":"user",
+        "text":"Original prompt", "attachments":[], "streaming":false, "createdBy":"user",
+        "creationSource":"web", "createdAt":at, "updatedAt":at,
+    }]);
     let mut active_session: serde_json::Value = serde_json::from_str(
         include_str!("../../../../fixtures/samples/OrchestrationV2ProviderSession.jsonl")
             .lines()
@@ -481,6 +486,7 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
     active_session["id"] = json!("active-session");
     active_session["capabilities"]["threads"]["canForkThread"] = json!(false);
     active_session["capabilities"]["context"]["supportsFullThreadHandoff"] = json!(true);
+    active_session["capabilities"]["checkpointing"]["providerCanRollbackConversation"] = json!(true);
     projection["providerSessions"] = json!([active_session]);
     projection["thread"]["activeProviderThreadId"] = json!("active-pt");
     projection["providerThreads"] = json!([{
@@ -532,6 +538,16 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
     let scope = parent.clone();
     let session_store = store.clone();
     let session_thread = parent.clone();
+    let update_store = store.clone();
+    let update_thread = parent.clone();
+    on_key("ctrl+u", move |_| {
+        let generation = update_store.snapshot().environments[&update_thread.environment].session;
+        update_store.update_thread(&update_thread, generation, |thread| {
+            let p = Rc::make_mut(thread.projection.as_mut().expect("loaded thread"));
+            p.thread.updated_at = t3_contracts::wire::WireDateTime("2026-11-13T12:00:01Z".into());
+            true
+        });
+    });
     view()
         .w_full()
         .h_full()
@@ -568,6 +584,7 @@ fn ConnectedTimelineFixture() -> impl IntoElement {
             });
         }))
         .child(t3_ui::screens::thread::timeline::timeline(parent))
+        .child(confirm_dialog_host())
 }
 
 #[test]
@@ -598,6 +615,23 @@ fn edit_from_here_requires_a_checkpoint_at_the_real_start_of_history() {
     app.press("id:page-history")
         .expect("first loaded turn is no longer the thread start");
     assert!(!app.screen().matches(edit).expect("selector"));
+}
+
+#[test]
+fn cancelling_edit_from_here_allows_a_fresh_confirmation_after_the_thread_changes() {
+    let mut app = start(Root::of::<ConnectedTimelineFixture>(), DESKTOP);
+    let edit = "role:button[Edit from here]";
+    let title = "Edit from here?";
+    app.wait_for(edit).expect("editable user message");
+    app.press(edit).expect("preflight the current history");
+    app.wait_for(title).expect("first confirmation");
+    app.press_key("ctrl+u").expect("the thread changes");
+    app.press("role:button[Cancel]").expect("cancel");
+    app.wait_for_gone(title, std::time::Duration::from_secs(5))
+        .expect("first confirmation closes");
+
+    app.press(edit).expect("preflight the new history");
+    app.wait_for(title).expect("a fresh confirmation opens");
 }
 
 #[test]

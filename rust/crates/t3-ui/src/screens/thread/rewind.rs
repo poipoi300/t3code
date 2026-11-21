@@ -75,6 +75,7 @@ pub trait TimelineRewindClient {
         false
     }
     fn availability(&self, key: &ThreadKey, target: &RewindTarget) -> RewindAvailability;
+    fn cancel_confirmation(&self, _key: &ThreadKey) {}
     fn changes(&self, key: &ThreadKey) -> LocalBoxStream<'static, ()>;
     fn rewind(
         &self,
@@ -94,6 +95,20 @@ pub trait TimelineRewindClient {
 /// Optional override; normal screens bind from Backend::client().
 #[derive(Clone)]
 pub struct RewindService(pub Rc<dyn TimelineRewindClient>);
+
+struct PendingRewindConfirmation {
+    client: Rc<dyn TimelineRewindClient>,
+    key: ThreadKey,
+    dispatched: bool,
+}
+
+impl Drop for PendingRewindConfirmation {
+    fn drop(&mut self) {
+        if !self.dispatched {
+            self.client.cancel_confirmation(&self.key);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct TimelineRewind {
@@ -213,26 +228,37 @@ impl TimelineRewind {
         let Some(client) = self.client.get() else {
             return;
         };
+        let confirmation = PendingRewindConfirmation {
+            client,
+            key: self.key.get(),
+            dispatched: false,
+        };
         let Some(answer) = request_revert_dialog(availability.can_restore_files) else {
             return;
         };
         self.pending.set(true);
         self.owner.spawn(async move {
             let _pending = Pending(self.pending);
+            let mut confirmation = confirmation;
             let Some(choice) = answer.await else {
                 return;
             };
             let restore_files = choice == RevertChoice::RestoreFiles;
-            let key = self.key.get();
-            let availability = client.availability(&key, &target);
+            let key = &confirmation.key;
+            let availability = confirmation.client.availability(key, &target);
             if !availability.can_rewind || (restore_files && !availability.can_restore_files) {
                 self.error.set(availability.reason);
                 return;
             }
             self.error.set(None);
             self.restored_prompt.set(None);
-            match client.rewind(key.clone(), target, restore_files).await {
-                Ok(prompt) if self.nav.top().thread() == Some(&key) => {
+            confirmation.dispatched = true;
+            match confirmation
+                .client
+                .rewind(key.clone(), target, restore_files)
+                .await
+            {
+                Ok(prompt) if self.nav.top().thread() == Some(key) => {
                     self.restored_prompt.set(Some(prompt))
                 }
                 Ok(_) => {}
