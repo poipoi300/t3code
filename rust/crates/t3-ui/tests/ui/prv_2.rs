@@ -5,7 +5,7 @@ use crate::{
     support::{DESKTOP, PHONE},
 };
 use futures::{FutureExt, future::LocalBoxFuture, stream::LocalBoxStream};
-use nsh_core::prelude::*;
+use nsh_core::{platform::Lifecycle, prelude::*};
 use nsh_engine::Root;
 use serde_json::json;
 use std::rc::Rc;
@@ -36,6 +36,7 @@ use t3_ui::{
 struct StreamPlatform {
     environment: EnvironmentPlatform,
     browser: BrowserWire,
+    retry: Option<BrowserWire>,
 }
 
 impl Storage for StreamPlatform {
@@ -95,7 +96,14 @@ impl Platform for StreamPlatform {
     }
     fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
         if request.url.contains("/api/preview-stream/ws?") {
-            futures::future::ready(self.browser.connect(request)).boxed_local()
+            let browser = if let Some(retry) = &self.retry
+                && !self.browser.requests().is_empty()
+            {
+                retry
+            } else {
+                &self.browser
+            };
+            futures::future::ready(browser.connect(request)).boxed_local()
         } else {
             self.environment.websocket(request)
         }
@@ -107,6 +115,15 @@ impl Platform for StreamPlatform {
 
 #[component]
 fn StreamFixture() -> impl IntoElement {
+    stream_fixture_content(false)
+}
+
+#[component]
+fn NodeRequiredFixture() -> impl IntoElement {
+    stream_fixture_content(true)
+}
+
+fn stream_fixture_content(node_required: bool) -> impl IntoElement {
     t3_ui::theme::install(&Default::default());
     let owner = Owner::current();
     let run: Spawner = Rc::new(move |task| {
@@ -155,12 +172,20 @@ fn StreamFixture() -> impl IntoElement {
     });
 
     let browser = BrowserWire::default();
-    assert!(browser.text(
+    let retry = node_required.then(BrowserWire::default);
+    if node_required {
+        assert!(browser.peer_close(
+            1011,
+            r#"{"_tag":"PreviewStreamNodeRequired","message":"server diagnostic"}"#,
+        ));
+    }
+    let available = retry.as_ref().unwrap_or(&browser);
+    assert!(available.text(
         json!({"type":"control","controller":"you","generation":1,"canOperate":true,"dialog":null})
     ));
-    assert!(browser.text(json!({"type":"viewport","width":800,"height":600})));
+    assert!(available.text(json!({"type":"viewport","width":800,"height":600})));
     assert!(
-        browser.binary(b"<script>throw new Error('never interpret page HTML')</script>".to_vec())
+        available.binary(b"<script>throw new Error('never interpret page HTML')</script>".to_vec())
     );
 
     let store = ClientStore::default();
@@ -168,6 +193,7 @@ fn StreamFixture() -> impl IntoElement {
         StreamPlatform {
             environment: server.platform(),
             browser: browser.clone(),
+            retry: retry.clone(),
         },
         store.clone(),
         OrchestrationV2CreationSource::Web,
@@ -198,9 +224,52 @@ fn StreamFixture() -> impl IntoElement {
         assert!(fixture.peer_close(1008, "policy"));
     });
     let fixture = browser.clone();
+    let reply_index = stored(0);
     on_key("f5", move |_| {
-        assert!(fixture.text(json!({"type":"clipboard","text":"selected page text"})));
+        let index = reply_index.with(|index| {
+            let current = *index;
+            *index += 1;
+            current
+        });
+        let (gesture, text) = [
+            (0, "old selection"),
+            (1, "selected page text"),
+            (2, ""),
+            (2, "replayed text"),
+            (3, "reply after leaving the app"),
+        ][index];
+        let inputs = fixture.sent();
+        let request = inputs
+            .iter()
+            .filter(|input| {
+                input["type"] == "key"
+                    && input["action"] == "down"
+                    && matches!(input["key"].as_str(), Some("c" | "x"))
+            })
+            .nth(gesture)
+            .expect("copy or cut key sent");
+        let request_id = request["requestId"].as_str().expect("gesture ID");
+        assert!(!request_id.is_empty());
+        assert!(fixture.text(json!({"type":"clipboard","text":text,"requestId":request_id})));
     });
+    let fixture = browser.clone();
+    on_key("f3", move |_| {
+        assert!(fixture.text(json!({"type":"clipboard","text":"untagged text"})));
+        assert!(
+            fixture.text(json!({"type":"clipboard","text":"unknown text","requestId":"unknown"}))
+        );
+    });
+    if let Some(retry) = retry {
+        let fixture = browser.clone();
+        on_key("f2", move |_| {
+            for wire in [&fixture, &retry] {
+                let requests = wire.requests();
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].contains("nodeRequirement=close"));
+                assert!(requests[0].contains("threadId=thread&tabId=stream-tab"));
+            }
+        });
+    }
     let fixture = browser.clone();
     on_key("f7", move |_| {
         let inputs = fixture.sent();
@@ -376,14 +445,26 @@ fn stream_at(width: (f32, f32)) {
             .expect("leave the browser surface");
         app.set_clipboard(Some("newer local text".into()));
         app.press("id:preview-page").expect("return to the browser");
-        app.press_key("ctrl+c")
-            .expect("attempt a second copy before the first reply");
-        app.press_key("f5").expect("receive a stale copy reply");
+        app.press_key("ctrl+x").expect("cut before the first reply");
+        app.press_key("f3").expect("receive unrelated replies");
         assert_eq!(app.screen().clipboard(), Some("newer local text"));
-        app.press("id:preview-page").expect("focus before copying");
-        app.press_key("ctrl+c").expect("copy from page");
-        app.press_key("f5").expect("receive copied text from page");
+        app.press_key("f5").expect("receive the old copy reply");
+        assert_eq!(app.screen().clipboard(), Some("newer local text"));
+        app.press_key("f5").expect("receive the matching cut reply");
         assert_eq!(app.screen().clipboard(), Some("selected page text"));
+        app.press_key("ctrl+c").expect("copy with no selection");
+        app.press_key("f5").expect("complete an empty selection");
+        app.press_key("f5").expect("receive a duplicate reply");
+        assert_eq!(app.screen().clipboard(), Some("selected page text"));
+        app.press_key("ctrl+c")
+            .expect("request copy before switching apps");
+        app.set_environment("leave app", |env| env.lifecycle = Lifecycle::Inactive)
+            .expect("leave the app without changing the focused field");
+        app.set_clipboard(Some("copied in another app".into()));
+        app.set_environment("return to app", |env| env.lifecycle = Lifecycle::Active)
+            .expect("return to the preview");
+        app.press_key("f5").expect("receive the retired copy reply");
+        assert_eq!(app.screen().clipboard(), Some("copied in another app"));
         app.wheel("id:preview-page", point(px(0.0), px(24.0)))
             .expect("scroll page");
     }
@@ -414,4 +495,32 @@ fn desktop_streams_a_preview_and_forwards_input() {
 #[test]
 fn phone_streams_a_preview_and_forwards_input() {
     stream_at(PHONE);
+}
+
+fn retry_after_installing_node(width: (f32, f32)) {
+    let mut app = app_at(width, Root::of::<NodeRequiredFixture>());
+    app.wait_for("role:button[Open browser]").expect("paired");
+    app.press("role:button[Open browser]")
+        .expect("open browser");
+    app.type_text("label:Search or enter URL", "https://example.test/")
+        .expect("address");
+    app.press_key("Enter").expect("open viewer");
+    app.wait_for("Server browser automation requires Node.js and playwright-core.")
+        .expect("show the host requirement");
+    app.press("role:button[Try again]")
+        .expect("retry the same tab");
+    app.wait_for("You have control")
+        .expect("viewer connected after retry");
+    app.press_key("f2")
+        .expect("verify diagnostic opt-in on both requests");
+}
+
+#[test]
+fn desktop_shows_the_node_requirement_and_retries() {
+    retry_after_installing_node(DESKTOP);
+}
+
+#[test]
+fn phone_shows_the_node_requirement_and_retries() {
+    retry_after_installing_node(PHONE);
 }

@@ -42,6 +42,7 @@ impl PreviewTarget {
         if !self.interactive {
             url.push_str("&interactive=false");
         }
+        url.push_str("&nodeRequirement=close");
         self.access.with_query(&url)
     }
     pub fn resource_url(&self, upload: bool, id: &str) -> String {
@@ -118,7 +119,10 @@ pub enum PreviewEvent {
         sequence: f64,
     },
     Control(PreviewControl),
-    Clipboard(String),
+    Clipboard {
+        request_id: String,
+        text: String,
+    },
     Popup(String),
     Download {
         file_name: String,
@@ -129,6 +133,7 @@ pub enum PreviewEvent {
     Unauthorized,
     Gone,
     HostSetup(PreviewStreamHostSetup),
+    NodeRequired,
     RetryAt(u64),
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -244,7 +249,16 @@ impl PreviewSession {
                 }
             }
             "popup" => PreviewEvent::Popup(v.get("tabId")?.as_str()?.into()),
-            "clipboard" => PreviewEvent::Clipboard(v.get("text")?.as_str()?.into()),
+            "clipboard" => {
+                let request_id = v.get("requestId")?.as_str()?;
+                if !valid_clipboard_request_id(request_id) {
+                    return None;
+                }
+                PreviewEvent::Clipboard {
+                    request_id: request_id.into(),
+                    text: v.get("text")?.as_str()?.into(),
+                }
+            }
             "download" => PreviewEvent::Download {
                 file_name: v.get("fileName")?.as_str()?.into(),
                 size_bytes: v.get("sizeBytes")?.as_f64()?,
@@ -279,7 +293,13 @@ impl PreviewSession {
     pub fn stop_loading(&self) -> Option<PreviewEvent> {
         self.send(json!({"type":"stopLoading"}))
     }
-    pub fn closed(&mut self, generation: u64, code: u16, reason: &str, now: u64) -> Vec<PreviewEvent> {
+    pub fn closed(
+        &mut self,
+        generation: u64,
+        code: u16,
+        reason: &str,
+        now: u64,
+    ) -> Vec<PreviewEvent> {
         if !self.current(generation) {
             return vec![];
         }
@@ -296,6 +316,11 @@ impl PreviewSession {
                 self.stopped = true;
                 self.state = PreviewState::Closed;
                 events.push(PreviewEvent::Gone);
+            }
+            1011 if is_node_required(reason) => {
+                self.stopped = true;
+                self.state = PreviewState::Failed("Server browser requires Node.js".into());
+                events.push(PreviewEvent::NodeRequired);
             }
             PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE => {
                 self.stopped = true;
@@ -337,6 +362,16 @@ impl PreviewSession {
         self.withdraw()
     }
 }
+fn is_node_required(reason: &str) -> bool {
+    serde_json::from_str::<Value>(reason).is_ok_and(|value| {
+        value.get("_tag").and_then(Value::as_str) == Some("PreviewStreamNodeRequired")
+    })
+}
+
+fn valid_clipboard_request_id(id: &str) -> bool {
+    !id.is_empty() && id.encode_utf16().take(129).count() <= 128
+}
+
 pub fn preview_modifiers(alt: bool, ctrl: bool, meta: bool, shift: bool) -> u8 {
     (alt as u8) | ((ctrl as u8) << 1) | ((meta as u8) << 2) | ((shift as u8) << 3)
 }
@@ -527,6 +562,60 @@ mod tests {
         assert!(s.binary(1, vec![1]).is_empty());
         assert!(s.closed(1, 4401, "", 0).is_empty());
     }
+    #[test]
+    fn clipboard_replies_require_an_id_and_preserve_empty_selections() {
+        let mut s = session();
+        s.opened(1);
+        assert_eq!(
+            s.text(1, r#"{"type":"clipboard","text":"","requestId":"42"}"#),
+            [PreviewEvent::Clipboard {
+                request_id: "42".into(),
+                text: String::new()
+            }],
+        );
+        assert!(
+            s.text(1, r#"{"type":"clipboard","text":"legacy"}"#)
+                .is_empty()
+        );
+        for request_id in [String::new(), "🧪".repeat(65)] {
+            assert!(
+                s.text(
+                    1,
+                    &json!({"type":"clipboard","text":"ignored","requestId":request_id})
+                        .to_string()
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn node_required_close_stops_until_the_viewer_retries() {
+        let mut s = session();
+        s.opened(1);
+        assert!(
+            s.closed(
+                1,
+                1011,
+                r#"{"_tag":"PreviewStreamNodeRequired","message":"required"}"#,
+                0
+            )
+            .contains(&PreviewEvent::NodeRequired)
+        );
+        assert_eq!(
+            s.state,
+            PreviewState::Failed("Server browser requires Node.js".into())
+        );
+        assert!(s.reconnect().is_none());
+
+        let mut s = session();
+        s.opened(1);
+        assert!(
+            s.closed(1, 1011, r#"{"_tag":"OtherError"}"#, 0)
+                .contains(&PreviewEvent::RetryAt(500))
+        );
+    }
+
     #[test]
     fn terminal_close_codes_and_backoff_are_injected() {
         for (code, expected) in [

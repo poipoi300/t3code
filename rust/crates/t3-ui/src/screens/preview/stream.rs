@@ -7,9 +7,11 @@ use nsh_core::{
     KeyEvent, TouchEvent, TouchPhase,
     element::ImageSrc,
     keymap::{Keystroke, Modifiers},
-    platform::clipboard::{image_mime, image_size},
+    platform::{
+        Lifecycle,
+        clipboard::{image_mime, image_size},
+    },
     prelude::*,
-    time::{Instant, now},
 };
 use t3_client::{
     platform::Platform,
@@ -33,7 +35,6 @@ use crate::{
 
 const RESIZE_DELAY: Duration = Duration::from_millis(150);
 const SEND_DEADLINE: Duration = Duration::from_secs(5);
-const COPY_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_QUEUED_INPUTS: usize = 2048;
 const RELEASE_RESERVE: usize = 128;
 
@@ -162,6 +163,7 @@ enum StreamFailure {
     Unauthorized,
     Gone,
     HostSetup(PreviewStreamHostSetup),
+    NodeRequired,
 }
 
 fn controlled(control: &Option<PreviewControl>) -> bool {
@@ -194,6 +196,11 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
         pending_copy: stored(None),
         interaction: stored(0),
     };
+    effect(move || {
+        if lifecycle() != Lifecycle::Active {
+            clipboard.reset();
+        }
+    });
     let entry_ref = element_ref();
     let entry_focused = signal(false);
     let pending_probe = signal(None::<(f64, f64)>);
@@ -229,7 +236,6 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
         controls.control.set(None);
         let (send, receive) = mpsc::unbounded();
         clipboard.reset();
-        clipboard.pending_copy.replace(None);
         let _ = controls.sender.replace(Some(send));
         watch(async move {
             let result = service
@@ -270,7 +276,10 @@ pub(super) fn server_browser_surface<P: Platform + Clone + 'static>(
                                         frame.set(Some(SharedString::from(jpeg)));
                                     }
                                 }
-                                PreviewEvent::Clipboard(value) => clipboard.copy_out(value),
+                                PreviewEvent::Clipboard { request_id, text } => {
+                                    clipboard.copy_out(&request_id, text);
+                                }
+                                PreviewEvent::NodeRequired => failure = StreamFailure::NodeRequired,
                                 PreviewEvent::Unauthorized => failure = StreamFailure::Unauthorized,
                                 PreviewEvent::Gone => failure = StreamFailure::Gone,
                                 PreviewEvent::HostSetup(setup) => {
@@ -508,10 +517,13 @@ fn stream_failure(failure: StreamFailure, revision: Signal<u64>) -> impl IntoEle
         }
         StreamFailure::Gone => t("This browser tab is closed."),
         StreamFailure::HostSetup(setup) => t(host_setup_message(setup)),
+        StreamFailure::NodeRequired => {
+            t("Server browser automation requires Node.js and playwright-core.")
+        }
     };
     let retry = matches!(
         failure,
-        StreamFailure::Unavailable | StreamFailure::HostSetup(_)
+        StreamFailure::Unavailable | StreamFailure::HostSetup(_) | StreamFailure::NodeRequired
     );
     let command = match failure {
         StreamFailure::HostSetup(setup) => Some(setup.command),
@@ -572,7 +584,7 @@ fn browser_entry(
         .auto_correct(false)
         .paste_behavior(PasteBehavior::Report)
         .on_paste(move |event: &nsh_core::PasteEvent| {
-            if untracked(|| controls.controls_page()) && !event.text.is_empty() {
+            if clipboard.owns_active_page() && !event.text.is_empty() {
                 controls.send(BrowserInput::Text {
                     text: event.text.clone(),
                 });
@@ -642,6 +654,7 @@ fn entry_key(controls: StreamControls, key: &str, text: Option<&str>) {
                 None
             },
             modifiers: 0,
+            request_id: None,
         });
     }
 }
@@ -726,20 +739,15 @@ struct ClipboardShortcuts {
     controls: StreamControls,
     tasks: TaskOwner,
     paste_keys: Stored<[bool; 2]>,
-    pending_copy: Stored<Option<CopyRequest>>,
+    pending_copy: Stored<Option<String>>,
     interaction: Stored<u64>,
-}
-
-#[derive(Clone, Copy)]
-struct CopyRequest {
-    expires: Instant,
-    interaction: u64,
 }
 
 impl ClipboardShortcuts {
     fn invalidate(self) {
         self.interaction
             .with(|epoch| *epoch = epoch.wrapping_add(1));
+        self.pending_copy.replace(None);
     }
 
     fn reset(self) {
@@ -748,9 +756,7 @@ impl ClipboardShortcuts {
     }
 
     fn forward(self, action: KeyAction, event: &KeyEvent) {
-        if !untracked(|| self.controls.controls_page())
-            || matches!(event.key.as_str(), "Process" | "Unidentified")
-        {
+        if !self.owns_active_page() || matches!(event.key.as_str(), "Process" | "Unidentified") {
             return;
         }
         let key = event.key.as_str();
@@ -779,25 +785,15 @@ impl ClipboardShortcuts {
                 return;
             }
         }
-        let copying =
-            down && shortcut && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x"));
-        if copying {
-            // The protocol's clipboard replies have no request ID.
-            if self
-                .pending_copy
-                .get()
-                .is_some_and(|request| now() <= request.expires)
-            {
-                return;
-            }
-            if forward_key(self.controls, action, event) {
-                self.pending_copy.replace(Some(CopyRequest {
-                    expires: now() + COPY_DEADLINE,
-                    interaction: self.interaction.get(),
-                }));
-            }
-        } else {
-            forward_key(self.controls, action, event);
+        let copying = down
+            && matches!(mods(event.modifiers) & 0b0111, 2 | 4)
+            && (key.eq_ignore_ascii_case("c") || key.eq_ignore_ascii_case("x"));
+        if copying && event.repeat {
+            return;
+        }
+        let request_id = copying.then(|| self.interaction.get().to_string());
+        if forward_key(self.controls, action, event, request_id.clone()) && copying {
+            self.pending_copy.replace(request_id);
         }
     }
 
@@ -813,6 +809,7 @@ impl ClipboardShortcuts {
         self.tasks.spawn(async move {
             let text = clipboard.await;
             if !text.is_empty()
+                && untracked(lifecycle) == Lifecycle::Active
                 && self.interaction.get() == interaction
                 && self.controls.control.with_untracked(|current| {
                     controlled(current)
@@ -826,18 +823,33 @@ impl ClipboardShortcuts {
         });
     }
 
-    fn copy_out(self, text: String) {
-        if untracked(|| self.controls.controls_page())
-            && self.pending_copy.replace(None).is_some_and(|request| {
-                self.interaction.get() == request.interaction && now() <= request.expires
-            })
-        {
+    fn owns_active_page(self) -> bool {
+        untracked(|| lifecycle() == Lifecycle::Active && self.controls.controls_page())
+    }
+
+    fn copy_out(self, request_id: &str, text: String) {
+        if !self.owns_active_page() {
+            return;
+        }
+        let matched = self.pending_copy.with(|pending| {
+            if pending.as_deref() != Some(request_id) {
+                return false;
+            }
+            *pending = None;
+            true
+        });
+        if matched && !text.is_empty() {
             set_clipboard(text);
         }
     }
 }
 
-fn forward_key(controls: StreamControls, action: KeyAction, event: &KeyEvent) -> bool {
+fn forward_key(
+    controls: StreamControls,
+    action: KeyAction,
+    event: &KeyEvent,
+    request_id: Option<String>,
+) -> bool {
     let key = event.key.to_string();
     let text = if matches!(action, KeyAction::Down) && !event.modifiers.ctrl && !event.modifiers.cmd
     {
@@ -855,6 +867,7 @@ fn forward_key(controls: StreamControls, action: KeyAction, event: &KeyEvent) ->
         code: event.code.to_string(),
         text,
         modifiers: mods(event.modifiers),
+        request_id,
     })
 }
 

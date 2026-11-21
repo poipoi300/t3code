@@ -16,7 +16,7 @@ use crate::{
     platform::{Platform, PlatformError, SocketClose, WebSocket},
 };
 
-use super::{PreviewEvent, PreviewSession, browser::BrowserPreview};
+use super::{PreviewEvent, PreviewSession, browser::BrowserPreview, valid_clipboard_request_id};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserTransportError {
@@ -315,6 +315,8 @@ pub enum BrowserInput {
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
         modifiers: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 }
 
@@ -330,6 +332,11 @@ impl BrowserInput {
             Self::History { delta } => matches!(delta, -1 | 1),
             Self::Probe { x, y } | Self::Mouse { x, y, .. } => x.is_finite() && y.is_finite(),
             Self::Text { text } => !text.is_empty(),
+            Self::Key {
+                action,
+                request_id: Some(id),
+                ..
+            } => matches!(action, KeyAction::Down) && valid_clipboard_request_id(id),
             Self::Wheel {
                 x,
                 y,
