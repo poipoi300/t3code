@@ -4,10 +4,9 @@ use super::{
     js::{self, FirstEvent, Listeners, remove_listeners},
     timer,
 };
-use crate::socket_ingress::{Limits, browser::Ingress};
+use crate::socket_ingress::{self, BufferedReceiver, BufferedSender, Incoming, Item, Limits};
 use futures::{
-    FutureExt, StreamExt,
-    channel::mpsc,
+    FutureExt,
     future::{Either, select},
 };
 use js_sys::{Array, ArrayBuffer, JsString, Uint8Array};
@@ -21,21 +20,32 @@ const CLOSE_TIMEOUT_MS: u64 = 5_000;
 pub(crate) struct BrowserSocket {
     socket: web_sys::WebSocket,
     window: web_sys::Window,
-    incoming: Option<mpsc::UnboundedReceiver<Frame>>,
+    incoming: Option<BufferedReceiver>,
     events: Rc<RefCell<BrowserEvents>>,
     peer_close: Option<SocketClose>,
 }
 
 struct BrowserEvents {
-    ingress: Ingress,
+    ingress: Option<BufferedSender>,
     listeners: Listeners,
 }
 
 impl BrowserEvents {
-    fn finish(&mut self, terminal: Result<Option<SocketClose>, PlatformError>) {
-        self.ingress.finish(terminal);
+    fn finish(&mut self, terminal: Option<Item>) {
+        if let (Some(mut sender), Some(item)) = (self.ingress.take(), terminal) {
+            let _ = sender.send(item);
+        }
         remove_listeners(&mut self.listeners);
     }
+}
+
+fn close_status(event: &web_sys::Event) -> SocketClose {
+    event
+        .dyn_ref::<CloseEvent>()
+        .map_or(SocketClose::ABNORMAL, |event| SocketClose {
+            code: event.code(),
+            reason: event.reason(),
+        })
 }
 
 pub(crate) async fn connect(
@@ -58,13 +68,13 @@ pub(crate) async fn connect(
         })?;
     socket.set_binary_type(BinaryType::Arraybuffer);
     let limits = Limits::for_url(&url);
-    let (ingress, incoming) = Ingress::new(limits.queue);
+    let (ingress, incoming) = socket_ingress::buffered(limits.preview);
     let browser = BrowserSocket {
         socket,
         window,
         incoming: Some(incoming),
         events: Rc::new(RefCell::new(BrowserEvents {
-            ingress,
+            ingress: Some(ingress),
             listeners: Vec::new(),
         })),
         peer_close: None,
@@ -92,19 +102,23 @@ pub(crate) async fn connect(
             return;
         };
         let mut events = events.borrow_mut();
-        if let Err(error) = frame.and_then(|frame| events.ingress.send(frame)) {
-            events.finish(Err(error));
+        let result = frame.and_then(|frame| {
+            events
+                .ingress
+                .as_mut()
+                .ok_or(PlatformError::Closed)?
+                .send(Ok(Incoming::Frame(frame)))
+        });
+        if let Err(error) = result {
+            events.finish(Some(Err(error)));
             let _ = connection.close();
         }
     })?;
     browser.events.borrow_mut().listeners.push(message);
-    let events = Rc::downgrade(&browser.events);
     let connection = socket.clone();
     let error = js::listen(socket, "error", move |_| {
-        if let Some(events) = events.upgrade() {
-            events
-                .borrow_mut()
-                .finish(Err(PlatformError::Network("WebSocket error".into())));
+        // The browser dispatches close after error. Keep its listener to receive the code.
+        if connection.ready_state() < web_sys::WebSocket::CLOSING {
             let _ = connection.close();
         }
     })?;
@@ -112,11 +126,9 @@ pub(crate) async fn connect(
     let events = Rc::downgrade(&browser.events);
     let close = js::listen(socket, "close", move |event| {
         if let Some(events) = events.upgrade() {
-            let close = event.dyn_ref::<CloseEvent>().map(|event| SocketClose {
-                code: event.code(),
-                reason: event.reason(),
-            });
-            events.borrow_mut().finish(Ok(close));
+            events
+                .borrow_mut()
+                .finish(Some(Ok(Incoming::Close(close_status(&event)))));
         }
     })?;
     browser.events.borrow_mut().listeners.push(close);
@@ -127,10 +139,10 @@ pub(crate) async fn connect(
             (
                 "close",
                 Box::new(|event: &web_sys::Event| {
-                    let code = event.dyn_ref::<CloseEvent>().map_or(0, CloseEvent::code);
-                    Err(PlatformError::Network(format!(
-                        "WebSocket closed during handshake ({code})"
-                    )))
+                    Err(PlatformError::SocketHandshakeClosed {
+                        close: close_status(event),
+                        http_status: None,
+                    })
                 }),
             ),
         ],
@@ -165,17 +177,16 @@ impl WebSocket for BrowserSocket {
             let Some(incoming) = self.incoming.as_mut() else {
                 return Ok(None);
             };
-            if let Some(frame) = incoming.next().await {
-                return Ok(Some(frame));
+            match incoming.next().await {
+                Some(Ok(Incoming::Frame(frame))) => Ok(Some(frame)),
+                item => {
+                    self.incoming = None;
+                    if let Some(Incoming::Close(close)) = item.transpose()? {
+                        self.peer_close = Some(close);
+                    }
+                    Ok(None)
+                }
             }
-            self.incoming = None;
-            self.peer_close = self
-                .events
-                .borrow_mut()
-                .ingress
-                .terminal()
-                .unwrap_or(Ok(None))?;
-            Ok(None)
         }
         .boxed_local()
     }
@@ -183,7 +194,7 @@ impl WebSocket for BrowserSocket {
     fn close(&mut self) -> HostFuture<'_, ()> {
         async move {
             self.incoming = None;
-            self.events.borrow_mut().finish(Ok(None));
+            self.events.borrow_mut().finish(None);
             if self.socket.ready_state() >= web_sys::WebSocket::CLOSING {
                 return Ok(());
             }
@@ -203,7 +214,7 @@ impl WebSocket for BrowserSocket {
 
 impl Drop for BrowserSocket {
     fn drop(&mut self) {
-        self.events.borrow_mut().finish(Ok(None));
+        self.events.borrow_mut().finish(None);
         if matches!(
             self.socket.ready_state(),
             web_sys::WebSocket::CONNECTING | web_sys::WebSocket::OPEN
@@ -230,10 +241,16 @@ mod tests {
                 static CLOSED = 3;
                 readyState = 0;
                 listeners = new Set();
-                constructor() {
+                constructor(url) {
                     super();
                     last = this;
                     queueMicrotask(() => {
+                        if (url.endsWith('/refuse')) {
+                            this.readyState = 3;
+                            this.dispatchEvent(new Event('error'));
+                            this.dispatchEvent(new CloseEvent('close', {code: 1006}));
+                            return;
+                        }
                         this.readyState = 1;
                         this.dispatchEvent(new Event('open'));
                     });
@@ -316,11 +333,27 @@ mod tests {
         let mut socket = test_socket(&window).await;
         end_socket("error", 0, "");
         end_socket("close", 1006, "");
-        assert!(matches!(
-            socket.receive().now_or_never(),
-            Some(Err(PlatformError::Network(_)))
-        ));
         assert_eq!(socket.receive().now_or_never(), Some(Ok(None)));
+        assert_eq!(
+            socket.close_info(),
+            Some(&SocketClose {
+                code: 1006,
+                reason: String::new()
+            })
+        );
+        assert_eq!(listener_count(), 0);
+        let failure = connect(
+            window.clone(),
+            SocketRequest {
+                url: "wss://host/refuse".into(),
+                protocols: vec![],
+            },
+        )
+        .await;
+        assert!(
+            matches!(failure, Err(PlatformError::SocketHandshakeClosed { close, http_status: None })
+            if close.code == 1006 && close.reason.is_empty())
+        );
         assert_eq!(listener_count(), 0);
 
         let mut socket = test_socket(&window).await;
@@ -343,6 +376,40 @@ mod tests {
             assert_eq!(socket.receive().now_or_never(), Some(Ok(None)));
             assert_eq!(listener_count(), 0);
         }
+    }
+
+    #[wasm_bindgen_test]
+    async fn preview_control_burst_keeps_stream_and_latest_image() {
+        install_socket();
+        let _restore = RestoreSocket;
+        let mut socket = test_socket(&js_sys::global().unchecked_into()).await;
+        for i in 1..=64 {
+            send_text("x", i);
+        }
+        for i in 1..=64 {
+            assert_eq!(
+                socket.receive().now_or_never(),
+                Some(Ok(Some(Frame::Text("x".repeat(i)))))
+            );
+        }
+        assert_eq!(socket.receive().now_or_never(), None);
+        send_binary(1);
+        send_text("between", 1);
+        send_binary(2);
+        assert_eq!(
+            socket.receive().now_or_never(),
+            Some(Ok(Some(Frame::Text("between".into()))))
+        );
+        assert_eq!(
+            socket.receive().now_or_never(),
+            Some(Ok(Some(Frame::Binary(vec![0; 2]))))
+        );
+        assert_eq!(socket.receive().now_or_never(), None);
+        send_text("live", 1);
+        assert_eq!(
+            socket.receive().now_or_never(),
+            Some(Ok(Some(Frame::Text("live".into()))))
+        );
     }
 
     async fn test_socket(window: &web_sys::Window) -> BrowserSocket {

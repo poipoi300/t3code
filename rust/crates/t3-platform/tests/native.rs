@@ -657,7 +657,12 @@ async fn a_server_choosing_an_unoffered_protocol_is_rejected() {
         server
     );
     match result {
-        Err(PlatformError::Network(message)) => assert!(!message.contains("secret")),
+        Err(PlatformError::SocketHandshakeClosed {
+            close,
+            http_status: None,
+        }) => {
+            assert_eq!(close, SocketClose::ABNORMAL);
+        }
         Err(other) => panic!("unexpected error {other:?}"),
         Ok(_) => panic!("unoffered protocol accepted"),
     }
@@ -686,13 +691,52 @@ async fn a_rejected_upgrade_does_not_leak_the_ticket_url() {
     };
     let (result, ()) = tokio::join!(platform.websocket(socket_request(&address, &[])), server);
     match result {
-        Err(PlatformError::Network(message)) => {
-            assert!(message.contains("401"));
-            assert!(!message.contains("secret"));
+        Err(error @ PlatformError::SocketHandshakeClosed { .. }) => {
+            assert_eq!(
+                error,
+                PlatformError::SocketHandshakeClosed {
+                    close: SocketClose {
+                        code: 1006,
+                        reason: String::new()
+                    },
+                    http_status: Some(401),
+                }
+            );
+            assert!(!format!("{error:?} {error}").contains("secret"));
         }
         Err(other) => panic!("unexpected error {other:?}"),
         Ok(_) => panic!("upgrade should fail"),
     }
+}
+
+#[tokio::test]
+async fn tcp_eof_without_a_close_frame_reports_abnormal_closure() {
+    let (platform, _dir, _) = platform().await;
+    let (listener, address) = bind().await;
+    let server = async {
+        let mut socket = accept(&listener, None).await;
+        socket.send(Message::text("last")).await.unwrap();
+        drop(socket);
+    };
+    let client = async {
+        let mut socket = platform
+            .websocket(socket_request(&address, &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.receive().await.unwrap(),
+            Some(t3_rpc::Frame::Text("last".into()))
+        );
+        assert_eq!(socket.receive().await.unwrap(), None);
+        assert_eq!(
+            socket.close_info(),
+            Some(&SocketClose {
+                code: 1006,
+                reason: String::new()
+            })
+        );
+    };
+    tokio::join!(client, server);
 }
 
 #[tokio::test]
@@ -1724,6 +1768,7 @@ async fn https_trusts_a_deployment_ca_only_when_it_is_configured() {
 async fn preview_socket_ingress_rejects_oversized_control_messages() {
     let (platform, _dir, _) = platform().await;
     let (listener, address) = bind().await;
+    let (observed_limit, observed) = oneshot::channel();
     let server = async {
         let mut socket = accept(&listener, None).await;
         socket
@@ -1734,6 +1779,13 @@ async fn preview_socket_ingress_rejects_oversized_control_messages() {
             .send(Message::text("é".repeat(128 * 1024 + 1)))
             .await
             .unwrap();
+        let close = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("limit close must reach the peer");
+        assert!(
+            matches!(close, Some(Ok(Message::Close(Some(frame)))) if frame.code == CloseCode::Size)
+        );
+        observed_limit.send(()).unwrap();
     };
     let client = async {
         let mut request = socket_request(&address, &[]);
@@ -1748,6 +1800,8 @@ async fn preview_socket_ingress_rejects_oversized_control_messages() {
             Err(PlatformError::TooLarge)
         ));
         assert_eq!(socket.receive().await.unwrap(), None);
+        observed.await.unwrap();
+        socket.close().await.unwrap();
     };
     tokio::join!(client, server);
 }

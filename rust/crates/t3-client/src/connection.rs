@@ -1164,8 +1164,8 @@ fn map_connection_platform_error(error: crate::platform::PlatformError) -> Conne
         E::Unsupported(_) | E::RandomUnavailable => FailureKind::Unsupported,
         E::Denied(_) => FailureKind::Permission,
         E::Storage(_) | E::InvalidData(_) | E::TooLarge => FailureKind::Configuration,
-        E::Network(_) => FailureKind::Network,
-        E::Closed | E::Cancelled => FailureKind::Transport,
+        E::Network(_) | E::SocketHandshakeClosed { .. } => FailureKind::Network,
+        E::Closed | E::Cancelled | E::SocketBacklogOverflow => FailureKind::Transport,
     };
     ConnectionFailure::new(
         kind,
@@ -1174,8 +1174,10 @@ fn map_connection_platform_error(error: crate::platform::PlatformError) -> Conne
             E::RandomUnavailable => "This client has no secure random source.",
             E::Denied(_) => "Permission to use this connection capability was denied.",
             E::Storage(_) => "Could not access saved connection data.",
-            E::Network(_) => "Could not reach the environment endpoint.",
-            E::Closed => "The connection closed.",
+            E::Network(_) | E::SocketHandshakeClosed { .. } => {
+                "Could not reach the environment endpoint."
+            }
+            E::Closed | E::SocketBacklogOverflow => "The connection closed.",
             E::Cancelled => "The connection operation was cancelled.",
             E::InvalidData(_) | E::TooLarge => "The connection capability returned invalid data.",
         },

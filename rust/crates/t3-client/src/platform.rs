@@ -14,6 +14,14 @@ pub enum PlatformError {
     Storage(String),
     #[error("host network failed")]
     Network(String),
+    #[error("WebSocket closed during handshake")]
+    SocketHandshakeClosed {
+        close: SocketClose,
+        /// Available when the native peer rejected the upgrade with HTTP.
+        http_status: Option<u16>,
+    },
+    #[error("WebSocket receive backlog exceeds byte limit")]
+    SocketBacklogOverflow,
     #[error("resource closed")]
     Closed,
     #[error("operation cancelled")]
@@ -34,6 +42,8 @@ impl std::fmt::Debug for PlatformError {
             Self::Storage(_) => "Storage([redacted])",
             Self::Network(_) => "Network([redacted])",
             Self::InvalidData(_) => "InvalidData([redacted])",
+            Self::SocketHandshakeClosed { .. } => "SocketHandshakeClosed([redacted])",
+            Self::SocketBacklogOverflow => "SocketBacklogOverflow",
             Self::Closed => "Closed",
             Self::Cancelled => "Cancelled",
             Self::TooLarge => "TooLarge",
@@ -182,6 +192,14 @@ pub struct SocketRequest {
 pub struct SocketClose {
     pub code: u16,
     pub reason: String,
+}
+
+impl SocketClose {
+    /// A connection ended without a received WebSocket close frame.
+    pub const ABNORMAL: Self = Self {
+        code: 1006,
+        reason: String::new(),
+    };
 }
 
 pub trait WebSocket {

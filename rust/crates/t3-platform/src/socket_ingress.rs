@@ -1,26 +1,32 @@
-use t3_client::platform::PlatformError;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, PoisonError},
+};
+
+use futures::{StreamExt, channel::mpsc};
+use t3_client::platform::{PlatformError, SocketClose};
+use t3_rpc::Frame;
 
 pub(crate) struct Limits {
     pub(crate) text: usize,
     pub(crate) binary: usize,
-    pub(crate) queue: Option<usize>,
+    pub(crate) preview: bool,
 }
 
 impl Limits {
     pub(crate) fn for_url(url: &url::Url) -> Self {
-        // Preview receives small control events and JPEGs, paced by the viewer ACK.
         if url.path() == "/api/preview-stream/ws" {
             Self {
                 text: 256 * 1024,
                 binary: 12 * 1024 * 1024,
-                queue: Some(8),
+                preview: true,
             }
         } else {
             let rpc = t3_rpc::transport::MAX_INCOMING_FRAME_BYTES;
             Self {
                 text: rpc,
                 binary: rpc,
-                queue: None,
+                preview: false,
             }
         }
     }
@@ -34,102 +40,178 @@ impl Limits {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
-pub(crate) mod browser {
-    use futures::channel::mpsc;
-    use t3_client::platform::{PlatformError, SocketClose};
-    use t3_rpc::Frame;
+pub(crate) enum Incoming {
+    Frame(Frame),
+    Close(SocketClose),
+}
 
-    pub(crate) struct Ingress {
-        frames: Option<mpsc::UnboundedSender<Frame>>,
-        queue: Option<usize>,
-        terminal: Option<Result<Option<SocketClose>, PlatformError>>,
+pub(crate) type Item = Result<Incoming, PlatformError>;
+
+const MAX_PREVIEW_CONTROL_BACKLOG_BYTES: usize = 64 * 1024 * 1024;
+
+fn control_bytes(item: &Item) -> usize {
+    match item {
+        Ok(Incoming::Frame(Frame::Text(text))) => size_of::<Item>() + text.capacity(),
+        _ => 0,
+    }
+}
+
+struct Pending {
+    messages: VecDeque<Item>,
+    // The count positions the newest image after the controls that preceded it.
+    image: Option<(usize, Vec<u8>)>,
+    preview_control_bytes: Option<usize>,
+}
+
+impl Pending {
+    fn push(&mut self, item: Item) -> Result<(), PlatformError> {
+        if let Some(bytes) = &mut self.preview_control_bytes {
+            if let Ok(Incoming::Frame(Frame::Binary(image))) = item {
+                self.image = Some((self.messages.len(), image));
+                return Ok(());
+            }
+            let total = *bytes + control_bytes(&item);
+            if total > MAX_PREVIEW_CONTROL_BACKLOG_BYTES {
+                return Err(PlatformError::SocketBacklogOverflow);
+            }
+            *bytes = total;
+        }
+        self.messages.push_back(item);
+        Ok(())
     }
 
-    impl Ingress {
-        pub(crate) fn new(queue: Option<usize>) -> (Self, mpsc::UnboundedReceiver<Frame>) {
-            let (frames, incoming) = mpsc::unbounded();
-            (
-                Self {
-                    frames: Some(frames),
-                    queue,
-                    terminal: None,
-                },
-                incoming,
-            )
-        }
-
-        pub(crate) fn send(&self, frame: Frame) -> Result<(), PlatformError> {
-            let sender = self.frames.as_ref().ok_or(PlatformError::Closed)?;
-            if self.queue.is_some_and(|max| sender.len() >= max) {
-                return Err(PlatformError::TooLarge);
+    fn pop(&mut self) -> Option<Item> {
+        if let Some((before, _)) = &mut self.image {
+            if *before == 0 {
+                return self
+                    .image
+                    .take()
+                    .map(|(_, bytes)| Ok(Incoming::Frame(Frame::Binary(bytes))));
             }
-            sender
-                .unbounded_send(frame)
-                .map_err(|_| PlatformError::Closed)
+            *before -= 1;
         }
-
-        pub(crate) fn finish(&mut self, terminal: Result<Option<SocketClose>, PlatformError>) {
-            if self.frames.take().is_some() {
-                self.terminal = Some(terminal);
-            }
+        let item = self.messages.pop_front()?;
+        if let Some(bytes) = &mut self.preview_control_bytes {
+            *bytes -= control_bytes(&item);
         }
+        Some(item)
+    }
+}
 
-        pub(crate) fn terminal(&mut self) -> Option<Result<Option<SocketClose>, PlatformError>> {
-            self.terminal.take()
+pub(crate) struct BufferedSender {
+    pending: Arc<Mutex<Pending>>,
+    ready: mpsc::Sender<()>,
+}
+
+pub(crate) struct BufferedReceiver {
+    pending: Arc<Mutex<Pending>>,
+    ready: mpsc::Receiver<()>,
+}
+
+pub(crate) fn buffered(preview: bool) -> (BufferedSender, BufferedReceiver) {
+    let pending = Arc::new(Mutex::new(Pending {
+        messages: VecDeque::new(),
+        image: None,
+        preview_control_bytes: preview.then_some(0),
+    }));
+    let (ready, next) = mpsc::channel(0);
+    (
+        BufferedSender {
+            pending: pending.clone(),
+            ready,
+        },
+        BufferedReceiver {
+            pending,
+            ready: next,
+        },
+    )
+}
+
+impl BufferedSender {
+    pub(crate) fn send(&mut self, item: Item) -> Result<(), PlatformError> {
+        if self.ready.is_closed() {
+            return Err(PlatformError::Closed);
+        }
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(item)?;
+        // One outstanding notification is enough. The receiver checks the queue before awaiting.
+        match self.ready.try_send(()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_full() => Ok(()),
+            Err(_) => Err(PlatformError::Closed),
         }
     }
+}
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use futures::{FutureExt, StreamExt};
-
-        #[test]
-        fn terminal_closes_the_stream_and_preserves_only_the_first_outcome() {
-            let peer = SocketClose {
-                code: 4503,
-                reason: "sandbox".into(),
-            };
-            for ending in [
-                Ok(Some(peer)),
-                Err(PlatformError::Network("socket error".into())),
-                Ok(None),
-            ] {
-                let (mut ingress, mut stream) = Ingress::new(Some(4));
-                ingress.send(Frame::Text("last frame".into())).unwrap();
-                ingress.finish(ending.clone());
-                ingress.finish(Err(PlatformError::TooLarge));
-                assert_eq!(
-                    stream.next().now_or_never(),
-                    Some(Some(Frame::Text("last frame".into())))
-                );
-                assert_eq!(stream.next().now_or_never(), Some(None));
-                assert_eq!(ingress.terminal(), Some(ending));
-                assert_eq!(ingress.terminal(), None);
-                assert_eq!(
-                    ingress.send(Frame::Text("late".into())),
-                    Err(PlatformError::Closed)
-                );
+impl BufferedReceiver {
+    pub(crate) async fn next(&mut self) -> Option<Item> {
+        loop {
+            if let Some(item) = self
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop()
+            {
+                return Some(item);
             }
+            self.ready.next().await?;
         }
+    }
+}
 
-        #[test]
-        fn preview_ingress_caps_message_sizes_and_queue() {
-            let url = url::Url::parse("wss://host/api/preview-stream/ws?wsTicket=unused").unwrap();
-            let limits = super::super::Limits::for_url(&url);
-            for (binary, max) in [(false, 256 * 1024), (true, 12 * 1024 * 1024)] {
-                assert_eq!(limits.check(max, binary), Ok(()));
-                assert_eq!(limits.check(max + 1, binary), Err(PlatformError::TooLarge));
-            }
-            let (ingress, _stream) = Ingress::new(limits.queue);
-            for _ in 0..8 {
-                ingress.send(Frame::Binary(vec![0])).unwrap();
-            }
-            assert_eq!(
-                ingress.send(Frame::Binary(vec![0])),
-                Err(PlatformError::TooLarge)
-            );
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_control_backlog_caps_aggregate_bytes() {
+        use futures::FutureExt;
+        let (mut sender, mut receiver) = buffered(true);
+        let control = || Ok(Incoming::Frame(Frame::Text("x".repeat(256 * 1024))));
+        for _ in 0..255 {
+            assert_eq!(sender.send(control()), Ok(()));
         }
+        assert_eq!(
+            sender.send(control()),
+            Err(PlatformError::SocketBacklogOverflow)
+        );
+        assert!(matches!(
+            receiver.next().now_or_never(),
+            Some(Some(Ok(Incoming::Frame(Frame::Text(_)))))
+        ));
+        assert_eq!(sender.send(control()), Ok(()));
+    }
+
+    #[test]
+    fn preview_buffer_keeps_controls_and_newest_image_before_terminal() {
+        use futures::FutureExt;
+        let (mut sender, mut receiver) = buffered(true);
+        sender
+            .send(Ok(Incoming::Frame(Frame::Text("before".into()))))
+            .unwrap();
+        sender
+            .send(Ok(Incoming::Frame(Frame::Binary(vec![1]))))
+            .unwrap();
+        sender
+            .send(Ok(Incoming::Frame(Frame::Text("between".into()))))
+            .unwrap();
+        sender
+            .send(Ok(Incoming::Frame(Frame::Binary(vec![2]))))
+            .unwrap();
+        sender
+            .send(Ok(Incoming::Close(SocketClose::ABNORMAL)))
+            .unwrap();
+        drop(sender);
+        for expected in ["before", "between"] {
+            assert!(matches!(receiver.next().now_or_never(),
+                Some(Some(Ok(Incoming::Frame(Frame::Text(text))))) if text == expected));
+        }
+        assert!(matches!(receiver.next().now_or_never(),
+            Some(Some(Ok(Incoming::Frame(Frame::Binary(bytes))))) if bytes == [2]));
+        assert!(matches!(receiver.next().now_or_never(),
+            Some(Some(Ok(Incoming::Close(close)))) if close == SocketClose::ABNORMAL));
+        assert!(matches!(receiver.next().now_or_never(), Some(None)));
     }
 }
