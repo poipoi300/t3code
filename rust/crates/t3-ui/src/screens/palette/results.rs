@@ -193,10 +193,13 @@ pub fn command_palette_virtualized_results(
             let rows = virtual_list(
                 move || results.with(|results| results.rows.len()),
                 move |at| {
-                    let row = computed(move || {
-                        results.with(|results| results.rows.get(at.index()).cloned())
-                    });
-                    render_row(state, row, options.keys)
+                    let project =
+                        move || results.with(|results| results.rows.get(at.index()).cloned());
+                    // Publish the recycled cell's projection before its row bindings read it.
+                    // Pulling the list from a binding can retire that very binding's row.
+                    let row = signal(untracked(project));
+                    effect(move || row.set(project()));
+                    render_row(state, computed(move || row.get()), options.keys)
                 },
             )
             .keys(move || {
@@ -241,6 +244,15 @@ fn render_row(state: CommandState, row: Memo<Option<Row>>, keys: Keybindings) ->
             _ => None,
         })
     });
+    let option = computed(move || {
+        item.with(|item| {
+            item.as_ref().map(|item| {
+                let mut option = command::Item::new(item.value.clone(), title(item));
+                option.disabled = item.disabled;
+                option
+            })
+        })
+    });
     dynamic(move || {
         let kind = kind.get();
         untracked(|| match kind {
@@ -263,7 +275,7 @@ fn render_row(state: CommandState, row: Memo<Option<Row>>, keys: Keybindings) ->
                 )
                 .into_element(),
             1 => disabled_command_palette_result_row(item).into_element(),
-            2 => command_palette_result_row(state, item, keys).into_element(),
+            2 => command_palette_result_row(state, item, option, keys).into_element(),
             _ => view().into_element(),
         })
     })
@@ -390,17 +402,9 @@ fn disabled_command_palette_result_row(item: Memo<Option<Shared<Item>>>) -> impl
 fn command_palette_result_row(
     state: CommandState,
     item: Memo<Option<Shared<Item>>>,
+    option: Memo<Option<command::Item>>,
     keys: Keybindings,
 ) -> impl IntoElement {
-    let option = computed(move || {
-        item.with(|item| {
-            item.as_ref().map(|item| {
-                let mut option = command::Item::new(item.value.clone(), title(item));
-                option.disabled = item.disabled;
-                option
-            })
-        })
-    });
     command::command_item(
         state,
         option,

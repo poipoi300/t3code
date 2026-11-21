@@ -5,6 +5,8 @@
 //! (adapted below, started by `client.rs`); `demo::DemoBackend` drives the same store behind the
 //! explicit demo switch (`host.rs`).
 
+use std::rc::Rc;
+
 use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use futures::{FutureExt, StreamExt};
@@ -14,6 +16,8 @@ use t3_client::platform::Platform;
 use t3_client::types::{EnvironmentId, ThreadKey};
 
 pub use t3_client::composition::{EnvironmentEntry, SendError};
+
+use super::services::navigation::PaletteClient;
 
 /// The client the UI runs: the composition root over this target's host platform (the one type
 /// that differs by target). Service bindings in `runtime/services/` build their handles from it.
@@ -49,6 +53,10 @@ pub trait Backend {
         key: &ThreadKey,
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>>;
+
+    fn palette(&self) -> Option<Rc<dyn PaletteClient>> {
+        None
+    }
 
     /// The client itself, for the service bindings in `runtime/services/` (ui-package-addendum.md,
     /// "Client services"). None for the demo and an unavailable host.
@@ -88,6 +96,10 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
         text: String,
     ) -> LocalBoxFuture<'static, Result<(), SendError>> {
         ClientRuntime::send_message(self, key, text)
+    }
+
+    fn palette(&self) -> Option<Rc<dyn PaletteClient>> {
+        Some(Rc::new(ClientRuntime::palette(self)))
     }
 
     fn client(&self) -> Option<HostClient> {

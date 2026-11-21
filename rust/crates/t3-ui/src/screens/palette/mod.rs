@@ -7,7 +7,9 @@ pub mod results;
 
 use std::{collections::BTreeMap, rc::Rc};
 
+use futures::StreamExt;
 use nsh_core::{keymap::When, prelude::*};
+use t3_client::navigation::palette_service::Action;
 use t3_client::view_logic::shell::palette::{
     self as client, Group, MountState, SearchAction, SearchState, View,
 };
@@ -17,9 +19,18 @@ pub use t3_client::view_logic::shell::palette::{
 use t3_client::view_logic::shell::shortcuts::DispatchEvent;
 
 use crate::i18n::{Text, t};
+use crate::keys::bindings::Keybindings;
+use crate::runtime::tasks::{TaskOwner, watch};
+use crate::runtime::{Rt, Shared, services::navigation::PaletteClient};
+use crate::screens::panel::{Action as PanelAction, workspace_panel_host};
+use crate::state::{
+    nav::Navigator,
+    url::{Location, UrlRequest, UrlState},
+};
 use crate::theme::{cn, palette, tw};
 use crate::ui::command::{self, CommandOptions, CommandState, InputOptions};
 use crate::ui::icon::{Icon, icon};
+use crate::ui::toast::{ToastOptions, Variant, toast_manager};
 
 #[derive(Clone, Default)]
 struct Presence(usize);
@@ -144,6 +155,26 @@ pub fn is_command_palette_open() -> bool {
 
 /// Mount only around the workspace shell, never around standalone/pairing routes.
 pub fn command_palette(children: impl IntoElement) -> impl IntoElement {
+    if let Some(client) = use_context::<Rt>().and_then(|runtime| runtime.backend().palette()) {
+        let nav = crate::state::nav::navigator();
+        client.set_route(nav.top());
+        let route_client = client.clone();
+        effect(move || route_client.set_route(nav.top()));
+        let host = workspace_panel_host();
+        provide_context(files::PaletteSearchRuntime {
+            client: client.clone(),
+            open_file: Rc::new(move |target, path, line| {
+                host.apply(
+                    &target.thread,
+                    PanelAction::OpenFile {
+                        path: path.to_owned(),
+                        line: line.map(|line| line as f64),
+                    },
+                );
+            }),
+        });
+        provide_context(client);
+    }
     let palette = palette_controller();
     palette.store.update(MountState::mount);
     cleanup(move || {
@@ -324,16 +355,135 @@ fn open_intent_view(intent: Option<&Intent>) -> Option<View> {
 
 fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
     let initial = palette.state();
-    // SH-PALETTE-2 supplies the client-ranked catalogue and execution; no UI-invented commands.
+    let service = use_context::<Rc<dyn PaletteClient>>();
+    let keys = use_context::<Keybindings>();
+    let nav = use_context::<Navigator>();
+    let urls = use_context::<UrlState>();
+    let tasks = TaskOwner::here();
+    let toast = service.as_ref().map(|_| toast_manager());
+    let groups = signal(Shared(Rc::new(Vec::<Group>::new())));
+    let results = computed(move || results::Results::new(groups.get()));
+    let session_slot = stored(None::<PaletteSession>);
+    let operation_pending = signal(false);
+    let activation = service.clone();
     let state = CommandState::new(
-        Vec::new,
+        move || results.with(results::Results::command_items),
         CommandOptions {
             filter: false,
             ..Default::default()
         },
-        |_| {},
+        move |value| {
+            let (Some(service), Some(nav), Some(session)) = (&activation, nav, session_slot.get())
+            else {
+                return;
+            };
+            if operation_pending.get_untracked() || !palette.state().open {
+                return;
+            }
+            let item = groups.with_untracked(|groups| {
+                groups
+                    .iter()
+                    .flat_map(|group| &group.items)
+                    .find(|item| item.value == value && !item.disabled)
+                    .cloned()
+            });
+            let Some(item) = item else { return };
+            if let Some(groups) = item.groups {
+                session.apply(SearchAction::Push(View {
+                    groups,
+                    initial_query: None,
+                }));
+                return;
+            }
+            let operation = service.activate(item);
+            let origin = nav.top();
+            operation_pending.set(true);
+            let toast = toast.clone();
+            tasks.spawn(async move {
+                let result = operation.await;
+                operation_pending.set(false);
+                if !palette.state().open || nav.top() != origin {
+                    return;
+                }
+                match result {
+                    Ok(Action::Files) => {
+                        palette.open_child_search(OverlayMode::Files, session.return_context())
+                    }
+                    Ok(Action::Content) => {
+                        palette.open_child_search(OverlayMode::Content, session.return_context())
+                    }
+                    Ok(Action::Navigate(route)) => {
+                        palette.close();
+                        nav.open(route);
+                    }
+                    Ok(Action::NavigateAddress(address)) => {
+                        palette.close();
+                        if let Some(urls) = urls.filter(|urls| urls.available.get_untracked()) {
+                            urls.request(UrlRequest::Push(address));
+                        } else {
+                            nav.open(Location::parse(&address).route);
+                        }
+                    }
+                    Err(t3_client::ClientError::Cancelled) => {}
+                    Err(error) => {
+                        if let Some(toast) = toast {
+                            toast.add(ToastOptions {
+                                variant: Variant::Error,
+                                title: "Command failed".into(),
+                                description: Some(Text::client_key(error.to_string())),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    Ok(Action::NewProject | Action::Host { .. }) => {}
+                }
+            });
+        },
     );
+    let initial_intent = initial.intent.clone();
     let session = PaletteSession::new(state.query, initial.intent, initial.restored_search);
+    session_slot.replace(Some(session));
+    if let Some(service) = service {
+        if matches!(initial_intent, Some(Intent::NewThreadIn))
+            && let Some(view) = service
+                .catalogue()
+                .groups
+                .iter()
+                .flat_map(|group| &group.items)
+                .find(|item| item.value == "action:new-thread-in")
+                .and_then(|item| item.groups.clone())
+        {
+            session.apply(SearchAction::Back);
+            session.apply(SearchAction::Push(View {
+                groups: view,
+                initial_query: None,
+            }));
+        }
+        effect(move || {
+            let query = state.query.get();
+            let active = session.current_view().map(|view| view.groups);
+            let events = if let Some(active) = active {
+                let source = service.clone();
+                service
+                    .changes()
+                    .map(move |_| Ok(Rc::new(source.filter(&query, Some(&active)))))
+                    .boxed_local()
+            } else {
+                service.results(query)
+            };
+            let mut events = events;
+            let task = watch(async move {
+                while let Some(updated) = events.next().await {
+                    if let Ok(updated) = updated {
+                        groups.set(Shared(Rc::new(visible_groups(Rc::unwrap_or_clone(
+                            updated,
+                        )))));
+                    }
+                }
+            });
+            cleanup(move || task.cancel());
+        });
+    }
     // View depth changes remount the input, as CommandPalette.tsx's keyed content does.
     let depth = computed(move || {
         session.revision.get();
@@ -388,10 +538,41 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                     footer_action_label: Some("Select".into()),
                     ..Default::default()
                 },
-                view(),
+                keys.map(|keys| {
+                    results::command_palette_virtualized_results(
+                        state,
+                        results,
+                        results::ResultsOptions {
+                            keys,
+                            empty_state_message: None,
+                            actions_only: computed(move || {
+                                state.query.with(|query| query.starts_with('>'))
+                            }),
+                        },
+                    )
+                    .into_element()
+                })
+                .unwrap_or_else(|| view().into_element()),
             )
         }))
     })
+}
+
+fn visible_groups(mut groups: Vec<Group>) -> Vec<Group> {
+    // These client entries currently lead to unbuilt screens or a host command.
+    for group in &mut groups {
+        group.items.retain(|item| {
+            !matches!(
+                item.value.as_str(),
+                "action:usage"
+                    | "action:pull-requests"
+                    | "action:new-project"
+                    | "action:project-settings"
+            )
+        });
+    }
+    groups.retain(|group| !group.items.is_empty());
+    groups
 }
 
 #[derive(Clone, Copy, Default)]

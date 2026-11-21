@@ -301,3 +301,208 @@ fn content_search_keeps_file_groups_and_opens_the_matching_line() {
         assert!(app.screen().shows("opens:1"));
     }
 }
+
+#[component]
+fn ParityWorkspace() -> impl IntoElement {
+    use futures::FutureExt;
+    use nsh_core::keymap::When;
+    use serde_json::json;
+    use t3_client::{ClientStore, composition::ClientRuntime, testing::environment::*};
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::{
+        app::{app_tree, provide_client_services},
+        runtime::{Rt, host::Choice},
+        screens::panel::{SurfaceContent, workspace_panel_host},
+        state::nav::{Route, navigator},
+    };
+
+    let owner = Owner::current();
+    let spawner: t3_client::composition::Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("remote", spawner.clone());
+    server.set_permissions(&[
+        "orchestration:read",
+        "orchestration:operate",
+        "filesystem:read",
+    ]);
+    server.set_shell(shell(&[
+        ("thread", "First parity thread"),
+        ("second", "Second parity thread"),
+    ]));
+    server.set_thread(
+        "thread",
+        projection("thread", "First parity thread", json!([]), json!([])),
+    );
+    server.set_thread(
+        "second",
+        projection("second", "Second parity thread", json!([]), json!([])),
+    );
+    server.reply(
+        "projects.searchEntries",
+        Ok(json!({
+            "entries": [{"path": "src/PickerParity.rs", "kind": "file"}], "truncated": false
+        })),
+    );
+    server.reply(
+        "projects.searchContents",
+        Ok(json!({
+            "matches": [{"path": "src/ContentParity.rs", "lineNumber": 17,
+                         "lineContent": "let parity_needle = 1;", "matchRanges": []}],
+            "truncated": false
+        })),
+    );
+    let platform = server.platform();
+    let clock = platform.fake.clone();
+    on_key_with(
+        "f10",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| clock.advance(120),
+    );
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        platform,
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    let pairing = client.pair(server.pairing());
+    spawner(
+        async move {
+            pairing.await.expect("pair fixture environment");
+        }
+        .boxed_local(),
+    );
+    let key = target().thread;
+    let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
+    let probe = stored(None);
+    let app = app_tree(runtime, Route::Thread(key.clone()), move || {
+        provide_client_services(&client);
+        let panel = workspace_panel_host().panel(key);
+        let nav = navigator();
+        let status = computed(move || {
+            let Route::Thread(key) = nav.top() else {
+                return String::new();
+            };
+            panel.with(
+                |panel| match panel.active().map(|surface| &surface.content) {
+                    Some(SurfaceContent::File {
+                        relative_path,
+                        reveal_line,
+                        ..
+                    }) => {
+                        format!("Active file {relative_path} line {reveal_line:?}")
+                    }
+                    _ => format!("Active thread {}", key.thread.0),
+                },
+            )
+        });
+        probe.with(|slot| *slot = Some(status));
+    });
+    let status = probe.with(|slot| slot.expect("workspace probe"));
+    view()
+        .w_full()
+        .h_full()
+        .child(app)
+        .child(text(move || status.get()))
+}
+
+fn start_parity_workspace(window: (f32, f32)) -> Headless {
+    let mut fixture = Registry::new();
+    fixture.register::<ParityWorkspace>();
+    let mut sets = t3_ui::registries();
+    sets.push(fixture);
+    let mut config = EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<ParityWorkspace>())
+    };
+    if window == DESKTOP {
+        config.environment.os = nsh_core::platform::Os::Linux;
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+    }
+    let mut app = Headless::start(config).expect("workspace starts");
+    app.wait_for("First parity thread")
+        .expect("paired thread renders");
+    app
+}
+
+fn select_thread_through_palette(window: (f32, f32)) {
+    let mut app = start_parity_workspace(window);
+    app.press_key("mod+k").expect("open command palette");
+    app.type_text("role:combobox[Command palette]", "second parity thread")
+        .expect("filter the catalogue");
+    app.wait_for("role:option[Second parity thread]")
+        .expect("matching thread is selectable");
+    app.press("role:option[Second parity thread]")
+        .expect("open thread from catalogue");
+    app.wait_for("Active thread second")
+        .expect("thread route changes");
+}
+
+fn pick_file_through_palette(window: (f32, f32)) {
+    let mut app = start_parity_workspace(window);
+    app.press_key("mod+p").expect("open file picker");
+    app.wait_for("Indexing workspace files…")
+        .expect("picker observes the active project");
+    app.press_key("f10")
+        .expect("advance the fake debounce clock");
+    app.wait_for("role:option[PickerParity.rs]")
+        .expect("file from the project search RPC");
+    app.press("role:option[PickerParity.rs]")
+        .expect("select file");
+    app.wait_for("Active file src/PickerParity.rs line None")
+        .expect("workspace opens the exact file");
+    app.wait_for("id:file-preview-panel")
+        .expect("the registered Files surface renders the selection");
+}
+
+fn search_contents_through_palette(window: (f32, f32)) {
+    let mut app = start_parity_workspace(window);
+    app.press_key("mod+shift+f")
+        .expect("open project content search");
+    app.wait_for("Type to search across your project.")
+        .expect("content search observes the active project");
+    app.type_text("role:combobox[Search project contents]", "parity_needle")
+        .expect("search contents");
+    app.press_key("f10")
+        .expect("advance the fake debounce clock");
+    app.wait_for("role:button[src/ContentParity.rs:17]")
+        .expect("match from the content search RPC");
+    app.press("role:button[src/ContentParity.rs:17]")
+        .expect("open match");
+    app.wait_for("Active file src/ContentParity.rs line Some(17)")
+        .expect("workspace opens the match at its line");
+    app.wait_for("id:file-preview-panel")
+        .expect("the registered Files surface renders the selection");
+}
+
+#[test]
+fn parity_catalogue_desktop() {
+    select_thread_through_palette(DESKTOP);
+}
+#[test]
+fn parity_catalogue_phone() {
+    select_thread_through_palette(PHONE);
+}
+#[test]
+fn parity_file_picker_desktop() {
+    pick_file_through_palette(DESKTOP);
+}
+#[test]
+fn parity_file_picker_phone() {
+    pick_file_through_palette(PHONE);
+}
+#[test]
+fn parity_content_search_desktop() {
+    search_contents_through_palette(DESKTOP);
+}
+#[test]
+fn parity_content_search_phone() {
+    search_contents_through_palette(PHONE);
+}

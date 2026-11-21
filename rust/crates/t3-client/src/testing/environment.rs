@@ -516,6 +516,7 @@ impl Platform for EnvironmentPlatform {
                         CallKind::Unary,
                     ),
                     (WsProjectsSearchEntriesRpc::TAG, CallKind::Unary),
+                    (WsProjectsSearchContentsRpc::TAG, CallKind::Unary),
                     (WsTerminalOpenRpc::TAG, CallKind::Unary),
                     (WsTerminalWriteRpc::TAG, CallKind::Unary),
                     (WsTerminalResizeRpc::TAG, CallKind::Unary),

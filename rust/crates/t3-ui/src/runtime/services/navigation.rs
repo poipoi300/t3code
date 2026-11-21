@@ -5,7 +5,16 @@ use crate::{
 };
 use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 use std::{cell::RefCell, rc::Rc};
-use t3_client::{composition::ClientRuntime, platform::Platform};
+use t3_client::navigation::{
+    Route,
+    palette_service::{Action as PaletteAction, Catalogue, PaletteService},
+};
+use t3_client::view_logic::shell::{
+    palette::{Group, Item},
+    palette_files::PaletteSearchClient,
+};
+
+use t3_client::{ClientError, composition::ClientRuntime, platform::Platform};
 struct UrlBinding<P> {
     client: t3_client::navigation::UrlClient<P>,
     failure: Rc<RefCell<Option<t3_client::ClientError>>>,
@@ -583,12 +592,45 @@ impl<P: Platform + Clone + 'static> ui_new::NewThreadClient for NewThreadBinding
     }
 }
 
-pub fn palette_search_runtime<P: Platform + Clone + 'static>(
-    service: t3_client::navigation::palette_service::PaletteService<P>,
-    open_file: crate::screens::palette::files::OpenFile,
-) -> crate::screens::palette::files::PaletteSearchRuntime {
-    crate::screens::palette::files::PaletteSearchRuntime {
-        client: Rc::new(service),
-        open_file,
+/// The workspace palette shares a single client across its catalogue and both project searches.
+pub trait PaletteClient: PaletteSearchClient {
+    fn set_route(&self, route: Route);
+    fn catalogue(&self) -> Catalogue;
+    fn filter(&self, query: &str, active: Option<&[Group]>) -> Vec<Group>;
+    fn changes(&self) -> LocalBoxStream<'static, ()>;
+    fn results(
+        &self,
+        query: String,
+    ) -> LocalBoxStream<'static, Result<Rc<Vec<Group>>, ClientError>>;
+    fn activate(&self, item: Item) -> LocalBoxFuture<'static, Result<PaletteAction, ClientError>>;
+}
+
+impl<P: Platform + Clone + 'static> PaletteClient for PaletteService<P> {
+    fn set_route(&self, route: Route) {
+        PaletteService::set_route(self, route);
+    }
+
+    fn catalogue(&self) -> Catalogue {
+        PaletteService::catalogue(self)
+    }
+
+    fn filter(&self, query: &str, active: Option<&[Group]>) -> Vec<Group> {
+        PaletteService::filter(self, query, active, &[])
+    }
+
+    fn changes(&self) -> LocalBoxStream<'static, ()> {
+        PaletteService::changes(self)
+    }
+
+    fn results(
+        &self,
+        query: String,
+    ) -> LocalBoxStream<'static, Result<Rc<Vec<Group>>, ClientError>> {
+        self.watch(query)
+    }
+
+    fn activate(&self, item: Item) -> LocalBoxFuture<'static, Result<PaletteAction, ClientError>> {
+        let client = self.clone();
+        async move { PaletteService::activate(&client, &item).await }.boxed_local()
     }
 }
