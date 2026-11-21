@@ -1805,9 +1805,7 @@ impl AcpRegistryAgent {
     fn local(&self, names: &[&str]) -> bool {
         self.local_command.as_deref().is_some_and(|command| {
             names.iter().any(|name| {
-                [*name, &format!("{name}.exe"), &format!("{name}.cmd")]
-                    .iter()
-                    .any(|candidate| command == *candidate)
+                [*name, &format!("{name}.exe"), &format!("{name}.cmd")].contains(&command)
             })
         })
     }
