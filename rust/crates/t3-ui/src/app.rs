@@ -221,6 +221,8 @@ fn themed_tree(nav: Navigator) -> AnyElement {
                 .child(crate::screens::connect::connection_notices()),
         )
         .child(crate::screens::onboarding::welcome::first_run_gate())
+        // DSK-BACKEND: the local server's startup state and recovery window (desktop shell only).
+        .child(crate::screens::local_backend::overlay())
         // ThreadNotificationCoordinator, started once from the app root (hidden, effects only).
         .child(crate::screens::notifications::thread_notifications())
         .into_element();

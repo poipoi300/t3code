@@ -34,6 +34,8 @@ pub mod preview_state;
 pub mod request_latency;
 #[path = "shell/search.rs"]
 pub mod search;
+#[path = "shell/startup_recovery.rs"]
+pub mod startup_recovery;
 #[path = "shell/shortcuts.rs"]
 pub mod shortcuts;
 #[path = "shell/shortcut_config.rs"]
