@@ -101,6 +101,7 @@ fn paths_claims_and_legacy_image_lookup() {
     let path = root.join(format!("{id}.txt"));
     fs::write(&path, "body").expect("test fixture");
     assert_eq!(resolve_by_id(root, &id), Some(path.clone()));
+    assert!(resolve_by_id(root, &format!("discarded/../{id}")).is_none());
     let plan = plan_claim(root, "thread-a", &id).expect("test fixture");
     assert_eq!(plan.current_path, path);
     assert_eq!(
@@ -506,5 +507,46 @@ async fn swapping_an_upload_directory_cannot_publish_outside_it() {
         fs::read_dir(&outside).expect("outside").count(),
         0,
         "upload touched a replacement directory outside its pinned root"
+    );
+}
+
+#[tokio::test]
+async fn replay_cannot_recreate_missing_claim_authority() {
+    let temp = tempfile::tempdir().expect("temp");
+    let store = AttachmentStore::new(
+        temp.path().into(),
+        AssetSigner::new(vec![7; 32]).expect("key"),
+        Arc::new(Documents(AtomicUsize::new(0))),
+    );
+    let issued = store
+        .issue_owned_upload(
+            input(false, "a.png", "image/png", 1),
+            100,
+            Some("session:a".into()),
+        )
+        .await
+        .expect("issue");
+    let url = token(&issued.relative_url.0);
+    let path = store.upload(url, 101, &b"x"[..]).await.expect("upload");
+    store
+        .set_claimed(&issued.attachment_id.0, true)
+        .await
+        .expect("claim");
+    store
+        .upload(url, 102, &b"x"[..])
+        .await
+        .expect("identical retry");
+    assert!(
+        store
+            .owner(&issued.attachment_id.0)
+            .await
+            .expect("owner")
+            .claimed
+    );
+    fs::remove_file(path.with_extension("png.owner")).expect("remove record");
+    let _ = store.upload(url, 103, &b"x"[..]).await;
+    assert!(
+        store.owner(&issued.attachment_id.0).await.is_none(),
+        "a retry granted fresh claim authority"
     );
 }
