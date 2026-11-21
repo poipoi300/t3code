@@ -67,6 +67,7 @@ impl TerminalStream {
 }
 
 enum ScriptedReply {
+    Stream(Vec<Value>),
     Ready(Result<Value, Value>),
     Deferred(oneshot::Receiver<Result<Value, Value>>),
 }
@@ -185,6 +186,17 @@ impl FakeEnvironment {
             .entry(method.into())
             .or_default()
             .push_back(ScriptedReply::Ready(answer));
+    }
+
+    /// Emit these wire values on the next subscription, then keep the stream open.
+    pub fn stream_snapshot(&self, method: &str, items: Vec<Value>) {
+        self.server
+            .state
+            .borrow_mut()
+            .script
+            .entry(method.into())
+            .or_default()
+            .push_back(ScriptedReply::Stream(items));
     }
 
     /// Holds the next ordinary storage read of this key until the test supplies a result.
@@ -656,6 +668,7 @@ impl Handler for FakeHandler {
             state.script.get_mut(&tag).and_then(VecDeque::pop_front)
         };
         match scripted {
+            Some(ScriptedReply::Stream(items)) => return live(items),
             Some(ScriptedReply::Ready(answer)) => return unary(answer),
             Some(ScriptedReply::Deferred(reply)) => {
                 return HandlerOutput::Unary(

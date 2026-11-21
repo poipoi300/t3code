@@ -1,6 +1,13 @@
 use super::*;
 
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
+    pub fn settings_sessions(&self) -> crate::services::settings::sessions::SettingsSessions {
+        crate::services::settings::sessions::SettingsSessions::new(
+            self,
+            Rc::new(self.inner.platform.clone()),
+        )
+    }
+
     /// The settings pages' service (`services::settings::service`).
     pub fn settings(&self) -> crate::services::settings::service::SettingsService<P> {
         crate::services::settings::service::SettingsService::new(
