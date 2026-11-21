@@ -10,8 +10,11 @@ use t3_client::ClientError;
 use t3_client::platform::HostResource;
 use t3_client::services::assets::{file_attachment_too_large_message, format_attachment_size};
 use t3_client::thread_views::composer::attachment_intake::{
-    AttachmentItem, AttachmentSession, IncomingFile, UploadState, resource_from_uri,
-    should_handle_paste,
+    AttachmentItem, AttachmentSession, FileKind, IncomingFile, UploadState, classify,
+    resource_from_uri, should_handle_paste,
+};
+use t3_contracts::chat_attachment::{
+    PROVIDER_SEND_TURN_MAX_ATTACHMENTS, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 };
 
 use crate::i18n::{Text as UiText, Value, t, tr};
@@ -109,36 +112,42 @@ impl ComposerAttachments {
         }
         let client = self.client.get();
         self.error.set(None);
-        let Some(limit) = client.capabilities().staging_limit() else {
-            self.error.set(Some(UiText::from(
-                "This server does not support file attachments.",
-            )));
-            return;
-        };
-        let slots = client.remaining_slots();
-        if slots == 0 {
-            self.error.set(Some(UiText::content(tr(
-                "You can attach up to {count} files per message.",
-                &[(
-                    "count",
-                    Value::Int(
-                        t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS as i64,
-                    ),
-                )],
-            ))));
-            return;
-        }
+        let file_limit = client.capabilities().staging_limit();
+        let picker_limit = file_limit
+            .unwrap_or_default()
+            .max(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
         self.picking.set(true);
-        let answer = pick_files(FilePickRequest::new(true, slots as u32).max_size(limit));
+        let answer = pick_files(
+            FilePickRequest::new(true, PROVIDER_SEND_TURN_MAX_ATTACHMENTS as u32)
+                .max_size(picker_limit),
+        );
         self.owner.spawn(async move {
             let picked = answer.await;
             self.picking.set(false);
-            if picked.is_empty() || self.disabled.get_untracked() {
+            if self.disabled.get_untracked() {
+                return;
+            }
+            let picked = match picked {
+                Ok(picked) => picked,
+                Err(error) => {
+                    self.error.set(Some(UiText::content(error.to_string())));
+                    return;
+                }
+            };
+            if picked.files.is_empty() && !picked.truncated {
                 return;
             }
             let mut files = Vec::new();
-            let mut size_error = None;
-            for file in picked {
+            let mut picker_error = picked.truncated.then(|| {
+                UiText::content(tr(
+                    "You can attach up to {count} files per message.",
+                    &[(
+                        "count",
+                        Value::Int(PROVIDER_SEND_TURN_MAX_ATTACHMENTS as i64),
+                    )],
+                ))
+            });
+            for file in picked.files {
                 match file.status {
                     PickedStatus::Read => files.push(IncomingFile {
                         name: file.name,
@@ -148,19 +157,37 @@ impl ComposerAttachments {
                         insertion: None,
                     }),
                     PickedStatus::TooLarge => {
-                        size_error.get_or_insert_with(|| {
-                            file_attachment_too_large_message(&file.name, limit)
+                        picker_error.get_or_insert_with(|| {
+                            let limit = match classify(&file.name, &file.mime) {
+                                FileKind::File => file_limit,
+                                _ => Some(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES),
+                            };
+                            limit.map_or_else(
+                                || UiText::from("This server does not support file attachments."),
+                                |limit| {
+                                    UiText::content(file_attachment_too_large_message(
+                                        &file.name, limit,
+                                    ))
+                                },
+                            )
                         });
                     }
-                    _ => {}
+                    _ => {
+                        picker_error.get_or_insert_with(|| {
+                            UiText::client_key(format!(
+                                "'{}' is empty or could not be read.",
+                                file.name
+                            ))
+                        });
+                    }
                 }
             }
             let before = client.draft()["prompt"].clone();
             let intake = client.intake_bytes(files).await;
-            let has_picker_error = size_error.is_some() || intake.is_err();
+            let has_picker_error = picker_error.is_some() || intake.is_err();
             self.report(intake);
-            if let Some(error) = size_error {
-                self.error.set(Some(UiText::content(error)));
+            if let Some(error) = picker_error {
+                self.error.set(Some(error));
             }
             client.save_images().await;
             let upload = client.upload_pending().await;

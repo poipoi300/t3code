@@ -97,6 +97,7 @@ struct FixtureProps {
     connected: bool,
     question: bool,
     run_status: Option<String>,
+    attachment_mode: Option<String>,
 }
 
 /// The production composer under a client runtime, with what a test can observe: mounting
@@ -147,7 +148,14 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
     server.set_shell(thread_shell);
     server.set_thread("thread-a", detail);
     server.edit_config(|config| {
-        config["environment"]["capabilities"]["fileAttachments"] = json!({"maxUploadBytes":1024});
+        if props.attachment_mode.as_deref() == Some("images-only") {
+            config["environment"]["capabilities"]
+                .as_object_mut()
+                .expect("environment capabilities")
+                .remove("fileAttachments");
+        } else {
+            config["environment"]["capabilities"]["fileAttachments"] = json!({"maxUploadBytes":1024});
+        }
         if replay {
             config["settings"]["providerInstances"]["devReplay"] =
                 json!({"driver":"acpRegistry","displayName":"Replay (dev)"});
@@ -234,6 +242,47 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
     let dispatches = signal(Vec::<Value>::new());
     let searches = signal(0_usize);
     let mounted = signal(true);
+    let attachment_controls = props.attachment_mode.as_deref().map(|mode| {
+        let count = if mode == "last-slot" { 99 } else { 100 };
+        let drafts = client.composer_drafts();
+        let inspect = drafts.clone();
+        let status = signal(String::new());
+        view()
+            .child(
+                nsh_base::button()
+                    .test_id("seed-files")
+                    .on_press(move || {
+                        let files: Vec<_> = (0..count).map(|i| json!({
+                    "id":format!("marker-{i}"), "name":format!("marker-{i}.txt"),
+                    "type":"file", "mimeType":"text/plain", "sizeBytes":1, "file":null
+                })).collect();
+                        drafts
+                            .update(|document| {
+                                document["draftsByThreadKey"]["env:thread-a"] =
+                                    json!({"prompt":"","images":[],"files":files});
+                                Ok(())
+                            })
+                            .expect("seed a writable draft");
+                    })
+                    .child(text("Seed files")),
+            )
+            .child(
+                nsh_base::button()
+                    .test_id("inspect-files")
+                    .on_press(move || {
+                        let document = inspect.document();
+                        let document = document.borrow();
+                        let files = &document["draftsByThreadKey"]["env:thread-a"]["files"];
+                        status.set(format!(
+                            "Files count {} first marker {}",
+                            files.as_array().map_or(0, Vec::len),
+                            files[0]["file"].is_null()
+                        ));
+                    })
+                    .child(text("Inspect files")),
+            )
+            .child(text(move || status.get()))
+    });
     let sender: Rc<dyn t3_ui::screens::composer::send::ComposerSendClient> =
         Rc::new(client.clone());
     let tail = pending_messages(
@@ -287,6 +336,7 @@ fn ComposerFixture(props: FixtureProps) -> impl IntoElement {
         .child(text(move || {
             format!("Timeline derivations {}", timeline_runs.get())
         }))
+        .child(attachment_controls)
         .child(tail)
         .child(dynamic(move || {
             mounted.get().then(|| {
@@ -311,6 +361,17 @@ fn start_with(
     run_status: Option<&'static str>,
     picker: Option<Arc<dyn nsh_core::picker::PickerBackend>>,
 ) -> Headless {
+    start_with_mode(window, connected, question, run_status, picker, None)
+}
+
+fn start_with_mode(
+    window: (f32, f32),
+    connected: bool,
+    question: bool,
+    run_status: Option<&'static str>,
+    picker: Option<Arc<dyn nsh_core::picker::PickerBackend>>,
+    attachment_mode: Option<&'static str>,
+) -> Headless {
     let mut config = EngineConfig {
         picker,
         ui_sets: t3_ui::registries(),
@@ -319,13 +380,14 @@ fn start_with(
             connected,
             question,
             run_status: run_status.map(str::to_owned),
+            attachment_mode: attachment_mode.map(str::to_owned),
         }))
     };
     if question {
         // The panel's 200 ms single-select auto-advance runs on the engine clock.
         config.clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
     }
-    if window == DESKTOP {
+    if window.0 == DESKTOP.0 {
         config.environment.os = nsh_core::platform::Os::Linux;
         config.environment.idiom = nsh_core::platform::Idiom::Desktop;
     }
@@ -597,9 +659,14 @@ impl nsh_core::picker::PickerBackend for TestPicker {
     fn pick_files(
         &self,
         request: nsh_core::picker::FilePickRequest,
-    ) -> nsh_core::picker::PickFuture {
-        assert_eq!(request.size_limit(), 1024);
-        Box::pin(std::future::ready(self.0.clone()))
+    ) -> nsh_core::picker::FilePickFuture {
+        assert_eq!(
+            request.limit as usize,
+            t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+        );
+        Box::pin(std::future::ready(Ok(
+            nsh_core::picker::FilePickSelection::new(self.0.clone()),
+        )))
     }
 }
 
@@ -613,7 +680,7 @@ fn native_picker_attaches_readable_files_and_shows_the_size_error() {
             "text/plain",
             nsh_core::ImageData::new(b"note".to_vec()),
         ),
-        PickedFile::too_large("large.txt", "text/plain", 2048),
+        PickedFile::too_large("large.txt", "text/plain", 11 * 1024 * 1024),
     ]));
     let mut app = start_with(DESKTOP, true, false, None, Some(picker));
     app.press("role:button[Attach files]").expect("attach");
@@ -638,6 +705,142 @@ fn cancelling_the_picker_keeps_attach_available_and_shows_no_error() {
             .matches("role:alert")
             .expect("no attachment message")
     );
+}
+
+fn review_picker(mode: Option<&'static str>, files: Vec<nsh_core::picker::PickedFile>) -> Headless {
+    let picker = Arc::new(TestPicker(files));
+    // The production strip lists every reattach marker above the picker button.
+    let full_draft = matches!(mode, Some("last-slot" | "reattach"));
+    let window = if full_draft {
+        (DESKTOP.0, 5000.0)
+    } else {
+        DESKTOP
+    };
+    let mut app = start_with_mode(window, true, false, None, Some(picker), mode);
+    app.wait_until("writable composer", Duration::from_secs(5), |screen| {
+        screen.enabled("role:button[Attach files]").unwrap_or(false)
+    })
+    .expect("attachment intake attached to the draft");
+    if full_draft {
+        app.press("id:seed-files").expect("seed reattach markers");
+    }
+    app.press("role:button[Attach files]").expect("attach");
+    app
+}
+
+fn picked_file(name: &str, mime: &str, bytes: Vec<u8>) -> nsh_core::picker::PickedFile {
+    let mut file = nsh_core::picker::PickedFile::new(name, mime, nsh_core::ImageData::new(bytes));
+    file.name = name.into();
+    file
+}
+
+#[test]
+fn review_picker_allows_images_without_file_staging() {
+    let mut app = review_picker(
+        Some("images-only"),
+        vec![
+            picked_file("image.gif", "image/gif", b"GIF89a\x01\0\x01\0".to_vec()),
+            picked_file("blocked.txt", "text/plain", b"x".to_vec()),
+        ],
+    );
+    app.wait_for("role:button[Preview image.gif]")
+        .expect("images do not need file staging");
+    app.wait_for("This server does not support file attachments.")
+        .expect("the staging restriction still applies to documents");
+}
+
+#[test]
+fn review_picker_uses_the_image_limit_for_images() {
+    let mut jpeg = vec![0; 3 * 1024 * 1024];
+    jpeg[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+    let mut app = review_picker(
+        None,
+        vec![
+            picked_file("photo.jpg", "image/jpeg", jpeg),
+            picked_file("too-big.txt", "text/plain", vec![b'x'; 2048]),
+        ],
+    );
+    app.wait_for("role:button[Preview photo.jpg]")
+        .expect("an image may exceed the document limit");
+    app.wait_for("'too-big.txt' exceeds the 1 KB attachment limit.")
+        .expect("documents still use the server limit");
+}
+
+#[test]
+fn review_picker_reports_an_overfull_draft() {
+    let mut app = review_picker(
+        Some("last-slot"),
+        vec![
+            picked_file("fits.txt", "text/plain", b"x".to_vec()),
+            picked_file("over.txt", "text/plain", b"x".to_vec()),
+        ],
+    );
+    app.wait_for("fits.txt").expect("one more attachment fits");
+    app.wait_for("You can attach up to 100 files per message.")
+        .expect("the rest of the selection is reported");
+}
+
+#[test]
+fn review_picker_replaces_a_reattach_marker_at_capacity() {
+    let mut app = review_picker(
+        Some("reattach"),
+        vec![picked_file("marker-0.txt", "text/plain", b"x".to_vec())],
+    );
+    app.wait_until("picker completes", Duration::from_secs(5), |screen| {
+        screen.enabled("role:button[Attach files]").unwrap_or(false)
+    })
+    .expect("picker returns");
+    app.press("id:inspect-files").expect("inspect draft");
+    app.wait_for("Files count 100 first marker false")
+        .expect("replacement uses the existing slot");
+}
+
+struct FailingPicker;
+
+impl nsh_core::picker::PickerBackend for FailingPicker {
+    fn pick_images(&self, _: nsh_core::picker::PickRequest) -> nsh_core::picker::PickFuture {
+        unreachable!("Attach files uses the multi-file picker")
+    }
+    fn pick_files(&self, _: nsh_core::picker::FilePickRequest) -> nsh_core::picker::FilePickFuture {
+        Box::pin(std::future::ready(Err(
+            nsh_core::picker::FilePickError::Dialog("no document portal".into()),
+        )))
+    }
+}
+
+#[test]
+fn review_picker_displays_a_dialog_failure() {
+    let mut app = start_with(DESKTOP, true, false, None, Some(Arc::new(FailingPicker)));
+    app.press("role:button[Attach files]").expect("attach");
+    app.wait_for("The file picker failed: no document portal")
+        .expect("dialog failure is visible");
+}
+
+#[test]
+fn review_picker_displays_unreadable_files_and_keeps_readable_ones() {
+    let mut app = review_picker(
+        None,
+        vec![
+            picked_file("readable.txt", "text/plain", b"x".to_vec()),
+            nsh_core::picker::PickedFile::unreadable("missing.txt"),
+        ],
+    );
+    app.wait_for("readable.txt")
+        .expect("readable selection kept");
+    app.wait_for("'missing.txt' is empty or could not be read.")
+        .expect("read failure is visible");
+}
+
+#[test]
+fn review_picker_reports_more_than_one_hundred_selected_files() {
+    let mut app = review_picker(
+        None,
+        vec![picked_file("note.txt", "text/plain", b"x".to_vec()); 101],
+    );
+    app.wait_for("note.txt")
+        .expect("the selection was retained");
+    app.wait_for("You can attach up to 100 files per message.")
+        .expect("selection limit is visible");
 }
 
 #[test]

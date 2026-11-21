@@ -72,7 +72,7 @@ impl nsh_core::picker::PickerBackend for Picker {
     fn pick_images(&self, _: nsh_core::picker::PickRequest) -> nsh_core::picker::PickFuture {
         unreachable!("Attach files uses the file picker");
     }
-    fn pick_files(&self, _: nsh_core::picker::FilePickRequest) -> nsh_core::picker::PickFuture {
+    fn pick_files(&self, _: nsh_core::picker::FilePickRequest) -> nsh_core::picker::FilePickFuture {
         let consumed = self.0.swap(true, std::sync::atomic::Ordering::Relaxed);
         let files = if consumed {
             Vec::new()
@@ -83,7 +83,9 @@ impl nsh_core::picker::PickerBackend for Picker {
                 nsh_core::ImageData::new(b"hello".to_vec()),
             )]
         };
-        Box::pin(std::future::ready(files))
+        Box::pin(std::future::ready(Ok(
+            nsh_core::picker::FilePickSelection::new(files),
+        )))
     }
 }
 
