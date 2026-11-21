@@ -30,7 +30,10 @@ pub use desktop_environment::desktop_environment_id;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod desktop_environment {
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::Read,
+        path::{Path, PathBuf},
+    };
 
     use t3_client::types::EnvironmentId;
 
@@ -65,14 +68,36 @@ mod desktop_environment {
     }
 
     fn read_environment_id(state_dir: &Path) -> Option<EnvironmentId> {
-        let value = std::fs::read_to_string(state_dir.join("environment-id")).ok()?;
+        const MAX_ID_FILE_BYTES: u64 = 4096;
+        let file = std::fs::File::open(state_dir.join("environment-id")).ok()?;
+        let mut value = String::new();
+        file.take(MAX_ID_FILE_BYTES + 1)
+            .read_to_string(&mut value)
+            .ok()?;
+        if value.len() as u64 > MAX_ID_FILE_BYTES {
+            return None;
+        }
         let id = t3_contracts::wire::trim_js(&value);
-        (!id.is_empty()).then(|| EnvironmentId(id.to_owned()))
+        (!id.is_empty() && !id.chars().any(char::is_control)).then(|| EnvironmentId(id.to_owned()))
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn desktop_identity_rejects_oversized_files_and_embedded_controls() {
+            let state = tempfile::tempdir().expect("temporary state directory");
+            let file = state.path().join("environment-id");
+            for contents in [
+                "a".repeat(4097),
+                "local\nother".into(),
+                "local\0other".into(),
+            ] {
+                std::fs::write(&file, contents).expect("write invalid ID");
+                assert!(read_environment_id(state.path()).is_none());
+            }
+        }
 
         #[test]
         fn desktop_identity_comes_from_the_resolved_state_directory() {
