@@ -680,3 +680,126 @@ impl OpenVsxHttp for &StubHttp {
         StubHttp::request(self, method, url)
     }
 }
+
+#[test]
+fn zip_checked_offsets_and_lengths() {
+    use t3_theme::import::zip::ZipArchive;
+    let original = zip_of(&[("a", b"ok")], b"");
+    let end = original.len() - 22;
+    let central = end - 47;
+    for (at, field) in [
+        (end + 16, u32::MAX.to_le_bytes().to_vec()),
+        (end + 12, u32::MAX.to_le_bytes().to_vec()),
+        (central + 42, (u32::MAX - 1).to_le_bytes().to_vec()),
+        (central + 30, u16::MAX.to_le_bytes().to_vec()),
+        (28, u16::MAX.to_le_bytes().to_vec()),
+        (end + 20, u16::MAX.to_le_bytes().to_vec()),
+    ] {
+        let mut bytes = original.clone();
+        bytes[at..at + field.len()].copy_from_slice(&field);
+        assert!(ZipArchive::open(&bytes).is_err(), "invalid field at {at}");
+    }
+}
+
+#[test]
+fn zip_checked_truncated_directory_and_entry_counts() {
+    use t3_theme::import::zip::ZipArchive;
+    let original = zip_of(&[("a", b"")], b"");
+    let end = original.len() - 22;
+    let mut truncated = original.clone();
+    truncated.remove(end - 1);
+    truncated[end - 1 + 12..end - 1 + 16].copy_from_slice(&46u32.to_le_bytes());
+    assert!(ZipArchive::open(&truncated).is_err());
+    for count in [0u16, 2, u16::MAX] {
+        let mut bytes = original.clone();
+        bytes[end + 8..end + 10].copy_from_slice(&count.to_le_bytes());
+        bytes[end + 10..end + 12].copy_from_slice(&count.to_le_bytes());
+        assert!(ZipArchive::open(&bytes).is_err(), "count {count}");
+    }
+}
+
+#[test]
+fn zip_checked_member_names() {
+    use t3_theme::import::zip::ZipArchive;
+    for path in ["/a", "C:/a", r"\a", r"extension\..\..\a"] {
+        assert!(
+            ZipArchive::open(&zip_of(&[(path, b"")], b"")).is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn zip_checked_inflated_data_is_bounded_despite_underreported_size() {
+    use t3_theme::import::zip::{MAX_THEME_BYTES, ZipArchive};
+    let expanded = vec![0; MAX_THEME_BYTES + 1];
+    let compressed = miniz_oxide::deflate::compress_to_vec(&expanded, 1);
+    let mut bytes = zip_of(&[("a", &compressed)], b"");
+    let central = bytes.len() - 22 - 47;
+    for at in [8, central + 10] {
+        bytes[at..at + 2].copy_from_slice(&8u16.to_le_bytes());
+    }
+    let archive = ZipArchive::open(&bytes).expect("metadata fits");
+    assert_eq!(
+        archive.read_text("a", "Theme").unwrap_err().0,
+        "Theme is too large."
+    );
+}
+
+#[test]
+fn zip_checked_random_input_and_mutated_records_return_without_panicking() {
+    use t3_theme::import::zip::ZipArchive;
+    let seed = zip_of(&[("a", b"hello")], b"comment");
+    let mut state = 20261121u32;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    for n in 0..4096 {
+        let mut bytes = if n % 2 == 0 {
+            seed.clone()
+        } else {
+            vec![0; (next() % 256) as usize]
+        };
+        let changes = if n % 2 == 0 {
+            1 + (next() % 8) as usize
+        } else {
+            bytes.len()
+        };
+        for i in 0..changes {
+            let index = if n % 2 == 0 {
+                next() as usize % bytes.len()
+            } else {
+                i
+            };
+            bytes[index] = next() as u8;
+        }
+        if let Ok(archive) = ZipArchive::open(&bytes) {
+            let _ = archive.read_text("a", "Theme");
+        }
+    }
+}
+
+#[test]
+fn zip_checked_extra_fields_cannot_exceed_their_header() {
+    use t3_theme::import::zip::ZipArchive;
+    for local in [false, true] {
+        let mut bytes = zip_of(&[("a", b"")], b"");
+        let central = 31;
+        let end = central + 47;
+        let (length, insertion) = if local {
+            bytes[end + 16..end + 20].copy_from_slice(&35u32.to_le_bytes());
+            (28, central)
+        } else {
+            bytes[end + 12..end + 16].copy_from_slice(&51u32.to_le_bytes());
+            (central + 30, end)
+        };
+        bytes[length..length + 2].copy_from_slice(&4u16.to_le_bytes());
+        bytes.splice(insertion..insertion, [0xfe, 0xca, 0, 0]);
+        assert!(ZipArchive::open(&bytes).is_ok());
+        bytes[insertion + 2] = 1;
+        assert!(ZipArchive::open(&bytes).is_err());
+    }
+}

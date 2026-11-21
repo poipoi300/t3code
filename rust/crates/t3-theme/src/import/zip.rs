@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_with_limit};
 
-use super::openvsx::{MAX_PACKAGE_PATH_LENGTH, normalize_package_path};
+use super::openvsx::MAX_PACKAGE_PATH_LENGTH;
 
 pub const MAX_ZIP_ENTRIES: usize = 5_000;
 pub const MAX_UNCOMPRESSED_BYTES: u64 = 100 * 1024 * 1024;
@@ -23,158 +23,196 @@ fn error(message: &str) -> PackageError {
     PackageError(message.to_owned())
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> Option<usize> {
-    bytes
-        .get(at..at + 2)
-        .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+fn invalid() -> PackageError {
+    error("That extension package has an invalid ZIP directory.")
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+fn slice(bytes: &[u8], at: usize, length: usize) -> Result<&[u8], PackageError> {
     bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .get(at..at.checked_add(length).ok_or_else(invalid)?)
+        .ok_or_else(invalid)
+}
+
+fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8], PackageError> {
+    let (head, tail) = bytes.split_at_checked(length).ok_or_else(invalid)?;
+    *bytes = tail;
+    Ok(head)
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> Result<usize, PackageError> {
+    Ok(usize::from(u16::from_le_bytes(
+        slice(bytes, at, 2)?.try_into().map_err(|_| invalid())?,
+    )))
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32, PackageError> {
+    Ok(u32::from_le_bytes(
+        slice(bytes, at, 4)?.try_into().map_err(|_| invalid())?,
+    ))
 }
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
 const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
 
-struct Eocd {
-    offset: usize,
-    directory_offset: usize,
-    directory_end: usize,
-    comment_length: usize,
+struct Directory<'a> {
+    local: &'a [u8],
+    central: &'a [u8],
+    count: usize,
+    eocd_offset: usize,
 }
 
-fn find_eocd(bytes: &[u8]) -> Result<Eocd, PackageError> {
-    let minimum = bytes.len().saturating_sub(65_557);
-    let mut offset = bytes
-        .len()
-        .checked_sub(22)
-        .ok_or_else(|| error("That extension package has no ZIP directory."))?;
-    loop {
-        if offset < minimum {
-            return Err(error("That extension package has no ZIP directory."));
+fn directory(bytes: &[u8]) -> Result<Directory<'_>, PackageError> {
+    let start = bytes.len().saturating_sub(22 + usize::from(u16::MAX));
+    let tail = bytes.get(start..).ok_or_else(invalid)?;
+    for (index, header) in tail.windows(22).enumerate().rev() {
+        if u32_at(header, 0)? != EOCD_SIGNATURE {
+            continue;
         }
-        let comment = u16_at(bytes, offset + 20);
-        if u32_at(bytes, offset) == Some(EOCD_SIGNATURE)
-            && comment.is_some_and(|c| offset + 22 + c == bytes.len())
-        {
-            break;
+        let offset = start.checked_add(index).ok_or_else(invalid)?;
+        let mut comment = bytes.get(offset..).ok_or_else(invalid)?;
+        take(&mut comment, 22)?;
+        if comment.len() != u16_at(header, 20)? {
+            continue;
         }
-        match offset.checked_sub(1) {
-            Some(next) => offset = next,
-            None => return Err(error("That extension package has no ZIP directory.")),
-        }
-    }
-    let invalid = || error("That extension package has an invalid ZIP directory.");
-    let directory_size = u32_at(bytes, offset + 12).ok_or_else(invalid)? as usize;
-    let directory_offset = u32_at(bytes, offset + 16).ok_or_else(invalid)? as usize;
-    let directory_end = directory_offset + directory_size;
-    if directory_end != offset || directory_end > bytes.len() {
-        return Err(invalid());
-    }
-    Ok(Eocd {
-        offset,
-        directory_offset,
-        directory_end,
-        comment_length: u16_at(bytes, offset + 20).ok_or_else(invalid)?,
-    })
-}
-
-/// One central-directory record.
-#[derive(Debug, Clone)]
-struct Record {
-    name: String,
-    method: u16,
-    compressed: u32,
-    uncompressed: u32,
-    local_offset: usize,
-}
-
-/// `inspectZipDirectory`: validates the central directory and returns the archive with
-/// any trailing comment removed, because a comment can imitate an end-of-directory record.
-pub fn inspect_zip_directory(bytes: &[u8]) -> Result<Vec<u8>, PackageError> {
-    let eocd = find_eocd(bytes)?;
-    read_records(bytes, &eocd)?;
-    if eocd.comment_length == 0 {
-        return Ok(bytes.to_vec());
-    }
-    let mut stripped = bytes[..eocd.offset + 22].to_vec();
-    stripped[eocd.offset + 20] = 0;
-    stripped[eocd.offset + 21] = 0;
-    Ok(stripped)
-}
-
-fn read_records(bytes: &[u8], eocd: &Eocd) -> Result<Vec<Record>, PackageError> {
-    let invalid = || error("That extension package has an invalid ZIP directory.");
-    let mut records = Vec::new();
-    let mut total: u64 = 0;
-    let mut offset = eocd.directory_offset;
-    while offset < eocd.directory_end {
-        if offset + 46 > eocd.directory_end || u32_at(bytes, offset) != Some(CENTRAL_SIGNATURE) {
-            return Err(invalid());
-        }
-        if records.len() + 1 > MAX_ZIP_ENTRIES {
+        let count = u16_at(header, 10)?;
+        if count > MAX_ZIP_ENTRIES {
             return Err(error("That extension package has too many files."));
         }
-        let compressed = u32_at(bytes, offset + 20).ok_or_else(invalid)?;
-        let uncompressed = u32_at(bytes, offset + 24).ok_or_else(invalid)?;
-        if compressed == 0xffff_ffff || uncompressed == 0xffff_ffff {
+        if u16_at(header, 4)? != 0 || u16_at(header, 6)? != 0 || u16_at(header, 8)? != count {
+            return Err(invalid());
+        }
+        let before = bytes.get(..offset).ok_or_else(invalid)?;
+        let (local, central) = before
+            .split_at_checked(u32_at(header, 16)? as usize)
+            .ok_or_else(invalid)?;
+        if central.len() != u32_at(header, 12)? as usize || count > central.len() / 46 {
+            return Err(invalid());
+        }
+        return Ok(Directory {
+            local,
+            central,
+            count,
+            eocd_offset: offset,
+        });
+    }
+    Err(error("That extension package has no ZIP directory."))
+}
+
+#[derive(Debug, Clone)]
+struct Record {
+    method: usize,
+    uncompressed: u32,
+    data: std::ops::Range<usize>,
+}
+
+fn extra_fields(mut bytes: &[u8]) -> Result<(), PackageError> {
+    while !bytes.is_empty() {
+        let header = take(&mut bytes, 4)?;
+        take(&mut bytes, u16_at(header, 2)?)?;
+    }
+    Ok(())
+}
+
+fn records(directory: &Directory<'_>) -> Result<BTreeMap<String, Record>, PackageError> {
+    let mut entries = BTreeMap::new();
+    let mut central = directory.central;
+    let mut total = 0u64;
+    for _ in 0..directory.count {
+        let header = take(&mut central, 46)?;
+        if u32_at(header, 0)? != CENTRAL_SIGNATURE || u16_at(header, 34)? != 0 {
+            return Err(invalid());
+        }
+        let compressed = u32_at(header, 20)?;
+        let uncompressed = u32_at(header, 24)?;
+        if compressed == u32::MAX || uncompressed == u32::MAX {
             return Err(error(
                 "That extension package has unsupported ZIP64 metadata.",
             ));
         }
-        total += u64::from(uncompressed);
+        total = total
+            .checked_add(u64::from(uncompressed))
+            .ok_or_else(invalid)?;
         if total > MAX_UNCOMPRESSED_BYTES {
             return Err(error(
                 "That extension package expands beyond the safe import limit.",
             ));
         }
-        if uncompressed > 0
-            && (compressed == 0
-                || f64::from(uncompressed) / f64::from(compressed) > MAX_COMPRESSION_RATIO as f64)
-        {
+        if u64::from(uncompressed) > u64::from(compressed) * MAX_COMPRESSION_RATIO {
             return Err(error(
                 "That extension package has an unsafe compression ratio.",
             ));
         }
-        let name_length = u16_at(bytes, offset + 28).ok_or_else(invalid)?;
-        let extra_length = u16_at(bytes, offset + 30).ok_or_else(invalid)?;
-        let comment_length = u16_at(bytes, offset + 32).ok_or_else(invalid)?;
-        let name_bytes = bytes
-            .get(offset + 46..offset + 46 + name_length)
+        let name = take(&mut central, u16_at(header, 28)?)?;
+        extra_fields(take(&mut central, u16_at(header, 30)?)?)?;
+        take(&mut central, u16_at(header, 32)?)?;
+        let path = std::str::from_utf8(name).map_err(|_| invalid())?;
+        if path.is_empty()
+            || path.encode_utf16().count() > MAX_PACKAGE_PATH_LENGTH
+            || path.starts_with('/')
+            || path.contains(['\\', '\0'])
+            || path.as_bytes().get(1) == Some(&b':')
+        {
+            return Err(error("Theme path is not a safe relative package path."));
+        }
+        if path.split('/').any(|segment| segment == "..") {
+            return Err(error("Theme path escapes the extension package."));
+        }
+        let mut local = directory
+            .local
+            .get(u32_at(header, 42)? as usize..)
             .ok_or_else(invalid)?;
-        records.push(Record {
-            name: String::from_utf8_lossy(name_bytes).into_owned(),
-            method: u16_at(bytes, offset + 10).ok_or_else(invalid)? as u16,
-            compressed,
-            uncompressed,
-            local_offset: u32_at(bytes, offset + 42).ok_or_else(invalid)? as usize,
-        });
-        offset += 46 + name_length + extra_length + comment_length;
+        let local_header = take(&mut local, 30)?;
+        let method = u16_at(header, 10)?;
+        if u32_at(local_header, 0)? != LOCAL_SIGNATURE
+            || u16_at(local_header, 8)? != method
+            || take(&mut local, u16_at(local_header, 26)?)? != name
+        {
+            return Err(invalid());
+        }
+        extra_fields(take(&mut local, u16_at(local_header, 28)?)?)?;
+        let start = directory
+            .local
+            .len()
+            .checked_sub(local.len())
+            .ok_or_else(invalid)?;
+        take(&mut local, compressed as usize)?;
+        let end = directory
+            .local
+            .len()
+            .checked_sub(local.len())
+            .ok_or_else(invalid)?;
+        if entries
+            .insert(
+                path.to_owned(),
+                Record {
+                    method,
+                    uncompressed,
+                    data: start..end,
+                },
+            )
+            .is_some()
+        {
+            return Err(invalid());
+        }
     }
-    if offset != eocd.directory_end {
+    if !central.is_empty() {
         return Err(invalid());
     }
-    Ok(records)
+    Ok(entries)
 }
 
-/// JSZip's path sanitiser: drops `.` segments and interior empty ones, applies `..`.
-fn sanitize(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').collect();
-    let mut result: Vec<&str> = Vec::new();
-    for (index, part) in parts.iter().enumerate() {
-        if *part == "." || (part.is_empty() && index != 0 && index != parts.len() - 1) {
-            continue;
-        }
-        if *part == ".." {
-            result.pop();
-        } else {
-            result.push(part);
-        }
-    }
-    result.join("/")
+/// Validate the directory and local ranges, then remove the untrusted ZIP comment.
+pub fn inspect_zip_directory(bytes: &[u8]) -> Result<Vec<u8>, PackageError> {
+    let directory = directory(bytes)?;
+    records(&directory)?;
+    let mut stripped = bytes
+        .get(..directory.eocd_offset)
+        .ok_or_else(invalid)?
+        .to_vec();
+    stripped.extend_from_slice(slice(bytes, directory.eocd_offset, 20)?);
+    stripped.extend_from_slice(&[0, 0]);
+    Ok(stripped)
 }
 
 /// A checked archive whose entries can be read by sanitised path.
@@ -187,26 +225,12 @@ pub struct ZipArchive {
 impl ZipArchive {
     /// `inspectZipDirectory` + `JSZip.loadAsync` + `inspectZip`.
     pub fn open(bytes: &[u8]) -> Result<Self, PackageError> {
-        let bytes = inspect_zip_directory(bytes)?;
-        let eocd = find_eocd(&bytes)?;
-        let records = read_records(&bytes, &eocd)
-            .map_err(|_| error("That Open VSX extension package could not be opened."))?;
-        let mut entries = BTreeMap::new();
-        for record in records {
-            let safe = sanitize(&record.name);
-            if safe != record.name {
-                if record.name.len() > MAX_PACKAGE_PATH_LENGTH {
-                    return Err(error("Theme path is not a safe relative package path."));
-                }
-                normalize_package_path(&record.name, "extension/")
-                    .map_err(|e| PackageError(e.0))?;
-            }
-            entries.insert(safe, record);
-        }
-        if entries.len() > MAX_ZIP_ENTRIES {
-            return Err(error("That extension package has too many files."));
-        }
-        Ok(Self { bytes, entries })
+        let directory = directory(bytes)?;
+        let entries = records(&directory)?;
+        Ok(Self {
+            bytes: directory.local.to_vec(),
+            entries,
+        })
     }
 
     pub fn contains(&self, path: &str) -> bool {
@@ -225,19 +249,13 @@ impl ZipArchive {
         }
         let unreadable =
             || PackageError("That Open VSX extension package could not be opened.".into());
-        let header = record.local_offset;
-        if u32_at(&self.bytes, header) != Some(LOCAL_SIGNATURE) {
-            return Err(unreadable());
-        }
-        let name_length = u16_at(&self.bytes, header + 26).ok_or_else(unreadable)?;
-        let extra_length = u16_at(&self.bytes, header + 28).ok_or_else(unreadable)?;
-        let start = header + 30 + name_length + extra_length;
-        let data = self
-            .bytes
-            .get(start..start + record.compressed as usize)
-            .ok_or_else(unreadable)?;
+        let data = self.bytes.get(record.data.clone()).ok_or_else(unreadable)?;
         let raw = match record.method {
-            0 => data.to_vec(),
+            0 if data.len() > MAX_THEME_BYTES => {
+                return Err(PackageError(format!("{description} is too large.")));
+            }
+            0 if data.len() == record.uncompressed as usize => data.to_vec(),
+            0 => return Err(unreadable()),
             8 => decompress_to_vec_with_limit(data, MAX_THEME_BYTES).map_err(|failure| {
                 if failure.status == TINFLStatus::HasMoreOutput {
                     PackageError(format!("{description} is too large."))
@@ -249,6 +267,9 @@ impl ZipArchive {
         };
         if raw.len() > MAX_THEME_BYTES {
             return Err(PackageError(format!("{description} is too large.")));
+        }
+        if raw.len() != record.uncompressed as usize {
+            return Err(unreadable());
         }
         Ok(String::from_utf8_lossy(&raw).into_owned())
     }
