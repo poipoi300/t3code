@@ -1748,3 +1748,138 @@ fn local_codex_setup_installs_before_sign_in_and_ignores_other_flows() {
         ]
     );
 }
+
+#[test]
+fn settings_route_removal_disconnects_only_the_saved_ssh_target_after_commit() {
+    use t3_client::services::settings::SavedRouteEdit;
+    let mut harness = Harness::new(ENV);
+    let client = paired(&mut harness);
+    let id = environment(ENV);
+    harness
+        .run(client.pair_ssh(SshPairingInput {
+            target: serde_json::from_value(ssh_target("box")).unwrap(),
+            label: None,
+            expected_environment: Some(id.clone()),
+        }))
+        .unwrap();
+    harness.settle();
+    let routes = client.environments()[0].routes.clone();
+    let ssh = routes
+        .iter()
+        .find(|r| r.mode == ConnectionMode::Ssh)
+        .unwrap()
+        .id
+        .clone();
+    let order = routes.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+    assert_eq!(order.len(), 2);
+    let mut stale = order.clone();
+    stale.reverse();
+    assert!(
+        harness
+            .run(client.edit_saved_routes(id.clone(), stale, SavedRouteEdit::Remove(ssh.clone())))
+            .is_err()
+    );
+    assert!(
+        !harness
+            .server()
+            .state
+            .borrow()
+            .ssh
+            .iter()
+            .any(|event| event == "disconnect box")
+    );
+    harness.server().state.borrow_mut().refuse_catalog_save = true;
+    assert!(
+        harness
+            .run(client.edit_saved_routes(
+                id.clone(),
+                order.clone(),
+                SavedRouteEdit::Remove(ssh.clone())
+            ))
+            .is_err()
+    );
+    assert!(
+        !harness
+            .server()
+            .state
+            .borrow()
+            .ssh
+            .iter()
+            .any(|event| event == "disconnect box")
+    );
+    harness.server().state.borrow_mut().refuse_catalog_save = false;
+    harness
+        .run(client.edit_saved_routes(id, order, SavedRouteEdit::Remove(ssh)))
+        .unwrap();
+    harness.settle();
+    assert_eq!(route_modes(&client), [ConnectionMode::Remote]);
+    assert_eq!(
+        harness
+            .server()
+            .state
+            .borrow()
+            .ssh
+            .iter()
+            .filter(|event| event.as_str() == "disconnect box")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn settings_security_route_address_never_contains_url_credentials() {
+    let route = t3_client::connection::Route {
+        id: "direct".into(),
+        environment: environment(ENV),
+        mode: ConnectionMode::Remote,
+        http_base:
+            "https://username:pw@server.test:444/private?token=private-query#private-fragment"
+                .into(),
+        ws_base: String::new(),
+    };
+    assert_eq!(
+        t3_client::services::settings::saved_route_address(&route).as_deref(),
+        Some("https://server.test:444")
+    );
+}
+
+#[test]
+fn settings_diagnosis_sanitizes_the_rendered_snapshot_and_copied_facts() {
+    use t3_client::connection::{
+        ConnectionFailure, ConnectionHop, FailureCause, FailureKind, connection_diagnosis_text,
+    };
+    let mut host = Harness::new(ENV);
+    let client = paired(&mut host);
+    let id = environment(ENV);
+    for (code, expected) in [
+        ("untrusted-marker", "<code>"),
+        ("a", "<code>"),
+        ("ABCD-2345", "ABCD-2345"),
+    ] {
+        let mut failure = ConnectionFailure::new(FailureKind::ApprovalPending, "error-marker");
+        failure.hop = Some(ConnectionHop::Server);
+        failure.cause = Some(FailureCause::ApprovalPending);
+        failure.trace_id = Some("trace-marker".into());
+        failure.verification_code = Some(code.into());
+        let mut state = client.environments()[0].state.clone();
+        state.phase = Phase::Blocked;
+        state.last_failure = Some(failure);
+        client.store().set_connection(id.clone(), state);
+        let diagnosis = client.settings_diagnosis(&id, None).unwrap();
+        assert!(
+            diagnosis.steps.iter().any(|s| s
+                == &format!("Or run `t3 auth connect-device approve {expected}` on Fake host."))
+        );
+        assert!(
+            !diagnosis
+                .facts
+                .iter()
+                .any(|(label, _)| matches!(label.as_str(), "Error" | "Trace ID"))
+        );
+        let report = connection_diagnosis_text("Fake host", &diagnosis);
+        for marker in ["untrusted-marker", "error-marker", "trace-marker"] {
+            assert!(!report.contains(marker));
+        }
+        assert!(report.contains("Route: Direct"));
+    }
+}

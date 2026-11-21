@@ -34,6 +34,12 @@ type LinkCall = LocalBoxFuture<'static, Result<(), PeerLinkFailure>>;
 
 type Call = LocalBoxFuture<'static, Result<(), ClientError>>;
 pub trait ConnectionSettings {
+    fn forget_peer(&self, source: EnvironmentId, target: EnvironmentId) -> LinkCall;
+    fn refresh_relay(&self) -> LocalBoxFuture<'static, ()>;
+    fn access_manager(
+        &self,
+        id: &EnvironmentId,
+    ) -> Option<Rc<t3_client::services::settings::access::Manager>>;
     fn machines(&self, source: &EnvironmentId, links: &[PeerLinkSummary]) -> Vec<LinkableMachine>;
     fn link(
         &self,
@@ -56,6 +62,18 @@ pub trait ConnectionSettings {
 }
 
 impl<P: Platform + Clone + 'static> ConnectionSettings for ClientRuntime<P> {
+    fn forget_peer(&self, source: EnvironmentId, target: EnvironmentId) -> LinkCall {
+        self.forget_settings_peer(source, target)
+    }
+    fn refresh_relay(&self) -> LocalBoxFuture<'static, ()> {
+        ClientRuntime::refresh_relay(self)
+    }
+    fn access_manager(
+        &self,
+        id: &EnvironmentId,
+    ) -> Option<Rc<t3_client::services::settings::access::Manager>> {
+        ClientRuntime::access_manager(self, id)
+    }
     fn peer_session(&self, id: &EnvironmentId) -> Option<t3_client::rpc::SessionEndpoint> {
         self.settings_peer_session(id)
     }
@@ -72,24 +90,7 @@ impl<P: Platform + Clone + 'static> ConnectionSettings for ClientRuntime<P> {
         self.link_settings_peer(source, dest, code, access)
     }
     fn diagnose(&self, id: &EnvironmentId) -> Option<ConnectionDiagnosis> {
-        let mut diagnosis = self.diagnosis(id, option_env!("T3_APP_VERSION"))?;
-        // Server errors and trace IDs are unconstrained strings and may contain credentials.
-        diagnosis
-            .facts
-            .retain(|(label, _)| !matches!(label.as_str(), "Error" | "Trace ID"));
-        if let Some(untrusted) = self
-            .client(id)
-            .and_then(|c| c.state().last_failure)
-            .and_then(|f| f.verification_code)
-            .filter(|code| !valid_device_display_code(code))
-        {
-            for step in &mut diagnosis.steps {
-                if !untrusted.is_empty() {
-                    *step = step.replace(&untrusted, "<code>");
-                }
-            }
-        }
-        Some(diagnosis)
+        self.settings_diagnosis(id, option_env!("T3_APP_VERSION"))
     }
     fn enabled(&self, id: &EnvironmentId, enabled: bool) -> Call {
         self.set_saved_environment_enabled(id, enabled)
@@ -120,19 +121,6 @@ impl<P: Platform + Clone + 'static> ConnectionSettings for ClientRuntime<P> {
     }
 }
 
-// The public comparison code derived by t3-auth is two groups of four characters.
-fn valid_device_display_code(code: &str) -> bool {
-    let Some((first, last)) = code.split_once('-') else {
-        return false;
-    };
-    first.len() == 4
-        && last.len() == 4
-        && first
-            .bytes()
-            .chain(last.bytes())
-            .all(|b| b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ".contains(&b))
-}
-
 pub(super) type Services = Stored<Rc<dyn ConnectionSettings>>;
 
 pub(super) fn action(label: String, on_press: impl Fn() + 'static) -> AnyElement {
@@ -160,6 +148,9 @@ pub fn screen() -> AnyElement {
     let relay_tick = signal(0u64);
     if let Some(s) = services {
         use futures::StreamExt;
+        if s.get().relay_state().is_some_and(|state| !state.refreshing) {
+            TaskOwner::here().spawn(s.get().refresh_relay());
+        }
         let mut changes = s.get().relay_changes();
         crate::runtime::tasks::watch(async move {
             while changes.next().await.is_some() {
@@ -183,7 +174,12 @@ pub fn screen() -> AnyElement {
             !rt.environments().iter().any(saved)
                 && services
                     .and_then(|s| s.get().relay_state())
-                    .is_none_or(|state| !state.refreshing && state.environments.is_empty())
+                    .is_none_or(|state| {
+                        !state.refreshing
+                            && !state.offline
+                            && state.error.is_none()
+                            && state.environments.is_empty()
+                    })
         },
         move |empty| {
             empty.then(|| {
@@ -208,7 +204,7 @@ pub fn screen() -> AnyElement {
     settings_page_container(
         view()
             .child(section)
-            .child(services.map(linked_environments))
+            .child(services.map(|s| linked_environments(s, relay_tick)))
             .child(region(
                 move || form.get(),
                 move |request| {
@@ -225,6 +221,17 @@ struct Commands {
     busy: Signal<bool>,
     error: Signal<Option<&'static str>>,
 }
+fn command_error(cause: &ClientError, fallback: &'static str) -> &'static str {
+    match cause {
+        ClientError::InvalidPayload(reason) if reason == "The saved routes have changed." => {
+            "The saved routes have changed."
+        }
+        ClientError::InvalidPayload(reason) if reason == "This route cannot be removed." => {
+            "This route cannot be removed."
+        }
+        _ => fallback,
+    }
+}
 impl Commands {
     fn run(self, error: &'static str, work: impl FnOnce() -> Call + 'static) {
         if self.busy.get_untracked() {
@@ -234,8 +241,8 @@ impl Commands {
         self.busy.set(true);
         let result = work();
         self.tasks.spawn(async move {
-            if result.await.is_err() {
-                self.error.set(Some(error));
+            if let Err(cause) = result.await {
+                self.error.set(Some(command_error(&cause, error)));
             }
             self.busy.set(false);
         });
@@ -504,7 +511,7 @@ fn routes_list(
                                 let observed = order.get();
                                 let mut desired = observed.clone();
                                 desired.swap(index, next);
-                                commands.run("Reorder routes", move || {
+                                commands.run("Could not reorder the routes.", move || {
                                     s.get().edit_routes(
                                         id.get(),
                                         observed,
@@ -546,7 +553,7 @@ fn routes_list(
                         };
                         commands.tasks.spawn(async move {
                             if answer.await {
-                                commands.run("Remove route", move || {
+                                commands.run("Could not remove the route.", move || {
                                     s.get().edit_routes(
                                         id.get(),
                                         observed,
@@ -612,7 +619,8 @@ fn diagnosis_details(
                     panel
                         .child(services.map(|s| {
                             action(t("Retry now"), move || {
-                                commands.run("Connection failed", move || s.get().retry(&id.get()))
+                                commands
+                                    .run("Could not reconnect.", move || s.get().retry(&id.get()))
                             })
                         }))
                         .child(action(t("Copy diagnostics"), move || {
@@ -730,7 +738,7 @@ fn add_environment(
 
 /// Port of LinkedEnvironmentsSettings.tsx. Each mount belongs to a specific
 /// host session. A reconnect or loss of read access disposes its query and rows.
-fn linked_environments(services: Services) -> AnyElement {
+fn linked_environments(services: Services, relay_tick: Signal<u64>) -> AnyElement {
     let rt = rt();
     let hosts = computed(move || {
         rt.store.track_environments();
@@ -747,7 +755,7 @@ fn linked_environments(services: Services) -> AnyElement {
         move || hosts.get(),
         |e| (e.0.clone(), e.2.0, e.3),
         move |row, index| {
-            let (id, label, _, _) = row.get_untracked();
+            let (id, label, _, writer) = row.get_untracked();
             let id = stored(id);
             let title = if hosts.with(|h| h.len()) > 1 {
                 tr(
@@ -760,7 +768,7 @@ fn linked_environments(services: Services) -> AnyElement {
             let refresh = signal(0u32);
             let content = region(
                 move || refresh.get(),
-                move |_| peer_list(id, services, refresh),
+                move |_| peer_list(id, services, refresh, writer, relay_tick),
             );
             settings_section(
                 if index.get_untracked() == 0 {
@@ -775,16 +783,20 @@ fn linked_environments(services: Services) -> AnyElement {
     )
 }
 
-fn peer_list(id: Stored<EnvironmentId>, services: Services, refresh: Signal<u32>) -> AnyElement {
+fn peer_list(
+    id: Stored<EnvironmentId>,
+    services: Services,
+    refresh: Signal<u32>,
+    writer: bool,
+    relay_tick: Signal<u64>,
+) -> AnyElement {
     use t3_client::rpc::RpcEndpoint;
     use t3_contracts::rpc::{Empty, WsPeerLinksListRpc};
     let result = signal(None);
-    let writer = signal(false);
     let busy = signal(false);
     let message = signal(None::<String>);
     let tasks = TaskOwner::here();
     if let Some(session) = services.get().peer_session(&id.get()) {
-        writer.set(session.grants_scope(AuthEnvironmentScope::AccessWrite) == Some(true));
         tasks.spawn(async move {
             result.set(Some(
                 session
@@ -796,8 +808,8 @@ fn peer_list(id: Stored<EnvironmentId>, services: Services, refresh: Signal<u32>
         });
     }
     let opened = signal(false);
-    view().child(writer.get_untracked().then(||action(t("Link"),move ||opened.set(true))))
-        .child(region(move ||opened.get(),move |visible|visible.then(||peer_form(id,services,opened,refresh,result))))
+    view().child(writer.then(||action(t("Link"),move ||opened.set(true))))
+        .child(region(move ||opened.get(),move |visible|visible.then(||peer_form(id,services,opened,refresh,result,relay_tick))))
         .child(region(move ||result.get(),move |state|{
         let links=match state {
             None=>return text(t("Loading linked environments…")).into_element(),
@@ -822,19 +834,15 @@ fn peer_list(id: Stored<EnvironmentId>, services: Services, refresh: Signal<u32>
                 .child(text(link.label).app_class(tw("text-sm font-medium text-foreground")))
                 .child(text(format!("{access} · {status}")).app_class(tw("text-xs text-muted-foreground")))
                 .child(text(urls).app_class(tw("truncate text-xs text-muted-foreground/80")))
-                .child(writer.get_untracked().then(||button(ButtonContent::Label(t("Forget")),ButtonVariant::DestructiveOutline,ButtonSize::Xs,move ||busy.get(),move ||{
+                .child(writer.then(||button(ButtonContent::Label(t("Forget")),ButtonVariant::DestructiveOutline,ButtonSize::Xs,move ||busy.get(),move ||{
                     if busy.get_untracked(){return;}
                     let Some(answer)=request_confirm_dialog(confirmation.get(),Some(ConfirmDialogOptions{variant:ConfirmDialogVariant::Destructive,..Default::default()})) else{return};
                     busy.set(true);
                     tasks.spawn(async move{
-                        if answer.await && let Some(session)=services.get().peer_session(&id.get()) {
-                            use t3_contracts::{peer_link::PeerLinkRemoveInput,rpc::WsPeerLinksUnlinkRpc};
-                            let input=PeerLinkRemoveInput{environment_id:target.get()};
-                            if session.available::<WsPeerLinksUnlinkRpc>(&input) {
-                                match session.call::<WsPeerLinksUnlinkRpc>(input).await {
-                                    Ok(_)=>refresh.update(|n|*n+=1),
-                                    Err(_)=>message.set(Some(t("Could not forget the link"))),
-                                }
+                        if answer.await {
+                            match services.get().forget_peer(id.get(),target.get()).await {
+                                Ok(())=>refresh.update(|n|*n+=1),
+                                Err(reason)=>message.set(Some(peer_error(reason,true))),
                             }
                         }
                         busy.set(false);
@@ -856,32 +864,73 @@ fn relay_rows(services: Services, tick: Signal<u64>) -> AnyElement {
     region(
         move || {
             tick.get();
-            let saved = rt.environments();
-            services
-                .get()
-                .relay_state()
+            let saved_envs = rt.environments();
+            let Some(state) = services.get().relay_state() else {
+                return (None, vec![]);
+            };
+            let problem = if !saved_envs.iter().any(saved)
+                && state.environments.is_empty()
+                && !state.refreshing
+            {
+                if state.offline {
+                    Some("You appear to be offline.")
+                } else {
+                    state.error.as_ref().map(|reason| match reason {
+                        t3_client::relay::RelayError::Timeout => "The relay request timed out.",
+                        t3_client::relay::RelayError::SignedOut => {
+                            "Sign in to T3 Connect and try again."
+                        }
+                        _ => "Check your connection and try again.",
+                    })
+                }
+            } else {
+                None
+            };
+            let rows = state
+                .environments
                 .into_iter()
-                .flat_map(|s| s.environments)
-                .filter(|(id, _)| !saved.iter().any(|e| e.id == *id))
-                .map(|(id, entry)| {
+                .filter_map(|(id, entry)| {
+                    let existing = saved_envs.iter().find(|e| e.id == id);
+                    if existing.is_some_and(|e| {
+                        !saved(e) || e.routes.iter().any(|r| r.mode == ConnectionMode::Relay)
+                    }) {
+                        return None;
+                    }
                     let unsupported = entry
                         .status
                         .as_ref()
                         .and_then(|s| s.descriptor.as_ref()?.as_ref())
                         .and_then(t3_client::connection::orchestration_protocol_compatibility_error)
                         .is_some();
-                    (
+                    let offline_reason = entry
+                        .status
+                        .as_ref()
+                        .and_then(t3_client::relay::relay_offline_reason_message);
+                    Some((
                         id,
                         entry.environment.label.0,
                         entry.availability,
                         unsupported,
-                    )
+                        existing.is_some(),
+                        offline_reason,
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (problem, rows)
         },
-        move |rows| {
+        move |(problem, rows)| {
             let mut list = view();
-            for (id, label, availability, unsupported) in rows {
+            if let Some(problem) = problem {
+                list = list.child(
+                    view()
+                        .child(text(t("Could not load T3 Connect environments")))
+                        .child(text(t(problem)))
+                        .child(action(t("Try again"), move || {
+                            commands.tasks.spawn(services.get().refresh_relay())
+                        })),
+                );
+            }
+            for (id, label, availability, unsupported, fallback, offline_reason) in rows {
                 let status = if unsupported {
                     "Client not supported"
                 } else {
@@ -899,17 +948,29 @@ fn relay_rows(services: Services, tick: Signal<u64>) -> AnyElement {
                         .app_class(tw("flex flex-row items-center gap-2 px-3 py-2.5 sm:px-4"))
                         .child(
                             view().flex_1().child(text(label)).child(
-                                text(format!(
-                                    "{} · {} · {}",
-                                    t("T3 Connect"),
-                                    t("Not added"),
-                                    Text::client_key(status).resolve()
-                                ))
+                                text(
+                                    if let Some(reason) = offline_reason.filter(|_| {
+                                        !unsupported && availability == Availability::Offline
+                                    }) {
+                                        t(reason)
+                                    } else {
+                                        format!(
+                                            "{} · {} · {}",
+                                            t("T3 Connect"),
+                                            t(if fallback {
+                                                "Saved without T3 Connect"
+                                            } else {
+                                                "Not added"
+                                            }),
+                                            Text::client_key(status).resolve()
+                                        )
+                                    },
+                                )
                                 .app_class(tw("text-xs text-muted-foreground")),
                             ),
                         )
                         .child(button(
-                            ButtonContent::Label(t("Add")),
+                            ButtonContent::Label(t(if fallback { "Add route" } else { "Add" })),
                             ButtonVariant::Default,
                             ButtonSize::Sm,
                             move || unsupported || commands.busy.get(),
@@ -951,24 +1012,25 @@ fn environment_menu(
         ..Default::default()
     };
     let remove = t("Remove from this device…");
-    let routes = if routes_open.get_untracked() {
-        t("Hide routes")
-    } else {
-        t("Routes")
-    };
-    let menu=menu_button(tr("More actions for {name}",&[("name",Value::Text(name))]),move ||commands.busy.get(),crate::ui::icon::icon_with_class(crate::ui::icon::Icon::Ellipsis,"size-4"),MenuOptions::default(),menu_popup(view()
-        .child(menu_item(routes.clone(),ItemOptions::default(),text(routes),move || routes_open.update(|open| *open = !*open)))
-        .child(mcp.map(|url|{
+    let menu = region(
+        move || routes_open.get(),
+        move |open| {
+            let routes = t(if open { "Hide routes" } else { "Routes" });
+            menu_button(tr("More actions for {name}",&[("name",Value::Text(name.clone()))]),move ||commands.busy.get(),crate::ui::icon::icon_with_class(crate::ui::icon::Icon::Ellipsis,"size-4"),MenuOptions::default(),menu_popup(view()
+        .child(menu_item(routes.clone(),ItemOptions::default(),text(routes),move ||routes_open.update(|open| *open = !*open)))
+        .child(mcp.clone().map(|url|{
             let label=t("Copy MCP URL");
             menu_item(label.clone(),ItemOptions::default(),text(label),move ||set_clipboard(url.clone()))
         }))
-        .child(menu_item(remove.clone(),options,text(remove),move ||{
+        .child(menu_item(remove.clone(),options,text(remove.clone()),move ||{
             if relay_managed&&services.get().relay_state().is_some(){relay_confirm.set(true);return}
             let message=tr("Remove {name} from this device?\nThis forgets its pairing, credentials, and cached threads here. Switch it off instead to keep it saved.",&[("name",Value::Text(label.get()))]);
             let Some(answer)=request_confirm_dialog(message,Some(ConfirmDialogOptions{variant:ConfirmDialogVariant::Destructive,..Default::default()})) else{return};
             let id=id.get();
             commands.tasks.spawn(async move {if answer.await{commands.run("Could not remove backend",move ||services.get().remove_saved(&id));}});
-        }))));
+        }))))
+        },
+    );
     view().child(menu).child(alert_dialog(relay_confirm,move |state|alert_dialog_popup(state,Default::default(),move ||{
         let registration=services.get().relay_state().map(|s|s.registration(&id.get()));
         let description=match registration {
@@ -986,12 +1048,34 @@ fn environment_menu(
     }))).into_element()
 }
 
+fn peer_error(reason: PeerLinkFailure, forget: bool) -> String {
+    use t3_contracts::peer_link::PeerLinkErrorReason as Reason;
+    t(match reason {
+        PeerLinkFailure::NotAllowed => "This session cannot manage linked environments.",
+        PeerLinkFailure::Disconnected => "Reconnect to this environment and try again.",
+        PeerLinkFailure::Refused(reason) => match reason {
+            Reason::UnknownLink => "This environment no longer has that link.",
+            Reason::PairingRejected => "The other environment rejected the pairing code.",
+            Reason::Unreachable => "The other environment could not be reached.",
+            Reason::NotAT3Environment => "This address does not identify a T3 Code environment.",
+            Reason::Incompatible => "The other environment uses an incompatible T3 Code version.",
+            Reason::SelfLink => "An environment cannot link to itself.",
+            Reason::Expired => "The link has expired. Link it again with a new pairing code.",
+            Reason::Storage => "The environment could not save the link change.",
+            Reason::Disabled => "Linked environments are disabled on this host.",
+        },
+        _ if forget => "Could not forget the link",
+        _ => "Could not link the environment",
+    })
+}
+
 fn peer_form(
     source: Stored<EnvironmentId>,
     services: Services,
     opened: Signal<bool>,
     refresh: Signal<u32>,
     links: Signal<Option<Result<Vec<PeerLinkSummary>, ()>>>,
+    relay_tick: Signal<u64>,
 ) -> AnyElement {
     use crate::ui::{
         dialog::{
@@ -1010,7 +1094,15 @@ fn peer_form(
     let error = signal(None::<String>);
     let failed = signal(std::collections::BTreeSet::new());
     let tasks = TaskOwner::here();
+    if services
+        .get()
+        .relay_state()
+        .is_some_and(|s| !s.refreshing && s.environments.is_empty())
+    {
+        tasks.spawn(services.get().refresh_relay());
+    }
     let machines = computed(move || {
+        relay_tick.get();
         rt.environments();
         rt.store.track_environments();
         services.get().machines(
@@ -1086,9 +1178,9 @@ fn peer_form(
                                     set.insert(target);
                                 });
                             }
-                            reason.to_string()
+                            t(&reason.to_string())
                         }
-                        PeerLinkFailure::Unavailable => t("Could not link the environment"),
+                        reason => peer_error(reason, false),
                     };
                     error.set(Some(message));
                 }
@@ -1129,4 +1221,27 @@ select(picker,move |value|choice.set(value.map(|v|v.to_string())))})))
             view().child(dialog_header(state,view().child(dialog_title(state,||"Link an environment".into())).child(dialog_description(state,||"Agents here can then launch, message and wait on threads there. It appears under Authorized clients in that environment's Sharing & access, where it can be revoked.".into())))).child(dialog_panel(state,panel))
         })
     }).into_element()
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn settings_command_error_preserves_stale_order_and_masks_remote_reasons() {
+        let fallback = "Could not remove the route.";
+        assert_eq!(
+            command_error(
+                &ClientError::InvalidPayload("The saved routes have changed.".into()),
+                fallback
+            ),
+            "The saved routes have changed."
+        );
+        assert_eq!(
+            command_error(
+                &ClientError::InvalidPayload("secret-marker".into()),
+                fallback
+            ),
+            fallback
+        );
+    }
 }

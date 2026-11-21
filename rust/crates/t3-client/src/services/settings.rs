@@ -188,6 +188,466 @@ use crate::types::EnvironmentId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerLinkFailure {
+    NotAllowed,
+    Disconnected,
+    Refused(t3_contracts::peer_link::PeerLinkErrorReason),
     Mint(crate::services::http::PeerPairingCodeError),
     Unavailable,
+}
+
+impl From<crate::rpc::RpcCallError> for PeerLinkFailure {
+    fn from(error: crate::rpc::RpcCallError) -> Self {
+        use crate::rpc::RpcCallError;
+        use t3_contracts::rpc::WsPeerLinksListError;
+        match error {
+            RpcCallError::Rejected(errors) => errors
+                .into_iter()
+                .find_map(
+                    |e| match serde_json::from_value::<WsPeerLinksListError>(e).ok()? {
+                        WsPeerLinksListError::PeerLinkError(error) => {
+                            Some(Self::Refused(error.reason))
+                        }
+                        WsPeerLinksListError::EnvironmentAuthorizationError(_) => {
+                            Some(Self::NotAllowed)
+                        }
+                    },
+                )
+                .unwrap_or(Self::Unavailable),
+            RpcCallError::NotSent(crate::ClientError::PermissionDenied { .. }) => Self::NotAllowed,
+            RpcCallError::Unknown
+            | RpcCallError::Interrupted
+            | RpcCallError::NotSent(
+                crate::ClientError::Disconnected | crate::ClientError::Cancelled,
+            ) => Self::Disconnected,
+            _ => Self::Unavailable,
+        }
+    }
+}
+
+/// One mounted Sharing & access page. The socket, its grants and the stream
+/// snapshot belong to one session; a reconnect mounts a new manager.
+pub mod access {
+    use crate::{
+        connection::ConnectedClient,
+        permissions::{
+            EnvironmentHttpClient, apply_auth_access_stream_event,
+            connect_device::{connect_device_name, describe_connect_device_client},
+        },
+        platform::Platform,
+        rpc::{RpcEndpoint, SessionEndpoint, subscription::SubscriptionOptions},
+    };
+    use futures::StreamExt;
+    use std::{cell::RefCell, rc::Rc};
+    use t3_contracts::{
+        auth::*,
+        base_schemas::{AuthSessionId, TrimmedNonEmptyString},
+        rpc::{
+            Empty, WsServerUpdateSettingsPayload, WsServerUpdateSettingsRpc,
+            WsSubscribeAuthAccessRpc,
+        },
+        settings::ServerSettingsPatch,
+    };
+
+    #[derive(Clone, PartialEq, Eq)]
+    pub enum Action {
+        Client(AuthSessionId),
+        Others,
+        Approve(TrimmedNonEmptyString),
+        Deny(TrimmedNonEmptyString),
+        Device(TrimmedNonEmptyString),
+    }
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct ClientRow {
+        pub id: AuthSessionId,
+        pub name: String,
+        pub details: String,
+        pub scopes: Vec<String>,
+        pub current: bool,
+        pub live: bool,
+        pub last_connected: Option<String>,
+    }
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct Pending {
+        pub id: TrimmedNonEmptyString,
+        pub code: Option<String>,
+        pub details: String,
+    }
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct Device {
+        pub key: TrimmedNonEmptyString,
+        pub name: String,
+        pub code: Option<String>,
+        pub since: String,
+    }
+    #[derive(Clone, PartialEq, Eq, Default)]
+    pub struct Records {
+        pub clients: Vec<ClientRow>,
+        pub pending: Vec<Pending>,
+        pub trusted: Vec<Device>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AccessFailure {
+        Changed,
+        Save,
+        Revoke,
+    }
+    #[derive(Clone, PartialEq, Eq)]
+    pub enum PermissionState {
+        Checking,
+        Failed,
+        Rejected,
+        Verified(Vec<bool>),
+    }
+    pub enum RevokeTitle {
+        OtherClients,
+        Device(String),
+    }
+    pub enum Outcome {
+        Done,
+        Confirm(RevokeTitle),
+    }
+    pub struct Manager {
+        client: ConnectedClient,
+        endpoint: SessionEndpoint,
+        platform: Rc<dyn Platform>,
+        snapshot: RefCell<Option<AuthAccessSnapshot>>,
+    }
+    pub fn display_code(code: &str) -> Option<String> {
+        let (first, last) = code.split_once('-')?;
+        (first.len() == 4
+            && last.len() == 4
+            && first
+                .bytes()
+                .chain(last.bytes())
+                .all(|b| b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ".contains(&b)))
+        .then(|| code.to_owned())
+    }
+    fn records(snapshot: &AuthAccessSnapshot) -> Records {
+        let mut result = Records::default();
+        let mut sessions = snapshot.client_sessions.iter().collect::<Vec<_>>();
+        sessions.sort_by_key(|s| {
+            std::cmp::Reverse((
+                s.current,
+                s.connected,
+                crate::time::epoch_ms(&s.issued_at.0),
+            ))
+        });
+        for s in sessions {
+            let m = &s.client;
+            let os_browser = [m.os.as_ref(), m.browser.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|v| v.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let name = m.label.as_ref().map(|l| l.0.clone()).unwrap_or_else(|| {
+                if os_browser.is_empty() {
+                    s.subject.0.clone()
+                } else {
+                    os_browser
+                }
+            });
+            let mut bits = Vec::new();
+            if let Some(kind) = serde_json::to_value(m.device_type)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                && kind != "unknown"
+            {
+                let mut kind = kind;
+                if let Some(first) = kind.get_mut(0..1) {
+                    first.make_ascii_uppercase();
+                }
+                bits.push(kind);
+            }
+            bits.extend(
+                [m.os.as_ref(), m.browser.as_ref(), m.ip_address.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|s| s.0.clone()),
+            );
+            result.clients.push(ClientRow {
+                id: s.session_id.clone(),
+                name,
+                details: bits.join(" · "),
+                current: s.current,
+                live: s.current || s.connected,
+                last_connected: s.last_connected_at.as_ref().map(|date| date.0.clone()),
+                scopes: s
+                    .permissions
+                    .as_ref()
+                    .unwrap_or(&s.scopes)
+                    .iter()
+                    .filter_map(|scope| {
+                        serde_json::to_value(scope)
+                            .ok()?
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .collect(),
+            });
+        }
+        if let Some(devices) = &snapshot.connect_devices {
+            let mut links = snapshot.pairing_links.iter().collect::<Vec<_>>();
+            links.sort_by_key(|l| std::cmp::Reverse(crate::time::epoch_ms(&l.created_at.0)));
+            result.pending = links
+                .into_iter()
+                .filter_map(|l| {
+                    let r = l.connect_device_request.as_ref()?;
+                    Some(Pending {
+                        id: l.id.clone(),
+                        code: display_code(&r.verification_code.0),
+                        details: describe_connect_device_client(r.client.as_ref()),
+                    })
+                })
+                .collect();
+            result.trusted = devices
+                .iter()
+                .map(|d| Device {
+                    key: d.proof_key_thumbprint.clone(),
+                    name: describe_connect_device_client(d.client.as_ref()),
+                    code: display_code(&d.verification_code.0),
+                    since: d.approved_at.0.clone(),
+                })
+                .collect();
+        }
+        result
+    }
+    impl Manager {
+        pub(crate) fn new(client: ConnectedClient, platform: Rc<dyn Platform>) -> Option<Self> {
+            let endpoint = client.session()?;
+            Some(Self {
+                client,
+                endpoint,
+                platform,
+                snapshot: Default::default(),
+            })
+        }
+        pub async fn permissions(
+            &self,
+            scopes: &[AuthEnvironmentScope],
+            mut publish: impl FnMut(PermissionState),
+        ) {
+            let mut retry = crate::permissions::SessionRetry::default();
+            loop {
+                if self
+                    .endpoint
+                    .grants_scope(AuthEnvironmentScope::AccessRead)
+                    .is_none()
+                {
+                    return;
+                }
+                let result = self.client.verify_session().await;
+                if self
+                    .endpoint
+                    .grants_scope(AuthEnvironmentScope::AccessRead)
+                    .is_none()
+                {
+                    return;
+                }
+                match result {
+                    Ok(state) if state.authenticated => {
+                        publish(PermissionState::Verified(
+                            scopes
+                                .iter()
+                                .map(|scope| {
+                                    crate::permissions::session_grants_scope(&state, *scope)
+                                })
+                                .collect(),
+                        ));
+                        return;
+                    }
+                    Ok(_) => {
+                        publish(PermissionState::Rejected);
+                        return;
+                    }
+                    Err(_) => {
+                        publish(PermissionState::Failed);
+                        self.platform.sleep(retry.failed()).await;
+                    }
+                }
+            }
+        }
+        pub async fn follow(&self, mut publish: impl FnMut(Result<Records, ()>)) {
+            if self.endpoint.grants_scope(AuthEnvironmentScope::AccessRead) != Some(true) {
+                return;
+            }
+            let mut events = self
+                .endpoint
+                .subscribe_recovering::<WsSubscribeAuthAccessRpc, _>(
+                    self.platform.as_ref(),
+                    Empty {},
+                    SubscriptionOptions::default(),
+                );
+            while let Some(event) = events.next().await {
+                if self.endpoint.grants_scope(AuthEnvironmentScope::AccessRead) != Some(true) {
+                    break;
+                }
+                let result = match event {
+                    Ok(AuthAccessStreamEvent::AuthAccessStreamSnapshotEvent(e)) => {
+                        self.snapshot.replace(Some(e.payload));
+                        Ok(())
+                    }
+                    Ok(event) => self
+                        .snapshot
+                        .borrow_mut()
+                        .as_mut()
+                        .map(|s| apply_auth_access_stream_event(s, event))
+                        .ok_or(()),
+                    Err(_) => Err(()),
+                };
+                if result.is_err() {
+                    self.snapshot.take();
+                }
+                publish(self.snapshot.borrow().as_ref().map(records).ok_or(()));
+            }
+            self.snapshot.take();
+            publish(Err(()));
+        }
+        fn writable(&self) -> Result<EnvironmentHttpClient, ()> {
+            if self
+                .endpoint
+                .grants_scope(AuthEnvironmentScope::AccessWrite)
+                != Some(true)
+            {
+                return Err(());
+            }
+            self.client.access_http().ok_or(())
+        }
+        /// Revalidate membership on click and after any interleaved setting save.
+        fn connect_revoke(&self, action: &Action) -> Result<Option<RevokeTitle>, ()> {
+            if !matches!(action, Action::Others)
+                && self.endpoint.grants_scope(AuthEnvironmentScope::AccessRead) != Some(true)
+            {
+                return Err(());
+            }
+            let state = self.snapshot.borrow();
+            let snapshot = state.as_ref();
+            match action {
+                Action::Others => {
+                    if let Some(s) = snapshot
+                        && !s.client_sessions.iter().any(|v| !v.current)
+                    {
+                        return Err(());
+                    }
+                    Ok(snapshot
+                        .filter(|s| {
+                            s.connect_devices.as_ref().is_some_and(|d| !d.is_empty())
+                                || s.client_sessions
+                                    .iter()
+                                    .any(|v| !v.current && v.subject.0 == "cloud-connect")
+                        })
+                        .map(|_| RevokeTitle::OtherClients))
+                }
+                Action::Client(id) => {
+                    let record = snapshot
+                        .ok_or(())?
+                        .client_sessions
+                        .iter()
+                        .find(|v| &v.session_id == id && !v.current)
+                        .ok_or(())?;
+                    Ok((record.subject.0 == "cloud-connect").then(|| {
+                        RevokeTitle::Device(connect_device_name(Some(&record.client)).into())
+                    }))
+                }
+                Action::Device(key) => {
+                    let device = snapshot
+                        .and_then(|s| s.connect_devices.as_ref())
+                        .ok_or(())?
+                        .iter()
+                        .find(|d| &d.proof_key_thumbprint == key)
+                        .ok_or(())?;
+                    Ok(Some(RevokeTitle::Device(
+                        connect_device_name(device.client.as_ref()).into(),
+                    )))
+                }
+                Action::Approve(id) | Action::Deny(id) => {
+                    let s = snapshot.filter(|s| s.connect_devices.is_some()).ok_or(())?;
+                    let request = s
+                        .pairing_links
+                        .iter()
+                        .find(|l| &l.id == id)
+                        .and_then(|l| l.connect_device_request.as_ref())
+                        .ok_or(())?;
+                    if matches!(action, Action::Approve(_))
+                        && display_code(&request.verification_code.0).is_none()
+                    {
+                        return Err(());
+                    }
+                    Ok(None)
+                }
+            }
+        }
+        pub async fn apply(
+            &self,
+            action: &Action,
+            confirmed: Option<bool>,
+        ) -> Result<Outcome, AccessFailure> {
+            self.writable().map_err(|_| AccessFailure::Changed)?;
+            if let Some(title) = self
+                .connect_revoke(action)
+                .map_err(|_| AccessFailure::Changed)?
+            {
+                match confirmed {
+                    None => {
+                        if self.endpoint.connect_approval() == Some(false) {
+                            return Ok(Outcome::Confirm(title));
+                        }
+                    }
+                    Some(true) => {
+                        let patch = ServerSettingsPatch {
+                            require_connect_device_approval: Some(true),
+                            ..Default::default()
+                        };
+                        let input = WsServerUpdateSettingsPayload {
+                            patch: patch.into(),
+                            provider_instance_mutation: None,
+                        };
+                        if !self.endpoint.available::<WsServerUpdateSettingsRpc>(&input) {
+                            return Err(AccessFailure::Save);
+                        }
+                        let saved = self
+                            .endpoint
+                            .command::<WsServerUpdateSettingsRpc>(input)
+                            .await
+                            .map_err(|_| AccessFailure::Save)?;
+                        if !saved.require_connect_device_approval {
+                            return Err(AccessFailure::Save);
+                        }
+                    }
+                    Some(false) => {}
+                }
+            }
+            let http = self.writable().map_err(|_| AccessFailure::Changed)?;
+            self.connect_revoke(action)
+                .map_err(|_| AccessFailure::Changed)?;
+            match action {
+                Action::Client(id) => http
+                    .revoke_client(&AuthRevokeClientSessionInput {
+                        session_id: id.clone(),
+                    })
+                    .await
+                    .map(|_| ()),
+                Action::Others => http.revoke_other_clients().await.map(|_| ()),
+                Action::Approve(id) => http
+                    .approve_connect_device(&AuthApproveConnectDeviceInput {
+                        pairing_link_id: id.clone(),
+                    })
+                    .await
+                    .map(|_| ()),
+                Action::Deny(id) => http
+                    .revoke_pairing_link(&AuthRevokePairingLinkInput { id: id.clone() })
+                    .await
+                    .map(|_| ()),
+                Action::Device(key) => http
+                    .revoke_connect_device(&AuthRevokeConnectDeviceInput {
+                        proof_key_thumbprint: key.clone(),
+                    })
+                    .await
+                    .map(|_| ()),
+            }
+            .map_err(|_| AccessFailure::Revoke)?;
+            Ok(Outcome::Done)
+        }
+    }
 }

@@ -817,6 +817,15 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             .environments()
             .into_iter()
             .find(|entry| &entry.id == environment)?;
+        self.diagnosis_for_entry(entry, client_version)
+    }
+
+    fn diagnosis_for_entry(
+        &self,
+        entry: EnvironmentEntry,
+        client_version: Option<&str>,
+    ) -> Option<ConnectionDiagnosis> {
+        let environment = &entry.id;
         if !entry.state.desired || entry.state.phase == Phase::Connected {
             return None;
         }

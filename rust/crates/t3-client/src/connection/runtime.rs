@@ -118,6 +118,19 @@ impl ConnectedClient {
         .then(|| self.owner.settings_http.borrow().clone())
         .flatten()
     }
+    /// Read-only verification of the installed route for the permissions disclosure.
+    pub(crate) async fn verify_session(
+        &self,
+    ) -> Result<t3_contracts::auth::AuthSessionState, crate::authorization::AuthorizationError>
+    {
+        let http = self
+            .owner
+            .settings_http
+            .borrow()
+            .clone()
+            .ok_or(crate::authorization::AuthorizationError::SessionChanged)?;
+        http.fetch_session_state(None).await
+    }
     pub fn state(&self) -> ConnectionState {
         self.store()
             .snapshot()
@@ -775,12 +788,9 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                 };
                 // A failed request on a healthy socket resubscribes on it (WP5's policy); the
                 // socket job ending is what replaces the session.
-                let mut stream = endpoint
-                    .subscribe_recovering::<t3_contracts::rpc::WsSubscribeServerConfigRpc, _>(
-                        &platform,
-                        input,
-                        Default::default(),
-                    );
+                let mut stream = endpoint.subscribe_recovering::<crate::rpc::ConfigWire<
+                    t3_contracts::rpc::WsSubscribeServerConfigRpc,
+                >, _>(&platform, input, Default::default());
                 let mut current = None;
                 let mut announced = None;
                 while let Some(event) = stream.next().await {
@@ -790,7 +800,7 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                     };
                     match crate::services::config::apply_server_config_projection(
                         current.as_ref(),
-                        event,
+                        event.value,
                     ) {
                         Ok(Some(next)) => {
                             if !store.set_config(
@@ -799,6 +809,14 @@ impl<P: Platform + Clone + 'static> Runtime<P> {
                                 next.config.as_ref().clone(),
                             ) {
                                 return Outcome::Ended(Err(ClientError::Cancelled));
+                            }
+                            use t3_contracts::server::ServerConfigStreamEvent;
+                            if matches!(
+                                next.latest_event,
+                                ServerConfigStreamEvent::Snapshot(_)
+                                    | ServerConfigStreamEvent::SettingsUpdated(_)
+                            ) {
+                                endpoint.set_connect_approval(event.connect_approval);
                             }
                             let reported = reported_endpoints(&next.config);
                             if let Some((learn, (route_id, learned))) = &learn

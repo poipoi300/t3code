@@ -12,6 +12,40 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
 }
 
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {
+    pub fn access_manager(
+        &self,
+        id: &EnvironmentId,
+    ) -> Option<Rc<crate::services::settings::access::Manager>> {
+        crate::services::settings::access::Manager::new(
+            self.client(id)?,
+            Rc::new(self.inner.platform.clone()),
+        )
+        .map(Rc::new)
+    }
+    /// Sanitize the same failure snapshot used to compose the visible remedies and clipboard report.
+    pub fn settings_diagnosis(
+        &self,
+        id: &EnvironmentId,
+        client_version: Option<&str>,
+    ) -> Option<ConnectionDiagnosis> {
+        let mut entry = self
+            .environments()
+            .into_iter()
+            .find(|entry| &entry.id == id)?;
+        if let Some(failure) = &mut entry.state.last_failure
+            && failure
+                .verification_code
+                .as_deref()
+                .is_some_and(|code| crate::services::settings::access::display_code(code).is_none())
+        {
+            failure.verification_code = Some("<code>".into());
+        }
+        let mut diagnosis = self.diagnosis_for_entry(entry, client_version)?;
+        diagnosis
+            .facts
+            .retain(|(label, _)| !matches!(label.as_str(), "Error" | "Trace ID"));
+        Some(diagnosis)
+    }
     /// Local device preference, saved under the same registry lease as pairing.
     pub fn set_saved_environment_enabled(
         &self,
@@ -49,6 +83,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                     ));
                 }
                 let time = Time::from_platform(platform);
+                let mut ssh_target = None;
                 match edit {
                     SavedRouteEdit::Order(next) => {
                         registry.reorder_routes(&id, &next, time)?;
@@ -63,10 +98,27 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                                 "This route cannot be removed.".into(),
                             ));
                         }
+                        if routes
+                            .iter()
+                            .any(|r| r.id == route && r.mode == ConnectionMode::Ssh)
+                        {
+                            let stores = ConnectionStores::new(Rc::new(platform.clone()));
+                            let profile = stores.profile(&id, &route).await.map_err(|_| {
+                                ClientError::InvalidPayload(
+                                    "Could not read the saved SSH profile.".into(),
+                                )
+                            })?;
+                            if let Some(ConnectionProfile::Ssh { target, .. }) = profile {
+                                ssh_target = Some(target);
+                            }
+                        }
                         registry.remove_route(&id, &route, time)?;
                     }
                 }
                 registry.save(platform).await?;
+                if let Some(target) = ssh_target {
+                    let _ = platform.ssh_disconnect(target).await;
+                }
                 this.start_saved(&id).await
             }
             .boxed_local(),
@@ -147,6 +199,34 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         machines
     }
 
+    pub fn forget_settings_peer(
+        &self,
+        source: EnvironmentId,
+        target: EnvironmentId,
+    ) -> LocalBoxFuture<'static, Result<(), crate::services::settings::PeerLinkFailure>> {
+        use crate::rpc::RpcEndpoint;
+        use crate::services::settings::PeerLinkFailure;
+        use t3_contracts::{peer_link::PeerLinkRemoveInput, rpc::WsPeerLinksUnlinkRpc};
+        let this = self.clone();
+        async move {
+            let session = this
+                .settings_peer_session(&source)
+                .ok_or(PeerLinkFailure::Disconnected)?;
+            let input = PeerLinkRemoveInput {
+                environment_id: target,
+            };
+            if !session.available::<WsPeerLinksUnlinkRpc>(&input) {
+                return Err(PeerLinkFailure::NotAllowed);
+            }
+            session
+                .command::<WsPeerLinksUnlinkRpc>(input)
+                .await
+                .map(|_| ())
+                .map_err(Into::into)
+        }
+        .boxed_local()
+    }
+
     pub fn link_settings_peer(
         &self,
         source: EnvironmentId,
@@ -167,8 +247,10 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         async move {
             let source_session = this
                 .settings_peer_session(&source)
-                .filter(|s| s.grants_scope(AuthEnvironmentScope::AccessWrite) == Some(true))
-                .ok_or(Failure::Unavailable)?;
+                .ok_or(Failure::Disconnected)?;
+            if source_session.grants_scope(AuthEnvironmentScope::AccessWrite) != Some(true) {
+                return Err(Failure::NotAllowed);
+            }
             let (expected, label, urls, code) = match destination {
                 PeerDestination::Address(url) => {
                     (None, None, vec![url], code.ok_or(Failure::Unavailable)?)
@@ -206,13 +288,13 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 access,
             };
             if !source_session.available::<WsPeerLinksLinkRpc>(&input) {
-                return Err(Failure::Unavailable);
+                return Err(Failure::NotAllowed);
             }
             source_session
-                .call::<WsPeerLinksLinkRpc>(input)
+                .command::<WsPeerLinksLinkRpc>(input)
                 .await
                 .map(|_| ())
-                .map_err(|_| Failure::Unavailable)
+                .map_err(Into::into)
         }
         .boxed_local()
     }

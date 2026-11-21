@@ -135,6 +135,7 @@ pub struct ServerState {
     pub hold_socket_close: bool,
     pub socket_closes: usize,
     pub fail_device_preference_write: bool,
+    pub refuse_catalog_save: bool,
     /// Failure injection: dispatches are received and never answered.
     pub hold_dispatches: bool,
     /// Failure injection: the host cannot produce random bytes.
@@ -357,6 +358,15 @@ impl Storage for TestPlatform {
         self.fake.list(area, namespace)
     }
     fn transaction(&self, transaction: StorageTransaction) -> HostFuture<'_, bool> {
+        if self.server.state.borrow().refuse_catalog_save
+            && transaction
+                .ordinary
+                .iter()
+                .any(|w| w.key.namespace == "connection-catalog")
+        {
+            return async { Err(PlatformError::Storage("catalog save refused".into())) }
+                .boxed_local();
+        }
         self.fake.transaction(transaction)
     }
 }

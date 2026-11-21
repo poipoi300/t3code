@@ -56,6 +56,7 @@ use t3_ui::{
 #[derive(Clone, PartialEq, Props)]
 struct ManagedProps {
     write: bool,
+    refuse_unlink: bool,
 }
 
 #[component]
@@ -86,7 +87,14 @@ fn Managed(props: ManagedProps) -> impl IntoElement {
         "access":"read-only","linkedAt":"2026-10-01T00:00:00Z","expiresAt":"2030-01-01T00:00:00Z",
         "lastReachedAt":null,"lastError":null,"status":"reachable"
     }]})));
-    server.reply("peerLinks.unlink", Ok(serde_json::json!({"removed":true})));
+    server.reply(
+        "peerLinks.unlink",
+        if props.refuse_unlink {
+            Err(serde_json::json!({"_tag":"PeerLinkError","reason":"unknown_link","message":"private-rejection-marker"}))
+        } else {
+            Ok(serde_json::json!({"removed":true}))
+        },
+    );
     server.reply("peerLinks.list", Ok(serde_json::json!({"links":[]})));
     server.reply("peerLinks.link", Ok(serde_json::json!({
         "environmentId":"new-peer","label":"New host","urls":["https://new.test"],"access":"approval-required",
@@ -118,6 +126,36 @@ fn Managed(props: ManagedProps) -> impl IntoElement {
         OrchestrationV2CreationSource::Web,
         spawner,
     );
+    let short_code = std::rc::Rc::new(std::cell::Cell::new(false));
+    let short = short_code.clone();
+    on_key("ctrl+shift+x", move |_| short.set(true));
+    let diagnostic_client = client.clone();
+    on_key("ctrl+shift+d", move |_| {
+        use t3_client::connection::{ConnectionFailure, FailureCause, FailureKind, Phase};
+        let mut entry = diagnostic_client
+            .environments()
+            .into_iter()
+            .next()
+            .expect("paired machine");
+        let mut failure =
+            ConnectionFailure::new(FailureKind::ApprovalPending, "fixture-error-marker");
+        failure.trace_id = Some("fixture-trace-marker".into());
+        failure.verification_code = Some(
+            if short_code.get() {
+                "a"
+            } else {
+                "fixture-invalid-code"
+            }
+            .into(),
+        );
+        failure.hop = Some(t3_client::connection::ConnectionHop::Server);
+        failure.cause = Some(FailureCause::ApprovalPending);
+        entry.state.phase = Phase::Blocked;
+        entry.state.last_failure = Some(failure);
+        diagnostic_client
+            .store()
+            .set_connection(entry.id, entry.state);
+    });
     let restarting = client.clone();
     on_key("ctrl+shift+r", move |_| {
         spawn(restarting.reconnect(&t3_client::types::EnvironmentId("env".into())));
@@ -138,10 +176,16 @@ fn managed_app(window: (f32, f32)) -> Headless {
 }
 
 fn managed_with_grant(window: (f32, f32), write: bool) -> Headless {
+    managed_fixture(window, write, false)
+}
+fn managed_fixture(window: (f32, f32), write: bool, refuse_unlink: bool) -> Headless {
     let mut config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
-        ..EngineConfig::new(Root::new::<Managed>(move || ManagedProps { write }))
+        ..EngineConfig::new(Root::new::<Managed>(move || ManagedProps {
+            write,
+            refuse_unlink,
+        }))
     };
     config.environment.idiom = if window == PHONE {
         nsh_core::platform::Idiom::Phone
@@ -245,7 +289,12 @@ fn forget_peer(window: (f32, f32)) {
         .expect("linked host from guarded RPC");
     app.wait_for("text:https://build.test")
         .expect("show destination origin");
-    assert!(!app.screen().shows("secret-marker"));
+    assert!(
+        app.screen()
+            .texts()
+            .iter()
+            .all(|value| !value.contains("secret-marker"))
+    );
     app.press("role:button[Forget]").expect("open confirmation");
     app.press("role:button[Cancel]").expect("keep link");
     app.wait_for("Build host").expect("still linked");
@@ -393,4 +442,87 @@ fn read_only_host_desktop() {
 #[test]
 fn read_only_host_phone() {
     read_only_host(PHONE);
+}
+
+fn route_menu(w: (f32, f32)) {
+    let mut app = managed_app(w);
+    app.wait_for("Build host")
+        .expect("connected and list loaded");
+    app.press("role:button[Routes]").expect("expand routes");
+    app.press("role:button[More actions for Fake host]")
+        .expect("open menu");
+    app.press("role:menuitem[Hide routes]")
+        .expect("menu reflects expanded routes");
+    app.press("role:button[More actions for Fake host]")
+        .expect("reopen");
+    app.wait_for("role:menuitem[Routes]")
+        .expect("menu reflects closed routes");
+}
+#[test]
+fn route_menu_desktop() {
+    route_menu(DESKTOP)
+}
+#[test]
+fn route_menu_phone() {
+    route_menu(PHONE)
+}
+fn refused_unlink(w: (f32, f32)) {
+    let mut app = managed_fixture(w, true, true);
+    app.wait_for("Build host").expect("connected");
+    app.press("role:button[Forget]").expect("forget");
+    app.press("role:button[Confirm]").expect("confirm");
+    app.wait_for("This environment no longer has that link.")
+        .expect("specific safe rejection");
+    assert!(
+        app.screen()
+            .texts()
+            .iter()
+            .all(|value| !value.contains("private-rejection-marker"))
+    );
+}
+#[test]
+fn refused_unlink_desktop() {
+    refused_unlink(DESKTOP)
+}
+#[test]
+fn refused_unlink_phone() {
+    refused_unlink(PHONE)
+}
+
+fn scrubbed_diagnosis(w: (f32, f32)) {
+    let mut app = managed_app(w);
+    app.wait_for("Build host").expect("paired machine");
+    app.press_key("ctrl+shift+d")
+        .expect("pending approval with diagnostic metadata");
+    app.press("role:button[Details]")
+        .expect("inspect diagnosis");
+    app.wait_for("What to try").expect("diagnosis visible");
+    app.press("role:button[Copy diagnostics]")
+        .expect("copy visible report");
+    let screen = app.screen();
+    let copied = screen.clipboard().expect("copied");
+    for marker in [
+        "fixture-error-marker",
+        "fixture-trace-marker",
+        "fixture-invalid-code",
+    ] {
+        assert!(screen.texts().iter().all(|value| !value.contains(marker)));
+        assert!(!copied.contains(marker), "excluded from clipboard");
+    }
+    assert!(screen.shows("Or run `t3 auth connect-device approve <code>` on Fake host."));
+    assert!(copied.contains("Route: Direct"));
+    app.press_key("ctrl+shift+x")
+        .expect("select short comparison value");
+    app.press_key("ctrl+shift+d")
+        .expect("update failed connection");
+    app.wait_for("Or run `t3 auth connect-device approve <code>` on Fake host.")
+        .expect("redaction preserves ordinary words");
+}
+#[test]
+fn scrubbed_diagnosis_desktop() {
+    scrubbed_diagnosis(DESKTOP)
+}
+#[test]
+fn scrubbed_diagnosis_phone() {
+    scrubbed_diagnosis(PHONE)
 }

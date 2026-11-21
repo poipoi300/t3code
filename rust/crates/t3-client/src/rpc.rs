@@ -140,6 +140,41 @@ pub trait RpcEndpoint {
     }
 }
 
+/// Preserve the optional Connect policy while decoding the regular config contract.
+/// ServerSettings defaults a missing field to false, but legacy hosts omit the policy.
+pub(crate) struct ConfigWire<M>(std::marker::PhantomData<M>);
+
+pub(crate) struct ConfigReply<T: t3_contracts::rpc::RpcMethod> {
+    pub(crate) value: T::Success,
+    pub(crate) connect_approval: Option<bool>,
+}
+
+impl<M: t3_contracts::rpc::RpcMethod> RpcMethod for ConfigWire<M> {
+    type Input = M::Payload;
+    type Output = ConfigReply<M>;
+    const NAME: &'static str = M::TAG;
+}
+impl<'de, M: t3_contracts::rpc::RpcMethod> serde::Deserialize<'de> for ConfigReply<M> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        let settings = if M::STREAMS {
+            match raw["type"].as_str() {
+                Some("snapshot") => raw.pointer("/config/settings"),
+                Some("settingsUpdated") => raw.pointer("/payload/settings"),
+                _ => None,
+            }
+        } else {
+            raw.get("settings")
+        };
+        let connect_approval = settings.and_then(|s| s["requireConnectDeviceApproval"].as_bool());
+        let value = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            value,
+            connect_approval,
+        })
+    }
+}
+
 /// The caller installs a fresh endpoint per authenticated connection, and drives its driver.
 #[derive(Clone)]
 pub struct SessionEndpoint {
@@ -155,6 +190,7 @@ struct Session {
     commands: mpsc::UnboundedSender<DriverCommand>,
     calls: HashMap<RequestId, Rc<RefCell<Mailbox>>>,
     config_clock: Option<clock::ConfigClock>,
+    connect_approval: Option<bool>,
 }
 enum DriverCommand {
     Start(Request, CallKind),
@@ -214,13 +250,22 @@ impl SessionEndpoint {
     }
     pub async fn initial_config(&self) -> Result<t3_contracts::server::ServerConfig, ClientError> {
         let config = self
-            .call::<t3_contracts::rpc::WsServerGetConfigRpc>(t3_contracts::rpc::Empty {})
+            .call::<ConfigWire<t3_contracts::rpc::WsServerGetConfigRpc>>(
+                t3_contracts::rpc::Empty {},
+            )
             .await?;
-        if config.environment.environment_id != self.environment() {
+        if config.value.environment.environment_id != self.environment() {
             self.invalidate();
             return Err(ClientError::EnvironmentMismatch);
         }
-        Ok(config)
+        self.set_connect_approval(config.connect_approval);
+        Ok(config.value)
+    }
+    pub(crate) fn connect_approval(&self) -> Option<bool> {
+        self.inner.borrow().connect_approval
+    }
+    pub(crate) fn set_connect_approval(&self, approval: Option<bool>) {
+        self.inner.borrow_mut().connect_approval = approval;
     }
     pub async fn probe(&self) -> Result<(), ClientError> {
         self.call::<t3_contracts::rpc::WsServerProbeRpc>(t3_contracts::rpc::Empty {})
@@ -525,6 +570,7 @@ where
         commands,
         calls: HashMap::new(),
         config_clock: None,
+        connect_approval: None,
     }));
     (
         SessionEndpoint {
