@@ -12,7 +12,7 @@ use t3_client::platform::Platform;
 
 use crate::runtime::Rt;
 use crate::runtime::host::{self, Started};
-use crate::screens::{router, shell};
+use crate::screens::{guest, router, shell};
 use crate::state::clock;
 use crate::state::nav::{Navigator, Route, initial_route};
 use crate::state::panels::Panels;
@@ -32,7 +32,15 @@ pub fn App() -> impl IntoElement {
     launch_tree(
         crate::runtime::client::read_desktop_environment,
         async move {
-            let (launched, choice) = crate::runtime::client::launch_inputs(app_url().await);
+            let address = app_url().await;
+            if os() == nsh_core::platform::Os::Web
+                && let Some(location) = address.as_deref().and_then(guest::GuestAddress::parse)
+            {
+                // Guests must never restore owner environments or mount their global hosts.
+                return Box::new(move || guest::boot(Some(location)))
+                    as Box<dyn FnOnce() -> AnyElement>;
+            }
+            let (launched, choice) = crate::runtime::client::launch_inputs(address);
             let store = ClientStore::default();
             let started = host::start(store.clone(), choice).await;
             let history = match started.backend.client() {
@@ -55,7 +63,7 @@ pub fn App() -> impl IntoElement {
                 },
                 |history| history.location.route.clone(),
             );
-            move || {
+            Box::new(move || {
                 #[cfg(not(target_arch = "wasm32"))]
                 let pair_screen = route == Route::Pair;
                 let tree = booted_with_history(route, store, started, history);
@@ -65,7 +73,7 @@ pub fn App() -> impl IntoElement {
                 #[cfg(not(target_arch = "wasm32"))]
                 crate::runtime::client::follow_native_links(pair_screen);
                 tree
-            }
+            })
         },
     )
 }
@@ -143,6 +151,9 @@ fn navigation_error(error: crate::i18n::Text) {
 /// Everything below the boot: contexts, client services (`provide_services`), the routes and
 /// the root hosts. Tests mount it with a fake-platform client, as `App` does with the host's.
 pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> AnyElement {
+    if route == Route::Guest {
+        return guest::boot(None);
+    }
     if let Some(highlighter) = crate::host::code_highlighter() {
         provide_context(highlighter);
     }

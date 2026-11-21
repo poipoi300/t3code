@@ -8,6 +8,7 @@ pub mod connection;
 pub mod device;
 pub mod environment;
 pub mod error;
+pub mod guest;
 pub mod mcp_apps;
 pub mod navigation;
 pub mod operations;
