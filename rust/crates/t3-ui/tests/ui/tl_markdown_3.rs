@@ -394,3 +394,12 @@ fn images_render_through_the_chat_markdown_image() {
         "a direct source is drawn, not refused"
     );
 }
+
+#[test]
+fn default_markdown_requests_the_authored_remote_image() {
+    let mut app = root(false, "![authored logo](https://example.com/authored.png)");
+    app.fail_images("https://example.com/authored.png")
+        .expect("fail the exact authored URL");
+    app.wait_for("Image unavailable · authored logo")
+        .expect("default renderer received its direct image error");
+}

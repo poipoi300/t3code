@@ -193,7 +193,7 @@ impl MarkdownPlugin for MarkdownLinkPlugin {
     }
 
     fn render(&self, node: &CustomNode) -> Option<AnyElement> {
-        self.render_link(node)
+        self.render_link(node, None)
     }
 }
 
@@ -247,7 +247,11 @@ impl MarkdownLinkPlugin {
         None
     }
 
-    fn render_link(&self, node: &CustomNode) -> Option<AnyElement> {
+    pub(super) fn render_link(
+        &self,
+        node: &CustomNode,
+        images: Option<super::base::MarkdownImageRenderer>,
+    ) -> Option<AnyElement> {
         match node.name.as_str() {
             "markdown-external-link" => {
                 let content = Document::new(vec![Block::paragraph(node.content.clone())]);
@@ -261,27 +265,29 @@ impl MarkdownLinkPlugin {
                         move || Some(href.clone()),
                         |_| {},
                     )
-                        .title(
-                            node.attributes
-                                .get("title")
-                                .cloned()
-                                .map(SharedString::from),
-                        )
-                        .accessibility_label(Some(SharedString::from(node.text.clone())))
-                        .app_class(tw("min-w-0 max-w-full text-info-foreground no-underline"))
-                        .child(
-                            nsh_base::text_view()
-                                .document(Some(content))
-                                .classes(TextViewClasses {
-                                    root: Some(tw("text-sm leading-relaxed text-info-foreground")),
-                                    paragraph: Some(tw("m-0")),
-                                    ..Default::default()
-                                })
-                                .render_custom(move |node| {
-                                    plugin.render(node).unwrap_or_else(|| view().into_element())
-                                }),
-                        )
-                        .into_element()
+                    .title(
+                        node.attributes
+                            .get("title")
+                            .cloned()
+                            .map(SharedString::from),
+                    )
+                    .accessibility_label(Some(SharedString::from(node.text.clone())))
+                    .app_class(tw("min-w-0 max-w-full text-info-foreground no-underline"))
+                    .child(
+                        super::base::nested_text_view(images.clone())
+                            .document(Some(content))
+                            .classes(TextViewClasses {
+                                root: Some(tw("text-sm leading-relaxed text-info-foreground")),
+                                paragraph: Some(tw("m-0")),
+                                ..Default::default()
+                            })
+                            .render_custom(move |node| {
+                                plugin
+                                    .render_link(node, images.clone())
+                                    .unwrap_or_else(|| view().into_element())
+                            }),
+                    )
+                    .into_element()
                 }))
             }
             "markdown-file-link" => {
@@ -299,7 +305,7 @@ impl MarkdownLinkPlugin {
                 Some(
                     text(SharedString::default())
                         .child(
-                            nsh_base::text_view()
+                            super::base::nested_text_view(images)
                                 .document(Some(Document::new(vec![Block::paragraph(
                                     node.content.clone(),
                                 )])))
@@ -335,6 +341,9 @@ impl MarkdownLinkPlugin {
                 )
             }
             "markdown-external-leading" => {
+                if images.is_some() {
+                    return Some(text(SharedString::from(node.text.clone())).into_element());
+                }
                 let host = node.attributes.get("host")?.clone();
                 // Native text retains a single no-break inline box for the favicon and prefix.
                 Some(

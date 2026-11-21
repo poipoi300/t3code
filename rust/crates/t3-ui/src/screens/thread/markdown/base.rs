@@ -9,8 +9,8 @@
 //! between blocks is the same as inside one TextView.
 
 use nsh_base::text_view::{
-    Block, CodeBlock, CustomNode, Document, Image, ImageLength, MarkdownOptions, MarkdownPlugin,
-    MarkdownPlugins, Parser, TextViewClasses, TextViewMath,
+    Block, CodeBlock, CustomNode, Document, Image, ImageLength, MarkdownOptions, MarkdownPlugins,
+    Parser, TextViewClasses, TextViewMath,
 };
 use nsh_core::prelude::*;
 
@@ -44,6 +44,8 @@ pub fn chat_markdown_with_root_classes(
     }
     let context = super::links::markdown_link_context();
     let plugins = use_context::<MarkdownPlugins>().unwrap_or_default();
+    let images = use_context::<MarkdownImageRenderer>();
+    let nested_images = images.clone();
     let streaming = std::rc::Rc::new(streaming);
     let parse_streaming = streaming.clone();
     let math = use_context::<ChatMarkdownSettings>().map(|settings| settings.math_enabled);
@@ -78,15 +80,18 @@ pub fn chat_markdown_with_root_classes(
             super::links::MarkdownLinkPlugin {
                 context: context.get(),
             }
-            .render(node)
-            .unwrap_or_else(|| markdown_custom_fallback(node))
+            .render_link(node, nested_images.clone())
+            .unwrap_or_else(|| markdown_custom_fallback(node, nested_images.clone()))
         })
         .render_code_block(|code: &CodeBlock| fenced_code_block(code))
         .render_math(|formula: &TextViewMath| {
             let formula = formula.clone();
             super::rich::markdown_math(computed(move || formula.clone()), true).into_element()
         })
-        .render_image(markdown_image)
+        .render_image(move |image: &Image| match &images {
+            Some(renderer) => (renderer.0)(image),
+            None => markdown_image(image),
+        })
         .selectable(true)
         .into_element()
 }
@@ -138,7 +143,24 @@ fn markdown_image(image: &Image) -> AnyElement {
     }
 }
 
-fn markdown_custom_fallback(node: &CustomNode) -> AnyElement {
+/// Applies to authored images, including images in nested link labels and custom nodes.
+#[derive(Clone)]
+pub struct MarkdownImageRenderer(pub std::rc::Rc<dyn Fn(&Image) -> AnyElement>);
+
+pub(super) fn nested_text_view(
+    images: Option<MarkdownImageRenderer>,
+) -> nsh_base::text_view::TextViewElement {
+    let view = nsh_base::text_view();
+    match images {
+        Some(renderer) => view.render_image(move |image: &Image| (renderer.0)(image)),
+        None => view,
+    }
+}
+
+fn markdown_custom_fallback(
+    node: &CustomNode,
+    images: Option<MarkdownImageRenderer>,
+) -> AnyElement {
     let blocks = if !node.children.is_empty() {
         node.children.clone()
     } else if !node.content.is_empty() {
@@ -146,7 +168,7 @@ fn markdown_custom_fallback(node: &CustomNode) -> AnyElement {
     } else {
         return text(SharedString::from(node.text.clone())).into_element();
     };
-    nsh_base::text_view()
+    nested_text_view(images)
         .document(Some(Document::new(blocks)))
         .classes(chat_markdown_classes())
         .into_element()
