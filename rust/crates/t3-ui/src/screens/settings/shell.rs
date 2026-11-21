@@ -567,6 +567,17 @@ pub fn screen_for<P: t3_client::platform::Platform + Clone + 'static>(
 ) -> AnyElement {
     let runtime = crate::runtime::services::settings::settings(client);
     untracked(|| {
+        if page == SettingsPage::Devices {
+            provide_context(t3_client::services::settings::devices::SourceWriter::new(
+                client,
+            ));
+        }
+        if matches!(
+            page,
+            SettingsPage::Maintenance | SettingsPage::Devices | SettingsPage::Labs
+        ) {
+            provide_context(client.settings_sessions());
+        }
         if page == SettingsPage::Providers {
             provide_context(super::providers::Services::new(client));
         }
