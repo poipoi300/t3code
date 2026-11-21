@@ -117,6 +117,8 @@ enum AssetGrant {
     Attachment {
         attachment_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<FileIdentity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         download: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_name: Option<String>,
@@ -256,9 +258,27 @@ impl AssetAccess {
                 disposition,
                 render_intent,
             } => {
-                let path = attachment_file(&self.attachments_dir, &attachment_id.0, &self.internal)
-                    .ok_or(Error::AssetDenied)?;
+                let (path, mut opened) =
+                    attachment_file(&self.attachments_dir, &attachment_id.0, &self.internal)
+                        .ok_or(Error::AssetDenied)?;
                 let extension = attachments::parse_id(&attachment_id.0).and_then(|p| p.extension);
+                let identity = opened.identity.clone();
+                if extension.is_none()
+                    && matches!(
+                        self::extension(&path.to_string_lossy()).as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "webp"
+                    )
+                {
+                    inline_dimensions = blocking(move || {
+                        Ok(crate::image::dimensions(
+                            &opened.read_range(0, crate::image::HEADER_BYTES)?,
+                        ))
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(Some);
+                }
                 let supplied_mime = mime_type.map(|m| m.0);
                 let video = supplied_mime
                     .as_deref()
@@ -296,6 +316,7 @@ impl AssetAccess {
                 (
                     AssetGrant::Attachment {
                         attachment_id: attachment_id.0,
+                        identity: Some(identity),
                         download: download.then_some(true),
                         file_name: file_name.map(|n| n.0),
                         mime_type: mime,
@@ -505,12 +526,6 @@ impl AssetAccess {
                 workspace_root,
                 relative_path,
             } => canonical_workspace_file(Path::new(workspace_root), relative_path, &self.internal),
-            AssetGrant::Attachment { attachment_id, .. }
-                if attachments::parse_id(attachment_id)
-                    .is_some_and(|id| id.extension.is_none()) =>
-            {
-                attachment_file(&self.attachments_dir, attachment_id, &self.internal)
-            }
             _ => None,
         };
         let image_dimensions = if inline_dimensions.is_some() {
@@ -661,23 +676,25 @@ impl AssetAccess {
         let asset = match claims.grant {
             AssetGrant::Attachment {
                 attachment_id,
+                identity,
                 download,
                 file_name,
                 mime_type,
                 render_intent,
-            } => attachment_file(&self.attachments_dir, &attachment_id, &self.internal).and_then(
-                |path| {
-                    let file = OpenMediaFile::open(&path, None).ok().flatten()?;
-                    Some(ResolvedAsset::File {
-                        path,
-                        download: download.unwrap_or(false),
-                        file_name,
-                        mime_type,
-                        render_intent,
-                        file,
-                    })
-                },
-            ),
+            } => attachment_file(&self.attachments_dir, &attachment_id, &self.internal)
+                .filter(|(_, opened)| {
+                    identity
+                        .as_ref()
+                        .is_none_or(|expected| expected == &opened.identity)
+                })
+                .map(|(path, file)| ResolvedAsset::File {
+                    path,
+                    download: download.unwrap_or(false),
+                    file_name,
+                    mime_type,
+                    render_intent,
+                    file,
+                }),
             AssetGrant::WorkspaceFileExact {
                 workspace_root,
                 relative_path,
@@ -806,19 +823,31 @@ impl AssetAccess {
         Ok(asset)
     }
 }
-/// A stored attachment that is the file its entry names, opened under the attachments directory
-/// without following a link ([`ContainedFiles`](crate::contained_files::ContainedFiles)): the
-/// opened file must be the entry itself, so a planted link to a file outside or to another
-/// attachment is neither signed nor served.
-fn attachment_file(directory: &Path, id: &str, internal: &InternalPaths) -> Option<PathBuf> {
-    let path = attachments::resolve_by_id(directory, id)?;
-    let files = crate::contained_files::ContainedFiles::new(directory);
-    let real = files.realpath(&path).ok()?;
-    let stat = files.open(&real).ok()?.stat().ok()?;
-    (stat.regular
-        && files.lstat_identity(&path).ok()? == stat.identity
-        && !internal.contains(&real))
-    .then_some(real)
+/// Open the generated leaf under the configured directory. Resolve a configured root alias once,
+/// then use the same checked handle for dimensions or the response body.
+fn attachment_file(
+    directory: &Path,
+    id: &str,
+    internal: &InternalPaths,
+) -> Option<(PathBuf, OpenMediaFile)> {
+    let scope = crate::scoped::ScopedDir::open(directory).ok()?;
+    let path = attachments::resolve_by_id(&scope.root, id)?;
+    let name = Path::new(path.file_name()?);
+    let file = scope.open_file(name).ok()?;
+    if crate::scoped::final_path(&file, &path).ok()? != path || internal.contains(&path) {
+        return None;
+    }
+    let (device, inode, _) = crate::scoped::identity(&file).ok()?;
+    if inode == "0" {
+        return None;
+    }
+    Some((
+        path,
+        OpenMediaFile {
+            file,
+            identity: FileIdentity { device, inode },
+        },
+    ))
 }
 pub fn canonical_file(path: &Path, internal: &InternalPaths) -> Option<PathBuf> {
     let canonical = paths::canonicalize(path).ok()?;
@@ -958,7 +987,7 @@ pub fn preview_mime(ext: &str) -> Option<&'static str> {
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIdentity {
     pub device: String,
     pub inode: String,

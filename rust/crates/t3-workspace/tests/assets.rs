@@ -798,7 +798,10 @@ async fn attachment_links_are_never_followed_and_client_types_never_render() {
         service.attachments_dir.join(format!("{real}.png")),
     ] {
         let planted = attachments::create_id("thread", None).expect("id");
-        link(&target, &service.attachments_dir.join(format!("{planted}.png")));
+        link(
+            &target,
+            &service.attachments_dir.join(format!("{planted}.png")),
+        );
         assert!(
             service
                 .issue_url(grant(&planted, None), AssetContext::default(), 100)
@@ -808,6 +811,17 @@ async fn attachment_links_are_never_followed_and_client_types_never_render() {
             target.display()
         );
     }
+    assert!(
+        service
+            .issue_url(
+                grant(&format!("staging/../{real}"), None),
+                AssetContext::default(),
+                100
+            )
+            .await
+            .is_err(),
+        "signed a path alias instead of an attachment ID"
+    );
     // Signed while it was a file, swapped for a link afterwards: nothing is served.
     let swapped = attachments::create_id("thread", None).expect("id");
     let swapped_path = service.attachments_dir.join(format!("{swapped}.png"));
@@ -828,7 +842,11 @@ async fn attachment_links_are_never_followed_and_client_types_never_render() {
     );
     // An image asked for as HTML is served by its stored extension, not as HTML.
     let issued = service
-        .issue_url(grant(&real, Some("text/html")), AssetContext::default(), 100)
+        .issue_url(
+            grant(&real, Some("text/html")),
+            AssetContext::default(),
+            100,
+        )
         .await
         .expect("url");
     let (token, name) = url_parts(&issued.relative_url.0);
@@ -840,4 +858,49 @@ async fn attachment_links_are_never_followed_and_client_types_never_render() {
     };
     assert_eq!(mime_type, None);
     assert!(path.ends_with(format!("{real}.png")));
+}
+
+#[tokio::test]
+async fn an_attachment_preview_grants_the_original_file() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let root = temp.path();
+    let service = service(root);
+    let id = attachments::create_id("thread", None).expect("id");
+    let relative = format!("attachments/{id}.png");
+    put(root, &relative, b"first");
+    let resource = AssetResource::Attachment {
+        attachment_id: Text(id),
+        file_name: None,
+        mime_type: None,
+        disposition: None,
+        render_intent: None,
+    };
+    let grant = service
+        .issue_url(resource, AssetContext::default(), 100)
+        .await
+        .expect("grant");
+    let (token, name) = url_parts(&grant.relative_url.0);
+    let mut old_claims: serde_json::Value = service.signer.verify_json(token).expect("claims");
+    old_claims
+        .as_object_mut()
+        .expect("object")
+        .remove("identity");
+    let legacy = service.signer.sign_json(&old_claims).expect("legacy token");
+    assert!(
+        service
+            .resolve(&legacy, name, 101)
+            .await
+            .expect("legacy grant")
+            .is_some()
+    );
+    fs::rename(root.join(&relative), root.join("original.png")).expect("move original");
+    put(root, &relative, b"second");
+    assert!(
+        service
+            .resolve(token, name, 101)
+            .await
+            .expect("resolve")
+            .is_none(),
+        "preview accepted a replacement file"
+    );
 }
