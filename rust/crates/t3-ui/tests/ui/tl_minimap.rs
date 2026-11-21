@@ -78,7 +78,8 @@ fn start_root(window: (f32, f32), root: Root) -> Headless {
     })
     .expect("minimap fixture");
     app.set_environment("fine desktop pointer", |env| {
-        env.os = nsh_core::platform::Os::Windows;
+        // The pinned headless backend delivers raw view keys only in Linux mode.
+        env.os = nsh_core::platform::Os::Linux;
         env.idiom = nsh_core::platform::Idiom::Desktop;
     })
     .expect("input environment");

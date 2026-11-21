@@ -605,8 +605,6 @@ impl ThreadFind {
 /// Port of ThreadFindBar.tsx ThreadFindBar.
 pub fn thread_find_bar(find: ThreadFind) -> impl IntoElement {
     let available_width = signal(0.0_f32);
-    let shift = signal(false);
-    let composing = signal(false);
     let focus = computed(move || find.state.with(|state| (state.open, state.focus_request)));
     // Synchronizes native input focus with the web's open/refocus request.
     effect(move || {
@@ -625,6 +623,20 @@ pub fn thread_find_bar(find: ThreadFind) -> impl IntoElement {
     when(
         move || find.state.with(|state| state.open),
         move || {
+            let focused = signal(false);
+            let composing = signal(false);
+            // A native field consumes raw keys. Bind modified Return and Escape only
+            // while this field has focus, leaving composition and plain submit to the IME.
+            effect(move || {
+                if focused.get() && !composing.get() {
+                    let options = KeyOptions {
+                        when: nsh_core::keymap::When::Always,
+                        ..Default::default()
+                    };
+                    on_key_with("shift+enter", options, move |_| find.step(-1));
+                    on_key_with("escape", options, move |_| find.close());
+                }
+            });
             // No InputGroup primitive exists yet: these are its popover/lg and pill classes.
             // NSH has no CSS starting: mount transition; the bar mounts at full opacity.
             // NSH cannot parse min(token, calc(100%-1.5rem)); measure the inset native wrapper.
@@ -643,15 +655,13 @@ pub fn thread_find_bar(find: ThreadFind) -> impl IntoElement {
                     .on_change(move |query: &str| find.set_query(query))
                     .placeholder(t("Find in thread")).label(ts("Find in thread"))
                     .test_id("thread-find-input")
+                    .on_focus(move || focused.set(true))
+                    .on_blur(move || focused.set(false))
                     .app_class(tw("min-w-0 flex-1 bg-transparent px-2.5 pe-1.5 text-sm"))
                     // Native submit excludes an IME composition Enter; raw keys do not.
                     .on_composition_change(move |event: &nsh_core::element::Composition| composing.set(event.composing))
-                    .on_submit(move |_: &str| { if !composing.get_untracked() { find.step(if shift.get_untracked() { -1 } else { 1 }); } })
-                    .on_key_up(move |event: &KeyEvent| shift.set(event.modifiers.shift))
-                    .on_key_down(move |event: &KeyEvent| {
-                        shift.set(event.modifiers.shift);
-                        if event.key.as_str() == "Escape" { find.close(); }
-                    }))
+                    .submit_behavior(SubmitBehavior::Submit)
+                    .on_submit(move |_: &str| { if !composing.get_untracked() { find.step(1); } }))
                 // This is already the last sibling; NSH has no CSS order property.
                 .child(view().app_class(tw("flex h-auto items-center justify-center gap-0.5 pe-1 leading-none"))
                     .child(text(move || find.state.with(|s| if s.query.trim().is_empty() { String::new() } else if s.counting { t("1/…") } else { format_thread_find_count(s.active_index, s.count) }))

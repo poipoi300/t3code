@@ -129,7 +129,14 @@ fn an_empty_result_disables_navigation_and_reopening_clears_the_old_query() {
     app.wait_for("0/0").expect("empty");
     let _ = app.press("role:button[Next match]");
     assert!(app.screen().shows("0/0"));
-    app.press("role:button[Close find]").expect("close");
+    app.type_text("id:thread-find-input", "")
+        .expect("refocus field");
+    app.press_key("Escape").expect("close from the query field");
+    assert!(
+        !app.screen()
+            .matches("id:thread-find-bar")
+            .expect("selector")
+    );
     app.press("id:open-find").expect("reopen");
     assert!(!app.screen().shows("0/0"));
 }
