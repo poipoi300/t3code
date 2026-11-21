@@ -68,14 +68,7 @@ pub struct SidebarItem {
 
 impl SidebarItem {
     pub fn list_key(&self) -> SharedString {
-        // Length-prefix the environment so ids containing ':' cannot alias another environment.
-        format!(
-            "{}:{}{}",
-            self.key.environment.0.len(),
-            self.key.environment.0,
-            self.key.thread.0
-        )
-        .into()
+        selection::row_key(&self.key).into()
     }
 }
 
@@ -546,6 +539,10 @@ fn shelf_marker(
 pub fn sidebar() -> impl IntoElement {
     let runtime = rt();
     let nav = navigator();
+    let undo_notice = row::thread_actions().map(actions::footer_undo);
+    let snooze_dialog = snooze::dialog_host();
+    let selection_store = selection::use_thread_selection_store();
+    selection::install_escape(selection_store);
     let state = sidebar_state();
     let environments = runtime.environments_signal();
     let ids = computed(move || {
@@ -654,6 +651,45 @@ pub fn sidebar() -> impl IntoElement {
             )))
         })
     });
+    let visible_threads = computed(move || {
+        if searching.get() {
+            return results.with(|rows| {
+                rows.iter()
+                    .map(|row| (row.item.key.clone(), row.source.section))
+                    .collect()
+            });
+        }
+        shelf_items.with(|list| {
+            model.with(|model| {
+                list.items
+                    .iter()
+                    .filter_map(|item| {
+                        let SidebarListItem::Thread(index) = *item else {
+                            return None;
+                        };
+                        let row = model.rows.get(index)?;
+                        Some((row.item.key.clone(), row.source.section))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    let available_threads = computed(move || {
+        model.with(|model| {
+            model
+                .rows
+                .iter()
+                .map(|row| row.item.key.clone())
+                .collect::<Vec<_>>()
+        })
+    });
+    let interactions = selection::Interactions {
+        store: selection_store,
+        visible_threads,
+        available_threads,
+        tasks: crate::runtime::tasks::TaskOwner::here(),
+    };
+    provide_context(interactions);
     let count = computed(move || {
         if searching.get() {
             results.with(|rows| rows.len())
@@ -728,6 +764,7 @@ pub fn sidebar() -> impl IntoElement {
                 row.as_ref()
                     .map(|row| row::RowExtras {
                         selected: row.source.selected
+                            || selection_store.is_selected(&selection::row_key(&row.item.key))
                             || (searching.get() && active_result.get() == at.index()),
                         environment_label: show_environments
                             .get()
@@ -817,6 +854,7 @@ pub fn sidebar() -> impl IntoElement {
             )
         });
         if widen {
+            selection_store.clear_selection();
             state.update(|state| {
                 state.project_scope.clear();
                 state.selected.clear();
@@ -888,6 +926,8 @@ pub fn sidebar() -> impl IntoElement {
                         .map(|row| row.item.key.clone())
                 }) {
                     query.set(String::new());
+                    selection_store.clear_selection();
+                    selection_store.set_anchor(&selection::row_key(&key));
                     nav.open(Route::Thread(key));
                 }
             }
@@ -905,6 +945,7 @@ pub fn sidebar() -> impl IntoElement {
         selected,
         favicon_source: Rc::new(|_| None),
         on_change: Rc::new(move |keys| {
+            selection_store.clear_selection();
             state.update(|state| {
                 state.project_scope = keys;
                 state.selected.clear();
@@ -941,13 +982,17 @@ pub fn sidebar() -> impl IntoElement {
                 }))
                 .child(when(move || !searching.get() && selected.with(|keys| !keys.is_empty()), move || {
                     nsh_base::button().accessibility_label(t("Show all projects"))
-                        .on_press(move || { state.update(|state| {state.project_scope.clear(); state.selected.clear();}); list_ref.scroll_to_offset(px(0.0), false); })
+                        .on_press(move || { state.update(|state| {state.project_scope.clear(); state.selected.clear();}); selection_store.clear_selection(); list_ref.scroll_to_offset(px(0.0), false); })
                         .app_class(tw_with(Scope::Sidebar, "inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-sidebar-border px-2.5 py-1 text-2xs font-medium text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground", &[]))
                         .child(text(t("Show all projects")))
                 }))
         }))
         .child(list)
-        .child(chrome::sidebar_chrome_footer(false.into(), Route::Home.into(), Default::default()))
+        .child(snooze_dialog)
+        .child(chrome::sidebar_chrome_footer(false.into(), Route::Home.into(), chrome::ChromeFooterSlots {
+            undo_notice,
+            ..Default::default()
+        }))
 }
 
 #[cfg(test)]

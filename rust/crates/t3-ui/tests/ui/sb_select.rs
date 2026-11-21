@@ -246,3 +246,75 @@ fn unchanged_clear_anchor_and_removal_do_not_publish() {
     press(&mut app, &["Anchor b", "Remove none"]);
     assert!(app.screen().shows("publications=2"));
 }
+
+#[test]
+fn live_sidebar_selects_a_range_and_batches_settlement_desktop() {
+    selects_a_range_and_batches_settlement(DESKTOP);
+}
+
+#[test]
+fn live_sidebar_selects_a_range_and_batches_settlement_phone() {
+    selects_a_range_and_batches_settlement(PHONE);
+}
+
+fn selects_a_range_and_batches_settlement(window: (f32, f32)) {
+    use super::sb_actions_1::{open_row_menu, start_live_sidebar};
+
+    let mut app = start_live_sidebar(window);
+    select_two(&mut app);
+    open_row_menu(&mut app, window, "Beta thread");
+    app.press("role:menuitem[Settle (2)]")
+        .expect("settle both selected rows");
+    app.wait_for("Settled 2,")
+        .expect("one notice contains both rows");
+    app.press_key("f9").expect("read RPC trace");
+    let forward = app.shows("RPC thread.settle:alpha thread.settle:beta");
+    let reverse = app.shows("RPC thread.settle:beta thread.settle:alpha");
+    assert!(
+        forward || reverse,
+        "both selected rows must dispatch a settle command"
+    );
+}
+
+fn select_two(app: &mut Headless) {
+    app.hold_keys("ctrl", true)
+        .expect("hold selection modifier");
+    app.press("role:button[Alpha thread, Project]")
+        .expect("toggle first row");
+    app.hold_keys("ctrl", false)
+        .expect("release selection modifier");
+    app.hold_keys("shift", true).expect("hold range modifier");
+    app.press("role:button[Beta thread, Project]")
+        .expect("extend through second row");
+    app.hold_keys("shift", false)
+        .expect("release range modifier");
+}
+
+#[test]
+fn live_sidebar_confirms_batch_delete_desktop() {
+    confirms_batch_delete(DESKTOP);
+}
+
+#[test]
+fn live_sidebar_confirms_batch_delete_phone() {
+    confirms_batch_delete(PHONE);
+}
+
+fn confirms_batch_delete(window: (f32, f32)) {
+    use super::sb_actions_1::{assert_commands, open_row_menu, start_live_sidebar};
+
+    let mut app = start_live_sidebar(window);
+    select_two(&mut app);
+    open_row_menu(&mut app, window, "Beta thread");
+    app.press("role:menuitem[Delete (2)]")
+        .expect("delete selected rows");
+    app.wait_for("Delete 2 threads?")
+        .expect("one confirmation for both rows");
+    app.press("role:button[Cancel]").expect("cancel deletion");
+    assert_commands(&mut app, "");
+    open_row_menu(&mut app, window, "Beta thread");
+    app.press("role:menuitem[Delete (2)]")
+        .expect("selection survives cancellation");
+    app.press("role:button[Confirm]").expect("delete both rows");
+    assert_commands(&mut app, "thread.delete:alpha thread.delete:beta");
+}

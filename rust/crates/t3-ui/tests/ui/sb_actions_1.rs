@@ -314,3 +314,215 @@ fn the_notice_invokes_client_undo_then_disappears_when_the_resource_clears() {
         assert_eq!(app.screen().matches("role:button[Undo]"), Ok(false));
     }
 }
+
+#[component]
+pub(super) fn LiveSidebar() -> impl IntoElement {
+    use std::rc::Rc;
+
+    use futures::FutureExt;
+    use nsh_core::keymap::When;
+    use serde_json::json;
+    use t3_client::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        testing::environment::{FakeEnvironment, shell},
+    };
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+    use t3_ui::{
+        app::{app_tree, provide_client_services},
+        runtime::{Rt, host::Choice},
+        screens::sidebar::row::RowThreadActionsRuntime,
+        state::nav::Route,
+    };
+
+    let owner = Owner::current();
+    let spawner: Spawner = Rc::new(move |future| {
+        owner.run(|| {
+            spawn(future);
+        });
+    });
+    let server = FakeEnvironment::new("sidebar-remote", spawner.clone());
+    server.set_shell(shell(&[("alpha", "Alpha thread"), ("beta", "Beta thread")]));
+    server.edit_config(|config| {
+        config["settings"]["snoozePresets"] = json!([{ "kind": "after", "minutes": 17 }]);
+        for capability in ["threadPinning", "threadSettlement", "threadSnooze"] {
+            config["environment"]["capabilities"][capability] = json!(true);
+        }
+    });
+    for sequence in 2..12 {
+        server.reply(
+            "orchestration.dispatchCommand",
+            Ok(json!({"sequence":sequence})),
+        );
+    }
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    let pairing = client.pair(server.pairing());
+    spawner(
+        async move {
+            pairing.await.expect("pair sidebar environment");
+        }
+        .boxed_local(),
+    );
+    let runtime = Rt::new(store, Rc::new(client.clone()), Choice::Client);
+    let commands = signal(String::new());
+    on_key_with(
+        "f9",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            commands.set(
+                server
+                    .calls("orchestration.dispatchCommand")
+                    .into_iter()
+                    .filter(|payload| payload["type"] != "thread.visit")
+                    .map(|payload| {
+                        format!(
+                            "{}:{}",
+                            payload["type"].as_str().unwrap_or_default(),
+                            payload["threadId"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        },
+    );
+    view()
+        .w_full()
+        .h_full()
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(app_tree(runtime, Route::Home, move || {
+                    provide_client_services(&client);
+                    provide_context(RowThreadActionsRuntime(Rc::new(client)));
+                })),
+        )
+        .child(text(move || format!("RPC {}", commands.get())))
+}
+
+pub(super) fn start_live_sidebar(window: (f32, f32)) -> Headless {
+    let mut fixtures = Registry::new();
+    fixtures.register::<LiveSidebar>();
+    let mut sets = t3_ui::registries();
+    sets.push(fixtures);
+    let mut config = EngineConfig {
+        ui_sets: sets,
+        viewport: size(px(window.0), px(window.1)),
+        ..EngineConfig::new(Root::of::<LiveSidebar>())
+    };
+    config.environment.os = if window == PHONE {
+        Os::Android
+    } else {
+        Os::Linux
+    };
+    config.environment.idiom = if window == PHONE {
+        Idiom::Phone
+    } else {
+        Idiom::Desktop
+    };
+    let mut app = Headless::start(config).expect("start live sidebar");
+    app.wait_for("role:button[Alpha thread, Project]")
+        .expect("paired sidebar");
+    app
+}
+
+pub(super) fn open_row_menu(app: &mut Headless, window: (f32, f32), title: &str) {
+    let row = format!("role:button[{title}, Project]");
+    if window == PHONE {
+        app.long_press(&row).expect("open touch menu");
+    } else {
+        app.right_click(&row).expect("open context menu");
+    }
+}
+
+pub(super) fn assert_commands(app: &mut Headless, expected: &str) {
+    app.press_key("f9").expect("read RPC trace");
+    app.wait_for(&format!("text:RPC {expected}"))
+        .expect("expected thread commands");
+}
+
+#[test]
+fn live_sidebar_archives_and_undoes_from_the_footer_desktop() {
+    archives_and_undoes_from_the_footer(DESKTOP);
+}
+
+#[test]
+fn live_sidebar_archives_and_undoes_from_the_footer_phone() {
+    archives_and_undoes_from_the_footer(PHONE);
+}
+
+fn archives_and_undoes_from_the_footer(window: (f32, f32)) {
+    let mut app = start_live_sidebar(window);
+    open_row_menu(&mut app, window, "Alpha thread");
+    app.press("role:menuitem[Archive thread]")
+        .expect("archive from row");
+    app.wait_for("Archived,")
+        .expect("footer announces accepted archive");
+    app.press("role:button[Ctrl+Z to undo]")
+        .expect("undo from footer");
+    assert_commands(&mut app, "thread.archive:alpha thread.unarchive:alpha");
+}
+
+#[test]
+fn live_sidebar_renames_pins_and_confirms_permanent_deletion_desktop() {
+    renames_pins_and_confirms_permanent_deletion(DESKTOP);
+}
+
+#[test]
+fn live_sidebar_renames_pins_and_confirms_permanent_deletion_phone() {
+    renames_pins_and_confirms_permanent_deletion(PHONE);
+}
+
+fn renames_pins_and_confirms_permanent_deletion(window: (f32, f32)) {
+    let mut app = start_live_sidebar(window);
+    open_row_menu(&mut app, window, "Alpha thread");
+    app.press("role:menuitem[Rename thread]")
+        .expect("rename from row");
+    app.clear("label:Thread title").expect("replace title");
+    app.type_text("label:Thread title", "Renamed thread")
+        .expect("enter new title");
+    app.press_key("enter").expect("save title");
+    assert_commands(&mut app, "thread.metadata.update:alpha");
+
+    open_row_menu(&mut app, window, "Beta thread");
+    app.press("role:menuitem[Pin thread]")
+        .expect("pin from row");
+    assert_commands(&mut app, "thread.metadata.update:alpha thread.pin:beta");
+
+    open_row_menu(&mut app, window, "Beta thread");
+    app.press("role:menuitem[Delete]").expect("delete from row");
+    app.wait_for("This permanently clears conversation history for this thread.")
+        .expect("confirmation before sending delete");
+    assert_commands(&mut app, "thread.metadata.update:alpha thread.pin:beta");
+    app.press("role:button[Confirm]")
+        .expect("confirm permanent delete");
+    assert_commands(
+        &mut app,
+        "thread.metadata.update:alpha thread.pin:beta thread.delete:beta",
+    );
+}
+
+#[test]
+fn live_sidebar_undo_shortcut_uses_the_client_notice() {
+    for window in [DESKTOP, PHONE] {
+        let mut app = start_live_sidebar(window);
+        open_row_menu(&mut app, window, "Alpha thread");
+        app.press("role:menuitem[Archive thread]")
+            .expect("archive from row");
+        app.wait_for("Ctrl+Z to undo")
+            .expect("configured shortcut in footer");
+        app.press_key("ctrl+z")
+            .expect("undo with the configured keys");
+        assert_commands(&mut app, "thread.archive:alpha thread.unarchive:alpha");
+    }
+}

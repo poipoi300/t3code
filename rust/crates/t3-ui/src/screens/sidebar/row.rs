@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{StreamExt, future::LocalBoxFuture, stream::LocalBoxStream};
 
 use nsh_core::prelude::*;
 use t3_client::services::config::timestamp_ms;
@@ -11,20 +11,24 @@ use t3_client::services::models::{
     present_thread_shell, resolve_thread_provider_stack, resolve_thread_working_started_at,
 };
 use t3_client::store::Scope as StoreScope;
-use t3_client::types::ThreadKey;
+use t3_client::thread_views::{
+    shelves::SnoozePreset,
+    thread_ops::{actions::BatchReport, undo::UndoNotice},
+};
 use t3_client::view_logic::session::timestamps::{
     format_relative_elapsed, ms_until_relative_time_change, relative_time_elapsed_ms,
 };
 use t3_client::view_logic::shell::models::entries_for;
 use t3_client::view_logic::shell::sidebar::presentation::ThreadInput;
 use t3_client::view_logic::shell::sidebar::status::{self, Status};
+use t3_client::{ClientError, types::ThreadKey};
 use t3_contracts::orchestration_project::OrchestrationProjectShell;
 use t3_contracts::orchestration_v2::{
     AppThreadSettledOverride, OrchestrationV2ProviderGoalStatus, OrchestrationV2ThreadShell,
 };
-use t3_contracts::server::ServerConfig;
+use t3_contracts::{server::ServerConfig, wire::WireDateTime};
 
-use super::{RowVariant, SidebarItem};
+use super::{RowVariant, SidebarItem, actions::ThreadActionMenu};
 use crate::i18n::{Value, t, tr};
 use crate::runtime::tasks::TaskOwner;
 use crate::runtime::{Rt, Shared, rt};
@@ -40,37 +44,196 @@ type Thread = Memo<Option<Shared<OrchestrationV2ThreadShell>>>;
 
 /// The client's thread operations a row uses: its action menu, its actions and rename.
 pub trait RowThreadActions {
-    fn menu(&self, key: &ThreadKey) -> super::actions::ThreadActionMenu;
+    fn menu(&self, key: &ThreadKey) -> ThreadActionMenu;
+
+    fn sidebar_menu(
+        &self,
+        keys: &[ThreadKey],
+        _: i64,
+        _: bool,
+    ) -> (ThreadActionMenu, Vec<SnoozePreset>) {
+        (self.menu(&keys[0]), vec![])
+    }
+
+    fn sidebar_batch(
+        &self,
+        _: Vec<ThreadKey>,
+        _: String,
+        _: Option<WireDateTime>,
+    ) -> LocalBoxFuture<'static, Result<BatchReport, ClientError>> {
+        Box::pin(async { Err(ClientError::Unsupported("sidebar batch actions")) })
+    }
+
+    fn preset(
+        &self,
+        _: &ThreadKey,
+        _: &str,
+        _: &[SnoozePreset],
+    ) -> Result<WireDateTime, ClientError> {
+        Err(ClientError::Unsupported("snooze presets"))
+    }
+
+    fn snooze(
+        &self,
+        _: ThreadKey,
+        _: WireDateTime,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        Box::pin(async { Err(ClientError::Unsupported("snooze")) })
+    }
+
+    fn undo_notices(&self) -> LocalBoxStream<'static, Option<UndoNotice>> {
+        Box::pin(futures::stream::empty())
+    }
+
+    fn undo(&self) -> LocalBoxFuture<'static, Result<usize, ClientError>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    fn claims_undo_shortcut(&self) -> bool {
+        false
+    }
+
+    fn release_undo_shortcut(&self) {}
+
+    fn can_still_show(&self, _: &ThreadKey) -> bool {
+        true
+    }
+
+    fn action_moves_thread(&self, _: &ThreadKey, _: &str) -> bool {
+        true
+    }
+
     fn perform(
         &self,
         key: ThreadKey,
         action: String,
-    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>;
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
     fn rename(
         &self,
         key: ThreadKey,
         title: String,
-    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>>;
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
 }
 
 impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
     for t3_client::composition::ClientRuntime<P>
 {
-    fn menu(&self, key: &ThreadKey) -> super::actions::ThreadActionMenu {
+    fn menu(&self, key: &ThreadKey) -> ThreadActionMenu {
         crate::runtime::services::thread_ops::thread_action_menu(self, key)
     }
     fn perform(
         &self,
         key: ThreadKey,
         action: String,
-    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
-        self.thread_actions().perform_action(key, action)
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let service = self.thread_actions();
+        match action.as_str() {
+            "archive" => service.archive_thread(key),
+            "unarchive" => service.unarchive_thread(key),
+            "delete" => service.delete_thread(key),
+            _ => service.perform_action(key, action),
+        }
     }
+
+    fn sidebar_menu(
+        &self,
+        keys: &[ThreadKey],
+        opened_at: i64,
+        bulk: bool,
+    ) -> (ThreadActionMenu, Vec<SnoozePreset>) {
+        let service = self.thread_actions();
+        let format = self
+            .composer_preferences()
+            .snapshot()
+            .timestamp_format
+            .clone();
+        crate::screens::settings::snooze::with_snooze_calendar(opened_at, &format, |calendar| {
+            let first = &keys[0];
+            let menu = if bulk {
+                service.sidebar_batch_menu(keys, calendar)
+            } else {
+                service.sidebar_action_menu(first, calendar)
+            };
+            let presets = service.resolve_snooze_presets(&first.environment, calendar);
+            (menu.into(), presets)
+        })
+    }
+
+    fn sidebar_batch(
+        &self,
+        keys: Vec<ThreadKey>,
+        id: String,
+        until: Option<WireDateTime>,
+    ) -> LocalBoxFuture<'static, Result<BatchReport, ClientError>> {
+        self.thread_actions().perform_sidebar_batch(keys, id, until)
+    }
+
+    fn preset(
+        &self,
+        key: &ThreadKey,
+        id: &str,
+        shown: &[SnoozePreset],
+    ) -> Result<WireDateTime, ClientError> {
+        use crate::screens::settings::snooze::with_snooze_calendar;
+        let service = self.thread_actions();
+        let format = self
+            .composer_preferences()
+            .snapshot()
+            .timestamp_format
+            .clone();
+        with_snooze_calendar(nsh_core::time::unix_ms() as i64, &format, |calendar| {
+            service.pick_snooze_preset(&key.environment, shown, id, calendar)
+        })
+        .map(|preset| WireDateTime(preset.snoozed_until))
+    }
+
+    fn snooze(
+        &self,
+        key: ThreadKey,
+        until: WireDateTime,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        self.thread_actions().snooze_thread(key, until)
+    }
+
+    fn undo_notices(&self) -> LocalBoxStream<'static, Option<UndoNotice>> {
+        self.thread_actions().thread_undo_notice_changes()
+    }
+
+    fn undo(&self) -> LocalBoxFuture<'static, Result<usize, ClientError>> {
+        self.thread_actions().undo_latest_thread_action()
+    }
+
+    fn claims_undo_shortcut(&self) -> bool {
+        self.thread_actions().thread_undo_claims_shortcut()
+    }
+
+    fn release_undo_shortcut(&self) {
+        self.thread_actions().release_thread_undo_shortcut();
+    }
+
+    fn can_still_show(&self, key: &ThreadKey) -> bool {
+        self.thread_actions()
+            .thread_shell(key)
+            .is_some_and(|thread| thread.archived_at.is_none() && thread.deleted_at.is_none())
+    }
+
+    fn action_moves_thread(&self, key: &ThreadKey, id: &str) -> bool {
+        let service = self.thread_actions();
+        match id {
+            "settle" => service
+                .thread_shell(key)
+                .is_some_and(|row| row.settled_override == Some(AppThreadSettledOverride::Settled)),
+            "snooze" => service.snooze_menu(key).snoozed,
+            "archive" | "delete" => !self.can_still_show(key),
+            _ => false,
+        }
+    }
+
     fn rename(
         &self,
         key: ThreadKey,
         title: String,
-    ) -> futures::future::LocalBoxFuture<'static, Result<(), t3_client::ClientError>> {
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         self.thread_actions().rename_thread(key, title)
     }
 }
@@ -78,6 +241,16 @@ impl<P: t3_client::platform::Platform + Clone + 'static> RowThreadActions
 /// Rows use the host's client; a mount over another client (a fake environment) provides it.
 #[derive(Clone)]
 pub struct RowThreadActionsRuntime(pub std::rc::Rc<dyn RowThreadActions>);
+
+pub(super) fn thread_actions() -> Option<std::rc::Rc<dyn RowThreadActions>> {
+    use_context::<RowThreadActionsRuntime>()
+        .map(|runtime| runtime.0)
+        .or_else(|| {
+            rt().backend()
+                .client()
+                .map(|client| std::rc::Rc::new(client) as std::rc::Rc<dyn RowThreadActions>)
+        })
+}
 type Project = Memo<Option<Shared<OrchestrationProjectShell>>>;
 
 /// Supplied by the sidebar's selection/draft/snooze stores, never inferred from run state.
@@ -408,23 +581,35 @@ pub fn sidebar_thread_row(
     nav: Navigator,
 ) -> impl IntoElement {
     let key = computed(move || item.with(|i| i.as_ref().map(|i| i.key.clone())));
+    let interactions = use_context::<super::selection::Interactions>();
+    let menu_open = signal(false);
+    let opened_at = signal(nsh_core::time::unix_ms() as i64);
+    effect(move || {
+        if menu_open.get() {
+            opened_at.set(nsh_core::time::unix_ms() as i64);
+        }
+    });
+    let targets = move || {
+        let key = key.get()?;
+        Some(interactions.map_or_else(
+            || (vec![key.clone()], false),
+            |interactions| interactions.targets(&key),
+        ))
+    };
     // SB-ACTIONS-1's thread menu over the client's operations (thread_ops binding). The menu's
     // availability follows the thread's shell (pin, settle, unread), which this memo reads.
-    let client = use_context::<RowThreadActionsRuntime>()
-        .map(|runtime| runtime.0)
-        .or_else(|| {
-            rt().backend()
-                .client()
-                .map(|client| std::rc::Rc::new(client) as std::rc::Rc<dyn RowThreadActions>)
-        });
+    let client = thread_actions();
     let menu_client = client.clone();
-    let menu = computed(move || {
+    let prepared_menu = computed(move || {
         thread.with(|_| ());
         let client = menu_client.as_ref()?;
-        key.get().map(|key| client.menu(&key))
+        let (keys, bulk) = targets()?;
+        (!keys.is_empty()).then(|| client.sidebar_menu(&keys, opened_at.get(), bulk))
     });
+    let menu =
+        computed(move || prepared_menu.with(|menu| menu.as_ref().map(|(menu, _)| menu.clone())));
     // The rename input and the action menu go as their work starts; the row outlives both.
-    let tasks = TaskOwner::here();
+    let tasks = interactions.map_or_else(TaskOwner::here, |interactions| interactions.tasks);
     let renaming = signal(false);
     let rename_draft = signal(String::new());
     let config = environment_config(key);
@@ -503,29 +688,94 @@ pub fn sidebar_thread_row(
         (!card()).then_some("flex h-9 items-center gap-2.5 px-2.5"),
     ])))
     };
-    let failed = |action: &str, error: t3_client::ClientError| {
-        crate::ui::toast::toast_manager().add(crate::ui::toast::ToastOptions {
-            variant: crate::ui::toast::Variant::Error,
-            title: crate::i18n::Text::client_key(
-                t3_client::thread_views::thread_ops::header::action_failure_title(action),
-            ),
-            description: Some(crate::i18n::Text::content(error.to_string())),
-            ..Default::default()
-        });
-    };
     let action_client = client.clone();
     let on_action = move |id: String| {
-        let (Some(client), Some(key)) = (action_client.clone(), key.get_untracked()) else {
+        let (Some(client), Some((keys, bulk))) = (action_client.clone(), untracked(targets)) else {
             return;
         };
+        if keys.is_empty() {
+            return;
+        }
         if id == "rename" {
             rename_draft.set(title());
             renaming.set(true);
             return;
         }
+        let choice = match id.strip_prefix("snooze:") {
+            Some("custom") => {
+                let Some(choice) = super::snooze::request() else {
+                    return;
+                };
+                Some(choice)
+            }
+            Some(preset) => {
+                let until = prepared_menu.with_untracked(|menu| {
+                    let shown = menu.as_ref().map_or(&[][..], |(_, shown)| shown.as_slice());
+                    client.preset(&keys[0], preset, shown)
+                });
+                match until {
+                    Ok(until) => {
+                        Some(Box::pin(futures::future::ready(Some(until))) as super::snooze::Choice)
+                    }
+                    Err(error) => {
+                        super::actions::action_failed("snooze", error);
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
         tasks.spawn(async move {
-            if let Err(error) = client.perform(key, id.clone()).await {
-                failed(&id, error);
+            let (id, until) = if let Some(choice) = choice {
+                let Some(until) = choice.await else {
+                    return;
+                };
+                (String::from("snooze"), Some(until))
+            } else {
+                (id, None)
+            };
+            let navigation =
+                interactions.and_then(|interactions| interactions.plan_navigation(nav, &id, &keys));
+            let result = if bulk {
+                if id != "delete"
+                    && let Some(interactions) = interactions
+                {
+                    interactions.store.remove_from_selection(
+                        &keys
+                            .iter()
+                            .map(super::selection::row_key)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                client.sidebar_batch(keys.clone(), id.clone(), until).await
+            } else {
+                let key = keys[0].clone();
+                let operation = match until {
+                    Some(until) => client.snooze(key.clone(), until),
+                    None => client.perform(key.clone(), id.clone()),
+                };
+                operation.await.map(|()| BatchReport {
+                    completed: vec![key],
+                    ..Default::default()
+                })
+            };
+            match result {
+                Ok(report) => {
+                    if let Some(interactions) = interactions {
+                        interactions.finish(
+                            nav,
+                            &id,
+                            &keys,
+                            &report.completed,
+                            client.as_ref(),
+                            navigation,
+                        );
+                    }
+                    if let Some((_, error)) = report.failed.into_iter().next() {
+                        super::actions::action_failed(&id, error);
+                    }
+                }
+                Err(error) => super::actions::action_failed(&id, error),
             }
         });
     };
@@ -539,7 +789,7 @@ pub fn sidebar_thread_row(
         let title = rename_draft.get_untracked();
         tasks.spawn(async move {
             if let Err(error) = client.rename(key, title).await {
-                failed("rename", error);
+                super::actions::action_failed("rename", error);
             }
         });
     }));
@@ -671,15 +921,17 @@ pub fn sidebar_thread_row(
             },
             sidebar_thread_tooltip(model, project_name, extras, providers),
         ))
-        .child(super::actions::sidebar_thread_context_menu(
-            nsh_base::button()
+        .child(super::actions::sidebar_thread_context_menu_with_open(
+            view()
+                .role(AccessibilityRole::Button)
+                .focusable(true)
                 .test_id(if untracked(card) {
                     "sidebar-row-card"
                 } else {
                     "sidebar-row-slim"
                 })
-                .accessibility_label(move || {
-                    Some(SharedString::from(
+                .label(move || {
+                    SharedString::from(
                         [
                             Some(title()),
                             presented.get().and_then(|p| {
@@ -693,11 +945,19 @@ pub fn sidebar_thread_row(
                         .filter(|s| !s.is_empty())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    ))
+                    )
                 })
-                .selected(active)
-                .on_press(move || {
-                    if let Some(key) = key.get() {
+                .accessibility_state(move || nsh_core::AccessibilityState {
+                    selected: active() || is_selected.get(),
+                    ..Default::default()
+                })
+                .on_press(move |event: &PressEvent| {
+                    let Some(key) = key.get_untracked() else {
+                        return;
+                    };
+                    if let Some(interactions) = interactions {
+                        interactions.press(key, nav, event);
+                    } else {
                         nav.open(Route::Thread(key));
                     }
                 })
@@ -705,6 +965,7 @@ pub fn sidebar_thread_row(
                 .child(when(card, card_body).otherwise(slim_body)),
             menu,
             on_action,
+            Some(menu_open),
         ))
 }
 

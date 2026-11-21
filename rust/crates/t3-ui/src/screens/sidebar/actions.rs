@@ -19,6 +19,15 @@ pub struct ThreadActionMenu {
     pub unavailable_reason: Option<String>,
 }
 
+impl From<t3_client::thread_views::thread_ops::actions::ThreadActionMenu> for ThreadActionMenu {
+    fn from(menu: t3_client::thread_views::thread_ops::actions::ThreadActionMenu) -> Self {
+        Self {
+            items: menu.items,
+            unavailable_reason: menu.unavailable_reason,
+        }
+    }
+}
+
 /// Port of Sidebar.tsx handleThreadContextMenu's api.contextMenu.show presentation.
 /// NSH's shared context menu replaces the web/native imperative menu host.
 pub fn sidebar_thread_context_menu(
@@ -26,10 +35,22 @@ pub fn sidebar_thread_context_menu(
     model: Memo<Option<ThreadActionMenu>>,
     on_action: impl Fn(String) + 'static,
 ) -> impl IntoElement {
+    sidebar_thread_context_menu_with_open(trigger, model, on_action, None)
+}
+
+pub(super) fn sidebar_thread_context_menu_with_open(
+    trigger: impl IntoElement,
+    model: Memo<Option<ThreadActionMenu>>,
+    on_action: impl Fn(String) + 'static,
+    open: Option<Signal<bool>>,
+) -> impl IntoElement {
     menu::context_menu(
         trigger,
         // UI-MENU owns popup sizing; the web fallback's sizing preset is requested in the hand-off.
-        MenuOptions::default(),
+        MenuOptions {
+            open,
+            ..Default::default()
+        },
         || false,
         thread_action_menu_content(model, on_action),
     )
@@ -417,3 +438,93 @@ fn action_icon(name: &str) -> Option<&'static str> {
 }
 
 const UNDO: &str = r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>"#;
+
+pub(super) fn action_failed(action: &str, error: t3_client::ClientError) {
+    if matches!(error, t3_client::ClientError::Cancelled) {
+        return;
+    }
+    use crate::ui::toast::{ToastOptions, Variant, toast_manager};
+    let title = match action {
+        "undo" => "Failed to undo thread action",
+        "snooze" => "Failed to snooze thread",
+        action => t3_client::thread_views::thread_ops::header::action_failure_title(action),
+    };
+    toast_manager().add(ToastOptions {
+        variant: Variant::Error,
+        title: crate::i18n::Text::client_key(title),
+        description: Some(crate::i18n::Text::content(error.to_string())),
+        ..Default::default()
+    });
+}
+
+pub(super) fn footer_undo(client: Rc<dyn super::row::RowThreadActions>) -> AnyElement {
+    use crate::keys::bindings::{Keybindings, Phase, Scope};
+    use crate::runtime::tasks::{TaskOwner, watch};
+    use futures::StreamExt;
+    use t3_client::view_logic::shell::keybindings::MatchContext;
+
+    let keys = use_context::<Keybindings>();
+    let current = signal(None);
+    let mut notices = client.undo_notices();
+    watch(async move {
+        while let Some(notice) = notices.next().await {
+            current.set(notice);
+        }
+    });
+    let notice = computed(move || {
+        current.get().map(|notice| ThreadUndoNotice {
+            action: notice.action,
+            count: notice.count,
+            shortcut: keys.and_then(|keys| keys.shortcut_label("thread.undo")),
+        })
+    });
+    let tasks = TaskOwner::here();
+    let undo_client = client.clone();
+    let undo = Rc::new(move || {
+        let undo = undo_client.undo();
+        tasks.spawn(async move {
+            if let Err(error) = undo.await {
+                action_failed("undo", error);
+            }
+        });
+    });
+    if let Some(keys) = keys {
+        let shortcut_undo = undo.clone();
+        let observer = client.clone();
+        let context_client = client.clone();
+        keys.register(
+            Scope {
+                phase: Phase::Capture,
+                context: Rc::new(move || {
+                    let context = MatchContext::default();
+                    if current.with(Option::is_some) && context_client.claims_undo_shortcut() {
+                        context.with("editableFocus", false)
+                    } else {
+                        context
+                    }
+                }),
+                when: Rc::new(move |_| current.with(Option::is_some)),
+                ..Default::default()
+            }
+            .command("thread.undo", move |event| {
+                if !event.key.repeat {
+                    shortcut_undo();
+                }
+                event.claim();
+                true
+            }),
+        );
+        keys.register(Scope {
+            phase: Phase::Observe,
+            observe: Some(Rc::new(move |event, consumed| {
+                if !consumed
+                    && !matches!(event.key.key.as_str(), "Alt" | "Control" | "Meta" | "Shift")
+                {
+                    observer.release_undo_shortcut();
+                }
+            })),
+            ..Default::default()
+        });
+    }
+    sidebar_thread_undo_notice(notice, move || undo()).into_element()
+}
