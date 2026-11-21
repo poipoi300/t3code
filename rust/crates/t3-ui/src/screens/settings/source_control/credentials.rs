@@ -11,7 +11,7 @@ use t3_contracts::{
     secret_reference::{SecretProviderId, SecretReference},
     settings_secret_value::SettingsSecretValue,
     source_control::{
-        SourceControlAppAccessStatus, SourceControlProviderDiscoveryItem,
+        SourceControlDiscoveryStatus, SourceControlProviderDiscoveryItem,
         SourceControlProviderKind, SourceControlSignInPrompt,
     },
 };
@@ -69,7 +69,7 @@ struct HostPanel {
 
 impl HostPanel {
     fn commit(self, edit: ForgeCredentialEdit, complete: impl FnOnce() + 'static) {
-        if self.saving.get_untracked() || !self.page.writable() {
+        if self.saving.get_untracked() || !self.id.with(|id| self.page.environment_writable(id)) {
             return;
         }
         self.saving.set(true);
@@ -87,7 +87,7 @@ impl HostPanel {
         });
     }
     fn disabled(self) -> bool {
-        self.saving.get() || !self.page.writable()
+        self.saving.get() || !self.id.with(|id| self.page.environment_writable(id))
     }
 }
 
@@ -129,12 +129,11 @@ pub(super) fn host_settings(
         .child(app_sign_in.then(|| {
             text(t("Or use your own credentials")).app_class(tw("text-xs text-muted-foreground"))
         }))
-        .child(app_sign_in.then(|| app_access_notice(panel)))
         .child(token_settings(panel))
-        .child(account_settings(
-            panel,
-            item.auth.accounts.unwrap_or_default(),
-        ))
+        .child(
+            (item.status == SourceControlDiscoveryStatus::Available)
+                .then(|| account_settings(panel, item.auth.accounts.unwrap_or_default())),
+        )
         .child(when(
             move || panel.failure.get(),
             || {
@@ -532,41 +531,6 @@ fn account_settings(
     rows
 }
 
-fn app_access_notice(panel: HostPanel) -> impl IntoElement {
-    let target = panel.page.context.view().and_then(|view| {
-        let target = view.target()?;
-        (target.environment_id == panel.id.get())
-            .then(|| target.project_id.clone())
-            .flatten()
-    });
-    let status = signal(None::<SourceControlAppAccessStatus>);
-    if let Some((services, target)) = panel.page.services.get().zip(target) {
-        let request = services.0.app_access(panel.id.get(), target);
-        crate::runtime::tasks::watch(async move {
-            let _ = status.try_set(request.await);
-        });
-    }
-    region(
-        move || status.get(),
-        move |status| {
-            status.map(|status| {
-                let label = match status {
-                    SourceControlAppAccessStatus::Covered => {
-                        t("The GitHub app has access to this repository.")
-                    }
-                    SourceControlAppAccessStatus::NotCovered => {
-                        t("The GitHub app does not have access to this repository.")
-                    }
-                    SourceControlAppAccessStatus::SignedOut => {
-                        t("Sign in to check the GitHub app's repository access.")
-                    }
-                };
-                text(label).app_class(tw("text-xs text-muted-foreground"))
-            })
-        },
-    )
-}
-
 #[derive(Clone, PartialEq)]
 enum SignInState {
     Idle,
@@ -664,7 +628,13 @@ fn app_sign_in_settings(panel: HostPanel, account: Option<String>) -> impl IntoE
                     .child(text(subtitle).app_class(tw("text-xs text-muted-foreground"))))
                 .child(button(ButtonContent::Label(label),
                     if signed_in { ButtonVariant::Outline } else if waiting { ButtonVariant::Ghost } else { ButtonVariant::Default },
-                    ButtonSize::Xs, move || !can_sign_in() || starting || panel.saving.get(), move || {
+                    ButtonSize::Xs, move || {
+                        if signed_in {
+                            panel.disabled()
+                        } else {
+                            !waiting && (starting || panel.saving.get() || !can_sign_in())
+                        }
+                    }, move || {
                         if signed_in {
                             panel.commit(ForgeCredentialEdit::SignOut { host: panel.definition.public_host.into() }, || {});
                         } else if waiting { cancel(); } else { sign_in(); }

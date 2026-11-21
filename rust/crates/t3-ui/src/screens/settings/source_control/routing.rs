@@ -19,6 +19,24 @@ const VALUES: [(&str, &str, RoutingAccess); 3] = [
     ("read-write", "Read and act", RoutingAccess::ReadWrite),
 ];
 
+fn routing_summary(choices: &[RoutingChoice]) -> String {
+    [
+        (RoutingAccess::ReadWrite, "read and act"),
+        (RoutingAccess::Read, "read PRs"),
+    ]
+    .into_iter()
+    .filter_map(|(permission, action)| {
+        let labels = choices
+            .iter()
+            .filter(|entry| entry.permission == permission)
+            .map(|entry| entry.label.as_str())
+            .collect::<Vec<_>>();
+        (!labels.is_empty()).then(|| format!("{} {}", labels.join(", "), t(action)))
+    })
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 pub(super) fn pull_request_routing_settings(page: Page) -> impl IntoElement {
     let choices = signal(Vec::<RoutingChoice>::new());
     let refresh = signal(0u64);
@@ -50,24 +68,9 @@ pub(super) fn pull_request_routing_settings(page: Page) -> impl IntoElement {
             if choices.len() < 2 {
                 return None;
             }
-            let summary = choices
-                .iter()
-                .filter(|entry| entry.permission != RoutingAccess::Off)
-                .map(|entry| {
-                    format!(
-                        "{} {}",
-                        entry.label,
-                        if entry.permission == RoutingAccess::ReadWrite {
-                            t("read and act")
-                        } else {
-                            t("read PRs")
-                        }
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
+            let summary = routing_summary(&choices);
             let mut rows = view().child(settings_row(
-                SettingsRowProps::titled("", Text::from("Pull request routing"))
+                SettingsRowProps::titled("", Text::from("Pull request sharing"))
                     .first()
                     .description(move || {
                         if summary.is_empty() {
@@ -144,7 +147,7 @@ pub(super) fn pull_request_routing_settings(page: Page) -> impl IntoElement {
                                 let Some(services) = page.services.get() else {
                                     return;
                                 };
-                                if saving.get_untracked() {
+                                if saving.get_untracked() || !entry.with(|entry| entry.available) {
                                     return;
                                 }
                                 saving.set(true);
@@ -174,9 +177,34 @@ pub(super) fn pull_request_routing_settings(page: Page) -> impl IntoElement {
             }
             Some(settings_section(
                 "pull-request-routing",
-                Text::from("Pull request routing"),
+                Text::from("Pull request sharing"),
                 rows,
             ))
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_groups_read_write_before_read() {
+        let choices = [
+            ("Reader", RoutingAccess::Read),
+            ("Main", RoutingAccess::ReadWrite),
+            ("Build", RoutingAccess::ReadWrite),
+            ("Off", RoutingAccess::Off),
+        ]
+        .map(|(name, permission)| RoutingChoice {
+            id: t3_client::types::EnvironmentId(name.into()),
+            label: name.into(),
+            permission,
+            available: true,
+        });
+        assert_eq!(
+            routing_summary(&choices),
+            "Main, Build read and act · Reader read PRs"
+        );
+    }
 }

@@ -200,6 +200,34 @@ pub enum SignInAction {
 pub type ForgeResult<T> = Result<T, ()>;
 
 impl<P: Platform + Clone + 'static> SettingsService<P> {
+    pub fn forge_settings_writable(&self, environment: &EnvironmentId) -> bool {
+        self.can_write_settings(environment)
+    }
+
+    pub fn set_forge_offered(
+        &self,
+        environment: EnvironmentId,
+        provider: SourceControlProviderKind,
+        offered: bool,
+    ) -> LocalBoxFuture<'static, ForgeResult<()>> {
+        let settings = self.clone();
+        async move {
+            if !settings.forge_settings_writable(&environment) {
+                return Err(());
+            }
+            let patch = Map::from_iter([(
+                "offeredSourceControlProviders".to_owned(),
+                json!({provider.0: offered}),
+            )]);
+            settings
+                .save(&environment, patch)
+                .await
+                .map(|_| ())
+                .map_err(|_| ())
+        }
+        .boxed_local()
+    }
+
     pub fn discover_forges(
         &self,
         environment: EnvironmentId,
@@ -366,24 +394,16 @@ pub struct RoutingChoice {
 
 impl<P: Platform + Clone + 'static> SettingsService<P> {
     pub fn routing_choices(&self) -> LocalBoxFuture<'static, Vec<RoutingChoice>> {
-        let entries = self.runtime.environments();
+        let entries = routing_entries(
+            self.runtime.environments(),
+            self.primary_environment().as_ref(),
+        );
         let permissions =
             crate::connection::PullRequestRoutingPermissions::new(self.platform.clone());
         async move {
-            let reads = entries.into_iter().map(|entry| {
-                let permissions = &permissions;
-                async move {
-                    let available = !entry.routes.is_empty() && !entry.damaged;
-                    let registration = route_registration(entry);
-                    let permission = permissions.get(&registration).await.unwrap_or_default();
-                    RoutingChoice {
-                        id: registration.id,
-                        label: registration.label,
-                        permission,
-                        available,
-                    }
-                }
-            });
+            let reads = entries
+                .into_iter()
+                .map(|entry| routing_choice(&permissions, entry));
             futures::future::join_all(reads).await
         }
         .boxed_local()
@@ -394,11 +414,12 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         environment: EnvironmentId,
         permission: crate::persistence::RoutingAccess,
     ) -> LocalBoxFuture<'static, ForgeResult<()>> {
-        let entry = self
-            .runtime
-            .environments()
-            .into_iter()
-            .find(|entry| entry.id == environment && !entry.damaged);
+        let entry = routing_entries(
+            self.runtime.environments(),
+            self.primary_environment().as_ref(),
+        )
+        .into_iter()
+        .find(|entry| entry.id == environment && !entry.damaged);
         let permissions =
             crate::connection::PullRequestRoutingPermissions::new(self.platform.clone());
         async move {
@@ -407,45 +428,39 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         }
         .boxed_local()
     }
+}
 
-    pub fn forge_app_access(
-        &self,
-        environment: EnvironmentId,
-        project: t3_contracts::base_schemas::ProjectId,
-    ) -> LocalBoxFuture<'static, Option<t3_contracts::source_control::SourceControlAppAccessStatus>>
-    {
-        use t3_contracts::source_control::SourceControlAppAccessInput;
-        let project = self
-            .runtime
-            .project_actions()
-            .project(&crate::workspace::ProjectKey {
-                environment: environment.clone(),
-                project,
-            });
-        let session = self.session(&environment);
-        async move {
-            let project = project?;
-            let identity = project.project.repository_identity.as_ref()?.as_ref()?;
-            let repository = identity.canonical_key.0.strip_prefix("github.com/")?;
-            let (owner, name) = repository.split_once('/')?;
-            if owner.is_empty() || name.is_empty() || name.contains('/') {
-                return None;
-            }
-            SourceControl::default()
-                .app_access(
-                    &environment,
-                    &session?,
-                    SourceControlAppAccessInput {
-                        provider: SourceControlProviderKind("github".into()),
-                        host: TrimmedNonEmptyString("github.com".into()),
-                        repository: TrimmedNonEmptyString(repository.into()),
-                    },
-                )
-                .await
-                .ok()
-                .map(|access| access.status)
-        }
-        .boxed_local()
+fn routing_entries(
+    mut entries: Vec<crate::composition::EnvironmentEntry>,
+    primary: Option<&EnvironmentId>,
+) -> Vec<crate::composition::EnvironmentEntry> {
+    entries.retain(|entry| {
+        (entry.state.desired || Some(&entry.id) == primary)
+            && entry
+                .state
+                .last_failure
+                .as_ref()
+                .is_none_or(|failure| failure.kind != crate::connection::FailureKind::Unsupported)
+    });
+    entries.sort_by_key(|entry| Some(&entry.id) != primary);
+    entries
+}
+
+async fn routing_choice(
+    permissions: &crate::connection::PullRequestRoutingPermissions,
+    entry: crate::composition::EnvironmentEntry,
+) -> RoutingChoice {
+    let damaged = entry.damaged;
+    let registration = route_registration(entry);
+    let (permission, available) = permissions
+        .get_with_availability(&registration)
+        .await
+        .unwrap_or_default();
+    RoutingChoice {
+        id: registration.id,
+        label: registration.label,
+        permission,
+        available: available && !damaged,
     }
 }
 
@@ -457,5 +472,71 @@ fn route_registration(
         label: entry.label,
         routes: entry.routes,
         enabled: entry.state.desired,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        composition::EnvironmentEntry,
+        connection::{ConnectionFailure, ConnectionMode, ConnectionState, FailureKind, Route},
+        testing::FakePlatform,
+    };
+
+    fn entry(name: &str, enabled: bool) -> EnvironmentEntry {
+        EnvironmentEntry {
+            id: EnvironmentId(name.into()),
+            label: name.into(),
+            state: ConnectionState {
+                desired: enabled,
+                ..ConnectionState::default()
+            },
+            routes: Vec::new(),
+            damaged: false,
+        }
+    }
+
+    #[test]
+    fn routes_primary_first_then_only_enabled_supported_saved_environments() {
+        let primary = entry("primary", false);
+        let mut unsupported = entry("unsupported", true);
+        unsupported.state.last_failure = Some(ConnectionFailure::new(
+            FailureKind::Unsupported,
+            "unsupported fixture",
+        ));
+        let entries = routing_entries(
+            vec![
+                entry("saved", true),
+                entry("disabled", false),
+                unsupported,
+                primary.clone(),
+            ],
+            Some(&primary.id),
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>(),
+            ["primary", "saved"]
+        );
+    }
+
+    #[test]
+    fn routing_choice_is_disabled_until_the_route_has_a_connection_key() {
+        let mut saved = entry("saved", true);
+        saved.routes.push(Route {
+            id: "bad-endpoint".into(),
+            environment: saved.id.clone(),
+            mode: ConnectionMode::Remote,
+            http_base: "invalid".into(),
+            ws_base: "invalid".into(),
+        });
+        let permissions = crate::connection::PullRequestRoutingPermissions::new(std::rc::Rc::new(
+            FakePlatform::default(),
+        ));
+        let choice = futures::executor::block_on(routing_choice(&permissions, saved));
+        assert!(!choice.available);
     }
 }

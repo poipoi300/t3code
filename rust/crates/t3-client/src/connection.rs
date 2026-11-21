@@ -3517,8 +3517,17 @@ impl PullRequestRoutingPermissions {
         &self,
         entry: &crate::environment::EnvironmentRegistration,
     ) -> Result<crate::persistence::RoutingAccess, ConnectionFailure> {
+        self.get_with_availability(entry)
+            .await
+            .map(|(access, _)| access)
+    }
+
+    pub(crate) async fn get_with_availability(
+        &self,
+        entry: &crate::environment::EnvironmentRegistration,
+    ) -> Result<(crate::persistence::RoutingAccess, bool), ConnectionFailure> {
         let Some(key) = self.connection_key(entry).await? else {
-            return Ok(crate::persistence::RoutingAccess::Off);
+            return Ok((crate::persistence::RoutingAccess::Off, false));
         };
         let grant = crate::persistence::load_routing_grant(self.platform.as_ref(), &entry.id)
             .await
@@ -3528,11 +3537,12 @@ impl PullRequestRoutingPermissions {
                     "Could not read routing permission.",
                 )
             })?;
-        Ok(grant
+        let access = grant
             .filter(|g| g.grant.connection_key == key)
             .map_or(crate::persistence::RoutingAccess::Off, |g| {
                 g.grant.permission
-            }))
+            });
+        Ok((access, true))
     }
     pub async fn set(
         &self,

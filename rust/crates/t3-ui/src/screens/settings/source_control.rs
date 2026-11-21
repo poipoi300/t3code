@@ -7,21 +7,20 @@ use std::rc::Rc;
 
 use futures::future::LocalBoxFuture;
 use nsh_core::prelude::*;
-use serde_json::json;
 use t3_client::{
     composition::ClientRuntime,
     persistence::RoutingAccess,
     platform::Platform,
     services::settings::service::{
-        SettingsService, SettingsWriteAccess,
+        SettingsService,
         source_control::{ForgeCredentialEdit, ForgeResult, RoutingChoice, SignInAction},
     },
     types::EnvironmentId,
 };
 use t3_contracts::source_control::{
-    SourceControlAppAccessStatus, SourceControlDiscoveryResult, SourceControlDiscoveryStatus,
-    SourceControlProviderAuthStatus, SourceControlProviderDiscoveryItem, SourceControlProviderKind,
-    SourceControlSignInInput, SourceControlSignInPrompt, WireOption,
+    SourceControlDiscoveryResult, SourceControlDiscoveryStatus, SourceControlProviderAuthStatus,
+    SourceControlProviderDiscoveryItem, SourceControlProviderKind, SourceControlSignInInput,
+    SourceControlSignInPrompt, WireOption,
 };
 
 use super::shell::{
@@ -50,6 +49,13 @@ trait ForgeClient {
         provider: SourceControlProviderKind,
         edit: ForgeCredentialEdit,
     ) -> LocalBoxFuture<'static, ForgeResult<()>>;
+    fn can_write(&self, environment: &EnvironmentId) -> bool;
+    fn set_offered(
+        &self,
+        environment: EnvironmentId,
+        provider: SourceControlProviderKind,
+        offered: bool,
+    ) -> LocalBoxFuture<'static, ForgeResult<()>>;
     fn can_sign_in(&self, environment: &EnvironmentId, input: &SourceControlSignInInput) -> bool;
     fn start(
         &self,
@@ -68,11 +74,6 @@ trait ForgeClient {
         environment: EnvironmentId,
         access: RoutingAccess,
     ) -> LocalBoxFuture<'static, ForgeResult<()>>;
-    fn app_access(
-        &self,
-        environment: EnvironmentId,
-        project: t3_contracts::base_schemas::ProjectId,
-    ) -> LocalBoxFuture<'static, Option<SourceControlAppAccessStatus>>;
 }
 
 struct Client<P: Platform + Clone + 'static> {
@@ -94,6 +95,18 @@ impl<P: Platform + Clone + 'static> ForgeClient for Client<P> {
     ) -> LocalBoxFuture<'static, ForgeResult<()>> {
         self.settings
             .edit_forge_credentials(environment, provider, edit)
+    }
+    fn can_write(&self, environment: &EnvironmentId) -> bool {
+        self.settings.forge_settings_writable(environment)
+    }
+    fn set_offered(
+        &self,
+        environment: EnvironmentId,
+        provider: SourceControlProviderKind,
+        offered: bool,
+    ) -> LocalBoxFuture<'static, ForgeResult<()>> {
+        self.settings
+            .set_forge_offered(environment, provider, offered)
     }
     fn can_sign_in(&self, environment: &EnvironmentId, input: &SourceControlSignInInput) -> bool {
         self.settings.can_sign_in_to_forge(environment, input)
@@ -124,13 +137,6 @@ impl<P: Platform + Clone + 'static> ForgeClient for Client<P> {
     ) -> LocalBoxFuture<'static, ForgeResult<()>> {
         self.settings.set_routing_choice(environment, access)
     }
-    fn app_access(
-        &self,
-        environment: EnvironmentId,
-        project: t3_contracts::base_schemas::ProjectId,
-    ) -> LocalBoxFuture<'static, Option<SourceControlAppAccessStatus>> {
-        self.settings.forge_app_access(environment, project)
-    }
 }
 
 #[derive(Clone)]
@@ -158,8 +164,13 @@ impl Page {
             let _ = self.refresh.try_set(revision + 1);
         }
     }
-    fn writable(self) -> bool {
-        self.context.write_access() == SettingsWriteAccess::Writable
+    fn environment_writable(self, environment: &EnvironmentId) -> bool {
+        let _ = self.context.view();
+        self.services.with(|services| {
+            services
+                .as_ref()
+                .is_some_and(|services| services.0.can_write(environment))
+        })
     }
     fn edit(
         self,
@@ -306,6 +317,7 @@ fn discovery_item_row(
     environment: EnvironmentId,
     item: SourceControlProviderDiscoveryItem,
 ) -> impl IntoElement {
+    let environment = stored(environment);
     let item = stored(item);
     let open = signal(false);
     let expand = item.with(|item| {
@@ -350,14 +362,26 @@ fn discovery_item_row(
                     .child(switch(
                         offered.clone(),
                         ControlState {
-                            disabled: Prop::bind(move || !page.writable()),
+                            disabled: Prop::bind(move || {
+                                !environment.with(|id| page.environment_writable(id))
+                            }),
                             checked: Prop::bind(move || {
                                 item.with(|item| {
                                     page.context
-                                        .server_settings()
-                                        .offered_source_control_providers
-                                        .get(&item.kind.0)
-                                        .copied()
+                                        .view()
+                                        .and_then(|view| {
+                                            environment.with(|id| {
+                                                view.all_environments
+                                                    .iter()
+                                                    .find(|entry| &entry.environment_id == id)?
+                                                    .config
+                                                    .as_ref()?
+                                                    .settings
+                                                    .offered_source_control_providers
+                                                    .get(&item.kind.0)
+                                                    .copied()
+                                            })
+                                        })
                                         .unwrap_or(true)
                                 })
                             }),
@@ -365,20 +389,23 @@ fn discovery_item_row(
                         },
                         Size::Default,
                         move |checked| {
-                            let provider = item.with(|item| item.kind.0.clone());
-                            page.context.update(
-                                json!({"offeredSourceControlProviders":{provider:checked}}),
-                            );
+                            if let Some(services) = page.services.get() {
+                                let provider = item.with(|item| item.kind.clone());
+                                let save =
+                                    services.0.set_offered(environment.get(), provider, checked);
+                                page.tasks.spawn(async move {
+                                    let _ = save.await;
+                                });
+                            }
                         },
                     ))
             })
             .children(move || {
-                let environment = environment.clone();
                 region(
                     move || open.get(),
                     move |open| {
                         open.then(|| {
-                            credentials::host_settings(page, environment.clone(), item.get())
+                            credentials::host_settings(page, environment.get(), item.get())
                         })
                     },
                 )
