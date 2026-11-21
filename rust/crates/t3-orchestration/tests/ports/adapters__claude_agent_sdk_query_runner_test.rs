@@ -133,6 +133,105 @@ async fn fixture_runtime(
         .expect("open Claude fixture session")
 }
 
+#[tokio::test]
+async fn claude_lifecycle_close_mid_turn_projects_interrupted() {
+    let (runtime, _events, _peer) = running().await;
+    let thread = fixture_turn_input()
+        .expect("fixture turn input")
+        .provider_thread;
+    runtime.close().await.expect("close Claude mid-turn");
+    let snapshot = runtime
+        .snapshot(thread)
+        .await
+        .expect("snapshot closed session");
+    assert_eq!(snapshot.provider_turns.len(), 1);
+    assert_eq!(
+        snapshot.provider_turns[0].status,
+        t3_contracts::orchestration_v2::ProviderTurnStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn claude_lifecycle_interrupt_followed_by_eof_is_interrupted() {
+    let (runtime, mut events, mut peer) = running().await;
+    let provider_turn_id = loop {
+        let event = events
+            .events
+            .recv()
+            .await
+            .expect("provider event")
+            .expect("valid event");
+        if let ProviderEventKind::Turn { provider_turn, .. } = event.kind {
+            let t3_contracts::orchestration_v2_id_table::IdOrIndex::Id(id) = provider_turn.id
+            else {
+                panic!("fixture should emit a provider turn ID");
+            };
+            break id;
+        }
+    };
+    let input = InterruptInput {
+        provider_thread: fixture_turn_input()
+            .expect("fixture turn input")
+            .provider_thread,
+        provider_turn_id,
+        request_runtime_restart: false,
+    };
+    let captured = runtime.clone();
+    let interrupt = tokio::spawn(async move { captured.interrupt_turn(input).await });
+    let request = peer.read().await;
+    assert_eq!(request["request"]["subtype"], "interrupt");
+    peer.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":{}}})).await;
+    interrupt
+        .await
+        .expect("join interrupt")
+        .expect("interrupt Claude");
+    drop(peer);
+    loop {
+        let event = events
+            .events
+            .recv()
+            .await
+            .expect("provider event")
+            .expect("valid event");
+        if let ProviderEventKind::Terminal {
+            outcome,
+            disposition,
+            ..
+        } = event.kind
+        {
+            assert!(
+                matches!(outcome, TerminalOutcome::Interrupted { .. }),
+                "{outcome:?}"
+            );
+            assert_ne!(disposition, ThreadDisposition::Broken);
+            break;
+        }
+    }
+    runtime.close().await.expect("close Claude fixture session");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_initialize_rejection_preserves_protocol_operation() {
+    let rejection = INITIALIZE_CLI
+        .replace(r#""subtype":"success""#, r#""subtype":"error""#)
+        .replace(
+            r#""response":{}"#,
+            r#""error":"fixture rejected initialization""#,
+        );
+    let script = format!("{rejection}\nwhile IFS= read -r line; do :; done");
+    let (_directory, runtime, input) = process_fixture(&script, false).await;
+    let error = runtime
+        .start_turn(input)
+        .await
+        .expect_err("initialization rejected");
+    assert!(
+        matches!(error, ProviderError::Operation { operation: ProviderOperation::Stream, ref detail } if detail == "Claude control request failed"),
+        "{error:?}"
+    );
+    runtime.close().await.expect("close Claude fixture session");
+}
+
 #[cfg(unix)]
 async fn process_fixture(
     script: &str,
@@ -199,7 +298,7 @@ async fn claude_lifecycle_immediate_eof_before_any_protocol_message_fails_startu
     assert_startup_failure(
         "printf 'launched\n' > fixture.log; exit 1",
         false,
-        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+        "Claude Code process exited with code 1.",
     )
     .await;
     assert_startup_failure("exit 0", false, CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL).await;
@@ -211,7 +310,7 @@ async fn claude_lifecycle_eof_during_mcp_registration_fails_startup() {
     assert_startup_failure(
         &format!("{INITIALIZE_CLI}\nIFS= read -r registration\nexit 23"),
         true,
-        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+        "Claude Code process exited with code 23.",
     )
     .await;
 }
@@ -235,13 +334,13 @@ async fn claude_lifecycle_stderr_only_root_refusal_is_curated() {
     assert_startup_failure(
         "printf 'token=sk-fixture\\n' >&2; exit 1",
         false,
-        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+        "Claude Code process exited with code 1.",
     )
     .await;
 }
 
 #[cfg(unix)]
-async fn assert_mid_turn_failure(exit: &str) {
+async fn assert_mid_turn_failure(exit: &str, expected: &str, code: Option<&str>) {
     use t3_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass;
 
     let script = format!(
@@ -261,51 +360,121 @@ printf 'token=sk-fixture\n' >&2
         .start_turn(input)
         .await
         .expect("start Claude fixture turn");
-    loop {
-        let event = events
-            .events
-            .recv()
-            .await
-            .expect("Claude event stream remains open")
-            .expect("Claude provider event");
-        if let ProviderEventKind::Terminal { outcome, .. } = event.kind {
-            let TerminalOutcome::Failed { failure, .. } = outcome else {
-                panic!("expected a failed turn after {exit}, got {outcome:?}");
-            };
-            assert_eq!(
-                failure.class,
-                OrchestrationV2ProviderFailureClass::TransportError
-            );
-            assert_eq!(failure.code, None);
-            assert_eq!(failure.message.0, "Provider turn failed.");
-            break;
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let event = events
+                .events
+                .recv()
+                .await
+                .expect("Claude event stream remains open")
+                .expect("Claude provider event");
+            if let ProviderEventKind::Terminal { outcome, .. } = event.kind {
+                break outcome;
+            }
         }
-    }
+    })
+    .await;
     runtime.close().await.expect("close Claude fixture session");
+    let outcome = terminal.expect("process loss must settle the live turn");
+    let TerminalOutcome::Failed { failure, .. } = outcome else {
+        panic!("expected a failed turn after {exit}, got {outcome:?}");
+    };
+    assert_eq!(
+        failure.class,
+        OrchestrationV2ProviderFailureClass::TransportError
+    );
+    assert_eq!(failure.message.0, expected);
+    assert_eq!(failure.code.as_ref().map(|code| code.0.as_str()), code);
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_lifecycle_clean_eof_mid_turn_is_a_transport_failure() {
-    assert_mid_turn_failure("exit 0").await;
+    assert_mid_turn_failure("exit 0", CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL, None).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_lifecycle_nonzero_exit_mid_turn_is_a_transport_failure() {
-    assert_mid_turn_failure("exit 37").await;
+    assert_mid_turn_failure(
+        "exit 37",
+        "Claude Code process exited with code 37.",
+        Some("process_exited_nonzero"),
+    )
+    .await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_lifecycle_killed_mid_turn_is_a_transport_failure() {
-    assert_mid_turn_failure("kill -KILL $$").await;
+    assert_mid_turn_failure(
+        "kill -KILL $$",
+        "Claude Code process terminated by signal SIGKILL.",
+        Some("process_killed_by_signal"),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_leader_exit_settles_with_inherited_pipes_open() {
+    assert_mid_turn_failure(
+        "mkfifo held\n(IFS= read -r release < held) &\nexit 38",
+        "Claude Code process exited with code 38.",
+        Some("process_exited_nonzero"),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_lifecycle_leader_exit_preserves_buffered_result() {
+    let script = format!(
+        r#"{INITIALIZE_CLI}
+IFS= read -r prompt
+mkfifo held
+(IFS= read -r release < held) &
+printf '%s\n' '{{"type":"result","subtype":"success","uuid":"finished","result":"Done","is_error":false,"num_turns":1,"duration_ms":1,"duration_api_ms":1,"total_cost_usd":0,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
+exit 38
+"#,
+    );
+    let (_directory, runtime, input) = process_fixture(&script, false).await;
+    let mut events = runtime
+        .subscribe()
+        .await
+        .expect("subscribe to Claude fixture");
+    runtime.start_turn(input).await.expect("start Claude turn");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let event = events
+                .events
+                .recv()
+                .await
+                .expect("provider event")
+                .expect("valid event");
+            if let ProviderEventKind::Terminal { outcome, .. } = event.kind {
+                break outcome;
+            }
+        }
+    })
+    .await;
+    runtime.close().await.expect("close Claude fixture session");
+    let outcome = terminal.expect("buffered result must settle the turn");
+    assert!(
+        matches!(outcome, TerminalOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_lifecycle_stdout_eof_while_cli_is_live_has_no_signal_code() {
-    assert_mid_turn_failure("mkfifo held\nexec 1>&-\nIFS= read -r release < held").await;
+    assert_mid_turn_failure(
+        "mkfifo held\nexec 1>&-\nIFS= read -r release < held",
+        CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL,
+        None,
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -378,6 +547,41 @@ async fn claude_lifecycle_broken_stdin_settles_even_while_stdout_stays_open() {
         OrchestrationV2ProviderFailureClass::TransportError
     );
     assert_eq!(failure.code, None);
+    drop(output);
+    runtime.close().await.expect("close Claude fixture session");
+}
+
+#[tokio::test(start_paused = true)]
+async fn claude_lifecycle_broken_startup_stdin_finishes_while_stdout_stays_open() {
+    let (reader, output) = tokio::io::duplex(65536);
+    let (writer, closed_peer) = tokio::io::duplex(65536);
+    drop(closed_peer);
+    let connector = Arc::new(PipeConnector::new(Session::connect(
+        reader,
+        writer,
+        SessionOptions::default(),
+    )));
+    let input = fixture_turn_input().expect("build Claude fixture turn");
+    let runtime = fixture_runtime(
+        ClaudeHostOptions::default(),
+        LaunchOptions {
+            cli_path: Some("fixture-claude".into()),
+            ..Default::default()
+        },
+        connector,
+        &input,
+        CancellationToken::new(),
+    )
+    .await;
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(5), runtime.start_turn(input)).await;
+    let error = result
+        .expect("the query owns a bounded startup drain")
+        .expect_err("broken startup stdin must fail");
+    assert!(
+        matches!(error, ProviderError::Operation { operation: ProviderOperation::Open, ref detail } if detail == CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL),
+        "{error:?}"
+    );
     drop(output);
     runtime.close().await.expect("close Claude fixture session");
 }
