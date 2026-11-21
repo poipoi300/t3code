@@ -131,6 +131,52 @@ fn a_reconnect_follows_every_open_thread_again_on_the_new_session() {
 }
 
 #[test]
+fn a_server_restart_refreshes_the_open_timeline_while_the_old_socket_closes() {
+    let mut harness = Harness::new(ENV);
+    harness.server().state.borrow_mut().hold_socket_close = true;
+    let (client, _ended) = connected(&mut harness);
+    let _lease = client.open_thread(thread("t1"));
+    harness.settle();
+    let before = live_session(&client);
+    assert_eq!(status(&client, "t1"), Some(SyncStatus::Live));
+    assert_eq!(harness.server().thread_subscribes("t1"), 1);
+
+    let mut replacement = thread_snapshot("t1");
+    replacement["snapshotSequence"] = serde_json::json!(2);
+    let mut visible = replacement["projection"]["visibleTurnItems"][0].clone();
+    visible["position"] = serde_json::json!(1);
+    visible["sourceItemId"] = serde_json::json!("after-restart");
+    visible["item"]["id"] = serde_json::json!("after-restart");
+    visible["item"]["ordinal"] = serde_json::json!(2);
+    replacement["projection"]["turnItems"]
+        .as_array_mut()
+        .unwrap()
+        .push(visible["item"].clone());
+    replacement["projection"]["visibleTurnItems"]
+        .as_array_mut()
+        .unwrap()
+        .push(visible);
+    {
+        let mut server = harness.server().state.borrow_mut();
+        server.hold_socket_close = false;
+        server.thread_snapshots.insert("t1".into(), replacement);
+    }
+    harness.server().hang_up();
+    harness.settle();
+    harness.advance(10_000);
+
+    assert!(
+        live_session(&client) > before,
+        "new socket despite the old close handshake"
+    );
+    assert_eq!(harness.server().thread_subscribes("t1"), 2);
+    assert_eq!(harness.server().open_threads_of("t1"), 1);
+    assert_eq!(status(&client, "t1"), Some(SyncStatus::Live));
+    let timeline = client.store().shared_thread(&key("t1")).unwrap();
+    assert_eq!(timeline.visible_turn_items.len(), 2);
+}
+
+#[test]
 fn a_lease_dropped_during_a_reconnect_is_not_followed_on_the_new_session() {
     let mut harness = Harness::new(ENV);
     let (client, _ended) = connected(&mut harness);

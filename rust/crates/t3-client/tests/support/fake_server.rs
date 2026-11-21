@@ -131,6 +131,8 @@ pub struct ServerState {
     pub unreachable: bool,
     /// Failure injection: HTTP works but every WebSocket upgrade fails (a proxy without upgrade).
     pub refuse_sockets: bool,
+    /// A transport still completing its close handshake after a server goes away.
+    pub hold_socket_close: bool,
     /// Failure injection: dispatches are received and never answered.
     pub hold_dispatches: bool,
     /// Failure injection: the host cannot produce random bytes.
@@ -490,6 +492,7 @@ impl Platform for TestPlatform {
             Ok(Box::new(Socket {
                 to_server: Some(to_server),
                 from_server,
+                closing: server.state.borrow().hold_socket_close,
             }) as Box<dyn WebSocket>)
         }
         .boxed_local()
@@ -544,6 +547,7 @@ impl Platform for TestPlatform {
 struct Socket {
     to_server: Option<mpsc::UnboundedSender<Frame>>,
     from_server: mpsc::UnboundedReceiver<Frame>,
+    closing: bool,
 }
 
 impl WebSocket for Socket {
@@ -563,6 +567,9 @@ impl WebSocket for Socket {
     fn close(&mut self) -> HostFuture<'_, ()> {
         async move {
             self.to_server = None;
+            if self.closing {
+                futures::future::pending::<()>().await;
+            }
             Ok(())
         }
         .boxed_local()

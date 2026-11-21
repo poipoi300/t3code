@@ -194,9 +194,11 @@ impl SessionFactory for PlatformSessionFactory {
             let authorization = self.authorization.clone();
             let identity = prepared.session.clone();
             let driver = async move {
-                let io = futures::future::join(
-                    rpc.run(ticks, move || clock.monotonic_ms()),
-                    pump(socket, outgoing_rx, incoming_tx, frames, generation),
+                // Either half ending makes this session unusable. In particular, an old
+                // host socket's pending close must not keep the RPC session alive after EOF.
+                let io = select(
+                    rpc.run(ticks, move || clock.monotonic_ms()).boxed_local(),
+                    pump(socket, outgoing_rx, incoming_tx, frames, generation).boxed_local(),
                 )
                 .map(|_| ())
                 .boxed_local();
@@ -294,6 +296,7 @@ async fn pump(
             }
         }
     }
+    drop(incoming);
     let _ = socket.close().await;
 }
 

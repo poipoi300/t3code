@@ -119,6 +119,30 @@ impl GitCheckpointBackend {
         (self.factory)(cwd)
     }
 
+    /// A recovery must use the project repository previously recorded for this environment.
+    pub async fn worktree_source(&self, root: PathBuf) -> Result<(Git, t3_git::RepositoryBinding)> {
+        let store = self
+            .bindings
+            .as_ref()
+            .ok_or(Error::Unsupported("repository binding store"))?;
+        let saved = match store.get(&root).await? {
+            Some(saved) => saved,
+            None => {
+                self.bind_scope(root.clone(), false).await?;
+                store
+                    .get(&root)
+                    .await?
+                    .ok_or(Error::Unsupported("missing project binding"))?
+            }
+        };
+        let saved: SavedBinding = serde_json::from_value(saved)?;
+        let binding = saved.repository.ok_or(Error::Service {
+            operation: crate::ports::checkpoints_forks::checkpoint_rollback_service::REPOSITORY_CHANGED_OPERATION,
+            detail: "The project folder was recorded without a Git repository.".into(),
+        })?;
+        Ok((self.handle(root), binding))
+    }
+
     async fn git(&self, cwd: PathBuf) -> Result<Git> {
         self.bound(cwd, false).await
     }
@@ -142,7 +166,12 @@ impl GitCheckpointBackend {
                 },
             };
         }
-        let repository = git.bind_repository().await.map_err(git_error)?;
+        let repository = if replace {
+            git.rebind_repository().await
+        } else {
+            git.bind_repository().await
+        }
+        .map_err(git_error)?;
         bindings
             .put(&cwd, serde_json::to_value(SavedBinding { repository })?)
             .await?;
@@ -662,6 +691,27 @@ mod tests {
                 CancellationToken::new(),
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn a_recreated_checkout_retries_only_the_identity_whose_save_failed() -> Result<()> {
+        let repo = Repository::new().await?;
+        let file = repo._temp.path().join("bindings.json");
+        let backend = GitCheckpointBackend::new(isolated_git(&repo._temp.path().join("home")))
+            .with_repository_bindings(Arc::new(crate::runtime::repository_bindings::FileRepositoryBindings::new(file.clone())));
+        let path = repo._temp.path().join("checkout");
+        std::fs::create_dir(&path)?;
+        backend.bind_scope(path.clone(), false).await?;
+        std::fs::remove_dir(&path)?;
+        repo.git.add_worktree(t3_git::WorktreeOptions { new_branch: Some("recovered".into()), ..t3_git::WorktreeOptions::new(&path, "HEAD") }).await.map_err(git_error)?;
+        let temporary = file.with_extension("json.tmp");
+        std::fs::create_dir(&temporary)?;
+        assert!(backend.bind_scope(path.clone(), true).await.is_err());
+        std::fs::remove_dir(temporary)?;
+        assert!(backend.is_repository(path.clone()).await?);
+        let saved = std::fs::read_to_string(file)?;
+        assert!(saved.contains("common_dir"));
+        Ok(())
     }
 
     const PLANTED_CHILD: &str = "T3_ORCHESTRATION_PLANTED_REPOSITORY_CHILD";
