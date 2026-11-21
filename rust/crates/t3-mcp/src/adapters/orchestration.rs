@@ -188,11 +188,10 @@ impl crate::services::AttachmentService for OrchestrationAdapter {
                 t3_orchestration::error::Error::Unsupported(method) => {
                     not_available("t3_thread_send_attachments", method)
                 }
-                t3_orchestration::error::Error::Service { operation, detail }
-                    if operation == "AttachmentClaims.claimPendingAttachments" =>
-                {
-                    McpError::failure("orchestration_error", detail)
-                }
+                t3_orchestration::error::Error::Service {
+                    operation: "AttachmentClaims.claimPendingAttachments",
+                    detail,
+                } => McpError::failure("orchestration_error", detail),
                 _ => McpError::unavailable(),
             })?;
         Ok(
@@ -236,11 +235,10 @@ fn failure(error: t3_orchestration::error::Error) -> McpError {
                 reason.chars().take(1000).collect::<String>(),
             )
         }
-        t3_orchestration::error::Error::Service { operation, detail }
-            if operation == "ThreadManagementProviderInstanceDisabledError" =>
-        {
-            McpError::failure("invalid_request", detail)
-        }
+        t3_orchestration::error::Error::Service {
+            operation: "ThreadManagementProviderInstanceDisabledError",
+            detail,
+        } => McpError::failure("invalid_request", detail),
         t3_orchestration::error::Error::CallerRefused { refusal, .. } => caller_refused(&refusal),
         _ => McpError::unavailable(),
     }
@@ -695,7 +693,7 @@ impl OrchestratorService for OrchestrationAdapter {
             answer["taskId"] = task.clone();
         }
         answer["status"] = encoded(&result.run.status)?;
-        answer["delivery"] = encoded(&result.delivery)?;
+        answer["delivery"] = encoded(result.delivery)?;
         decoded(answer)
     }
     async fn t3_thread_wait(

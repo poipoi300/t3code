@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use t3_mcp::{
     adapters::orchestration::OrchestrationAdapter,
-    services::{OrchestratorService, ProjectService, ThreadService},
+    services::{AttachmentService, OrchestratorService, ProjectService, ThreadService},
     *,
 };
 use t3_orchestration::{

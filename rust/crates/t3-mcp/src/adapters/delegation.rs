@@ -66,11 +66,10 @@ fn management_failure(error: t3_orchestration::error::Error) -> McpError {
         t3_orchestration::error::Error::CallerRefused { refusal, .. } => {
             failure(refusal.code(), refusal.to_string())
         }
-        t3_orchestration::error::Error::Service { operation, detail }
-            if operation == "ThreadManagementProviderInstanceDisabledError" =>
-        {
-            failure("invalid_request", detail)
-        }
+        t3_orchestration::error::Error::Service {
+            operation: "ThreadManagementProviderInstanceDisabledError",
+            detail,
+        } => failure("invalid_request", detail),
         error => failure("orchestration_error", error.to_string()),
     }
 }
