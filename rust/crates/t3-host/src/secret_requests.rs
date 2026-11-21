@@ -334,7 +334,9 @@ impl SecretRequests {
             }
         }
         let files = self.directory.join("files");
-        if let Ok(entries) = fs::read_dir(&files) {
+        if fs::symlink_metadata(&files).is_ok_and(|entry| entry.is_dir())
+            && let Ok(entries) = fs::read_dir(&files)
+        {
             for entry in entries {
                 let Ok(entry) = entry else {
                     continue;

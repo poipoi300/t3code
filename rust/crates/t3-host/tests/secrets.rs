@@ -392,3 +392,30 @@ async fn expiry_sweep_continues_after_an_undeletable_ref() {
         assert!(!next.exists());
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn expiry_sweep_leaves_a_symlinked_files_directory_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let service = SecretRequests::new(
+        dir.path().into(),
+        Arc::new(Time(AtomicI64::new(86_400_001))),
+        Arc::new(Cards {
+            status: Mutex::new("pending".into()),
+            fail: AtomicBool::new(false),
+            file: false,
+        }),
+        resolver(),
+    )
+    .unwrap();
+    let unrelated = outside.path().join("a".repeat(32));
+    std::fs::write(&unrelated, "unrelated file").unwrap();
+    filetime::set_file_mtime(&unrelated, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let files = dir.path().join("files");
+    std::os::unix::fs::symlink(outside.path(), &files).unwrap();
+
+    assert_eq!(service.sweep_expired().await.unwrap(), 0);
+    assert!(unrelated.is_file());
+    assert!(std::fs::symlink_metadata(files).unwrap().is_symlink());
+}
