@@ -24,14 +24,15 @@ pub struct NoDocumentText;
 pub trait CopyFile: Send + Sync {
     async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<()>;
 }
-struct NativeCopyFile;
+struct NativeCopyFile(Arc<t3_workspace::attachment_delivery::AttachmentDelivery>);
 #[async_trait]
 impl CopyFile for NativeCopyFile {
     async fn copy(&self, from: PathBuf, to: PathBuf) -> Result<()> {
-        tokio::task::spawn_blocking(move || std::fs::copy(from, to))
+        let delivery = self.0.clone();
+        tokio::task::spawn_blocking(move || delivery.copy_claim(&from, &to))
             .await
-            .map_err(|error| claim_error(error.to_string()))??;
-        Ok(())
+            .map_err(|e| claim_error(e.to_string()))?
+            .map_err(|e| claim_error(e.to_string()))
     }
 }
 #[async_trait]
@@ -228,21 +229,23 @@ fn sidecar(path: &Path) -> PathBuf {
     value.push(".txt");
     value.into()
 }
-fn release_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(sidecar(path));
-    }
-}
-
 #[derive(Clone)]
 pub struct AttachmentClaimService(Arc<ClaimState>);
 struct ClaimState {
+    delivery: Arc<t3_workspace::attachment_delivery::AttachmentDelivery>,
     directory: PathBuf,
     documents: Arc<dyn DocumentText>,
     copy_file: Arc<dyn CopyFile>,
     tasks: TaskTracker,
     closed: Mutex<bool>,
+}
+impl ClaimState {
+    fn release_paths(&self, paths: &[PathBuf]) {
+        for path in paths {
+            self.delivery.remove_claim(path);
+            self.delivery.remove_claim(&sidecar(path));
+        }
+    }
 }
 struct CancelClaim(CancellationToken);
 impl Drop for CancelClaim {
@@ -256,12 +259,16 @@ impl AttachmentClaimService {
         &self,
         attachment: &ChatAttachment,
     ) -> Result<super::thread_message_intake::AttachmentReference> {
-        let path = attachment_path(&self.0.directory, attachment)
-            .filter(|path| path.exists())
-            .ok_or_else(|| Error::Service {
+        let path =
+            attachment_path(&self.0.directory, attachment).ok_or_else(|| Error::Service {
                 operation: "AttachmentClaims.attachment_reference",
                 detail: "Attachment is no longer available. Attach it again.".into(),
             })?;
+        let delivery = self.0.delivery.clone();
+        let path = tokio::task::spawn_blocking(move || delivery.reference(&path))
+            .await
+            .map_err(|e| claim_error(e.to_string()))?
+            .map_err(|e| claim_error(e.to_string()))?;
         let extracted_path = if matches!(attachment, ChatAttachment::File(_)) {
             self.0.documents.ensure(path.clone()).await?
         } else {
@@ -273,14 +280,34 @@ impl AttachmentClaimService {
         })
     }
     pub fn new(directory: PathBuf, documents: Arc<dyn DocumentText>) -> Self {
-        Self::with_copy_file(directory, documents, Arc::new(NativeCopyFile))
+        let delivery = Arc::new(t3_workspace::attachment_delivery::AttachmentDelivery::new(
+            directory.clone(),
+        ));
+        Self::with_delivery(
+            directory,
+            documents,
+            Arc::new(NativeCopyFile(delivery.clone())),
+            delivery,
+        )
     }
     pub fn with_copy_file(
         directory: PathBuf,
         documents: Arc<dyn DocumentText>,
         copy_file: Arc<dyn CopyFile>,
     ) -> Self {
+        let delivery = Arc::new(t3_workspace::attachment_delivery::AttachmentDelivery::new(
+            directory.clone(),
+        ));
+        Self::with_delivery(directory, documents, copy_file, delivery)
+    }
+    pub fn with_delivery(
+        directory: PathBuf,
+        documents: Arc<dyn DocumentText>,
+        copy_file: Arc<dyn CopyFile>,
+        delivery: Arc<t3_workspace::attachment_delivery::AttachmentDelivery>,
+    ) -> Self {
         Self(Arc::new(ClaimState {
+            delivery,
             directory,
             documents,
             copy_file,
@@ -333,7 +360,7 @@ impl AttachmentClaimService {
                 if cancellation.is_cancelled() { return Err(Error::Cancelled); }
                 if sidecar(&current).exists() {
                     let from=sidecar(&current); let to=sidecar(&destination);
-                    if self.0.copy_file.copy(from,to.clone()).await.is_ok() { paths.push(to); } else { let _=std::fs::remove_file(to); }
+                    if self.0.copy_file.copy(from,to.clone()).await.is_ok() { paths.push(to); }
                 } else if let Some(extracted) = self.0.documents.ensure(destination).await? { paths.push(extracted); }
                 if cancellation.is_cancelled() { return Err(Error::Cancelled); }
                 claimed.push(attachment);
@@ -346,7 +373,7 @@ impl AttachmentClaimService {
                 claimed_paths: paths,
             }),
             Err(error) => {
-                release_paths(&paths);
+                self.0.release_paths(&paths);
                 Err(error)
             }
         }
@@ -398,14 +425,14 @@ impl AttachmentBackend for AttachmentClaimService {
                     .claim_batch(thread_id, attachments, &cancellation)
                     .await;
                 if let Err(Ok(claimed)) = send.send(result) {
-                    release_paths(&claimed.claimed_paths);
+                    service.0.release_paths(&claimed.claimed_paths);
                 }
             });
         }
         receive.await.map_err(|e| claim_error(e.to_string()))?
     }
     async fn release_claimed_paths(&self, paths: Vec<PathBuf>) -> Result<()> {
-        release_paths(&paths);
+        self.0.release_paths(&paths);
         Ok(())
     }
     async fn resolve(
@@ -436,7 +463,7 @@ impl AttachmentBackend for AttachmentClaimService {
                 paths.push(self.0.directory.join(format!("{id}.{extension}")));
             }
         }
-        release_paths(&paths);
+        self.0.release_paths(&paths);
         Ok(())
     }
 }

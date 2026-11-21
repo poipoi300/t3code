@@ -5616,6 +5616,7 @@ dependencies = [
  "t3-persistence",
  "t3-process",
  "t3-shared",
+ "t3-workspace",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

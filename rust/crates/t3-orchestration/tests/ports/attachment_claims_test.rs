@@ -260,3 +260,27 @@ async fn dropped_claims_await_late_copy_and_sidecar_publication_before_rollback(
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn injected_copier_rollback_removes_the_question_snapshot() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let original = pending(root.path(), "sample.png", "image/png", b"image", None);
+    let (started, _events) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    release.notify_one();
+    let service = AttachmentClaimService::with_copy_file(
+        root.path().into(),
+        Arc::new(NoDocumentText),
+        Arc::new(GatedCopy { started, release }),
+    );
+    let batch = service
+        .claim_pending(ThreadId("a".into()), vec![original])
+        .await?;
+    let reference = service.attachment_reference(&batch.attachments[0]).await?;
+    assert_ne!(reference.path, batch.claimed_paths[0]);
+    assert_eq!(std::fs::read(&reference.path)?, b"image");
+    service.release_claimed_paths(batch.claimed_paths).await?;
+    assert!(!reference.path.exists());
+    service.shutdown().await;
+    Ok(())
+}

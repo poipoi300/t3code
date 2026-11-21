@@ -30,6 +30,7 @@ name = "runtime"
 required-features = ["acp-adapter"]
 
 [dependencies]
+t3-workspace = { path = "../t3-workspace" }
 t3-contracts = { path = "../t3-contracts" }
 t3-persistence = { path = "../t3-persistence" }
 # Pure helpers shared with the client: terminal fold, find text, search policy.
