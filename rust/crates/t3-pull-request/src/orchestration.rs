@@ -13,6 +13,39 @@ use t3_orchestration::{
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use t3_orchestration::ports::thread_project::thread_pull_request_service::{
+    LinkedThreadsChange, LinkedThreadsChangeDetector, ThreadPullRequestService,
+};
+
+/// One detector per composed thread pull-request service, including its activity watermark.
+pub fn linked_threads_detector() -> Arc<LinkedThreadsChangeDetector> {
+    let detector = std::sync::Mutex::new(crate::linked::LinkedThreadsDetector::default());
+    Arc::new(move |event| {
+        match detector
+            .lock()
+            .expect("linked thread detector")
+            .observe(event)
+        {
+            crate::linked::LinkedChange::Changed => LinkedThreadsChange::Changed,
+            crate::linked::LinkedChange::Reordered => LinkedThreadsChange::Reordered,
+            crate::linked::LinkedChange::None => LinkedThreadsChange::None,
+        }
+    })
+}
+
+/// The full thread port observes the same commits. Only install the fallback in its absence.
+pub fn start_standalone_follower(
+    composed: Option<&ThreadPullRequestService>,
+    tasks: &TaskTracker,
+    events: broadcast::Receiver<Arc<t3_contracts::application_event::ApplicationStoredEvent>>,
+    stop: CancellationToken,
+    notify: impl Fn() + Send + 'static,
+) {
+    if composed.is_none() {
+        tasks.spawn(crate::linked::follow_changes(events, stop, notify));
+    }
+}
+
 /// Checkout lookup must use the host's authoritative worktree/project and repository identity services.
 #[async_trait]
 pub trait CheckoutPullRequests: Send + Sync {

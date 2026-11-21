@@ -375,3 +375,79 @@ async fn a_slow_change_feed_does_not_block_feeds_for_other_pull_requests() {
     slow.await.expect("joined").expect("slow feed opened");
     backend.shutdown().await;
 }
+
+#[tokio::test]
+async fn composed_thread_service_is_the_only_linked_notification_producer() {
+    use t3_orchestration::{
+        api::EventCommitter,
+        ports::thread_project::thread_pull_request_service::*,
+        projections::{
+            store::ProjectionStore,
+            write::{ParsedPullRequestKey, PullRequestIdentityRegistry},
+        },
+        testing::*,
+    };
+    struct Identities;
+    impl PullRequestIdentityRegistry for Identities {
+        fn parse_change_request_url(&self, _: &str) -> Option<ParsedPullRequestKey> {
+            None
+        }
+        fn canonical_repository_key(&self, key: &str) -> String {
+            key.into()
+        }
+        fn contains_repository(&self, _: &str) -> bool {
+            false
+        }
+    }
+    let db = TestDatabase::memory().expect("db");
+    let commits = Arc::new(FakeEventCommitter::new(db.stores.clone()));
+    let (backend, service, ..) = backend();
+    let mut revisions = service.subscribe_linked_thread_refreshes();
+    let port = Arc::new(ThreadPullRequestService::new(ThreadPullRequestServices {
+        projections: Arc::new(ProjectionStore::new(db.stores)),
+        commands: Arc::new(FakeCommandDispatcher::default()),
+        committer: commits.clone(),
+        workspaces: Arc::new(FakeWorkspaceBackend::default()),
+        pull_requests: Arc::new(backend),
+        identities: Arc::new(Identities),
+        repository_selector: Arc::new(|_| None),
+        linked_threads_change: t3_pull_request::orchestration::linked_threads_detector(),
+        opportunistic_work: Arc::new(|| false),
+        ids: Arc::new(SequenceIds::new("test")),
+        clock: Arc::new(ManualClock::new(TEST_TIME)),
+    }));
+    port.start().await.expect("port");
+    let tasks = tokio_util::task::TaskTracker::new();
+    t3_pull_request::orchestration::start_standalone_follower(
+        Some(&port),
+        &tasks,
+        commits.subscribe_shared().expect("shared"),
+        Default::default(),
+        move || service.notify_linked_threads_changed(),
+    );
+    let raw = include_str!(
+        "../../../fixtures/samples/OrchestrationV2DomainEvent.thread.metadata-updated.jsonl"
+    )
+    .lines()
+    .next()
+    .expect("fixture");
+    let mut event: serde_json::Value = serde_json::from_str(raw).expect("event");
+    event["type"] = json!("thread.archived");
+    commits.publish(
+        t3_contracts::application_event::ApplicationStoredEvent::Orchestration(Box::new(
+            t3_contracts::orchestration_v2::OrchestrationV2StoredEvent {
+                event: serde_json::from_value(event).expect("archive"),
+                sequence: 1,
+                command_id: None,
+            },
+        )),
+    );
+    revisions.changed().await.expect("revision");
+    assert_eq!(
+        commits.shared_publication.receiver_count(),
+        0,
+        "fallback is also following commits"
+    );
+    assert_eq!(*revisions.borrow_and_update(), 1);
+    port.shutdown().await;
+}

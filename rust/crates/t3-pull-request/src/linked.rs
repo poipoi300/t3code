@@ -128,7 +128,7 @@ impl crate::PullRequestService {
 
 /// Changes to the rows of `pullRequests.linkedThreads` (linkedThreads.ts).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum LinkedChange {
+pub enum LinkedChange {
     Changed,
     Reordered,
     None,
@@ -145,7 +145,7 @@ struct LinkedView {
 }
 
 #[derive(Default)]
-struct LinkedThreadsDetector {
+pub struct LinkedThreadsDetector {
     // A known unlinked thread has a None view. An absent thread may have links from a prior process.
     views: HashMap<t3_contracts::base_schemas::ThreadId, Option<(LinkedView, i64)>>,
 }
@@ -169,7 +169,7 @@ impl LinkedThreadsDetector {
             Some(None) => LinkedChange::None,
         }
     }
-    fn observe(
+    pub fn observe(
         &mut self,
         event: &t3_contracts::orchestration_v2::OrchestrationV2DomainEvent,
     ) -> LinkedChange {
@@ -368,6 +368,54 @@ mod tests {
         event["threadId"] = json!(id);
         event["occurredAt"] = json!(format!("2026-01-01T00:00:{second:02}Z"));
         envelope(event)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lag_resets_known_unlinked_rows_and_deletion_forgets_the_thread() {
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let (publish, mut revisions) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(follow_changes(rx, Default::default(), move || {
+            publish.send(()).expect("subscriber")
+        }));
+        tx.send(created("old", false)).expect("receiver");
+        tx.send(created("barrier", true)).expect("receiver");
+        revisions.recv().await.expect("initial barrier");
+        // On this current-thread runtime the follower cannot consume any part of this burst.
+        for _ in 0..3 {
+            tx.send(activity("old", 1)).expect("receiver");
+        }
+        drop(tx);
+        worker.await.expect("follower");
+        assert_eq!(
+            std::iter::from_fn(|| revisions.try_recv().ok()).count(),
+            2,
+            "lag invalidation and the now-unknown thread's activity"
+        );
+
+        let mut detector = LinkedThreadsDetector::default();
+        let event = created("deleted", true);
+        let ApplicationStoredEvent::Orchestration(row) = event.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            detector.observe(&row.event),
+            LinkedChange::Changed
+        ));
+        let mut deleted = serde_json::to_value(&row.event).expect("event");
+        deleted["type"] = json!("thread.deleted");
+        deleted["payload"]["deletedAt"] = json!("2026-01-01T00:00:10Z");
+        assert!(matches!(
+            detector.observe(&serde_json::from_value(deleted).expect("deletion")),
+            LinkedChange::Changed
+        ));
+        let event = activity("deleted", 2);
+        let ApplicationStoredEvent::Orchestration(row) = event.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            detector.observe(&row.event),
+            LinkedChange::Reordered
+        ));
     }
 
     #[tokio::test(start_paused = true)]
