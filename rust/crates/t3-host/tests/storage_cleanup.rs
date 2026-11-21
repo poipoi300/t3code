@@ -88,8 +88,12 @@ impl CleanupHost for Host {
         }
         Ok(self.lease.clone().lock_owned().await)
     }
-    async fn branch_pull_request(&self, cwd: &Path, _: &str) -> Result<Option<MergedPullRequest>> {
-        *self.pr_path.lock().await = Some(cwd.into());
+    async fn branch_pull_request(
+        &self,
+        git: &t3_git::Git,
+        _: &str,
+    ) -> Result<Option<MergedPullRequest>> {
+        *self.pr_path.lock().await = Some(git.cwd().into());
         self.pr_lookups.fetch_add(1, Ordering::SeqCst);
         Ok(self.pull_request.lock().await.clone())
     }
@@ -506,6 +510,218 @@ async fn linked_repository(
         Arc::new(Time(AtomicI64::new(NOW))),
     );
     (repo, path, h, service)
+}
+
+#[tokio::test]
+async fn cleanup_refuses_a_checkout_with_local_filter_commands_before_status() {
+    let home = tempfile::tempdir().unwrap();
+    let (root, path, _, service) = linked_repository(home.path()).await;
+    // An inert value, inspected as configuration only. No file uses the filter.
+    git(
+        &root,
+        &["config", "filter.fixture.clean", "fixture-placeholder"],
+    )
+    .await;
+    assert!(
+        service
+            .run_now()
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry
+                .reason
+                .to_ascii_lowercase()
+                .contains("repository or branch changed"))
+            && path.join(".git").is_file(),
+        "accepted repository-local filter commands"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_keeps_staged_gitlinks_without_descending_into_submodules() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, path, _, service) = linked_repository(home.path()).await;
+    let oid = git_text(&path, &["rev-parse", "HEAD"]).await;
+    git(
+        &path,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},nested", oid.trim()),
+        ],
+    )
+    .await;
+    let report = service.run_now().await.unwrap();
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.reason.to_lowercase().contains("uncommitted changes")),
+        "{report:?}"
+    );
+    assert!(path.join(".git").exists());
+}
+
+#[tokio::test]
+async fn cleanup_refuses_an_unregistered_admin_directory_or_a_mismatched_backlink() {
+    let home = tempfile::tempdir().unwrap();
+    let (root, path, _, service) = linked_repository(home.path()).await;
+    let marker = path.join(".git");
+    let original = std::fs::read_to_string(&marker).unwrap();
+    let admin = std::path::PathBuf::from(original.trim().strip_prefix("gitdir: ").unwrap());
+    let dummy = home.path().join("unregistered-admin");
+    std::fs::create_dir(&dummy).unwrap();
+    std::fs::write(&marker, format!("gitdir: {}\n", dummy.display())).unwrap();
+    assert!(
+        service
+            .run_now()
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry
+                .reason
+                .to_ascii_lowercase()
+                .contains("repository or branch changed"))
+            && path.join(".git").is_file(),
+        "accepted an unregistered Git directory"
+    );
+    std::fs::write(&marker, original).unwrap();
+    std::fs::write(admin.join("gitdir"), root.join(".git").to_str().unwrap()).unwrap();
+    assert!(
+        service
+            .run_now()
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry
+                .reason
+                .to_ascii_lowercase()
+                .contains("repository or branch changed"))
+            && path.join(".git").is_file(),
+        "accepted a backlink to a different checkout"
+    );
+}
+
+#[cfg(unix)]
+fn fsmonitor_probe(dir: &Path) -> (std::path::PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let marker = dir.join("fsmonitor-ran");
+    let script = dir.join("fsmonitor.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nprintf 'x'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (marker, script.to_string_lossy().into_owned())
+}
+
+/// An agent can rewrite its checkout's `.git` pointer. The fake directory names the victim
+/// folder as its work tree, holds a branch with an empty tree and runs a command as fsmonitor.
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_with_a_fake_gitdir_deletes_nothing_outside_and_runs_no_fsmonitor() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, path, _, service) = linked_repository(home.path()).await;
+    let victim = home.path().join("victim");
+    std::fs::create_dir_all(victim.join("nested/.git")).unwrap();
+    std::fs::write(victim.join("precious"), "keep").unwrap();
+    std::fs::write(victim.join("nested/file"), "keep").unwrap();
+    let evil = home.path().join("evil.git");
+    git(
+        home.path(),
+        &["init", "-q", "--bare", evil.to_str().unwrap()],
+    )
+    .await;
+    let (marker, script) = fsmonitor_probe(home.path());
+    for (key, value) in [
+        ("core.bare", "false"),
+        ("core.worktree", victim.to_str().unwrap()),
+        ("core.fsmonitor", script.as_str()),
+    ] {
+        git(&evil, &["config", key, value]).await;
+    }
+    let tree = {
+        let out = tokio::process::Command::new("git")
+            .args(["-C", evil.to_str().unwrap(), "mktree"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let commit = git_text(
+        &evil,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit-tree",
+            &tree,
+            "-m",
+            "empty",
+        ],
+    )
+    .await;
+    git(&evil, &["update-ref", "refs/heads/feature", commit.trim()]).await;
+    git(&evil, &["symbolic-ref", "HEAD", "refs/heads/feature"]).await;
+    std::fs::write(path.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
+    let report = service.run_now().await.unwrap();
+    assert!(
+        victim.join("precious").exists() && victim.join("nested/file").exists(),
+        "a fake Git directory made cleanup delete an outside folder: {report:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "cleanup ran the fake directory's fsmonitor"
+    );
+    assert!(path.join(".git").is_file(), "{report:?}");
+    assert!(
+        report.entries.iter().any(|e| e
+            .reason
+            .to_ascii_lowercase()
+            .contains("repository or branch changed")),
+        "{report:?}"
+    );
+}
+
+/// Even a correctly registered checkout must not run its configured fsmonitor command.
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_never_runs_a_registered_checkouts_fsmonitor_command() {
+    let home = tempfile::tempdir().unwrap();
+    let (root, _, _, service) = linked_repository(home.path()).await;
+    let (marker, script) = fsmonitor_probe(home.path());
+    git(&root, &["config", "core.fsmonitor", &script]).await;
+    git(&root, &["config", "core.untrackedCache", "true"]).await;
+    let _ = service.run_now().await.unwrap();
+    assert!(!marker.exists(), "cleanup ran core.fsmonitor");
+}
+
+/// Removing one checkout must not prune the project's other worktree registrations.
+#[tokio::test]
+async fn removing_a_checkout_never_prunes_other_worktree_registrations() {
+    let home = tempfile::tempdir().unwrap();
+    let (root, path, _, service) = linked_repository(home.path()).await;
+    let stale = home.path().join("worktrees/repo/stale");
+    git(
+        &root,
+        &["worktree", "add", "-b", "stale", stale.to_str().unwrap()],
+    )
+    .await;
+    std::fs::remove_dir_all(&stale).unwrap();
+    let report = service.run_now().await.unwrap();
+    assert!(!path.exists(), "{report:?}");
+    let listed = git_text(&root, &["worktree", "list", "--porcelain"]).await;
+    assert!(
+        listed.contains(stale.to_str().unwrap()),
+        "cleanup pruned another registration: {listed}"
+    );
 }
 
 #[tokio::test]
@@ -1313,7 +1529,7 @@ async fn an_unresponsive_safety_port_refuses_instead_of_hanging_the_sweep() {
         }
         async fn branch_pull_request(
             &self,
-            _: &Path,
+            _: &t3_git::Git,
             _: &str,
         ) -> Result<Option<MergedPullRequest>> {
             unreachable!()

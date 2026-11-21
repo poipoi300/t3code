@@ -67,13 +67,41 @@ pub trait CleanupHost: Send + Sync {
     async fn acquire_removal_permit(&self, path: &Path) -> Result<Box<dyn Send + Sync>> {
         Ok(Box::new(self.acquire_workspace_lease(path).await?))
     }
+    async fn acquire_candidate_permit(
+        &self,
+        path: &Path,
+        _owners: &[&CleanupThread],
+    ) -> Result<Box<dyn Send + Sync>> {
+        self.acquire_removal_permit(path).await
+    }
+    async fn recorded_binding(
+        &self,
+        _path: &Path,
+    ) -> Result<Option<Option<t3_git::RepositoryBinding>>> {
+        Ok(None)
+    }
     async fn branch_pull_request(
         &self,
-        project: &Path,
+        checkout: &t3_git::Git,
         branch: &str,
     ) -> Result<Option<MergedPullRequest>>;
     async fn invalidate_git_status(&self, project: &Path);
 }
+async fn cleanup_repository(
+    host: &dyn CleanupHost,
+    path: &Path,
+    source: Option<&t3_git::RepositoryBinding>,
+) -> Result<t3_git::Git> {
+    let saved = match host.recorded_binding(path).await? {
+        Some(None) => return Err(Error::Refused("repository or branch changed")),
+        value => value.flatten(),
+    };
+    t3_git::Git::new(path)
+        .cleanup_checkout(source, saved.as_ref())
+        .await
+        .map_err(|_| Error::Refused("repository or branch changed"))
+}
+
 pub struct StorageCleanup {
     state_dir: PathBuf,
     host: Arc<dyn CleanupHost>,
@@ -809,7 +837,24 @@ impl StorageCleanup {
         validate_cleanup_worktree(path, &snapshot.managed_roots)?;
         protect(snapshot, path, Some(project))?;
         protect(snapshot, Path::new(&requested.0), Some(project))?;
-        let git = t3_git::Git::new(path);
+        let permit = if dry_run {
+            None
+        } else {
+            Some(
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    self.host.acquire_candidate_permit(path, group),
+                )
+                .await
+                .map_err(|_| Error::Refused("workspace is busy"))??,
+            )
+        };
+        let project_git = cleanup_repository(self.host.as_ref(), project, None).await?;
+        let source = project_git
+            .recorded_repository()
+            .flatten()
+            .ok_or(Error::Refused("repository or branch changed"))?;
+        let git = cleanup_repository(self.host.as_ref(), path, Some(source)).await?;
         let head = read_git(&git, &["rev-parse", "HEAD"]).await?;
         check_branch(&git, &branch.0).await?;
         local_changes(&git, rules).await?;
@@ -824,7 +869,6 @@ impl StorageCleanup {
             )
         };
         if !eligible {
-            let project_git = t3_git::Git::new(project);
             let remotes = read_git(&project_git, &["remote"]).await?;
             let names: Vec<_> = remotes.lines().collect();
             if dry_run && !names.is_empty() {
@@ -903,7 +947,7 @@ impl StorageCleanup {
                 };
             }
             if !eligible && !names.is_empty() && rules.worktree_on_merge {
-                let pr = self.host.branch_pull_request(path, &branch.0).await?;
+                let pr = self.host.branch_pull_request(&git, &branch.0).await?;
                 let default_branch = default.splitn(4, '/').nth(3).unwrap_or(&default);
                 eligible = pull_request_merged(
                     pr.as_ref(),
@@ -922,25 +966,15 @@ impl StorageCleanup {
                 "worktree is not merged or has commits beyond the default branch",
             ));
         }
-        let allowed = if path.join(".gitmodules").exists() {
-            read_git(
-                &git,
-                &[
-                    "submodule",
-                    "foreach",
-                    "--recursive",
-                    "--quiet",
-                    "printf \"%s\\0\" \"$toplevel/$sm_path\"",
-                ],
-            )
-            .await?
-            .split('\0')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .collect()
-        } else {
-            Vec::new()
-        };
+        let modules = cleanup_modules(&git).await?;
+        for module in &modules.populated {
+            local_changes(module, rules).await?;
+        }
+        let allowed = modules
+            .populated
+            .iter()
+            .map(|g| g.cwd().to_owned())
+            .collect::<Vec<_>>();
         let measured_path = path.to_owned();
         let bytes = tokio::time::timeout(
             Duration::from_secs(30),
@@ -954,12 +988,7 @@ impl StorageCleanup {
         if dry_run {
             return Ok((format!("Would remove: {reason}"), Some(bytes)));
         }
-        let _lease = tokio::time::timeout(
-            Duration::from_secs(30),
-            self.host.acquire_removal_permit(path),
-        )
-        .await
-        .map_err(|_| Error::Refused("workspace is busy"))??;
+
         let latest = self.snapshot().await?;
         validate_cleanup_worktree(Path::new(&requested.0), &latest.managed_roots)?;
         validate_cleanup_worktree(path, &latest.managed_roots)?;
@@ -1009,15 +1038,20 @@ impl StorageCleanup {
                 return Err(Error::Refused("cleanup settings changed since check"));
             }
             if rules.worktree_keep_when == WorktreeKeepWhen::TrackedChanges {
-                read_git(&git, &["clean", "-ffdx"]).await?;
+                read_git(&git, &CLEAN_ARGS).await?;
             }
             if force {
                 local_changes(&git, rules).await?;
             }
-            t3_git::Git::new(project)
-                .remove_worktree(path, force)
-                .await
-                .map_err(|_| Error::Service)?;
+            // Revalidate both pinned handles. Remove exactly this registration.
+            check_branch(&git, &branch.0).await?;
+            let mut args = vec!["worktree", "remove"];
+            if force {
+                args.push("--force");
+            }
+            args.extend(["--", path.to_str().ok_or(Error::Invalid)?]);
+            read_git(&project_git, &args).await?;
+            drop(permit);
             self.host.invalidate_git_status(project).await;
         }
         Ok((
@@ -1104,9 +1138,9 @@ impl StorageCleanup {
         if dry_run {
             return Ok((format!("Would remove: {reason}"), Some(bytes)));
         }
-        let _lease = tokio::time::timeout(
+        let lease = tokio::time::timeout(
             Duration::from_secs(30),
-            self.host.acquire_removal_permit(path),
+            self.host.acquire_candidate_permit(path, group),
         )
         .await
         .map_err(|_| Error::Refused("workspace is busy"))??;
@@ -1144,10 +1178,13 @@ impl StorageCleanup {
             return Err(Error::Refused("thread deletion is still pending"));
         }
         let removal_path = path.to_owned();
-        tokio::task::spawn_blocking(move || fs::remove_dir_all(removal_path))
-            .await
-            .map_err(|_| Error::Service)?
-            .map_err(|_| Error::Io)?;
+        tokio::task::spawn_blocking(move || {
+            let _lease = lease;
+            fs::remove_dir_all(removal_path)
+        })
+        .await
+        .map_err(|_| Error::Service)?
+        .map_err(|_| Error::Io)?;
         Ok((reason, Some(bytes)))
     }
     async fn report_orphans(
@@ -1232,8 +1269,9 @@ impl StorageCleanup {
                         if registered.is_none() {
                             let mut paths = Vec::new();
                             for project in all_projects() {
-                                if let Ok(worktrees) =
-                                    t3_git::Git::new(project).list_worktrees().await
+                                if let Ok(root) =
+                                    cleanup_repository(self.host.as_ref(), project, None).await
+                                    && let Ok(worktrees) = root.list_worktrees().await
                                 {
                                     paths.extend(worktrees.into_iter().map(|w| w.path));
                                 }
@@ -1446,6 +1484,17 @@ fn owner<'a>(group: &[&'a CleanupThread]) -> Option<&'a CleanupThread> {
     }
     Some(group[top])
 }
+/// Removal commands walk and delete a whole checkout, as in the TypeScript implementation.
+fn git_timeout(args: &[&str]) -> Duration {
+    Duration::from_secs(
+        if args.starts_with(&["clean"]) || args.starts_with(&["worktree", "remove"]) {
+            300
+        } else {
+            30
+        },
+    )
+}
+const CLEAN_ARGS: [&str; 3] = ["clean", "-q", "-ffdx"];
 async fn execute_git(
     git: &t3_git::Git,
     args: &[&str],
@@ -1455,7 +1504,7 @@ async fn execute_git(
         allow_nonzero,
         max_output_bytes: 1024 * 1024,
         output_mode: t3_git::OutputMode::Error,
-        timeout: Some(Duration::from_secs(30)),
+        timeout: Some(git_timeout(args)),
         ..Default::default()
     };
     options.env.insert("LC_ALL".into(), Some("C".into()));
@@ -1550,7 +1599,6 @@ async fn hidden_tracked_changes(git: &t3_git::Git, sparse: bool) -> Result<()> {
         std::mem::take(&mut scan.flagged)
     };
     let mut files = Vec::new();
-    let mut link_files = Vec::new();
     for (mode, expected, name) in entries {
         if name.starts_with('"') || name.contains('\u{fffd}') {
             return Err(Error::Refused("hidden tracked file could not be inspected"));
@@ -1574,7 +1622,7 @@ async fn hidden_tracked_changes(git: &t3_git::Git, sparse: bool) -> Result<()> {
             let target = fs::read_link(git.cwd().join(&name)).map_err(|_| Error::Io)?;
             let output = git
                 .execute(
-                    &["hash-object", "--stdin"],
+                    &["hash-object", "--no-filters", "--stdin"],
                     t3_git::ExecuteOptions {
                         stdin: Some(target.to_string_lossy().as_bytes().to_vec()),
                         max_output_bytes: 1024 * 1024,
@@ -1590,24 +1638,14 @@ async fn hidden_tracked_changes(git: &t3_git::Git, sparse: bool) -> Result<()> {
                 ));
             }
         } else if metadata.is_file() {
-            if mode == "120000" {
-                link_files.push((expected, name));
-            } else {
-                files.push((expected, name));
-            }
+            files.push((expected, name));
         } else {
             return Err(Error::Refused("hidden tracked file changed type"));
         }
     }
-    for (entries, no_filters) in [(files, false), (link_files, true)] {
-        if entries.is_empty() {
-            continue;
-        }
-        let args = if no_filters {
-            vec!["hash-object", "--no-filters", "--stdin-paths"]
-        } else {
-            vec!["hash-object", "--stdin-paths"]
-        };
+    let entries = files;
+    if !entries.is_empty() {
+        let args = ["hash-object", "--no-filters", "--stdin-paths"];
         let stdin = entries
             .iter()
             .map(|(_, name)| format!("{name}\n"))
@@ -1640,6 +1678,26 @@ async fn hidden_tracked_changes(git: &t3_git::Git, sparse: bool) -> Result<()> {
     Ok(())
 }
 async fn local_changes(git: &t3_git::Git, rules: &WorktreeCleanupRules) -> Result<()> {
+    // Parent status skips recursion. Check the complete index, including staged gitlinks.
+    let staged = execute_git(
+        git,
+        &[
+            "diff-index",
+            "--cached",
+            "--quiet",
+            "--no-ext-diff",
+            "--ignore-submodules=none",
+            "HEAD",
+            "--",
+        ],
+        true,
+    )
+    .await?;
+    match staged.code {
+        Some(0) => {}
+        Some(1) => return Err(Error::Refused("has uncommitted changes")),
+        _ => return Err(Error::Service),
+    }
     let untracked = if rules.worktree_keep_when == WorktreeKeepWhen::TrackedChanges {
         "--untracked-files=no"
     } else {
@@ -1651,7 +1709,7 @@ async fn local_changes(git: &t3_git::Git, rules: &WorktreeCleanupRules) -> Resul
             "status",
             "--porcelain=v1",
             "-z",
-            "--ignore-submodules=none",
+            "--ignore-submodules=all",
             untracked,
         ],
     )
@@ -1692,6 +1750,57 @@ async fn local_changes(git: &t3_git::Git, rules: &WorktreeCleanupRules) -> Resul
     }
     Ok(())
 }
+struct CleanupModules {
+    populated: Vec<t3_git::Git>,
+    empty: Vec<PathBuf>,
+}
+
+async fn cleanup_modules(root: &t3_git::Git) -> Result<CleanupModules> {
+    let mut modules = CleanupModules {
+        populated: Vec::new(),
+        empty: Vec::new(),
+    };
+    let mut pending = vec![root.clone()];
+    while let Some(parent) = pending.pop() {
+        let index = read_git(&parent, &["ls-files", "--stage", "-z"]).await?;
+        for record in index.split('\0').filter(|r| r.starts_with("160000 ")) {
+            if modules.populated.len() + modules.empty.len() >= 10_000 {
+                return Err(Error::Refused("submodule inspection exceeded the limit"));
+            }
+            let (header, name) = record.split_once('\t').ok_or(Error::Invalid)?;
+            if name.is_empty()
+                || name.contains('\u{fffd}')
+                || !Path::new(name)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(Error::Refused("submodule path is invalid"));
+            }
+            let target = parent.cwd().join(name);
+            if !target.try_exists().map_err(|_| Error::Io)? {
+                continue;
+            }
+            if dunce::canonicalize(&target).map_err(|_| Error::Io)? != dunce::simplified(&target) {
+                return Err(Error::Refused("submodule checkout changed"));
+            }
+            if !target.join(".git").try_exists().map_err(|_| Error::Io)? {
+                modules.empty.push(target);
+                continue;
+            }
+            let module = parent
+                .cleanup_submodule(Some(&target), None)
+                .await
+                .map_err(|_| Error::Refused("submodule registration changed"))?;
+            let expected = header.split(' ').nth(1).ok_or(Error::Invalid)?;
+            if read_git(&module, &["rev-parse", "HEAD"]).await?.trim() != expected {
+                return Err(Error::Refused("has uncommitted changes"));
+            }
+            pending.push(module.clone());
+            modules.populated.push(module);
+        }
+    }
+    Ok(modules)
+}
 async fn submodule_removal(
     git: &t3_git::Git,
     rules: &WorktreeCleanupRules,
@@ -1699,42 +1808,17 @@ async fn submodule_removal(
 ) -> Result<bool> {
     let modules = admin.join("modules");
     let stored = modules.try_exists().map_err(|_| Error::Io)?;
-    if !stored && !git.cwd().join(".gitmodules").exists() {
-        return Ok(false);
-    }
-    let populated = read_git(
-        git,
-        &[
-            "submodule",
-            "foreach",
-            "--recursive",
-            "--quiet",
-            "printf \"%s\\0\" \"$toplevel/$sm_path\"",
-        ],
-    )
-    .await?;
-    let paths: Vec<_> = populated
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect();
+    let checkouts = cleanup_modules(git).await?;
     let mut pending = vec![modules];
-    for path in &paths {
-        pending.push(PathBuf::from(
-            read_git(
-                &t3_git::Git::new(path),
-                &["rev-parse", "--absolute-git-dir"],
-            )
-            .await?
-            .trim(),
-        ));
-    }
     let mut visited = BTreeSet::new();
     while let Some(directory) = pending.pop() {
         if !directory.exists() {
             continue;
         }
         let canonical = dunce::canonicalize(&directory).map_err(|_| Error::Io)?;
+        if canonical != dunce::simplified(&directory) {
+            return Err(Error::Refused("submodule store changed"));
+        }
         if !visited.insert(canonical) {
             continue;
         }
@@ -1747,13 +1831,13 @@ async fn submodule_removal(
             ));
         }
         if directory.join("HEAD").exists() {
+            let store = git
+                .cleanup_submodule(None, Some(&directory))
+                .await
+                .map_err(|_| Error::Refused("submodule repository could not be inspected"))?;
             let unpushed = read_git(
-                git,
+                &store,
                 &[
-                    "--git-dir",
-                    directory.to_str().ok_or(Error::Invalid)?,
-                    "--work-tree",
-                    git.cwd().to_str().ok_or(Error::Invalid)?,
                     "rev-list",
                     "--max-count=1",
                     "HEAD",
@@ -1776,30 +1860,12 @@ async fn submodule_removal(
             }
         }
     }
-    for path in &paths {
-        local_changes(&t3_git::Git::new(path), rules).await?;
+    for module in &checkouts.populated {
+        local_changes(module, rules).await?;
     }
-    let force = stored || !paths.is_empty();
+    let force = stored || !checkouts.populated.is_empty();
     if force && rules.worktree_keep_when != WorktreeKeepWhen::TrackedChanges {
-        let root = dunce::canonicalize(git.cwd()).map_err(|_| Error::Io)?;
-        let mut unchecked = Vec::new();
-        for repository in std::iter::once(&root).chain(paths.iter()) {
-            let index = read_git(
-                &t3_git::Git::new(repository),
-                &["ls-files", "--stage", "-z"],
-            )
-            .await?;
-            for record in index.split('\0').filter(|r| r.starts_with("160000 ")) {
-                let name = record.split_once('\t').ok_or(Error::Invalid)?.1;
-                let target = repository.join(name);
-                if !target.starts_with(&root) {
-                    return Err(Error::Refused("submodules could not be inspected"));
-                }
-                if !paths.contains(&target) && target.exists() {
-                    unchecked.push(target);
-                }
-            }
-        }
+        let mut unchecked = checkouts.empty;
         let mut inspected = unchecked.len();
         while let Some(target) = unchecked.pop() {
             if inspected > 10_000 {
@@ -1945,4 +2011,23 @@ fn shared_pnpm_virtual_store(root: &Path) -> Option<PathBuf> {
         .dir_metadata()
         .ok()?;
     (store.dev() == virtual_info.dev()).then_some(virtual_store)
+}
+
+#[cfg(test)]
+mod git_command_tests {
+    use super::*;
+
+    #[test]
+    fn removal_commands_get_the_long_timeout_and_clean_is_quiet() {
+        assert_eq!(git_timeout(&CLEAN_ARGS), Duration::from_secs(300));
+        assert_eq!(
+            git_timeout(&["worktree", "remove", "--", "x"]),
+            Duration::from_secs(300)
+        );
+        assert_eq!(git_timeout(&["status"]), Duration::from_secs(30));
+        assert!(
+            CLEAN_ARGS.contains(&"-q"),
+            "clean output fills the 1 MiB cap"
+        );
+    }
 }
