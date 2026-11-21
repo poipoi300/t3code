@@ -633,7 +633,14 @@ pub fn thread_find_bar(find: ThreadFind) -> impl IntoElement {
                         when: nsh_core::keymap::When::Always,
                         ..Default::default()
                     };
-                    on_key_with("shift+enter", options, move |_| find.step(-1));
+                    on_key_with(
+                        "shift+enter",
+                        KeyOptions {
+                            repeat: true,
+                            ..options
+                        },
+                        move |_| find.step(-1),
+                    );
                     on_key_with("escape", options, move |_| find.close());
                 }
             });

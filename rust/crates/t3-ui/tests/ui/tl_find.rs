@@ -140,3 +140,31 @@ fn an_empty_result_disables_navigation_and_reopening_clears_the_old_query() {
     app.press("id:open-find").expect("reopen");
     assert!(!app.screen().shows("0/0"));
 }
+
+#[test]
+fn held_shift_enter_repeats_in_the_focused_find_field() {
+    use nsh_core::{MountItem, keymap::Keystroke, platform::Os};
+    use std::sync::{Arc, Mutex};
+
+    let mut app = start(DESKTOP);
+    let keymap = Arc::new(Mutex::new(None));
+    let observed = keymap.clone();
+    app.observe(move |_, batch| {
+        for item in &batch.items {
+            if let MountItem::Keymap(map) = item {
+                *observed.lock().expect("keymap") = Some(map.clone());
+            }
+        }
+    });
+    app.press("id:open-find").expect("open");
+    app.type_text("id:thread-find-input", "needle")
+        .expect("query");
+    let stroke = Keystroke::parse("Shift+Enter", Os::Linux).expect("keystroke");
+    let map = keymap.lock().expect("keymap");
+    let map = map.as_ref().expect("mounted key bindings");
+    assert!(map.find(stroke, true, false).fired().is_some());
+    assert!(
+        map.find(stroke, true, true).fired().is_some(),
+        "holding Shift+Enter should step again"
+    );
+}
