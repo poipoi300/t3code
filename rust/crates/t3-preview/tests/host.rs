@@ -52,6 +52,38 @@ async fn startup_resolves_from_package_anchor_and_checks_api_without_launching_b
     std::fs::create_dir_all(&module).unwrap();
     std::fs::write(module.join("package.json"), r#"{"main":"index.cjs"}"#).unwrap();
     std::fs::write(module.join("index.cjs"),"const forbidden=()=>{throw Error('MUST NOT LAUNCH')};exports.chromium={launch:forbidden,launchPersistentContext:forbidden,connectOverCDP:forbidden};").unwrap();
+    let blocked = inputs(root.path());
+    std::fs::create_dir_all(&blocked.state_dir).unwrap();
+    let obstruction = blocked.state_dir.join("server-browser");
+    std::fs::write(&obstruction, "preserve").unwrap();
+    let fallback = t3_preview::host::PreviewServices::start(blocked, false)
+        .await
+        .unwrap();
+    assert!(
+        fallback
+            .preview
+            .manager()
+            .list(serde_json::from_value(serde_json::json!({"threadId":"thread"})).unwrap())
+            .await
+            .sessions
+            .is_empty()
+    );
+    let error = fallback
+        .preview
+        .driver()
+        .call(
+            t3_preview::driver::BrowserCommand::ViewerAck {
+                key: t3_preview::driver::TabKey::new("missing", "tab"),
+                viewer_id: "none".into(),
+                frame_id: 0,
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.tag(), "PreviewAutomationExecutionError");
+    fallback.preview.shutdown().await.unwrap();
+    std::fs::remove_file(obstruction).unwrap();
     let host = PreviewHost::new(inputs(root.path())).await.unwrap();
     assert!(host.runtime.playwright_module.ends_with("index.cjs"));
     assert!(host.runtime.node.is_absolute());

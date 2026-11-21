@@ -253,10 +253,16 @@ async fn local_images_are_inlined_once_per_reference_and_urls_are_untouched() {
     let root = tempfile::tempdir().unwrap();
     let png = root.path().join("shot.png");
     let svg = root.path().join("logo.svg");
+    // A CSS URL containing whitespace must be quoted. Keep the bare form when it is valid.
+    let quote = if svg.to_string_lossy().contains(char::is_whitespace) {
+        "'"
+    } else {
+        ""
+    };
     std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
     std::fs::write(&svg, b"<svg/>").unwrap();
     let source = format!(
-        "<html><head><title>Images</title></head><img src=\"{}\"><style>main{{background:url({})}}</style><script>const image='{}';</script><img src='https://example.com/a.png'><img src='./b.png'>",
+        "<html><head><title>Images</title></head><img src=\"{}\"><style>main{{background:url({quote}{}{quote})}}</style><script>const image='{}';</script><img src='https://example.com/a.png'><img src='./b.png'>",
         png.display(),
         svg.display(),
         png.display()
@@ -268,7 +274,9 @@ async fn local_images_are_inlined_once_per_reference_and_urls_are_untouched() {
             .count(),
         2
     );
-    assert!(prepared.contains("url(data:image/svg+xml;base64,PHN2Zy8+)"));
+    assert!(prepared.contains(&format!(
+        "url({quote}data:image/svg+xml;base64,PHN2Zy8+{quote})"
+    )));
     assert!(!prepared.contains(&root.path().to_string_lossy().to_string()));
     assert!(prepared.contains("https://example.com/a.png"));
     assert!(prepared.contains("./b.png"));

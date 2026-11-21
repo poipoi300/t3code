@@ -143,11 +143,12 @@ impl PreviewHost {
     pub async fn new_with_discovery(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
         input.validate_paths()?;
         let runtime = input.runtime.clone().validate().await?;
+        let driver = PreviewServices::managed_driver(&input, &runtime).await?;
         let PreviewServices {
             preview,
             html,
             discovery,
-        } = PreviewServices::build(input, Some(&runtime), discovery_enabled).await?;
+        } = PreviewServices::build(input, Some(driver), discovery_enabled).await?;
         Ok(Self {
             runtime,
             preview,
@@ -166,51 +167,62 @@ pub struct PreviewServices {
 impl PreviewServices {
     pub async fn start(input: HostInputs, discovery_enabled: bool) -> Result<Self> {
         input.validate_paths()?;
-        let runtime = input.runtime.clone().validate().await;
-        if let Err(error) = &runtime {
+        let worker = async {
+            let runtime = input.runtime.clone().validate().await?;
+            Self::managed_driver(&input, &runtime).await
+        }
+        .await;
+        if let Err(error) = &worker {
             tracing::info!(%error, "Server browser worker unavailable");
         }
-        Self::build(input, runtime.as_ref().ok(), discovery_enabled).await
+        Self::build(input, worker.ok(), discovery_enabled).await
+    }
+
+    async fn managed_driver(
+        input: &HostInputs,
+        runtime: &ValidatedRuntime,
+    ) -> Result<Arc<dyn BrowserDriver>> {
+        let profiles = input.state_dir.join("server-browser/profiles");
+        let downloads = input.state_dir.join("server-browser/downloads");
+        for directory in [&profiles, &downloads, &input.attachments_dir] {
+            tokio::fs::create_dir_all(directory)
+                .await
+                .map_err(|error| {
+                    configuration(format!(
+                        "Cannot prepare preview directory {}: {error}",
+                        directory.display()
+                    ))
+                })?;
+        }
+        let installer = PreviewBrowser::new(input.base_dir.clone())?;
+        let options = PlaywrightOptions {
+            node: runtime.node.clone(),
+            cwd: input.state_dir.clone(),
+            executable: PathBuf::new(),
+            profiles_dir: profiles,
+            downloads_dir: downloads,
+            attachments_dir: input.attachments_dir.clone(),
+            playwright_module: Some(runtime.playwright_module.clone()),
+            sandbox: input.sandbox,
+        };
+        Ok(Arc::new(
+            ManagedBrowserDriver::new(installer, options)
+                .with_node_environment(runtime.environment.clone()),
+        ))
     }
 
     async fn build(
         input: HostInputs,
-        runtime: Option<&ValidatedRuntime>,
+        worker: Option<Arc<dyn BrowserDriver>>,
         discovery_enabled: bool,
     ) -> Result<Self> {
-        let profiles = input.state_dir.join("server-browser/profiles");
-        let downloads = input.state_dir.join("server-browser/downloads");
-        let driver: Arc<dyn BrowserDriver> = if let Some(runtime) = runtime {
-            for directory in [&profiles, &downloads, &input.attachments_dir] {
-                tokio::fs::create_dir_all(directory)
-                    .await
-                    .map_err(|error| {
-                        configuration(format!(
-                            "Cannot prepare preview directory {}: {error}",
-                            directory.display()
-                        ))
-                    })?;
-            }
-            let installer = PreviewBrowser::new(input.base_dir)?;
-            let options = PlaywrightOptions {
-                node: runtime.node.clone(),
-                cwd: input.state_dir.clone(),
-                executable: PathBuf::new(),
-                profiles_dir: profiles,
-                downloads_dir: downloads,
-                attachments_dir: input.attachments_dir.clone(),
-                playwright_module: Some(runtime.playwright_module.clone()),
-                sandbox: input.sandbox,
-            };
-            Arc::new(
-                ManagedBrowserDriver::new(installer, options)
-                    .with_node_environment(runtime.environment.clone()),
-            )
-        } else {
-            Arc::new(UnavailableBrowserDriver { profiles })
-        };
+        let driver = worker.clone().unwrap_or_else(|| {
+            Arc::new(UnavailableBrowserDriver {
+                profiles: input.state_dir.join("server-browser/profiles"),
+            })
+        });
         let preview = PreviewService::new(
-            driver.clone(),
+            driver,
             PreviewOptions {
                 state_dir: input.state_dir.clone(),
                 desktop: input.desktop,
@@ -224,7 +236,7 @@ impl PreviewServices {
                 secrets_dir: input.secrets_dir,
                 recovery: input.recovery,
             },
-            runtime.map(|_| driver),
+            worker,
         );
         Ok(Self {
             preview,
