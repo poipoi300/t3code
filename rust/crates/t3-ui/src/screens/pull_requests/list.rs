@@ -15,7 +15,7 @@ use t3_client::{
 use t3_contracts::pull_request::*;
 
 use crate::{
-    i18n::t,
+    i18n::{t, tr},
     runtime::{rt, tasks::watch},
     state::{
         clock,
@@ -368,7 +368,7 @@ pub fn screen() -> AnyElement {
             });
         }
     });
-    let input = computed(move || filters.search.with(|s| s.input(s.value("q"))));
+    let requested = computed(move || filters.search.with(|s| s.input(s.value("q"))));
     let named_environment =
         computed(move || filters.search.with(|s| s.value("environmentId").to_owned()));
     let catalog = computed(move || {
@@ -383,7 +383,6 @@ pub fn screen() -> AnyElement {
                 Some((
                     entry.id,
                     state.session,
-                    entry.state.phase,
                     config.scratch_workspace_root.clone(),
                 ))
             })
@@ -395,9 +394,9 @@ pub fn screen() -> AnyElement {
         catalog
             .get()
             .into_iter()
-            .map(|(env, session, phase, scratch)| {
+            .map(|(env, session, scratch)| {
                 let shell = runtime.store.shell(env.clone());
-                (env, session, phase, scratch, shell)
+                (env, session, scratch, shell)
             })
             .collect::<Vec<_>>()
     });
@@ -408,7 +407,7 @@ pub fn screen() -> AnyElement {
         let shells = shells.get();
         let mut projects = Vec::new();
         let mut known = true;
-        for (env, _, _, scratch, shell) in &shells {
+        for (env, _, scratch, shell) in &shells {
             if let Some(shell) = shell.get() {
                 projects.extend(shell.projects.iter().map(|p| EnvironmentProject {
                     environment: env.clone(),
@@ -423,6 +422,20 @@ pub fn screen() -> AnyElement {
             }
         }
         (projects, known)
+    });
+    let input = computed(move || {
+        let mut query = requested.get();
+        if query.project_id.is_some() {
+            checkouts.with(|(projects, known)| {
+                query.project_id = pr_list::resolve_project_scope(
+                    query.project_id.take().flatten(),
+                    projects,
+                    *known,
+                )
+                .map(Some);
+            });
+        }
+        query
     });
     let scope = computed(move || {
         let shells = shells.get();
@@ -446,9 +459,9 @@ pub fn screen() -> AnyElement {
             targets
                 .into_iter()
                 .filter_map(|target| {
-                    let (_, session, phase, ..) =
+                    let (_, session, ..) =
                         shells.iter().find(|(e, ..)| *e == target.environment)?;
-                    Some(((target.environment, target.project_ids), *session, *phase))
+                    Some(((target.environment, target.project_ids), *session))
                 })
                 .collect::<Vec<_>>(),
         )
@@ -487,14 +500,16 @@ pub fn screen() -> AnyElement {
     effect(move || {
         let targets = scope.get().unwrap_or_default();
         let input = input.get();
-        let _ = refresh.get();
         replies.set(BTreeMap::new());
         let Some(client) = service.get() else { return };
-        for (target, _, _) in targets {
-            let mut request = input.clone();
-            request.project_ids = target.1.clone().map(Some);
-            read_pages(client.clone(), target, request, replies, more);
-        }
+        effect(move || {
+            refresh.get();
+            for (target, _) in &targets {
+                let mut request = input.clone();
+                request.project_ids = target.1.clone().map(Some);
+                read_pages(client.clone(), target.clone(), request, replies, more);
+            }
+        });
     });
     let nav = navigator();
     let controls = view()
@@ -707,10 +722,12 @@ fn list_body(
         && replies.values().all(|p| !p.loading && p.error.is_none())
     {
         let empty = if !typed.is_empty() {
-            format!(
-                "{} “{}”",
-                t("Nothing matches"),
-                t3_client::workspace::pr_views::markdown::bound_utf16(typed, 49, "…")
+            tr(
+                "Nothing matches “{query}”",
+                &[(
+                    "query",
+                    t3_client::workspace::pr_views::markdown::bound_utf16(typed, 49, "…").into(),
+                )],
             )
         } else if input.state != PullRequestListState::Open
             || involvement != PullRequestInvolvement::All
@@ -742,7 +759,10 @@ fn list_body(
             );
             body = body.child(
                 nsh_base::button()
-                    .accessibility_label(format!("{} #{}", t("Open pull request"), e.number))
+                    .accessibility_label(tr(
+                        "Open pull request #{number}",
+                        &[("number", e.number.to_string().into())],
+                    ))
                     .on_press(move || actions.filters.select(Some(&selected)))
                     .child(list_row(e)),
             );

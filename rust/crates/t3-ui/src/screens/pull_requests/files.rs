@@ -1,6 +1,6 @@
 //! Whole-PR diff pages and per-file host/environment viewed state.
 use crate::{
-    i18n::t,
+    i18n::{t, tr},
     runtime::tasks::{TaskOwner, watch},
     screens::panel::diff::{diff_panel_loading_state, diff_stat_label},
     theme::tw,
@@ -26,16 +26,37 @@ struct Pages {
 struct Viewed {
     rows: Signal<Option<Rc<PullRequestFilesViewedResult>>>,
     pending: Signal<bool>,
+    writable: Signal<bool>,
     error: Signal<Option<String>>,
     refresh: Signal<u64>,
     owner: TaskOwner,
 }
-pub(super) fn files(session: PullRequestReviewSession, viewed_enabled: bool) -> AnyElement {
+pub(super) fn files(
+    session: PullRequestReviewSession,
+    writable: Signal<bool>,
+    provider: String,
+    viewed_enabled: bool,
+) -> AnyElement {
     let pages = signal(Rc::new(Pages::default()));
     let pending = signal(true);
     let request = signal(0u64);
-    let error = signal(None::<String>);
+    let error = signal(None::<(String, String)>);
+    let name = match provider.as_str() {
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "forgejo" => "Forgejo",
+        "bitbucket" => "Bitbucket",
+        "azure-devops" => "Azure DevOps",
+        other => other,
+    }
+    .to_owned();
+    let term = if provider == "gitlab" {
+        "merge request"
+    } else {
+        "pull request"
+    };
     let viewed = Viewed {
+        writable,
         rows: signal(None),
         pending: signal(false),
         error: signal(None),
@@ -49,6 +70,7 @@ pub(super) fn files(session: PullRequestReviewSession, viewed_enabled: bool) -> 
         pending.set(true);
         error.set(None);
         let client = client.clone();
+        let name = name.clone();
         watch(async move {
             match client.diff(cursor.clone()).await {
                 Ok(page) => pages.update(|shared| {
@@ -69,7 +91,9 @@ pub(super) fn files(session: PullRequestReviewSession, viewed_enabled: bool) -> 
                     );
                     data.loaded = true;
                 }),
-                Err(e) => error.set(Some(e.to_string())),
+                Err(e) => error.set(Some(
+                    t3_client::workspace::pr_views::diff_http::describe_diff_error(&e, &name, term),
+                )),
             }
             pending.set(false);
         });
@@ -85,9 +109,8 @@ pub(super) fn files(session: PullRequestReviewSession, viewed_enabled: bool) -> 
                         viewed.rows.set(Some(Rc::new(rows)));
                         viewed.error.set(None);
                     }
-                    Err(e) => {
-                        viewed.rows.set(None);
-                        viewed.error.set(Some(e.to_string()));
+                    Err(_) => {
+                        viewed.error.set(Some(t("Your ticks could not be read")));
                     }
                 }
             });
@@ -102,9 +125,10 @@ pub(super) fn files(session: PullRequestReviewSession, viewed_enabled: bool) -> 
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
         .child(dynamic(move || {
-            error.get().map(|e| {
+            error.get().map(|(title, description)| {
                 view()
-                    .child(text(e))
+                    .child(text(title))
+                    .child(text(description))
                     .child(super::detail::button(t("Retry"), load))
             })
         }))
@@ -214,12 +238,13 @@ fn viewed_button(
         } else {
             "Unviewed"
         });
-        let label = format!(
-            "{} {} {} {}",
-            t("Mark"),
-            path,
-            t("as"),
-            t(if checked { "unviewed" } else { "viewed" })
+        let label = tr(
+            if checked {
+                "Mark {path} as unviewed"
+            } else {
+                "Mark {path} as viewed"
+            },
+            &[("path", path.as_str().into())],
         );
         let session = session.clone();
         let path = path.clone();
@@ -227,10 +252,7 @@ fn viewed_button(
         nsh_base::button()
             .accessibility_label(label)
             .child(text(caption))
-            .disabled({
-                let client = session.clone();
-                move || state.pending.get() || !client.can_write()
-            })
+            .disabled(move || state.pending.get() || !state.writable.get())
             .on_press(move || {
                 if state.pending.get() || !session.can_write() {
                     return;
@@ -249,12 +271,11 @@ fn viewed_button(
                     match client.set_viewed(file).await {
                         Ok(()) => match client.files_viewed().await {
                             Ok(rows) => state.rows.set(Some(Rc::new(rows))),
-                            Err(e) => {
-                                state.rows.set(None);
-                                state.error.set(Some(e.to_string()));
+                            Err(_) => {
+                                state.error.set(Some(t("Your ticks could not be read")));
                             }
                         },
-                        Err(e) => state.error.set(Some(e.to_string())),
+                        Err(_) => super::review::feedback_error("Could not update viewed files"),
                     }
                     state.pending.set(false);
                 });

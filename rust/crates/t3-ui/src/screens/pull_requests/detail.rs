@@ -2,12 +2,9 @@
 use std::rc::Rc;
 
 use crate::{
-    i18n::t,
+    i18n::{t, tr},
     runtime::{services::links::external_link, tasks::watch},
-    screens::{
-        panel::{Action, PanelRegistration, SurfaceContent, SurfaceContext, SurfaceKind},
-        thread::markdown::base::chat_markdown,
-    },
+    screens::panel::{Action, PanelRegistration, SurfaceContent, SurfaceContext, SurfaceKind},
     state::nav::{Route, navigator},
     theme::tw,
 };
@@ -25,12 +22,13 @@ type Read<T> =
     Rc<dyn Fn(EnvironmentId, PullRequestRef) -> LocalBoxFuture<'static, Result<T, String>>>;
 
 type ReviewSession = t3_client::workspace::pr_views::service::PullRequestReviewSession;
-type ReviewSessionFactory = Rc<dyn Fn(&EnvironmentId, PullRequestRef) -> Option<ReviewSession>>;
+type ReviewSessionFactory = Rc<dyn Fn(&EnvironmentId, PullRequestRef) -> ReviewSession>;
 
 #[derive(Clone)]
 struct Reads {
     detail: Read<PullRequestDetail>,
     review: ReviewSessionFactory,
+    media: super::markdown::Media,
     links: Read<PullRequestLinkedThreadsResult>,
 }
 
@@ -39,6 +37,7 @@ pub fn registration<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) ->
     let link_client = client.clone();
     let review_client = client.clone();
     let reads = Reads {
+        media: super::markdown::Media::new(client),
         review: Rc::new(move |env, reference| {
             review_client.pull_request_review_session(env, reference)
         }),
@@ -141,17 +140,35 @@ fn load(
     let linked = signal(None::<Result<PullRequestLinkedThreadsResult, String>>);
     let thread_env = env.clone();
     let review_env = env.clone();
-    let review_ref = reference.clone();
+    let session = (reads.review)(&env, reference.clone());
+    let conversation = super::review::Conversation::new(session.clone());
+    let links_env = env.clone();
+    let links_ref = reference.clone();
+    let config = crate::runtime::rt().store.environment_config(env.clone());
+    let supports_links = computed(move || config.with(|config| config.is_some()));
+    let links_revision = signal(0u64);
     let tab = signal(Tab::Summary);
     effect(move || {
         revision.get();
         detail.set(None);
-        linked.set(None);
         let result = (reads.detail)(env.clone(), reference.clone());
         watch(async move {
             detail.set(Some(result.await.map(Rc::new)));
         });
-        let result = (reads.links)(env.clone(), reference.clone());
+    });
+    effect(move || {
+        links_revision.get();
+        linked.set(None);
+        if !supports_links.get() {
+            return;
+        }
+        let Some(Ok(pr)) = detail.get() else { return };
+        let Some(reference) =
+            t3_client::workspace::pr_views::detail::linked_thread_reference(&pr, &links_ref)
+        else {
+            return;
+        };
+        let result = (reads.links)(links_env.clone(), reference);
         watch(async move {
             linked.set(Some(result.await));
         });
@@ -167,12 +184,11 @@ fn load(
                 .child(button(t("Back to pull requests"), back))
                 .child(dynamic(move || match detail.get() {
                     Some(Ok(pr)) => {
-                        let session = (reads.review)(&review_env, review_ref.clone());
-                        detail_tabs(pr, session, tab)
+                        let markdown = reads.media.scope(review_env.clone(), &pr);
+                        detail_tabs(pr, session.clone(), tab, conversation, markdown)
                     }
-                    Some(Err(error)) => view()
+                    Some(Err(_)) => view()
                         .child(text(t("Could not load pull request")))
-                        .child(text(error))
                         .child(button(t("Retry"), retry))
                         .into_element(),
                     None => text(t("Loading pull request…")).into_element(),
@@ -200,11 +216,13 @@ fn load(
                                 }));
                             }
                         }
-                        Some(Err(error)) => {
-                            body = body
-                                .child(text(t("Could not load linked threads")))
-                                .child(text(error))
-                                .child(button(t("Retry linked threads"), retry));
+                        Some(Err(_)) => {
+                            body = body.child(text(t("Could not load linked threads"))).child(
+                                nsh_base::button()
+                                    .accessibility_label(t("Retry linked threads"))
+                                    .child(text(t("Retry")))
+                                    .on_press(move || links_revision.update(|n| *n += 1)),
+                            );
                         }
                         _ => {}
                     }
@@ -222,8 +240,10 @@ enum Tab {
 }
 fn detail_tabs(
     pr: Rc<PullRequestDetail>,
-    session: Option<ReviewSession>,
+    session: ReviewSession,
     tab: Signal<Tab>,
+    conversation: super::review::Conversation,
+    markdown: super::markdown::PrMarkdown,
 ) -> AnyElement {
     let mut tabs = view().app_class(tw("flex flex-row flex-wrap gap-2"));
     for (value, label) in [
@@ -235,21 +255,24 @@ fn detail_tabs(
             tabs = tabs.child(button(t(label), move || tab.set(value)));
         }
     }
+    let composer = super::review::panel_composer(session.clone(), conversation, &pr);
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
         .child(header(&pr))
         .child(tabs)
         .child(dynamic(move || {
             if tab.get() == Tab::Summary {
-                return description(&pr);
+                return description(&pr, &markdown);
             }
-            let Some(session) = session.clone() else {
-                return text(t("Environment disconnected")).into_element();
-            };
+            let session = session.clone();
             match tab.get() {
-                Tab::Timeline => super::review::timeline(session, &pr),
+                Tab::Timeline => {
+                    super::review::timeline(session, &pr, conversation, markdown.clone())
+                }
                 Tab::Code => super::files::files(
                     session,
+                    conversation.writable,
+                    pr.provider.0.clone(),
                     pr.capabilities
                         .viewed_files
                         .as_ref()
@@ -259,6 +282,7 @@ fn detail_tabs(
                 Tab::Summary => unreachable!(),
             }
         }))
+        .child(composer)
         .into_element()
 }
 
@@ -275,7 +299,10 @@ fn header(pr: &PullRequestDetail) -> AnyElement {
         "pull request"
     };
     let number = format!("#{}", pr.number);
-    let host_label = format!("{} {} {number} {}", t("Open"), t(term), t("on host"));
+    let host_label = tr(
+        "Open {term} {number} on host",
+        &[("term", t(term).into()), ("number", number.clone().into())],
+    );
     let repo = match t3_client::workspace::pr_views::detail::repository_link(&pr.url.0, pr.number) {
         Some(url) => link(pr.repository.0.clone(), pr.repository.0.clone(), url),
         None => text(pr.repository.0.clone()).into_element(),
@@ -327,19 +354,21 @@ fn header(pr: &PullRequestDetail) -> AnyElement {
                 ))
                 .child(text(format!("{} → {}", pr.head_branch.0, pr.base_branch.0)))
                 .child(text(format!("+{} −{}", pr.additions, pr.deletions)))
-                .child(text(format!(
-                    "{} {}",
-                    pr.changed_files,
-                    t(if pr.changed_files == 1 {
-                        "file"
+                .child(text(tr(
+                    if pr.changed_files == 1 {
+                        "{count} file"
                     } else {
-                        "files"
-                    })
+                        "{count} files"
+                    },
+                    &[("count", pr.changed_files.to_string().into())],
                 ))),
         )
         .child(
             nsh_base::button()
-                .accessibility_label(format!("{}: {check_label}", t("Checks")))
+                .accessibility_label(tr(
+                    "Checks: {label}",
+                    &[("label", check_label.clone().into())],
+                ))
                 .child(text(check_label))
                 .on_press(move || expanded.update(|v| *v = !*v)),
         )
@@ -356,7 +385,7 @@ fn header(pr: &PullRequestDetail) -> AnyElement {
         )
         .into_element()
 }
-fn description(pr: &PullRequestDetail) -> AnyElement {
+fn description(pr: &PullRequestDetail, markdown: &super::markdown::PrMarkdown) -> AnyElement {
     let body = if pr.body.trim().is_empty() {
         format!("_{}_", t("No description provided."))
     } else {
@@ -365,6 +394,6 @@ fn description(pr: &PullRequestDetail) -> AnyElement {
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
         .child(text(t("Description")).app_class(tw("text-sm font-semibold")))
-        .child(chat_markdown(move || body.clone(), || false))
+        .child(markdown.render(&body))
         .into_element()
 }

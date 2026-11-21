@@ -2,7 +2,6 @@
 use crate::{
     i18n::t,
     runtime::tasks::{TaskOwner, watch},
-    screens::thread::markdown::base::chat_markdown,
     theme::tw,
 };
 use nsh_core::prelude::*;
@@ -11,25 +10,68 @@ use t3_client::workspace::pr_views::service::PullRequestReviewSession;
 use t3_contracts::{base_schemas::TrimmedNonEmptyString, pull_request::*};
 
 #[derive(Clone, Copy)]
-struct Conversation {
+pub(super) struct Conversation {
+    pub(super) writable: Signal<bool>,
+    activity: Signal<Option<Rc<PullRequestActivity>>>,
     drafts: Signal<BTreeMap<Option<String>, String>>,
     reply_to: Signal<Option<String>>,
     busy: Signal<bool>,
-    error: Signal<Option<String>>,
     refresh: Signal<u64>,
     owner: TaskOwner,
 }
 
-pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail) -> AnyElement {
-    let state = Conversation {
-        drafts: signal(BTreeMap::new()),
-        reply_to: signal(None),
-        busy: signal(false),
-        error: signal(None),
-        refresh: signal(0),
-        owner: TaskOwner::here(),
+impl Conversation {
+    pub fn new(session: PullRequestReviewSession) -> Self {
+        use futures::StreamExt;
+        let writable = signal(session.can_write());
+        let mut changes = session.changes();
+        watch(async move {
+            while changes.next().await.is_some() {
+                writable.set(session.can_write());
+            }
+        });
+        Self {
+            writable,
+            activity: signal(None),
+            drafts: signal(BTreeMap::new()),
+            reply_to: signal(None),
+            busy: signal(false),
+            refresh: signal(0),
+            owner: TaskOwner::here(),
+        }
+    }
+}
+pub(super) fn feedback_error(title: &'static str) {
+    use crate::ui::toast::{ToastOptions, Variant, toast_manager};
+    toast_manager().add(ToastOptions {
+        variant: Variant::Error,
+        title: crate::i18n::Text::from(title),
+        ..Default::default()
+    });
+}
+pub(super) fn panel_composer(
+    session: PullRequestReviewSession,
+    state: Conversation,
+    pr: &PullRequestDetail,
+) -> AnyElement {
+    let permitted = pr.capabilities.comment && pr.viewer_permissions.comment;
+    dynamic(move || {
+        (permitted && state.writable.get()).then(|| composer(session.clone(), state, None))
+    })
+    .into_element()
+}
+pub(super) fn timeline(
+    session: PullRequestReviewSession,
+    pr: &PullRequestDetail,
+    state: Conversation,
+    markdown: super::markdown::PrMarkdown,
+) -> AnyElement {
+    let term = if pr.provider.0 == "gitlab" {
+        "merge request"
+    } else {
+        "pull request"
     };
-    let activity = signal(None::<Rc<PullRequestActivity>>);
+    let activity = state.activity;
     let read_error = signal(None::<String>);
     let read = session.clone();
     effect(move || {
@@ -41,15 +83,16 @@ pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail
                     activity.set(Some(Rc::new(value)));
                     read_error.set(None);
                 }
-                Err(e) => read_error.set(Some(e.to_string())),
+                Err(_) => read_error.set(Some(crate::i18n::tr(
+                    "Could not load {term} activity",
+                    &[("term", crate::i18n::Value::from(t(term)))],
+                ))),
             }
         });
     });
-    let can_reply =
-        pr.capabilities.review.reply && pr.viewer_permissions.comment && session.can_write();
-    let write = pr.capabilities.comment && pr.viewer_permissions.comment && session.can_write();
+    let can_reply = pr.capabilities.review.reply && pr.viewer_permissions.comment;
     let replies = session.clone();
-    let mut body = view()
+    let body = view()
         .app_class(tw("flex min-w-0 flex-col gap-3"))
         .child(dynamic(move || {
             read_error.get().map(|error| {
@@ -62,14 +105,11 @@ pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail
         }))
         .child(dynamic(move || {
             let Some(data) = activity.get() else {
-                return text(if read_error.get().is_some() {
-                    String::new()
-                } else {
-                    t("Loading activity…")
-                })
-                .into_element();
+                return view().into_element();
             };
-            let mut rows = view().app_class(tw("flex min-w-0 flex-col gap-3"));
+            let mut rows = view()
+                .test_id("pr-conversations")
+                .app_class(tw("flex min-w-0 flex-col gap-3"));
             use t3_client::workspace::pr_views::detail::{ConversationThread, conversation_items};
             let threads = data
                 .review_threads
@@ -108,7 +148,8 @@ pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail
                     }
                 }
                 for comment in &item.comments {
-                    conversation = conversation.child(note(comment.author.as_ref(), &comment.body));
+                    conversation =
+                        conversation.child(note(comment.author.as_ref(), &comment.body, &markdown));
                 }
                 if let Some(thread) = item.thread {
                     let id = thread.id().to_owned();
@@ -128,7 +169,7 @@ pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail
                     } else if item.more_replies > 0 {
                         conversation = conversation.child(text(t("Showing partial conversation")));
                     }
-                    if can_reply {
+                    if can_reply && state.writable.get() {
                         let session = replies.clone();
                         conversation = conversation.child(dynamic(move || {
                             if state.reply_to.get().as_ref() == Some(&id) {
@@ -149,11 +190,7 @@ pub(super) fn timeline(session: PullRequestReviewSession, pr: &PullRequestDetail
             }
             rows.into_element()
         }));
-    if write {
-        body = body.child(composer(session, state, None));
-    }
-    body.child(dynamic(move || state.error.get().map(text)))
-        .into_element()
+    body.into_element()
 }
 fn load_more(
     session: PullRequestReviewSession,
@@ -172,7 +209,6 @@ fn load_more(
                 return;
             }
             state.busy.set(true);
-            state.error.set(None);
             let client = session.clone();
             let id = id.clone();
             let cursor = cursor.clone();
@@ -209,22 +245,25 @@ fn load_more(
                             *next = page.next_cursor.filter(|c| c != &cursor).map(Some);
                         }
                     }),
-                    Err(e) => state.error.set(Some(e.to_string())),
+                    Err(_) => feedback_error("More comments could not be loaded"),
                 }
                 state.busy.set(false);
             });
         })
         .into_element()
 }
-fn note(author: Option<&PullRequestActor>, body: &str) -> AnyElement {
-    let body = body.to_owned();
+fn note(
+    author: Option<&PullRequestActor>,
+    body: &str,
+    markdown: &super::markdown::PrMarkdown,
+) -> AnyElement {
     view()
         .app_class(tw("flex min-w-0 flex-col gap-1"))
         .child(
             text(author.map_or_else(|| t("ghost"), |a| a.login.0.clone()))
                 .app_class(tw("text-sm font-semibold")),
         )
-        .child(chat_markdown(move || body.clone(), || false))
+        .child(markdown.render(body))
         .into_element()
 }
 
@@ -281,7 +320,6 @@ fn composer(
                         return;
                     }
                     state.busy.set(true);
-                    state.error.set(None);
                     let thread = thread.clone();
                     let session = session.clone();
                     state.owner.spawn(async move {
@@ -300,7 +338,11 @@ fn composer(
                                 }
                                 state.refresh.update(|v| *v += 1);
                             }
-                            Err(e) => state.error.set(Some(e.to_string())),
+                            Err(_) => feedback_error(if reply {
+                                "Reply could not be posted"
+                            } else {
+                                "Could not post the comment"
+                            }),
                         }
                         state.busy.set(false);
                     });

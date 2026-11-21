@@ -4,3 +4,5 @@ pub mod detail;
 pub mod files;
 pub mod list;
 pub mod review;
+
+mod markdown;
