@@ -223,22 +223,10 @@ impl EnvironmentThemes {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                use notify::{
-                    EventKind,
-                    event::{AccessKind, AccessMode},
-                };
-                if let Ok(event) = event {
-                    // A scan opens the directory and its files. Read access must not queue
-                    // another scan, while a flushed write may be the final save event.
-                    let changed = match event.kind {
-                        EventKind::Access(access) => {
-                            matches!(access, AccessKind::Close(AccessMode::Write))
-                        }
-                        _ => true,
-                    };
-                    if changed || event.need_rescan() {
-                        let _ = tx.send(());
-                    }
+                if let Ok(event) = event
+                    && theme_event_needs_scan(&event)
+                {
+                    let _ = tx.send(());
                 }
             })
             .map_err(|_| Error::Service)?;
@@ -261,5 +249,47 @@ impl EnvironmentThemes {
             _watcher: watcher,
             task,
         })
+    }
+}
+
+fn theme_event_needs_scan(event: &notify::Event) -> bool {
+    use notify::{
+        EventKind,
+        event::{AccessKind, AccessMode},
+    };
+    // Reading the theme directory and its files during a scan must not queue another scan.
+    event.need_rescan()
+        || match event.kind {
+            EventKind::Access(access) => matches!(access, AccessKind::Close(AccessMode::Write)),
+            _ => true,
+        }
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use notify::{
+        Event, EventKind,
+        event::{AccessKind, AccessMode, CreateKind, Flag, ModifyKind, RemoveKind},
+    };
+    #[test]
+    fn scan_only_on_file_changes_write_close_or_a_rescan_request() {
+        for access in [
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Read,
+            AccessKind::Close(AccessMode::Read),
+        ] {
+            let read = Event::new(EventKind::Access(access));
+            assert!(!theme_event_needs_scan(&read), "{read:?}");
+            assert!(theme_event_needs_scan(&read.set_flag(Flag::Rescan)));
+        }
+        for kind in [
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert!(theme_event_needs_scan(&Event::new(kind)), "{kind:?}");
+        }
     }
 }
