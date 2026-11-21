@@ -1,7 +1,7 @@
 use super::thread_management_service::ThreadManagementService;
 use crate::{
     api::*,
-    assistant_citations::to_plain_text as citations_to_plain_text,
+    assistant_citations::{js_whitespace, to_plain_text as citations_to_plain_text, utf16_len},
     effects::TitleKind,
     error::{Error, Result},
     ports::runs_ingestion::provider_event_ingestor::expanded_id,
@@ -15,20 +15,14 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use t3_contracts::{chat_attachment::ChatAttachment, model_selection::ModelSelection};
+use t3_contracts::{
+    chat_attachment::ChatAttachment, model_selection::ModelSelection, wire::trim_js,
+};
 use tokio_util::sync::CancellationToken;
 
 const OMITTED: &str = "[Earlier content truncated]\n\n";
 const TRUNCATED: &str = "\n[Content truncated]\n";
 const BOOTSTRAP: &str = "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
-
-fn js_whitespace(character: char) -> bool {
-    (character.is_whitespace() && character != '\u{85}') || character == '\u{feff}'
-}
-
-fn trim_js(text: &str) -> &str {
-    text.trim_matches(js_whitespace)
-}
 
 pub fn is_attachment_only_bootstrap_prompt(text: &str) -> bool {
     let text = if text
@@ -40,9 +34,6 @@ pub fn is_attachment_only_bootstrap_prompt(text: &str) -> bool {
         text
     };
     text == BOOTSTRAP
-}
-fn utf16_len(text: &str) -> usize {
-    text.encode_utf16().count()
 }
 pub fn limit_title_message(text: &str, budget: usize) -> String {
     let text_units: Vec<_> = text.encode_utf16().collect();

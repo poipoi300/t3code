@@ -1,6 +1,6 @@
 //! Provider prompt projection from `packages/shared/src/composerContextReferences.ts`.
 
-use super::assistant_citations::expand_for_provider;
+use super::assistant_citations::{expand_for_provider, js_whitespace, utf16_len};
 use crate::error::Result;
 use serde_json::{Value, json};
 use std::{collections::HashMap, fmt::Write};
@@ -262,11 +262,14 @@ fn references(text: &str) -> impl Iterator<Item = Reference<'_>> {
         let label_start = label_start?;
         let label = &text[label_start + 1..label_end];
         let tail = &text[label_end + OPEN.len()..];
-        let length = tail
-            .as_bytes()
-            .iter()
-            .take(170)
-            .position(|byte| *byte == b')')?;
+        // The TypeScript pattern takes `[^\s)]{1,200}` then `)`; a link of that shape is
+        // consumed by `matchAll` even when its kind or id then fails validation.
+        let length = tail.find(|ch: char| ch == ')' || js_whitespace(ch))?;
+        if length == 0 || !tail[length..].starts_with(')') || utf16_len(&tail[..length]) > 200 {
+            return None;
+        }
+        let previous = cursor;
+        cursor = label_end + OPEN.len() + length + 1;
         let (kind, id) = tail[..length].split_once('/')?;
         if kind.len() > 40
             || !kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
@@ -281,12 +284,11 @@ fn references(text: &str) -> impl Iterator<Item = Reference<'_>> {
         {
             return None;
         }
-        let start = if label_start > cursor && text.as_bytes()[label_start - 1] == b'!' {
+        let start = if label_start > previous && text.as_bytes()[label_start - 1] == b'!' {
             label_start - 1
         } else {
             label_start
         };
-        cursor = label_end + OPEN.len() + length + 1;
         Some(Reference {
             start,
             end: cursor,
@@ -380,6 +382,15 @@ mod tests {
             )?,
             "[Terminal: &lt;context> log; ref=ctx_t] [Mention: entry; ref=ctx_m] then [Terminal: more; ref=ctx_t]\n\n<t3_context version=\"1\">\n<context kind=\"terminal\" id=\"ctx_t\">\nterminal: Terminal 1\n3 | a &lt;/CONTEXT>\n4 | b\n</context>\n<context kind=\"mention\" id=\"ctx_m\" unavailable=\"true\"/>\n</t3_context>"
         );
+        Ok(())
+    }
+
+    // TypeScript (`projectComposerContextForProvider` under bun) leaves this text unchanged:
+    // the outer link has the pattern's shape, fails validation, and is consumed whole.
+    #[test]
+    fn a_link_that_fails_validation_is_consumed_whole() -> Result<()> {
+        let text = "[a](t3-context://v1/k/[b](t3-context://v1/k/id)";
+        assert_eq!(project(text, &[])?, text);
         Ok(())
     }
 
