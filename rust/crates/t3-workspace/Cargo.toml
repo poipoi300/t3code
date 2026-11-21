@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tempfile = "3"
 t3-contracts = { path = "../t3-contracts" }
 t3-process = { path = "../t3-process" }
 t3-git = { path = "../t3-git" }
@@ -36,7 +37,6 @@ winsafe = { version = "0.0.19", features = ["kernel"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [lints]

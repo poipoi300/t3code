@@ -25,6 +25,7 @@ pub struct FileIdentity {
 }
 
 pub struct FileStat {
+    pub links: u64,
     pub size: u64,
     pub regular: bool,
     pub identity: FileIdentity,
@@ -142,6 +143,7 @@ impl ContainedFiles {
     }
 }
 
+#[cfg(windows)]
 fn identity(file: &File) -> io::Result<FileIdentity> {
     use cap_fs_ext::MetadataExt;
     // Built from the handle, so the volume serial number and file index are present.
@@ -154,11 +156,16 @@ fn identity(file: &File) -> io::Result<FileIdentity> {
 
 impl ContainedFile {
     pub fn stat(&self) -> io::Result<FileStat> {
-        let metadata = self.file.metadata()?;
+        use cap_fs_ext::MetadataExt;
+        let metadata = cap_std::fs::Metadata::from_file(&self.file)?;
         Ok(FileStat {
+            links: metadata.nlink(),
             size: metadata.len(),
             regular: metadata.is_file(),
-            identity: identity(&self.file)?,
+            identity: FileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
         })
     }
 

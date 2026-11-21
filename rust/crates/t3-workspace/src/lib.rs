@@ -1,6 +1,7 @@
 //! Native workspace, project filesystem, and signed asset services. Not a wasm32 dependency.
 
 pub mod assets;
+pub mod attachment_delivery;
 pub mod attachments;
 pub mod contained_files;
 pub mod entries;

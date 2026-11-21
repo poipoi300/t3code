@@ -142,6 +142,11 @@ fn sweeps_pending_sidecars_and_partials_but_preserves_thread_files() {
     let now = 1_000_000_000u64;
     for (name, age) in [
         (format!("{pending}.txt"), 24 * 60 * 60_000 + 1),
+        (format!("{pending}.txt.owner"), 5),
+        (
+            format!("{}.png.owner", pending_id(None)),
+            24 * 60 * 60_000 + 1,
+        ),
         (format!("{pending}.txt.txt"), 24 * 60 * 60_000 + 1),
         ("upload.part".into(), 60 * 60_000 + 1),
         (format!("{owned}.png"), 24 * 60 * 60_000 + 1),
@@ -158,9 +163,10 @@ fn sweeps_pending_sidecars_and_partials_but_preserves_thread_files() {
         )
         .expect("test fixture");
     }
-    assert_eq!(sweep_stale(root, now), 3);
+    assert_eq!(sweep_stale(root, now), 4);
     assert!(root.join(format!("{owned}.png")).is_file());
-    assert_eq!(fs::read_dir(root).expect("test fixture").count(), 2);
+    assert!(root.join(format!("{pending}.txt.owner")).is_file());
+    assert_eq!(fs::read_dir(root).expect("test fixture").count(), 3);
 }
 
 #[tokio::test]
@@ -549,4 +555,214 @@ async fn replay_cannot_recreate_missing_claim_authority() {
         store.owner(&issued.attachment_id.0).await.is_none(),
         "a retry granted fresh claim authority"
     );
+}
+
+#[tokio::test]
+async fn owner_authority_is_signed_and_bound_to_its_payload() {
+    let temp = tempfile::tempdir().expect("temp");
+    let store = AttachmentStore::new(
+        temp.path().into(),
+        AssetSigner::new(vec![7; 32]).expect("key"),
+        Arc::new(Documents(AtomicUsize::new(0))),
+    );
+    let issue = || {
+        store.issue_owned_upload(
+            input(false, "a.png", "image/png", 1),
+            100,
+            Some("session:a".into()),
+        )
+    };
+    let a = issue().await.expect("issue a");
+    let b = issue().await.expect("issue b");
+    let a_path = store
+        .upload(token(&a.relative_url.0), 101, &b"a"[..])
+        .await
+        .expect("upload a");
+    let b_path = store
+        .upload(token(&b.relative_url.0), 101, &b"b"[..])
+        .await
+        .expect("upload b");
+    let owner = a_path.with_extension("png.owner");
+    let signed = fs::read(&owner).expect("signed record");
+    fs::copy(b_path.with_extension("png.owner"), &owner).expect("copy fixture");
+    assert!(
+        store.owner(&a.attachment_id.0).await.is_none(),
+        "record from a different id"
+    );
+    fs::write(&owner, br#"{"owner":"session:a","claimed":false}"#).expect("unsigned record");
+    assert!(
+        store.owner(&a.attachment_id.0).await.is_none(),
+        "unsigned record"
+    );
+    fs::write(&owner, signed).expect("restore");
+    fs::rename(&a_path, a_path.with_extension("saved")).expect("move original");
+    fs::write(&a_path, b"c").expect("new payload");
+    assert!(
+        store.set_claimed(&a.attachment_id.0, true).await.is_err(),
+        "replacement payload"
+    );
+}
+
+#[tokio::test]
+async fn deleting_before_upload_revokes_the_signed_grant_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let restart = || {
+        AttachmentStore::new(
+            temp.path().into(),
+            AssetSigner::new(vec![7; 32]).unwrap(),
+            Arc::new(Documents(AtomicUsize::new(0))),
+        )
+    };
+    let store = restart();
+    let grant = store
+        .issue_owned_upload(input(false, "a.png", "image/png", 1), 100, Some("a".into()))
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .discard_owned(&grant.attachment_id.0, "b")
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .discard_owned(&grant.attachment_id.0, "a")
+            .await
+            .unwrap()
+    );
+    assert!(
+        restart()
+            .upload(token(&grant.relative_url.0), 102, &b"x"[..])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn owned_grants_reserve_bytes_per_issuer_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let restart = || {
+        AttachmentStore::new(
+            temp.path().into(),
+            AssetSigner::new(vec![7; 32]).unwrap(),
+            Arc::new(Documents(AtomicUsize::new(0))),
+        )
+    };
+    let store = restart();
+    for _ in 0..4 {
+        store
+            .issue_owned_upload(
+                input(true, "a.bin", "application/octet-stream", FILE_MAX_BYTES),
+                100,
+                Some("a".into()),
+            )
+            .await
+            .unwrap();
+    }
+    let store = restart();
+    assert!(
+        store
+            .issue_owned_upload(
+                input(true, "a.bin", "application/octet-stream", 1),
+                101,
+                Some("a".into())
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .issue_owned_upload(
+                input(true, "a.bin", "application/octet-stream", 1),
+                101,
+                Some("b".into())
+            )
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn unspent_count_survives_restart_and_expired_grants_release_it() {
+    let root = tempfile::tempdir().unwrap();
+    let restart = || {
+        AttachmentStore::new(
+            root.path().into(),
+            AssetSigner::new(vec![7; 32]).unwrap(),
+            Arc::new(Documents(AtomicUsize::new(0))),
+        )
+    };
+    let store = restart();
+    for _ in 0..t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
+        store
+            .issue_owned_upload(
+                input(false, "pixel.png", "image/png", 1),
+                100,
+                Some("a".into()),
+            )
+            .await
+            .unwrap();
+    }
+    let store = restart();
+    assert!(
+        store
+            .issue_owned_upload(
+                input(false, "more.png", "image/png", 1),
+                101,
+                Some("a".into())
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .issue_owned_upload(
+                input(false, "fresh.png", "image/png", 1),
+                101 + UPLOAD_TTL_MS,
+                Some("a".into())
+            )
+            .await
+            .is_ok()
+    );
+}
+
+#[test]
+fn question_snapshot_survives_restart_and_rollback_removes_it() {
+    use t3_workspace::attachment_delivery::AttachmentDelivery;
+    let root = tempfile::tempdir().unwrap();
+    let sources = root.path().join("attachments");
+    fs::create_dir(&sources).unwrap();
+    let refs = root.path().join("references");
+    let restart = || AttachmentDelivery::with_reference_directory(sources.clone(), refs.clone());
+    let path = sources.join("a.png");
+    fs::write(&path, b"first").unwrap();
+    let snapshot = restart().reference(&path).unwrap();
+    assert!(snapshot.starts_with(&refs));
+    fs::write(&path, b"later").unwrap();
+    assert_eq!(fs::read(&snapshot).unwrap(), b"first");
+    let delivery = restart();
+    let replacement = delivery.reference(&path).unwrap();
+    assert_ne!(snapshot, replacement);
+    delivery.remove_claim(&path);
+    assert!(!path.exists());
+    assert!(!snapshot.exists());
+    assert!(!replacement.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn question_snapshot_rejects_a_public_directory_on_every_attempt() {
+    use std::os::unix::fs::PermissionsExt;
+    use t3_workspace::attachment_delivery::AttachmentDelivery;
+    let root = tempfile::tempdir().unwrap();
+    let sources = root.path().join("attachments");
+    let refs = root.path().join("references");
+    fs::create_dir(&sources).unwrap();
+    fs::create_dir(&refs).unwrap();
+    fs::set_permissions(&refs, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = sources.join("a.png");
+    fs::write(&path, b"a").unwrap();
+    let delivery = AttachmentDelivery::with_reference_directory(sources, refs);
+    assert!(delivery.reference(&path).is_err());
+    assert!(delivery.reference(&path).is_err());
 }
