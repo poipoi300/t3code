@@ -24,16 +24,24 @@ use t3_contracts::{base_schemas::TrimmedNonEmptyString, pull_request::*};
 type Read<T> =
     Rc<dyn Fn(EnvironmentId, PullRequestRef) -> LocalBoxFuture<'static, Result<T, String>>>;
 
+type ReviewSession = t3_client::workspace::pr_views::service::PullRequestReviewSession;
+type ReviewSessionFactory = Rc<dyn Fn(&EnvironmentId, PullRequestRef) -> Option<ReviewSession>>;
+
 #[derive(Clone)]
 struct Reads {
     detail: Read<PullRequestDetail>,
+    review: ReviewSessionFactory,
     links: Read<PullRequestLinkedThreadsResult>,
 }
 
 pub fn registration<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> PanelRegistration {
     let detail_client = client.clone();
     let link_client = client.clone();
+    let review_client = client.clone();
     let reads = Reads {
+        review: Rc::new(move |env, reference| {
+            review_client.pull_request_review_session(env, reference)
+        }),
         detail: Rc::new(move |env, reference| {
             let client = detail_client.clone();
             async move {
@@ -106,7 +114,7 @@ fn surface(context: SurfaceContext, reads: Reads) -> AnyElement {
     .into_element()
 }
 
-fn button(label: String, action: impl Fn() + 'static) -> AnyElement {
+pub(super) fn button(label: String, action: impl Fn() + 'static) -> AnyElement {
     nsh_base::button()
         .accessibility_label(label.clone())
         .child(text(label))
@@ -132,6 +140,9 @@ fn load(
     let detail = signal(None::<Result<Rc<PullRequestDetail>, String>>);
     let linked = signal(None::<Result<PullRequestLinkedThreadsResult, String>>);
     let thread_env = env.clone();
+    let review_env = env.clone();
+    let review_ref = reference.clone();
+    let tab = signal(Tab::Summary);
     effect(move || {
         revision.get();
         detail.set(None);
@@ -155,7 +166,10 @@ fn load(
                 .app_class(tw("flex min-w-0 flex-col gap-3 p-4"))
                 .child(button(t("Back to pull requests"), back))
                 .child(dynamic(move || match detail.get() {
-                    Some(Ok(pr)) => summary(pr),
+                    Some(Ok(pr)) => {
+                        let session = (reads.review)(&review_env, review_ref.clone());
+                        detail_tabs(pr, session, tab)
+                    }
                     Some(Err(error)) => view()
                         .child(text(t("Could not load pull request")))
                         .child(text(error))
@@ -165,6 +179,9 @@ fn load(
                 }))
                 .child(dynamic(move || {
                     let mut body = view().app_class(tw("flex min-w-0 flex-col gap-1"));
+                    if tab.get() != Tab::Summary {
+                        return body;
+                    }
                     match linked.get() {
                         Some(Ok(result)) if !result.threads.is_empty() => {
                             body = body.child(text(t("Linked threads")));
@@ -197,7 +214,55 @@ fn load(
         .into_element()
 }
 
-fn summary(pr: Rc<PullRequestDetail>) -> AnyElement {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Summary,
+    Timeline,
+    Code,
+}
+fn detail_tabs(
+    pr: Rc<PullRequestDetail>,
+    session: Option<ReviewSession>,
+    tab: Signal<Tab>,
+) -> AnyElement {
+    let mut tabs = view().app_class(tw("flex flex-row flex-wrap gap-2"));
+    for (value, label) in [
+        (Tab::Summary, "Summary"),
+        (Tab::Timeline, "Timeline"),
+        (Tab::Code, "Code"),
+    ] {
+        if value != Tab::Code || pr.capabilities.diff {
+            tabs = tabs.child(button(t(label), move || tab.set(value)));
+        }
+    }
+    view()
+        .app_class(tw("flex min-w-0 flex-col gap-2"))
+        .child(header(&pr))
+        .child(tabs)
+        .child(dynamic(move || {
+            if tab.get() == Tab::Summary {
+                return description(&pr);
+            }
+            let Some(session) = session.clone() else {
+                return text(t("Environment disconnected")).into_element();
+            };
+            match tab.get() {
+                Tab::Timeline => super::review::timeline(session, &pr),
+                Tab::Code => super::files::files(
+                    session,
+                    pr.capabilities
+                        .viewed_files
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some(),
+                ),
+                Tab::Summary => unreachable!(),
+            }
+        }))
+        .into_element()
+}
+
+fn header(pr: &PullRequestDetail) -> AnyElement {
     let state = match pr.state {
         PullRequestState::Merged => "Merged",
         PullRequestState::Closed => "Closed",
@@ -214,11 +279,6 @@ fn summary(pr: Rc<PullRequestDetail>) -> AnyElement {
     let repo = match t3_client::workspace::pr_views::detail::repository_link(&pr.url.0, pr.number) {
         Some(url) => link(pr.repository.0.clone(), pr.repository.0.clone(), url),
         None => text(pr.repository.0.clone()).into_element(),
-    };
-    let body = if pr.body.trim().is_empty() {
-        format!("_{}_", t("No description provided."))
-    } else {
-        pr.body.clone()
     };
     let check_label = describe_checks(&pr.checks);
     let expanded = signal(false);
@@ -294,6 +354,16 @@ fn summary(pr: Rc<PullRequestDetail>) -> AnyElement {
                 })
                 .child(items),
         )
+        .into_element()
+}
+fn description(pr: &PullRequestDetail) -> AnyElement {
+    let body = if pr.body.trim().is_empty() {
+        format!("_{}_", t("No description provided."))
+    } else {
+        pr.body.clone()
+    };
+    view()
+        .app_class(tw("flex min-w-0 flex-col gap-2"))
         .child(text(t("Description")).app_class(tw("text-sm font-semibold")))
         .child(chat_markdown(move || body.clone(), || false))
         .into_element()

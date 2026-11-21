@@ -20,7 +20,7 @@ use t3_ui::{
     state::nav::Route,
 };
 
-fn detail() -> Value {
+pub(super) fn detail() -> Value {
     let mut v = entry(14, "Selected detail from host", "open", 27);
     v["capabilities"] = json!({"actions":[],"mergeMethods":[],"diff":true,"comment":false,"search":true,"deleteBranch":false,"review":{"inlineComment":false,"reply":false,"resolve":false,"verdicts":[]},"reviewers":{"request":false,"listCandidates":false}});
     v["viewerPermissions"] = json!({"actions":[],"comment":false,"resolve":false,"verdicts":[],"requestReviewers":false});
@@ -98,7 +98,7 @@ fn DetailFixture() -> impl IntoElement {
         ))
 }
 
-fn app_at(window: (f32, f32), root: Root) -> Headless {
+pub(super) fn app_at(window: (f32, f32), root: Root) -> Headless {
     let mut cfg = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(window.0), px(window.1)),
