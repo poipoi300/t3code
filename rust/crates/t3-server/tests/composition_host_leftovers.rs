@@ -1341,3 +1341,216 @@ async fn agent_sessions_are_scanned_and_imported_once_from_the_server_home() {
     drop((socket, other));
     server.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn database_storage_capability_matches_served_methods() {
+    let home = tempfile::tempdir().unwrap();
+    let s = start(home.path(), Default::default(), Default::default()).await;
+    let descriptor: Value = s
+        .http
+        .get(format!("{}/.well-known/t3/environment", s.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(descriptor["capabilities"]["databaseStorage"], true);
+    for key in ["storageCleanup", "storageCleanupRun"] {
+        assert!(descriptor["capabilities"].get(key).is_none());
+    }
+    s.served(&["server.getDatabaseStorage", "server.reclaimDatabaseSpace"]);
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "storage-cleanup")]
+struct IsolatedCheckout;
+
+#[cfg(feature = "storage-cleanup")]
+#[async_trait]
+impl t3_server::adapters::storage_cleanup::CleanupWorktrees for IsolatedCheckout {
+    async fn permit(&self, _: &Path) -> t3_host::Result<Box<dyn Send + Sync>> {
+        // This temp checkout has one writer, the started server's serialized cleanup worker.
+        Ok(Box::new(()))
+    }
+    async fn branch_pull_request(
+        &self,
+        _: &Path,
+        _: &str,
+    ) -> t3_host::Result<Option<t3_host::storage_cleanup::MergedPullRequest>> {
+        panic!("deleted thread cleanup must not query a forge");
+    }
+    async fn invalidate_git_status(&self, _: &Path) {}
+}
+
+#[cfg(feature = "storage-cleanup")]
+#[tokio::test]
+async fn storage_cleanup_obeys_scopes_and_preserves_projection_ownership() {
+    let home = tempfile::tempdir().unwrap();
+    settings(
+        home.path(),
+        json!({"storageCleanup":{"browserArtifactsAfterDays":7,"logsAfterDays":7,"worktreeOnDelete":true,"worktreeAfterDays":7}}),
+    );
+    let s = start(
+        home.path(),
+        Default::default(),
+        StartOptions {
+            cleanup_worktrees: Some(Arc::new(IsolatedCheckout)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let descriptor: Value = s
+        .http
+        .get(format!("{}/.well-known/t3/environment", s.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    println!(
+        "Cleanup host: {} unserved out of {} registered method names",
+        s.runtime.unserved_methods.len(),
+        t3_contracts::rpc::WS_METHODS.len()
+    );
+    for flag in ["storageCleanup", "storageCleanupRun"] {
+        assert_eq!(
+            descriptor["capabilities"][flag], true,
+            "{flag}: {descriptor}"
+        );
+    }
+    let (mut reader, mut read_client) = s.socket(&s.cookie(&["orchestration:read"]).await).await;
+    let (mut writer, mut write_client) = s.socket(&s.cookie(&["settings:write"]).await).await;
+    let report_method = "server.getStorageCleanupReport";
+    let run_method = "server.runStorageCleanup";
+    write_client
+        .start(report_method, json!({}), t3_rpc::CallKind::Stream)
+        .unwrap();
+    let t3_rpc::CallEvent::Exit { exit, .. } =
+        c_support::event(&mut writer, &mut write_client).await
+    else {
+        panic!("read permission was not enforced")
+    };
+    missing_scope(exit, "orchestration:read");
+    read_client
+        .start(report_method, json!({}), t3_rpc::CallKind::Stream)
+        .unwrap();
+    while c_support::chunk(&mut reader, &mut read_client)
+        .await
+        .is_null()
+    {}
+    let state = home.path().join("userdata");
+    let old = state.join("browser-artifacts/expired.png");
+    let rotated = state.join("logs/nested/tool.log.1");
+    let current = state.join("logs/nested/tool.log");
+    let nested = state.join("browser-artifacts/nested/keep.png");
+    for path in [&old, &rotated, &current, &nested] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH).unwrap();
+    }
+    missing_scope(
+        unary(&mut reader, &mut read_client, run_method, json!({})).await,
+        "settings:write",
+    );
+    assert!(old.exists() && rotated.exists());
+    let repo = home.path().join("repo");
+    let worktree = home.path().join("worktrees/feature");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "root",
+    ]);
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "feature",
+        worktree.to_str().unwrap(),
+    ]);
+    let db = t3_persistence::rusqlite::Connection::open(state.join("statev2.sqlite")).unwrap();
+    let date = "2020-01-01T00:00:00.000Z";
+    let mut thread: Value = serde_json::from_str(
+        include_str!("../../../fixtures/samples/OrchestrationV2AppThread.jsonl")
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    for (key,v) in json!({"id":"owner","projectId":"p","title":"test","worktreePath":worktree,"branch":"feature","createdAt":date,"updatedAt":date,"settledAt":null,"settledOverride":null,"deletedAt":date,"lineage":{"rootThreadId":"owner","parentThreadId":null,"relationshipToParent":null}}).as_object().unwrap() {thread[key]=v.clone();}
+    db.execute("INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES ('p','project',?1,'[]',?2,?2)",[repo.to_str().unwrap(),date]).unwrap();
+    db.execute("INSERT INTO orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,deleted_at,payload_json) VALUES ('owner','p','test','codex','full-access','default',?1,?1,?1,?2)",[date,&thread.to_string()]).unwrap();
+    db.execute("INSERT INTO orchestration_v2_effect_outbox(effect_id,command_id,thread_id,effect_type,payload_json,status,available_at,created_at,updated_at) VALUES ('job','cmd','owner','test','{}','failed',?1,?1,?1)",[date]).unwrap();
+    let manual = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(manual["trigger"], "manual");
+    assert_eq!(
+        c_support::chunk(&mut reader, &mut read_client).await,
+        manual
+    );
+    assert!(!old.exists() && !rotated.exists());
+    assert!(current.exists() && nested.exists());
+    assert!(
+        worktree.exists(),
+        "failed effects keep the checkout: {manual}"
+    );
+    db.execute(
+        "UPDATE orchestration_v2_effect_outbox SET status='succeeded' WHERE effect_id='job'",
+        [],
+    )
+    .unwrap();
+    // An archived thread still owns its checkout after its project is soft-deleted.
+    let mut archived = thread.clone();
+    archived["deletedAt"] = Value::Null;
+    archived["archivedAt"] = date.into();
+    db.execute(
+        "UPDATE projection_projects SET deleted_at=?1 WHERE project_id='p'",
+        [date],
+    )
+    .unwrap();
+    db.execute("UPDATE orchestration_v2_projection_threads SET archived_at=?1,deleted_at=NULL,payload_json=?2 WHERE thread_id='owner'",[date,&archived.to_string()]).unwrap();
+    let kept = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(c_support::chunk(&mut reader, &mut read_client).await, kept);
+    let row = kept["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["threadId"] == "owner")
+        .unwrap();
+    assert_eq!(row["reason"], "Project is unavailable", "{kept}");
+    assert!(row["projectPath"].is_null() && worktree.exists());
+    db.execute("UPDATE orchestration_v2_projection_threads SET archived_at=NULL,deleted_at=?1,payload_json=?2 WHERE thread_id='owner'",[date,&thread.to_string()]).unwrap();
+    let after = ok(unary(&mut writer, &mut write_client, run_method, json!({})).await);
+    assert_eq!(c_support::chunk(&mut reader, &mut read_client).await, after);
+    assert!(!worktree.exists(), "{after}");
+    let payload: String = db
+        .query_row(
+            "SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id='owner'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&payload).unwrap(), thread);
+    drop(db);
+    drop((reader, writer));
+    s.runtime.shutdown().await.unwrap();
+}

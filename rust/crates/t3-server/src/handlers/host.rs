@@ -6,6 +6,7 @@ use crate::{registry::HandlerRegistry, services::Domains};
 use t3_contracts::rpc::*;
 
 pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
+    register_cleanup(registry, domains)?;
     #[cfg(feature = "host")]
     if let Some(host) = domains.get::<crate::adapters::host::HostAdapter>() {
         let h = host.clone();
@@ -100,4 +101,53 @@ pub fn register_with(registry: &mut HandlerRegistry, domains: &Domains) -> crate
     registry.unimplemented::<WsServerPrepareTriageRpc>()?;
     registry.unimplemented::<WsServerGetDatabaseStorageRpc>()?;
     registry.unimplemented::<WsServerReclaimDatabaseSpaceRpc>()
+}
+
+fn register_cleanup(registry: &mut HandlerRegistry, domains: &Domains) -> crate::Result<()> {
+    #[cfg(feature = "storage-cleanup")]
+    if let Some(cleanup) = domains.get::<crate::adapters::storage_cleanup::CleanupAdapter>() {
+        let reports = cleanup.clone();
+        registry.register_stream::<WsServerGetStorageCleanupReportRpc, _, _, _>(move |_, _| {
+            let reports = reports.clone();
+            async move {
+                let mut receiver = reports.service.reports().await;
+                Ok(async_stream::stream! {
+                    while let Some(report) = receiver.recv().await { yield Ok(report); }
+                })
+            }
+        })?;
+        return registry.register::<WsServerRunStorageCleanupRpc, _, _>(move |ctx, _| {
+            let cleanup = cleanup.clone();
+            async move {
+                cleanup.run().await.map_err(|error| {
+                    Failure::Typed(WsServerRunStorageCleanupError::ServerSettingsError(
+                        Box::new(t3_contracts::settings::ServerSettingsError {
+                            _tag:
+                                t3_contracts::settings::ServerSettingsErrorTag::ServerSettingsError,
+                            settings_path: ctx
+                                .services
+                                .local
+                                .config
+                                .paths
+                                .settings()
+                                .display()
+                                .to_string(),
+                            operation: t3_contracts::settings::ServerSettingsOperation::ReadFile,
+                            provider_instance_id: None,
+                            environment_variable: None,
+                            managed_setting: None,
+                            managed_by: None,
+                            provider_label: None,
+                            cause: Some(Some(
+                                serde_json::json!({"name":"Error","message":error.to_string()}),
+                            )),
+                        }),
+                    ))
+                })
+            }
+        });
+    }
+    let _ = domains;
+    registry.unimplemented::<WsServerGetStorageCleanupReportRpc>()?;
+    registry.unimplemented::<WsServerRunStorageCleanupRpc>()
 }

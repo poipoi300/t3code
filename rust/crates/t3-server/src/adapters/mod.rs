@@ -1,5 +1,6 @@
 #[cfg(feature = "providers")]
 pub mod acp_registry;
+pub mod attachments;
 #[cfg(feature = "local-services")]
 pub mod auth;
 #[cfg(feature = "local-services")]
@@ -20,7 +21,6 @@ pub mod git_actions;
 pub mod host;
 #[cfg(feature = "host")]
 pub mod host_leftovers;
-pub mod attachments;
 #[cfg(all(feature = "git-actions", feature = "local-services"))]
 pub mod launch;
 #[cfg(feature = "mcp")]
@@ -45,10 +45,16 @@ pub mod providers;
 pub mod pull_requests;
 #[cfg(feature = "textgen-native")]
 pub mod review_guide;
+#[cfg(all(
+    feature = "scheduler",
+    feature = "orchestration",
+    feature = "local-services"
+))]
+pub mod scheduled_launch;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
-#[cfg(all(feature = "scheduler", feature = "orchestration", feature = "local-services"))]
-pub mod scheduled_launch;
+#[cfg(feature = "storage-cleanup")]
+pub mod storage_cleanup;
 #[cfg(feature = "local-services")]
 pub mod telemetry;
 #[cfg(feature = "terminal")]
@@ -61,7 +67,11 @@ pub mod textgen_native;
 pub mod title_links;
 #[cfg(feature = "usage")]
 pub mod usage;
+#[cfg(all(
+    feature = "orchestration",
+    feature = "workspace",
+    feature = "local-services"
+))]
+pub mod workflow_files;
 #[cfg(feature = "workspace")]
 pub mod workspace;
-#[cfg(all(feature = "orchestration", feature = "workspace", feature = "local-services"))]
-pub mod workflow_files;

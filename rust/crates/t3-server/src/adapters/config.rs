@@ -80,6 +80,8 @@ impl LocalServices {
         // Publish the capability before cloud and peer services copy the descriptor.
         environment.capabilities.linked_thread_refreshes =
             cfg!(feature = "pull-requests").then_some(true);
+        environment.capabilities.database_storage =
+            cfg!(all(feature = "host", feature = "orchestration")).then_some(true);
         environment.capabilities.usage_limit_sources = cfg!(feature = "providers").then_some(true);
         let settings =
             SettingsService::with_database(config.paths.settings(), Some(database.clone()));

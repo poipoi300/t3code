@@ -21,13 +21,16 @@ const DAY_MS: i64 = 86_400_000;
 pub struct CleanupThread {
     pub shell: OrchestrationV2ThreadShell,
     pub deleted: bool,
-    pub project_path: PathBuf,
+    /// Absent for a live thread whose project is unavailable. It still owns its checkout.
+    pub project_path: Option<PathBuf>,
 }
 #[derive(Clone, PartialEq)]
 pub struct CleanupSnapshot {
     pub settings: ServerSettings,
     pub threads: Vec<CleanupThread>,
     pub project_roots: Vec<PathBuf>,
+    /// Also protect deleted projects while finding orphan candidates for the report.
+    pub deleted_project_roots: Vec<PathBuf>,
     pub terminal_paths: Vec<PathBuf>,
     pub live_provider_paths: Vec<PathBuf>,
     pub pending_deletion_threads: BTreeSet<ThreadId>,
@@ -51,8 +54,19 @@ pub trait CleanupHost: Send + Sync {
     /// Complete enabled scheduled-task thread ids; unavailable reads must fail.
     async fn enabled_scheduled_threads(&self) -> Result<BTreeSet<ThreadId>>;
     async fn storage_cleanup_settings(&self) -> Result<StorageCleanupSettings>;
+    async fn settings(&self) -> Result<ServerSettings> {
+        Ok(self.snapshot().await?.settings)
+    }
+    /// Failed effects still protect a checkout. Only unfinished effects can unblock a sweep.
+    async fn deletion_can_finish(&self, _thread: &ThreadId) -> Result<bool> {
+        Ok(true)
+    }
     /// Must be the same lease provider turn startup and checkpoint restore use.
     async fn acquire_workspace_lease(&self, path: &Path) -> Result<OwnedMutexGuard<()>>;
+    /// An embedding may need to retain several independent writer guards until removal ends.
+    async fn acquire_removal_permit(&self, path: &Path) -> Result<Box<dyn Send + Sync>> {
+        Ok(Box::new(self.acquire_workspace_lease(path).await?))
+    }
     async fn branch_pull_request(
         &self,
         project: &Path,
@@ -67,10 +81,18 @@ pub struct StorageCleanup {
     gate: Mutex<()>,
     report: Mutex<ReportState>,
     automatic: tokio::sync::Notify,
+    deletions: std::sync::atomic::AtomicU64,
     dev_worktree_root: Option<PathBuf>,
     orphan_sizes: Mutex<BTreeMap<PathBuf, Option<u64>>>,
 }
+#[derive(Default)]
+struct DeletedWorktrees {
+    waiting: bool,
+    kept: Vec<PathBuf>,
+}
 struct ReportState {
+    deleted: DeletedWorktrees,
+    swept_deletions: u64,
     latest: Option<StorageCleanupReport>,
     subscribers: Vec<mpsc::UnboundedSender<Option<StorageCleanupReport>>>,
 }
@@ -220,10 +242,16 @@ impl StorageCleanup {
             clock,
             gate: Mutex::new(()),
             report: Mutex::new(ReportState {
+                deleted: DeletedWorktrees {
+                    waiting: true,
+                    kept: vec![],
+                },
                 latest: None,
+                swept_deletions: 0,
                 subscribers: Vec::new(),
             }),
             automatic: tokio::sync::Notify::new(),
+            deletions: Default::default(),
             dev_worktree_root,
             orphan_sizes: Mutex::new(BTreeMap::new()),
         }
@@ -244,17 +272,37 @@ impl StorageCleanup {
     pub fn request_automatic_sweep(&self) {
         self.automatic.notify_one();
     }
+    pub fn note_thread_deletion(&self) {
+        self.deletions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     pub fn start(self: &Arc<Self>) -> CleanupWorker {
         let service = self.clone();
-        let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(3600));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {_=interval.tick()=>{},_=service.automatic.notified()=>{}}
-                let _ = service.run_automatic().await;
-            }
-        });
+        let task =
+            tokio::spawn(async move { service.run_automatic_until(std::future::pending()).await });
         CleanupWorker { task }
+    }
+    /// Requests received during a sweep coalesce into one follow-up. On shutdown, finish
+    /// an in-flight removal before releasing its workspace permit or closing its database.
+    pub async fn run_automatic_until(&self, stop: impl std::future::Future<Output = ()>) {
+        tokio::pin!(stop);
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut stop => break,
+                () = self.automatic.notified() => {},
+                _ = interval.tick() => {},
+            }
+            let _ = self.run_automatic().await;
+        }
+    }
+    pub async fn provider_stop_may_unblock(&self, cwd: &Path) -> bool {
+        let report = self.report.lock().await;
+        report.swept_deletions != self.deletions.load(std::sync::atomic::Ordering::Relaxed)
+            || report.deleted.waiting
+            || report.deleted.kept.iter().any(|p| occupies(p, cwd))
     }
     pub async fn latest_report(&self) -> Option<StorageCleanupReport> {
         self.report.lock().await.latest.clone()
@@ -286,23 +334,35 @@ impl StorageCleanup {
     ) -> Result<StorageCleanupReport> {
         let _guard = self.gate.lock().await;
         let now = self.clock.now_ms();
-        let initial = self.snapshot().await?;
+        let deletions_at_start = self.deletions.load(std::sync::atomic::Ordering::Relaxed);
+        let retention = self.retention_settings().await?;
         let mut entries = Vec::new();
-        self.clean_worktrees(&initial, now, dry_run, &mut entries)
-            .await;
+        let deleted = match self.snapshot().await {
+            Ok(initial) => {
+                self.clean_worktrees(&initial, now, dry_run, &mut entries)
+                    .await
+            }
+            Err(error) => {
+                let mut entry = blank(StorageCleanupReportEntryKind::Worktree, None);
+                entry.outcome = StorageCleanupReportEntryOutcome::Failed;
+                entry.reason = error.to_string();
+                entries.push(entry);
+                DeletedWorktrees {
+                    waiting: true,
+                    kept: vec![],
+                }
+            }
+        };
         for (kind, root, days) in [
             (
                 StorageCleanupReportEntryKind::BrowserArtifacts,
                 self.state_dir.join("browser-artifacts"),
-                initial
-                    .settings
-                    .storage_cleanup
-                    .browser_artifacts_after_days,
+                retention.browser_artifacts_after_days,
             ),
             (
                 StorageCleanupReportEntryKind::Logs,
                 self.state_dir.join("logs"),
-                initial.settings.storage_cleanup.logs_after_days,
+                retention.logs_after_days,
             ),
         ] {
             let Some(days) = days else {
@@ -398,12 +458,22 @@ impl StorageCleanup {
         };
         if !dry_run {
             let mut published = self.report.lock().await;
+            published.deleted = deleted;
+            published.swept_deletions = deletions_at_start;
             published.latest = Some(report.clone());
             published
                 .subscribers
                 .retain(|tx| tx.send(Some(report.clone())).is_ok());
         }
         Ok(report)
+    }
+    async fn retention_settings(&self) -> Result<StorageCleanupSettings> {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            self.host.storage_cleanup_settings(),
+        )
+        .await
+        .map_err(|_| Error::Refused("cleanup settings are unavailable"))?
     }
     async fn clean_files(
         &self,
@@ -481,7 +551,7 @@ impl StorageCleanup {
                 if modified.is_none_or(|ms| ms >= i128::from(threshold)) {
                     continue;
                 }
-                let settings = self.host.storage_cleanup_settings().await?;
+                let settings = self.retention_settings().await?;
                 if (if logs {
                     settings.logs_after_days
                 } else {
@@ -509,14 +579,15 @@ impl StorageCleanup {
         now: i64,
         dry_run: bool,
         entries: &mut Vec<StorageCleanupReportEntry>,
-    ) {
+    ) -> DeletedWorktrees {
+        let mut deleted = DeletedWorktrees::default();
         if !std::iter::once(ProjectId(String::new()))
             .chain(snapshot.settings.project_settings_overrides.keys().cloned())
             .any(|project| {
                 resolve_rules(&snapshot.settings, &project).is_ok_and(|rules| enabled(&rules))
             })
         {
-            return;
+            return deleted;
         }
         let mut groups: Vec<(PathBuf, Vec<&CleanupThread>)> = Vec::new();
         let mut group_indices = BTreeMap::new();
@@ -561,10 +632,34 @@ impl StorageCleanup {
             let mut entry = blank(StorageCleanupReportEntryKind::Worktree, Some(&path));
             entry.thread_id = Some(owner.shell.id.clone());
             entry.thread_title = Some(owner.shell.title.clone());
-            entry.project_path = Some(owner.project_path.to_string_lossy().into_owned());
+            entry.project_path = owner
+                .project_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
             let result = self
                 .clean_worktree(snapshot, &members, owner, &path, &rules, now, dry_run)
                 .await;
+            if owner.deleted
+                && rules.worktree_on_delete
+                && let Err(error) = &result
+            {
+                deleted.kept.push(path.clone());
+                deleted.waiting |= match error {
+                    Error::Refused("thread deletion is still pending") => self
+                        .host
+                        .deletion_can_finish(&owner.shell.id)
+                        .await
+                        .unwrap_or(true),
+                    Error::Refused(
+                        "thread is running or has pending work"
+                        | "open terminal"
+                        | "settled moments ago"
+                        | "provider session is still open"
+                        | "thread activity or settings changed since check",
+                    ) => true,
+                    _ => false,
+                };
+            }
             match result {
                 Ok((reason, bytes)) => {
                     entry.reason = reason;
@@ -582,6 +677,7 @@ impl StorageCleanup {
             entries.push(entry);
         }
         self.report_orphans(snapshot, now, entries).await;
+        deleted
     }
     #[allow(clippy::too_many_arguments)]
     async fn clean_worktree(
@@ -597,6 +693,10 @@ impl StorageCleanup {
         if self::owner(group).is_none() {
             return Err(Error::Refused("worktree is shared by unrelated threads"));
         }
+        let project = owner
+            .project_path
+            .as_deref()
+            .ok_or(Error::Refused("project is unavailable"))?;
         for thread in group {
             if !thread.deleted && !thread_idle(&thread.shell, now, &snapshot.settings)? {
                 return Err(Error::Refused("thread is running or has pending work"));
@@ -617,6 +717,7 @@ impl StorageCleanup {
         let value = shell_value(&owner.shell)?;
         let mut settled = epoch(&value["settledAt"]);
         let mut current = owner;
+        let mut ancestors = Vec::new();
         let mut seen = BTreeSet::new();
         while settled.is_none() && !owner.deleted {
             let value = shell_value(&current.shell)?;
@@ -641,6 +742,7 @@ impl StorageCleanup {
             {
                 break;
             }
+            ancestors.push(parent);
             current = parent;
             settled = epoch(&shell_value(&parent.shell)?["settledAt"]);
         }
@@ -691,6 +793,7 @@ impl StorageCleanup {
                 .clean_scratch(
                     snapshot,
                     group,
+                    &ancestors,
                     path,
                     Path::new(&requested.0),
                     rules,
@@ -704,8 +807,8 @@ impl StorageCleanup {
         };
         validate_cleanup_worktree(Path::new(&requested.0), &snapshot.managed_roots)?;
         validate_cleanup_worktree(path, &snapshot.managed_roots)?;
-        protect(snapshot, path)?;
-        protect(snapshot, Path::new(&requested.0))?;
+        protect(snapshot, path, Some(project))?;
+        protect(snapshot, Path::new(&requested.0), Some(project))?;
         let git = t3_git::Git::new(path);
         let head = read_git(&git, &["rev-parse", "HEAD"]).await?;
         check_branch(&git, &branch.0).await?;
@@ -721,7 +824,7 @@ impl StorageCleanup {
             )
         };
         if !eligible {
-            let project_git = t3_git::Git::new(&owner.project_path);
+            let project_git = t3_git::Git::new(project);
             let remotes = read_git(&project_git, &["remote"]).await?;
             let names: Vec<_> = remotes.lines().collect();
             if dry_run && !names.is_empty() {
@@ -800,10 +903,7 @@ impl StorageCleanup {
                 };
             }
             if !eligible && !names.is_empty() && rules.worktree_on_merge {
-                let pr = self
-                    .host
-                    .branch_pull_request(&owner.project_path, &branch.0)
-                    .await?;
+                let pr = self.host.branch_pull_request(path, &branch.0).await?;
                 let default_branch = default.splitn(4, '/').nth(3).unwrap_or(&default);
                 eligible = pull_request_merged(
                     pr.as_ref(),
@@ -845,7 +945,7 @@ impl StorageCleanup {
         let bytes = tokio::time::timeout(
             Duration::from_secs(30),
             tokio::task::spawn_blocking(move || {
-                measure_with_repositories(&measured_path, true, &allowed)
+                measure_with_repositories(&measured_path, true, &allowed, false)
             }),
         )
         .await
@@ -856,15 +956,15 @@ impl StorageCleanup {
         }
         let _lease = tokio::time::timeout(
             Duration::from_secs(30),
-            self.host.acquire_workspace_lease(path),
+            self.host.acquire_removal_permit(path),
         )
         .await
         .map_err(|_| Error::Refused("workspace is busy"))??;
         let latest = self.snapshot().await?;
         validate_cleanup_worktree(Path::new(&requested.0), &latest.managed_roots)?;
         validate_cleanup_worktree(path, &latest.managed_roots)?;
-        protect(&latest, path)?;
-        protect(&latest, Path::new(&requested.0))?;
+        protect(&latest, path, Some(project))?;
+        protect(&latest, Path::new(&requested.0), Some(project))?;
         if latest.settings != snapshot.settings
             || group.iter().any(|old| !latest.threads.contains(old))
             || latest
@@ -878,7 +978,9 @@ impl StorageCleanup {
                 })
                 .count()
                 != group.iter().filter(|t| !t.deleted).count()
-            || !latest.threads.contains(current)
+            || ancestors
+                .iter()
+                .any(|ancestor| !latest.threads.contains(ancestor))
         {
             return Err(Error::Refused(
                 "thread activity or settings changed since check",
@@ -895,17 +997,28 @@ impl StorageCleanup {
         let admin = read_git(&git, &["rev-parse", "--absolute-git-dir"]).await?;
         let force = submodule_removal(&git, rules, Path::new(admin.trim())).await?;
         if !dry_run {
+            // Git's final status and submodule inspection can outlast a settings change.
+            let settings = tokio::time::timeout(Duration::from_secs(30), self.host.settings())
+                .await
+                .map_err(|_| Error::Refused("cleanup settings are unavailable"))??;
+            if resolve_rules(&settings, &owner.shell.project_id)? != *rules
+                || settings.auto_resume_limited_threads
+                    != snapshot.settings.auto_resume_limited_threads
+                || settings.snooze_limited_threads != snapshot.settings.snooze_limited_threads
+            {
+                return Err(Error::Refused("cleanup settings changed since check"));
+            }
             if rules.worktree_keep_when == WorktreeKeepWhen::TrackedChanges {
                 read_git(&git, &["clean", "-ffdx"]).await?;
             }
             if force {
                 local_changes(&git, rules).await?;
             }
-            t3_git::Git::new(&owner.project_path)
+            t3_git::Git::new(project)
                 .remove_worktree(path, force)
                 .await
                 .map_err(|_| Error::Service)?;
-            self.host.invalidate_git_status(&owner.project_path).await;
+            self.host.invalidate_git_status(project).await;
         }
         Ok((
             if dry_run {
@@ -963,6 +1076,7 @@ impl StorageCleanup {
         &self,
         snapshot: &CleanupSnapshot,
         group: &[&CleanupThread],
+        ancestors: &[&CleanupThread],
         path: &Path,
         requested: &Path,
         rules: &WorktreeCleanupRules,
@@ -970,18 +1084,15 @@ impl StorageCleanup {
         reason: String,
     ) -> Result<(String, Option<u64>)> {
         self.scratch_keep(path, requested, rules, group).await?;
-        protect(snapshot, path)?;
-        protect(snapshot, requested)?;
+        protect(snapshot, path, None)?;
+        protect(snapshot, requested, None)?;
         let inspect = || {
             let path = path.to_owned();
             async move {
                 tokio::time::timeout(
                     Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
-                        if path.join(".git").exists() {
-                            return Err(Error::Refused("contains a nested Git repository"));
-                        }
-                        measure_worktree(&path, true)
+                        measure_with_repositories(&path, true, &[], true)
                     }),
                 )
                 .await
@@ -995,15 +1106,15 @@ impl StorageCleanup {
         }
         let _lease = tokio::time::timeout(
             Duration::from_secs(30),
-            self.host.acquire_workspace_lease(path),
+            self.host.acquire_removal_permit(path),
         )
         .await
         .map_err(|_| Error::Refused("workspace is busy"))??;
         inspect().await?;
         self.scratch_keep(path, requested, rules, group).await?;
         let latest = self.snapshot().await?;
-        protect(&latest, path)?;
-        protect(&latest, requested)?;
+        protect(&latest, path, None)?;
+        protect(&latest, requested, None)?;
         let members = latest
             .threads
             .iter()
@@ -1016,6 +1127,9 @@ impl StorageCleanup {
             })
             .count();
         if latest.settings != snapshot.settings
+            || ancestors
+                .iter()
+                .any(|ancestor| !latest.threads.contains(ancestor))
             || group.iter().any(|t| !latest.threads.contains(t))
             || members != group.len()
         {
@@ -1048,6 +1162,12 @@ impl StorageCleanup {
             .filter_map(|t| t.shell.worktree_path.as_ref())
             .map(|p| dunce::canonicalize(&p.0).unwrap_or_else(|_| PathBuf::from(&p.0)))
             .collect();
+        let all_projects = || {
+            snapshot
+                .project_roots
+                .iter()
+                .chain(&snapshot.deleted_project_roots)
+        };
         let mut registered: Option<Vec<PathBuf>> = None;
         let mut candidates = BTreeSet::new();
         let scratch_root = self.scratch_root();
@@ -1061,7 +1181,7 @@ impl StorageCleanup {
                     .is_ok_and(|t| t.is_dir() && !t.is_symlink())
                     && dunce::canonicalize(&path).ok().as_ref() == Some(&path)
                     && !referenced.iter().any(|p| occupies(&path, p))
-                    && !snapshot.project_roots.iter().any(|p| occupies(&path, p))
+                    && !all_projects().any(|p| occupies(&path, p))
                     && child
                         .metadata()
                         .ok()
@@ -1093,10 +1213,7 @@ impl StorageCleanup {
                     if !metadata.is_dir()
                         || metadata.file_type().is_symlink()
                         || dunce::canonicalize(&path).ok().as_ref() != Some(&path)
-                        || snapshot
-                            .project_roots
-                            .iter()
-                            .any(|p| occupies(p, &path) && !root.starts_with(p))
+                        || all_projects().any(|p| occupies(p, &path) && !root.starts_with(p))
                     {
                         continue;
                     }
@@ -1114,7 +1231,7 @@ impl StorageCleanup {
                     if !path.join(".git").exists() {
                         if registered.is_none() {
                             let mut paths = Vec::new();
-                            for project in &snapshot.project_roots {
+                            for project in all_projects() {
                                 if let Ok(worktrees) =
                                     t3_git::Git::new(project).list_worktrees().await
                                 {
@@ -1143,7 +1260,7 @@ impl StorageCleanup {
                         if referenced
                             .iter()
                             .any(|p| p == &path || p.starts_with(&path))
-                            || snapshot.project_roots.iter().any(|p| occupies(&path, p))
+                            || all_projects().any(|p| occupies(&path, p))
                         {
                             continue;
                         }
@@ -1265,8 +1382,14 @@ fn path_key(path: &Path) -> PathBuf {
         path
     }
 }
-fn protect(snapshot: &CleanupSnapshot, path: &Path) -> Result<()> {
-    if snapshot.project_roots.iter().any(|p| occupies(path, p)) {
+fn protect(snapshot: &CleanupSnapshot, path: &Path, owner_project: Option<&Path>) -> Result<()> {
+    if snapshot
+        .project_roots
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(owner_project)
+        .any(|p| occupies(path, p))
+    {
         return Err(Error::Refused("contains a project checkout"));
     }
     if snapshot.terminal_paths.iter().any(|p| occupies(path, p)) {
@@ -1697,12 +1820,13 @@ async fn submodule_removal(
     Ok(force)
 }
 pub fn measure_worktree(root: &Path, inspect_repositories: bool) -> Result<u64> {
-    measure_with_repositories(root, inspect_repositories, &[])
+    measure_with_repositories(root, inspect_repositories, &[], false)
 }
 fn measure_with_repositories(
     root: &Path,
     inspect_repositories: bool,
     allowed: &[PathBuf],
+    plain_folder: bool,
 ) -> Result<u64> {
     if network_path(root) {
         return Err(Error::Refused("network paths cannot be inspected"));
@@ -1749,12 +1873,18 @@ fn measure_with_repositories(
                 .collect::<std::io::Result<Vec<_>>>()
                 .map_err(|_| Error::Io)?;
             if inspect_repositories
-                && path != root
+                && (plain_folder || path != root)
                 && !allowed.contains(&path)
-                && (path.join(".git").exists()
-                    || path.join("HEAD").exists()
-                        && path.join("objects").exists()
-                        && path.join("refs").exists())
+                && {
+                    let has = |marker: &str| {
+                        names.iter().any(|entry| {
+                            entry
+                                .file_name()
+                                .eq_ignore_ascii_case(std::ffi::OsStr::new(marker))
+                        })
+                    };
+                    has(".git") || has("head") && has("objects") && has("refs")
+                }
             {
                 return Err(Error::Refused("contains a nested Git repository"));
             }

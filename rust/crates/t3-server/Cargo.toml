@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 [features]
 # The assembled domain services the `t3` binary serves.
-default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp", "textgen-native"]
+default = ["local-services", "workspace", "terminal", "git", "scheduler", "usage", "orchestration", "host", "project", "device", "providers", "preview", "cloud", "forge", "pull-requests", "textgen", "git-actions", "mcp", "textgen-native", "storage-cleanup"]
 local-services = [
     "dep:t3-auth",
     "dep:t3-host",
@@ -29,6 +29,7 @@ terminal = ["dep:t3-terminal"]
 scheduler = ["dep:t3-scheduler", "dep:async-trait", "dep:t3-shared"]
 usage = ["dep:t3-usage", "dep:sysinfo"]
 host = ["dep:t3-host", "dep:sysinfo", "dep:async-trait"]
+storage-cleanup = ["host", "orchestration", "local-services", "terminal"]
 cloud = ["dep:t3-cloud", "host", "local-services"]
 device = ["dep:t3-device", "dep:t3-provider", "dep:t3-process", "local-services", "workspace", "dep:async-trait"]
 preview = ["dep:t3-preview", "local-services", "dep:sysinfo"]
