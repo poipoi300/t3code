@@ -16,11 +16,10 @@ use icu::datetime::DateTimeFormatterPreferences;
 use icu::datetime::fieldsets;
 #[cfg(feature = "icu-fallback")]
 use icu::datetime::options::TimePrecision;
+#[cfg(feature = "icu-fallback")]
+use icu::decimal::CompactDecimalFormatter;
 use icu::decimal::DecimalFormatter;
 use icu::decimal::options::{DecimalFormatterOptions, GroupingStrategy};
-#[cfg(feature = "icu-fallback")]
-use icu::experimental::compactdecimal::CompactDecimalFormatter;
-use icu::experimental::dimension::currency::CurrencyCode;
 use icu::experimental::dimension::currency::formatter::CurrencyFormatter;
 use icu::experimental::dimension::percent::formatter::PercentFormatter;
 use icu::list::ListFormatter;
@@ -28,10 +27,10 @@ use icu::list::options::{ListFormatterOptions, ListLength};
 use icu::locale::Locale;
 #[cfg(feature = "icu-fallback")]
 use icu::locale::preferences::extensions::unicode::keywords::HourCycle;
+use icu::locale::preferences::extensions::unicode::keywords::currency;
 use icu::plurals::{PluralCategory, PluralOperands, PluralRules};
 #[cfg(feature = "icu-fallback")]
 use icu::time::{DateTime, Time};
-use tinystr::tinystr;
 
 use crate::intl_pattern::{self, Clock};
 use crate::message::{PluralKind, Runtime};
@@ -279,7 +278,13 @@ impl Formats {
     fn compact_icu4x_decimal(&self, mut decimal: Decimal) -> String {
         decimal.trim_end();
         match CompactDecimalFormatter::try_new_short((&self.locale).into(), Default::default()) {
-            Ok(formatter) => formatter.format_fixed_decimal(&decimal).to_string(),
+            Ok(formatter) => {
+                // ICU 2.1 rounded subunit amounts to a whole number in the compact fallback.
+                if decimal.absolute.nonzero_magnitude_start() < 0 {
+                    decimal.round(0);
+                }
+                formatter.format(&decimal).to_string()
+            }
             Err(_) => decimal.to_string(),
         }
     }
@@ -334,17 +339,17 @@ impl Formats {
         decimal.trim_end();
         decimal.pad_end(-2);
         let code = match code.to_ascii_uppercase().as_str() {
-            "USD" => CurrencyCode(tinystr!(3, "USD")),
-            "EUR" => CurrencyCode(tinystr!(3, "EUR")),
+            "USD" => currency!("usd"),
+            "EUR" => currency!("eur"),
             _ => return decimal.to_string(),
         };
         // ICU4X puts the minus after the symbol (`$-1.00`); every shipped locale writes it first.
         let negative = decimal.sign() == fixed_decimal::Sign::Negative;
         let mut magnitude = decimal.clone();
         magnitude.set_sign(fixed_decimal::Sign::None);
-        match CurrencyFormatter::try_new((&self.locale).into(), Default::default()) {
+        match CurrencyFormatter::try_new_symbol((&self.locale).into(), code, Default::default()) {
             Ok(formatter) => {
-                let text = formatter.format_fixed_decimal(&magnitude, code).to_string();
+                let text = formatter.format_fixed_decimal(&magnitude).to_string();
                 if negative { format!("-{text}") } else { text }
             }
             Err(_) => decimal.to_string(),
@@ -370,6 +375,11 @@ impl Formats {
 
     /// `new Intl.PluralRules(locale, { type }).select(value)`.
     pub fn plural_category(&self, kind: PluralKind, value: f64) -> &'static str {
+        // The reference runtime uses CLDR 48, in which every Spanish ordinal is "other".
+        // CLDR 49 added an ordinal "one" rule for Spanish.
+        if kind == PluralKind::Ordinal && self.locale.id.language.as_str() == "es" {
+            return "other";
+        }
         let prefs = (&self.locale).into();
         let rules = match kind {
             PluralKind::Cardinal => PluralRules::try_new_cardinal(prefs),

@@ -138,4 +138,9 @@ fn icu4x_alone_compact_numbers() {
         100.0 * ok as f64 / total as f64
     );
     assert!(ok as f64 / total as f64 >= 0.60);
+
+    // A host locale without a generated table uses the compact fallback.
+    let fallback = Formats::new("en-CA");
+    assert_eq!(fallback.compact(0.2222, 0), "0");
+    assert_eq!(fallback.compact(-0.8, 0), "-1");
 }
