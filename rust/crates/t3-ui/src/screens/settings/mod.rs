@@ -20,6 +20,7 @@ pub mod providers;
 pub mod scheduled_tasks;
 pub mod search;
 pub mod secrets;
+mod setting_controls;
 pub mod shell;
 pub mod snooze;
 pub mod snap_shot;

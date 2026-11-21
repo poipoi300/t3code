@@ -87,6 +87,12 @@ pub trait SettingsService {
     ) -> Option<SettingsText>;
     fn last_enabled_grouping_mode(&self) -> LocalBoxFuture<'static, &'static str>;
     fn remember_enabled_grouping_mode(&self, mode: &str) -> LocalBoxFuture<'static, ()>;
+    fn read_device_preference(&self, key: &'static str) -> LocalBoxFuture<'static, Option<Value>>;
+    fn write_device_preference(
+        &self,
+        key: &'static str,
+        value: Value,
+    ) -> LocalBoxFuture<'static, ()>;
     fn search_availability(&self) -> SettingsSearchAvailability;
 }
 
@@ -449,6 +455,21 @@ impl SettingsContext {
         if let Some(runtime) = self.runtime.get() {
             let remember = runtime.0.remember_enabled_grouping_mode(mode);
             self.spawn(remember);
+        }
+    }
+
+    pub(super) fn read_device_preference(
+        self,
+        key: &'static str,
+    ) -> Option<LocalBoxFuture<'static, Option<Value>>> {
+        self.runtime
+            .get()
+            .map(|runtime| runtime.0.read_device_preference(key))
+    }
+
+    pub(super) fn write_device_preference(self, key: &'static str, value: Value) {
+        if let Some(runtime) = self.runtime.get() {
+            self.spawn(runtime.0.write_device_preference(key, value));
         }
     }
 
@@ -1168,18 +1189,21 @@ fn settings_page_container_plain(children: AnyElement) -> impl IntoElement {
 /// `SettingsPageContainer`: the scroll area, the scope sentence and the page's sections.
 pub fn settings_page_container(children: impl IntoElement) -> impl IntoElement {
     let context = use_settings();
-    scroll().app_class(tw("flex-1")).child(
-        view()
-            .on_layout(move |bounds: &Bounds<Points>| {
-                // The rows' container is the page column minus the page padding.
-                let _ = context.content_width.try_set(bounds.size.width.0);
-            })
-            .app_class(tw(
-                "mx-auto flex w-full max-w-4xl flex-col gap-6 px-5 pt-6 pb-12 sm:px-6 gap-8",
-            ))
-            .child(settings_scope_sentence(context))
-            .child(children),
-    )
+    scroll()
+        .test_id("settings-page-content")
+        .app_class(tw("flex-1"))
+        .child(
+            view()
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    // The rows' container is the page column minus the page padding.
+                    let _ = context.content_width.try_set(bounds.size.width.0);
+                })
+                .app_class(tw(
+                    "mx-auto flex w-full max-w-4xl flex-col gap-6 px-5 pt-6 pb-12 sm:px-6 gap-8",
+                ))
+                .child(settings_scope_sentence(context))
+                .child(children),
+        )
 }
 
 /// `useSettingsSearchTarget`: when a search jump names this anchor, scroll it to the middle,

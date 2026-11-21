@@ -12,6 +12,7 @@ use nsh_core::time::Clock;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
 use t3_client::ClientStore;
+use t3_client::testing::environment::FakeEnvironment;
 use t3_ui::runtime::Rt;
 use t3_ui::runtime::host::Started;
 use t3_ui::screens::settings::shell;
@@ -221,7 +222,6 @@ struct ConnectedProps {
 fn Connected(props: ConnectedProps) -> impl IntoElement {
     use futures::FutureExt;
     use t3_client::composition::{ClientRuntime, Spawner};
-    use t3_client::testing::environment::FakeEnvironment;
     use t3_client::types::EnvironmentId;
     use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
     theme::install(&theme::ThemeChoice::default());
@@ -292,6 +292,11 @@ fn Connected(props: ConnectedProps) -> impl IntoElement {
         });
     }
     let updates = signal(Vec::<serde_json::Value>::new());
+    let observed = server.clone();
+    // The phone dialog covers the outer fixture button.
+    on_key("ctrl+shift+u", move |_| {
+        updates.set(observed.calls("server.updateSettings"))
+    });
     view()
         .flex_1()
         .child(text(move || {

@@ -83,6 +83,19 @@ impl<P: Platform + Clone + 'static> SettingsService for SettingsBinding<P> {
     fn remember_enabled_grouping_mode(&self, mode: &str) -> LocalBoxFuture<'static, ()> {
         self.0.remember_enabled_grouping_mode(mode)
     }
+    fn read_device_preference(
+        &self,
+        key: &'static str,
+    ) -> LocalBoxFuture<'static, Option<serde_json::Value>> {
+        self.0.read_device_preference(key)
+    }
+    fn write_device_preference(
+        &self,
+        key: &'static str,
+        value: serde_json::Value,
+    ) -> LocalBoxFuture<'static, ()> {
+        self.0.write_device_preference(key, value)
+    }
     fn search_availability(&self) -> SettingsSearchAvailability {
         let environments = self.0.environments();
         SettingsSearchAvailability::from_environments(
