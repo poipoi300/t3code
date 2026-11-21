@@ -5,18 +5,23 @@
 //! descriptor** number, normally 3. `std::os::windows` knows handles, not CRT descriptors, and
 //! `GetStdHandle` only reaches stdin, stdout and stderr, so the CRT's own `_get_osfhandle` is the
 //! narrowest way to get from the number to the handle. The handle belongs to the CRT: this module
-//! duplicates it into a private non-inheritable handle and never closes the original (the Unix
-//! reader leaves its original open too).
+//! makes the original non-inheritable (so no process the server starts receives the bootstrap
+//! pipe, as `FD_CLOEXEC` does on Unix), duplicates it into a private non-inheritable handle and
+//! never closes the original (the Unix reader leaves its original open too).
 //!
 //! Invariants every `unsafe` block below relies on, repeated in its `SAFETY` comment:
-//! 1. The CRT-owned handle is only borrowed; no block closes it.
+//! 1. The CRT-owned handle is only borrowed; no block closes it. The one change made to it is
+//!    clearing its inherit flag.
 //! 2. The thread-local invalid-parameter handler is installed only around `_get_osfhandle` and is
 //!    restored on every path.
 //! 3. The duplicate is wrapped in an owner exactly once.
 //! 4. A read never blocks past the deadline: pipes are polled with `PeekNamedPipe` and read for at
 //!    most the byte count it reported, and each read's `OVERLAPPED`, event and buffer live on one
 //!    stack frame until the kernel is done with them (cancelled and drained on timeout).
-//! 5. Console, socket and unknown handle types are rejected, never treated as pipes.
+//! 5. Only disk files and pipes are read. A console or NUL (`FILE_TYPE_CHAR`) means no envelope, as a
+//!    tty or `/dev/null` does on Unix; an unknown type is rejected. `GetFileType` also reports a
+//!    socket as a pipe, which `PeekNamedPipe` then refuses, so it ends as a read failure and is
+//!    never read from.
 //! 6. No error, `Debug` output or log carries the payload, a handle value or OS error text.
 
 use std::{
@@ -28,9 +33,10 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{
         DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF,
-        ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        ERROR_INVALID_HANDLE, ERROR_IO_PENDING, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        SetHandleInformation, WAIT_OBJECT_0,
     },
-    Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType, ReadFile},
+    Storage::FileSystem::{FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType, ReadFile},
     System::{
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         Pipes::PeekNamedPipe,
@@ -41,7 +47,8 @@ use windows_sys::Win32::{
 /// Why no envelope could be read. Carries no payload, handle value or OS text.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Failure {
-    /// Console, socket or other handle type with no verified read semantics.
+    /// A handle type with no verified read semantics (neither a file, a pipe nor a character
+    /// device).
     UnsupportedHandle,
     Open,
     Read,
@@ -88,6 +95,8 @@ pub(super) fn read_first_line(
         // A file cannot block on a pipe writer, so the safe std reader suffices.
         FILE_TYPE_DISK => read_file(owned, max_bytes),
         FILE_TYPE_PIPE => read_pipe(&owned, deadline, max_bytes),
+        // NUL or a console: nothing will ever be written for us, like /dev/null or a tty.
+        FILE_TYPE_CHAR => Ok(None),
         _ => Err(Failure::UnsupportedHandle),
     }
 }
@@ -101,7 +110,8 @@ fn duplicate_inherited(fd: c_int) -> Result<Option<OwnedHandle>, Failure> {
     // between the two calls can return early or unwind.
     let previous =
         unsafe { _set_thread_local_invalid_parameter_handler(Some(ignore_invalid_parameter)) };
-    // SAFETY: any `c_int` is a valid argument; the call only reads CRT tables under the CRT lock.
+    // SAFETY: any `c_int` is a valid argument; the call only indexes the CRT's descriptor table
+    // (it takes no lock, and nothing else touches the table during startup).
     let raw = unsafe { _get_osfhandle(fd) };
     // SAFETY: restores exactly the handler the first call returned (invariant 2).
     unsafe { _set_thread_local_invalid_parameter_handler(previous) };
@@ -110,6 +120,15 @@ fn duplicate_inherited(fd: c_int) -> Result<Option<OwnedHandle>, Failure> {
         return Ok(None);
     }
     let source = raw as HANDLE;
+    // SAFETY: `source` came from the CRT and is only borrowed (invariant 1). Clearing its inherit
+    // flag changes no ownership: processes the server starts later do not receive the bootstrap
+    // pipe, as `FD_CLOEXEC` does on Unix. A stale slot reports an invalid handle: no envelope.
+    if unsafe { SetHandleInformation(source, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(code) if code as u32 == ERROR_INVALID_HANDLE => Ok(None),
+            _ => Err(Failure::Open),
+        };
+    }
     let mut duplicate: HANDLE = INVALID_HANDLE_VALUE;
     // SAFETY: `source` came from the CRT and is only borrowed: `DuplicateHandle` does not close it
     // (invariant 1). Both process arguments are this process's pseudo-handle, `duplicate` is a
@@ -382,6 +401,110 @@ mod tests {
         for fd in [-1, 999_999, i64::from(i32::MAX), i64::MAX] {
             assert_eq!(read_first_line(fd, LONG, MAX).unwrap(), None);
         }
+    }
+
+    /// The read end of a named pipe opened for overlapped I/O (the way Node can pass fd 3 with
+    /// `'overlapped'`), as a CRT descriptor, and its write end as a `File`.
+    fn overlapped_pipe() -> (std::fs::File, Descriptor) {
+        use windows_sys::Win32::{
+            Foundation::GENERIC_WRITE,
+            Storage::FileSystem::{
+                CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_INBOUND,
+            },
+            System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT},
+        };
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let name = format!(
+            r"\\.\pipe\t3-bootstrap-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated name that outlives the call; the security attributes
+        // are null (defaults).
+        let server = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_ne!(server, INVALID_HANDLE_VALUE);
+        // SAFETY: the same NUL-terminated name; the pipe exists, so this connects its client end.
+        let client = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(client, INVALID_HANDLE_VALUE);
+        // SAFETY: `client` was just created and nothing else owns it; the `File` closes it once.
+        let writer = unsafe { std::fs::File::from_raw_handle(client) };
+        // SAFETY: `_open_osfhandle` takes over `server`; the CRT is its only closer.
+        let fd = unsafe { _open_osfhandle(server as isize, 0) };
+        assert!(fd >= 0);
+        (writer, Descriptor(fd))
+    }
+
+    #[test]
+    fn an_overlapped_pipe_delivers_a_line_and_a_silent_writer_ends_within_the_second() {
+        let (mut writer, fd) = overlapped_pipe();
+        writer.write_all(b"{\"a\":1}\n").unwrap();
+        assert_eq!(read(&fd, LONG, MAX).unwrap().unwrap(), b"{\"a\":1}");
+        let (_silent_writer, fd) = overlapped_pipe();
+        let started = Instant::now();
+        assert_eq!(read(&fd, Duration::from_secs(1), MAX).unwrap(), None);
+        // The bound is one second plus polling; five seconds only guards against a hang.
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_overlapped_pipe_with_a_partial_line_times_out_without_an_error() {
+        let (mut writer, fd) = overlapped_pipe();
+        writer.write_all(b"partial").unwrap();
+        assert_eq!(read(&fd, Duration::from_millis(100), MAX).unwrap(), None);
+    }
+
+    #[test]
+    fn nul_and_the_read_leave_the_original_handle_non_inheritable() {
+        use windows_sys::Win32::Foundation::{GetHandleInformation, SetHandleInformation};
+        // NUL is a character device: no envelope.
+        let nul = std::fs::File::open("NUL").unwrap();
+        // SAFETY: `_open_osfhandle` takes over the handle; `into_raw_handle` releases the `File`.
+        let fd = unsafe {
+            use std::os::windows::io::IntoRawHandle;
+            _open_osfhandle(nul.into_raw_handle() as isize, 0)
+        };
+        let nul = Descriptor(fd);
+        assert_eq!(read(&nul, LONG, MAX).unwrap(), None);
+
+        let (mut writer, fd) = pipe();
+        // SAFETY: the CRT owns the descriptor's handle for the life of `fd`; this only sets a flag.
+        let source = unsafe { _get_osfhandle(fd.0) } as HANDLE;
+        // SAFETY: `source` is that live handle.
+        let set = unsafe { SetHandleInformation(source, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        assert_ne!(set, 0);
+        writer.write_all(b"{}\n").unwrap();
+        assert_eq!(read(&fd, LONG, MAX).unwrap().unwrap(), b"{}");
+        let mut flags = 0u32;
+        // SAFETY: `source` is still live; `flags` is a valid out pointer.
+        let got = unsafe { GetHandleInformation(source, &mut flags) };
+        assert_ne!(got, 0);
+        assert_eq!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "the bootstrap pipe stayed inheritable"
+        );
     }
 
     #[test]
