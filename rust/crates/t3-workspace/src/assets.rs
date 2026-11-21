@@ -186,6 +186,7 @@ pub trait ExternalAssets: Send + Sync {
 }
 #[derive(Default)]
 pub struct AssetContext<'a> {
+    pub attachment_identity: Option<FileIdentity>,
     pub workspace_root: Option<&'a Path>,
     pub project_favicon_path: Option<&'a str>,
     pub checkout: Checkout,
@@ -263,6 +264,13 @@ impl AssetAccess {
                         .ok_or(Error::AssetDenied)?;
                 let extension = attachments::parse_id(&attachment_id.0).and_then(|p| p.extension);
                 let identity = opened.identity.clone();
+                if context
+                    .attachment_identity
+                    .as_ref()
+                    .is_some_and(|expected| *expected != identity)
+                {
+                    return Err(Error::AssetDenied);
+                }
                 if extension.is_none()
                     && matches!(
                         self::extension(&path.to_string_lossy()).as_str(),

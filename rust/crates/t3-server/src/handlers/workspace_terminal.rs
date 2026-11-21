@@ -155,7 +155,7 @@ pub fn register_workspace(
         let now = clock(&ctx.services);
         async move {
             service
-                .create_url(input, now)
+                .create_url_for(Some(&ctx), input, now)
                 .await
                 .map_err(|error| Failure::Typed(WsAssetsCreateUrlError::AssetAccessError(error)))
         }

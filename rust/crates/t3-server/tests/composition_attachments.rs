@@ -437,6 +437,7 @@ impl Server {
             .map(|entries| {
                 entries
                     .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|kind| !kind.is_dir()))
                     .map(|e| e.file_name().to_string_lossy().into_owned())
                     .collect()
             })
@@ -746,7 +747,7 @@ async fn claims_are_once_only_and_only_by_the_uploading_session_for_its_own_thre
             vec![image(&linked)],
         )
         .await,
-        "Failed to claim attachment",
+        "attachment not found",
     );
     assert!(
         handed.try_recv().is_err(),
@@ -1017,5 +1018,128 @@ async fn overlapping_sends_from_one_session_claim_one_copy() {
         exits => panic!("expected one successful send: {exits:?}"),
     };
     assert_eq!(handed.recv().await.unwrap().thread, winner);
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn previews_require_a_pending_owner_or_a_readable_thread_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, mut delivered) = mpsc::unbounded_channel();
+    let server = start(temp.path(), tx).await;
+    let (mut owner, mut owner_client) = server.socket(&server.admin).await;
+    let id = server.upload(&mut owner, &mut owner_client, "a.png").await;
+    let resource = |id: &str| json!({"resource":{"_tag":"attachment","attachmentId":id}});
+    ok(unary(
+        &mut owner,
+        &mut owner_client,
+        "assets.createUrl",
+        resource(&id),
+    )
+    .await);
+    let reader = server.cookie(&["orchestration:read"]).await;
+    let (mut reader, mut client) = server.socket(&reader).await;
+    let missing = "pending-00000000-0000-4000-8000-000000000001";
+    let stray = "thread-a-00000000-0000-4000-8000-000000000002";
+    std::fs::write(server.attachments.join(format!("{stray}.png")), PNG).unwrap();
+    for candidate in [missing, &id, stray] {
+        let error = failure(
+            unary(
+                &mut reader,
+                &mut client,
+                "assets.createUrl",
+                resource(candidate),
+            )
+            .await,
+        );
+        assert_eq!(error["_tag"], "AssetAttachmentNotFoundError", "{error}");
+    }
+    create_thread(&mut owner, &mut owner_client, THREAD).await;
+    ok(send(
+        &mut owner,
+        &mut owner_client,
+        THREAD,
+        "shared-preview",
+        vec![image(&id)],
+    )
+    .await);
+    let record = delivered.recv().await.unwrap();
+    let claimed = record.attachment["id"].as_str().unwrap();
+    ok(unary(
+        &mut reader,
+        &mut client,
+        "assets.createUrl",
+        resource(claimed),
+    )
+    .await);
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn claim_metadata_must_match_the_upload() {
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let server = start(temp.path(), tx).await;
+    let (mut socket, mut client) = server.socket(&server.admin).await;
+    create_thread(&mut socket, &mut client, THREAD).await;
+    let id = server.upload(&mut socket, &mut client, "a.png").await;
+    for (key, field, replacement) in [
+        ("mime", "mimeType", json!("image/jpeg")),
+        ("kind", "type", json!("file")),
+        ("size", "sizeBytes", json!(1)),
+    ] {
+        let mut attachment = image(&id);
+        attachment[field] = replacement;
+        assert!(
+            matches!(
+                send(&mut socket, &mut client, THREAD, key, vec![attachment]).await,
+                Exit::Failure { .. }
+            ),
+            "accepted changed {field}"
+        );
+    }
+    ok(send(
+        &mut socket,
+        &mut client,
+        THREAD,
+        "original",
+        vec![image(&id)],
+    )
+    .await);
+    server.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn discarding_an_unspent_url_revokes_http_upload() {
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let server = start(temp.path(), tx).await;
+    let (mut socket, mut client) = server.socket(&server.admin).await;
+    let grant = ok(unary(
+        &mut socket,
+        &mut client,
+        "attachments.createUploadUrl",
+        json!({"type":"image","name":"pixel.png","mimeType":"image/png","sizeBytes":PNG.len()}),
+    )
+    .await);
+    ok(unary(
+        &mut socket,
+        &mut client,
+        "attachments.delete",
+        json!({"attachmentId":grant["attachmentId"]}),
+    )
+    .await);
+    let response = server
+        .http
+        .post(format!(
+            "{}{}",
+            server.base,
+            grant["relativeUrl"].as_str().unwrap()
+        ))
+        .body(PNG)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    assert!(server.stored().is_empty());
     server.runtime.shutdown().await.unwrap();
 }

@@ -428,7 +428,6 @@ mod native {
             host: ClaudeHostOptions {
                 home_directory: Some(host.home.clone()),
                 settings_directory: Some(claude_home.clone()),
-                attachment_directory: Some(host.attachments.clone()),
                 t3_mcp: host.t3_mcp.clone(),
                 compile_model: Some(claude_model_compiler(
                     host.manifest.clone(),
@@ -505,31 +504,42 @@ mod native {
         ) -> ProviderResult<Option<ResolvedCodexAttachment>> {
             use base64::Engine;
             use t3_contracts::chat_attachment::ChatAttachment;
-            let Some(path) = self.0.path(attachment) else {
+            let Some(original) = self.0.path(attachment) else {
                 return Ok(None);
             };
-            let image_data_url = match attachment {
-                ChatAttachment::Image(image) => match tokio::fs::read(&path).await {
-                    Ok(bytes) => Some(format!(
-                        "data:{};base64,{}",
-                        image.mime_type,
-                        base64::engine::general_purpose::STANDARD.encode(bytes)
-                    )),
-                    Err(_) => {
-                        return Err(ProviderError::Protocol {
-                            reason: Some(ProtocolReason::AttachmentUnreadable),
-                            detail: format!("Failed to read attachment '{}'.", image.id),
-                            payload: None,
-                        });
+            let files = self.0.clone();
+            let attachment = attachment.clone();
+            tokio::task::spawn_blocking(move || {
+                let unreadable = || ProviderError::Protocol {
+                    reason: Some(ProtocolReason::AttachmentUnreadable),
+                    detail: "Failed to read saved attachment.".into(),
+                    payload: None,
+                };
+                let path = files.reference(&original).ok_or_else(unreadable)?;
+                let image_data_url = match &attachment {
+                    ChatAttachment::Image(image) => {
+                        let bytes = files
+                            .read_reference(&path, t3_workspace::attachments::IMAGE_MAX_BYTES)
+                            .ok_or_else(unreadable)?;
+                        Some(format!(
+                            "data:{};base64,{}",
+                            image.mime_type,
+                            base64::engine::general_purpose::STANDARD.encode(bytes)
+                        ))
                     }
-                },
-                _ => None,
-            };
-            Ok(Some(ResolvedCodexAttachment {
-                extracted_text_path: self.0.extracted_text_path(&path),
-                path,
-                image_data_url,
-            }))
+                    _ => None,
+                };
+                Ok(Some(ResolvedCodexAttachment {
+                    extracted_text_path: files.extracted_text_path(&original),
+                    path,
+                    image_data_url,
+                }))
+            })
+            .await
+            .map_err(|e| ProviderError::Operation {
+                operation: ProviderOperation::Start,
+                detail: e.to_string(),
+            })?
         }
     }
 

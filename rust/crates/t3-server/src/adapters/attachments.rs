@@ -83,7 +83,7 @@ mod claims {
     };
     use t3_contracts::{
         assets::{AttachmentCreateUploadUrlInput, AttachmentCreateUploadUrlResult},
-        chat_attachment::{ChatAttachment, PROVIDER_SEND_TURN_MAX_ATTACHMENTS},
+        chat_attachment::ChatAttachment,
     };
     use t3_orchestration::ports::runs_ingestion::thread_message_intake::{
         AttachmentReference, AttachmentReferenceResolver,
@@ -101,38 +101,6 @@ mod claims {
     };
     use t3_workspace::{attachments::AttachmentStore, contained_files::ContainedFiles};
 
-    /// Upload URLs one issuer may hold unclaimed at a time: one message's worth.
-    const MAX_PENDING_PER_ISSUER: usize = PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
-    /// An issued URL counts against its issuer until the sweep could have removed its upload:
-    /// 24 h after an upload made up to one URL lifetime after issue.
-    const ISSUE_RECORD_TTL_MS: u64 =
-        24 * 60 * 60 * 1000 + t3_contracts::assets::ATTACHMENT_UPLOAD_URL_TTL_MS;
-
-    struct Issued {
-        issuer: Principal,
-        issued_ms: u64,
-        claimed: bool,
-    }
-
-    /// Per-issuer allowance. The sidecars supply durable claim authority.
-    /// This lock serializes caller decisions across intakes.
-    #[derive(Default)]
-    struct Ledger {
-        issued: HashMap<String, Issued>,
-    }
-
-    impl Ledger {
-        fn prune(&mut self, now: u64) {
-            self.issued
-                .retain(|_, entry| now.saturating_sub(entry.issued_ms) <= ISSUE_RECORD_TTL_MS);
-        }
-        fn mark(&mut self, id: &str, claimed: bool) {
-            if let Some(entry) = self.issued.get_mut(id) {
-                entry.claimed = claimed;
-            }
-        }
-    }
-
     #[derive(Debug, thiserror::Error)]
     pub enum UploadRefusal {
         #[error("too many uploads are waiting to be sent; send or remove some first")]
@@ -145,7 +113,7 @@ mod claims {
     pub struct AttachmentsAdapter {
         store: AttachmentStore,
         claims: AttachmentClaimService,
-        ledger: Arc<tokio::sync::Mutex<Ledger>>,
+        ledger: Arc<tokio::sync::Mutex<()>>,
         projections: Arc<OnceLock<Arc<dyn ProjectionReader>>>,
         principal: Option<Principal>,
         // Only this intake can roll back its copies. Accepted entries die with the request.
@@ -155,10 +123,11 @@ mod claims {
 
     impl AttachmentsAdapter {
         pub fn new(store: AttachmentStore, options: AttachmentOptions) -> Arc<Self> {
-            let claims = AttachmentClaimService::with_copy_file(
+            let claims = AttachmentClaimService::with_delivery(
                 store.base.clone(),
                 Arc::new(NoDocumentText),
-                Arc::new(ContainedCopy(ContainedFiles::new(store.base.clone()))),
+                Arc::new(ContainedCopy(store.clone())),
+                store.delivery.clone(),
             );
             Arc::new(Self {
                 store,
@@ -195,30 +164,13 @@ mod claims {
             issuer: Principal,
             input: AttachmentCreateUploadUrlInput,
         ) -> Result<AttachmentCreateUploadUrlResult, UploadRefusal> {
-            let now = self.now();
-            let mut ledger = self.ledger.lock().await;
-            ledger.prune(now);
-            let outstanding = ledger
-                .issued
-                .values()
-                .filter(|entry| entry.issuer == issuer && !entry.claimed)
-                .count();
-            if outstanding >= MAX_PENDING_PER_ISSUER {
-                return Err(UploadRefusal::TooMany);
-            }
-            let result = self
-                .store
-                .issue_owned_upload(input, now, Some(issuer.record()))
-                .await?;
-            ledger.issued.insert(
-                result.attachment_id.0.clone(),
-                Issued {
-                    issuer,
-                    issued_ms: now,
-                    claimed: false,
-                },
-            );
-            Ok(result)
+            self.store
+                .issue_owned_upload(input, self.now(), Some(issuer.record()))
+                .await
+                .map_err(|error| match error {
+                    t3_workspace::Error::Upload { status: 429, .. } => UploadRefusal::TooMany,
+                    error => error.into(),
+                })
         }
 
         /// `attachments.delete`: only the owner removes its pending upload; anything else is a
@@ -239,22 +191,9 @@ mod claims {
             issuer: &Principal,
             attachment_id: &str,
         ) -> Result<bool, t3_workspace::Error> {
-            let mut ledger = self.ledger.lock().await;
-            let recorded = self.store.owner(attachment_id).await;
-            if let Some(record) = recorded {
-                if record.claimed || record.owner != issuer.record() {
-                    return Ok(false);
-                }
-                self.store.delete_pending(attachment_id).await?;
-            } else if !ledger
-                .issued
-                .get(attachment_id)
-                .is_some_and(|entry| entry.issuer == *issuer && !entry.claimed)
-            {
-                return Ok(false);
-            }
-            ledger.issued.remove(attachment_id);
-            Ok(true)
+            self.store
+                .discard_owned(attachment_id, &issuer.record())
+                .await
         }
 
         async fn thread_attachments(
@@ -358,7 +297,7 @@ mod claims {
                 .filter(|a| attachment_is_pending_upload(a))
                 .map(|a| attachment_id(a).to_owned())
                 .collect();
-            let mut ledger = self.ledger.lock().await;
+            let ledger = self.ledger.lock().await;
             for attachment in attachments
                 .iter()
                 .filter(|a| attachment_is_pending_upload(a))
@@ -375,7 +314,11 @@ mod claims {
                 } else {
                     self.store.owner(id).await
                 };
-                if record.is_none_or(|record| record.owner != claimer.record() || record.claimed) {
+                if record.is_none_or(|record| {
+                    record.owner != claimer.record()
+                        || record.claimed
+                        || !record.matches_attachment(attachment)
+                }) {
                     return Err(claim_error(format!(
                         "Attachment '{}' cannot be sent: attachment not found (removed or expired).",
                         attachment_name(attachment)
@@ -383,7 +326,6 @@ mod claims {
                 }
             }
             self.set_claimed(&pending, true).await?;
-            pending.iter().for_each(|id| ledger.mark(id, true));
             drop(ledger);
             match self
                 .claims
@@ -402,9 +344,8 @@ mod claims {
                     Ok(claimed)
                 }
                 Err(error) => {
-                    let mut ledger = self.ledger.lock().await;
+                    let _ledger = self.ledger.lock().await;
                     let _ = self.set_claimed(&pending, false).await;
-                    pending.iter().for_each(|id| ledger.mark(id, false));
                     Err(error)
                 }
             }
@@ -456,14 +397,13 @@ mod claims {
         /// A rollback reopens the uploads its copies came from.
         async fn release_claimed_paths(&self, paths: Vec<PathBuf>) -> RuntimeResult<()> {
             {
-                let mut ledger = self.ledger.lock().await;
+                let _ledger = self.ledger.lock().await;
                 let mut copies = self.copies.lock().await;
                 let reopened: Vec<String> = paths
                     .iter()
                     .filter_map(|path| copies.remove(path))
                     .collect();
                 let _ = self.set_claimed(&reopened, false).await;
-                reopened.iter().for_each(|id| ledger.mark(id, false));
             }
             self.claims.release_claimed_paths(paths).await
         }
@@ -501,18 +441,20 @@ mod claims {
             let path = attachment_path(&base, attachment)
                 .ok_or_else(|| claim_error("Invalid attachment reference."))?;
             let document = matches!(attachment, ChatAttachment::File(_));
+            let delivery = self.store.delivery.clone();
             tokio::task::spawn_blocking(move || {
-                let files = ContainedFiles::new(base);
-                checked_source(&files, &path).map_err(|_| {
+                let saved = delivery.reference(&path).map_err(|_| {
                     claim_error("Attachment is no longer available. Attach it again.")
                 })?;
-                let mut text = path.as_os_str().to_owned();
-                text.push(".txt");
-                let text = PathBuf::from(text);
-                let extracted_path =
-                    (document && checked_source(&files, &text).is_ok()).then_some(text);
+                let extracted_path = if document {
+                    let mut text = path.into_os_string();
+                    text.push(".txt");
+                    delivery.reference(Path::new(&text)).ok()
+                } else {
+                    None
+                };
                 Ok(AttachmentReference {
-                    path,
+                    path: saved,
                     extracted_path,
                 })
             })
@@ -521,24 +463,24 @@ mod claims {
         }
     }
 
-    fn checked_source(
+    fn checked_stat(
         files: &ContainedFiles,
         path: &Path,
-    ) -> std::io::Result<t3_workspace::contained_files::ContainedFile> {
-        let source = files.open(&files.realpath(path)?)?;
+        source: &t3_workspace::contained_files::ContainedFile,
+    ) -> std::io::Result<t3_workspace::contained_files::FileStat> {
         let stat = source.stat()?;
-        if !stat.regular || files.lstat_identity(path)? != stat.identity {
+        if !stat.regular || stat.links != 1 || files.lstat_identity(path)? != stat.identity {
             return Err(std::io::Error::other(
                 "attachment is not a regular file of its own",
             ));
         }
-        Ok(source)
+        Ok(stat)
     }
 
     /// Copies a pending upload through a handle opened under the attachments directory without
     /// following a link (`ContainedFiles`); the opened file must be the entry itself, and the
     /// destination is created exclusively.
-    struct ContainedCopy(ContainedFiles);
+    struct ContainedCopy(AttachmentStore);
 
     #[async_trait]
     impl CopyFile for ContainedCopy {
@@ -551,43 +493,39 @@ mod claims {
         }
     }
 
-    fn copy_contained(files: &ContainedFiles, from: &Path, to: &Path) -> std::io::Result<()> {
+    fn copy_contained(store: &AttachmentStore, from: &Path, to: &Path) -> std::io::Result<()> {
         use std::io::Write;
         const CHUNK: usize = 64 * 1024;
-        let source = checked_source(files, from)?;
-        let stat = source.stat()?;
-        let mut target = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(to)?;
-        let mut offset = 0;
-        let result = loop {
-            let chunk = source.read_at(offset, CHUNK)?;
-            if chunk.is_empty() {
-                break if offset == stat.size {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::other(
-                        "attachment changed while it was claimed",
-                    ))
-                };
-            }
-            offset += chunk.len() as u64;
-            if offset > stat.size {
-                break Err(std::io::Error::other(
-                    "attachment changed while it was claimed",
-                ));
-            }
-            target.write_all(&chunk)?;
-        };
-        match result.and_then(|()| target.sync_all()) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                drop(target);
-                let _ = std::fs::remove_file(to);
-                Err(error)
-            }
+        let files = ContainedFiles::new(store.base.clone());
+        let source = files.open(&files.realpath(from)?)?;
+        let stat = checked_stat(&files, from, &source)?;
+        if let Some(id) = from.file_stem().and_then(|s| s.to_str())
+            && t3_workspace::attachments::parse_id(id)
+                .is_some_and(|p| p.thread_segment == "pending")
+        {
+            store
+                .verify_claimed_source(from, id, &stat)
+                .map_err(std::io::Error::other)?;
         }
+        store
+            .delivery
+            .write_claim(to, |target| {
+                let mut offset = 0;
+                loop {
+                    let chunk = source.read_at(offset, CHUNK)?;
+                    if chunk.is_empty() && offset == stat.size {
+                        return Ok(());
+                    }
+                    offset += chunk.len() as u64;
+                    if chunk.is_empty() || offset > stat.size {
+                        return Err(std::io::Error::other(
+                            "attachment changed while it was claimed",
+                        ));
+                    }
+                    target.write_all(&chunk)?;
+                }
+            })
+            .map_err(std::io::Error::other)
     }
 
     fn system_ms() -> u64 {
@@ -601,6 +539,16 @@ mod claims {
     mod tests {
         use super::*;
 
+        #[test]
+        fn claim_rechecks_link_count_on_the_opened_handle() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("source.png");
+            std::fs::write(&path, b"image").unwrap();
+            let files = ContainedFiles::new(temp.path());
+            let handle = files.open(&files.realpath(&path).unwrap()).unwrap();
+            std::fs::hard_link(&path, temp.path().join("alias.png")).unwrap();
+            assert!(checked_stat(&files, &path, &handle).is_err());
+        }
         /// A claim reached without a caller in scope (a spawned task, a host path that never set
         /// one) is refused, never treated as anyone's.
         #[tokio::test]
@@ -628,6 +576,58 @@ mod claims {
                 refused.to_string().contains("only by the caller"),
                 "{refused}"
             );
+        }
+
+        #[tokio::test]
+        async fn stalled_upload_discard_does_not_block_other_issuers() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = AttachmentStore::new(
+                temp.path().into(),
+                t3_workspace::assets::AssetSigner::new(vec![3; 32]).unwrap(),
+                Arc::new(NoDocuments),
+            );
+            let adapter = AttachmentsAdapter::new(
+                store.clone(),
+                AttachmentOptions {
+                    clock: Some(Arc::new(|| 100)),
+                },
+            );
+            let image = || {
+                serde_json::from_value(serde_json::json!({"type":"image","name":"a.png","mimeType":"image/png","sizeBytes":1})).unwrap()
+            };
+            let owner = Principal::Session("a".into());
+            let grant = adapter
+                .create_upload_url(owner.clone(), image())
+                .await
+                .unwrap();
+            let url = grant.relative_url.0.rsplit('/').next().unwrap().to_owned();
+            let (writer, reader) = tokio::io::duplex(8);
+            let upload = tokio::spawn(async move { store.upload(&url, 101, reader).await });
+            let timeout = std::time::Duration::from_secs(5);
+            tokio::time::timeout(timeout, async {
+                while !std::fs::read_dir(temp.path())
+                    .unwrap()
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let discard = adapter.discard_pending(&owner, &grant.attachment_id.0);
+            tokio::pin!(discard);
+            assert!(futures::poll!(&mut discard).is_pending());
+            tokio::time::timeout(
+                timeout,
+                adapter.create_upload_url(Principal::Session("b".into()), image()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            drop(writer);
+            assert!(upload.await.unwrap().is_err());
+            assert!(discard.await.unwrap());
         }
 
         struct NoDocuments;

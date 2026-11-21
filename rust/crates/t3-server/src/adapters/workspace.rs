@@ -30,6 +30,13 @@ mod enabled {
             resource: &'a AssetResource,
         ) -> BoxFuture<'a, Result<Option<AssetWorkspaceContext>>>;
     }
+    /// Upload issuance and deletion require an authenticated attachment adapter.
+    /// ```compile_fail
+    /// let _ = t3_server::adapters::workspace::WorkspaceAdapter::create_upload_url;
+    /// ```
+    /// ```compile_fail
+    /// let _ = t3_server::adapters::workspace::WorkspaceAdapter::delete_attachment;
+    /// ```
     pub struct WorkspaceAdapter {
         pub filesystem: WorkspaceFileSystem,
         pub entries: WorkspaceEntries,
@@ -88,7 +95,44 @@ mod enabled {
             input: AssetCreateUrlInput,
             now_ms: u64,
         ) -> std::result::Result<AssetCreateUrlResult, Box<AssetAccessError>> {
+            self.create_url_for(None, input, now_ms).await
+        }
+        pub(crate) async fn create_url_for(
+            &self,
+            caller: Option<&crate::registry::Context>,
+            input: AssetCreateUrlInput,
+            now_ms: u64,
+        ) -> std::result::Result<AssetCreateUrlResult, Box<AssetAccessError>> {
             let mut resource = input.resource;
+            let mut attachment_identity = None;
+            if let AssetResource::Attachment { attachment_id, .. } = &resource {
+                let denied = || Box::new(asset_error(resource.clone(), Error::AssetDenied));
+                let caller = caller
+                    .filter(|ctx| {
+                        ctx.scopes
+                            .contains(&t3_contracts::auth::AuthEnvironmentScope::OrchestrationRead)
+                    })
+                    .ok_or_else(denied)?;
+                let id = &attachment_id.0;
+                let parsed = t3_workspace::attachments::parse_id(id).ok_or_else(denied)?;
+                if parsed.thread_segment == "pending" {
+                    let issuer = crate::adapters::attachments::Principal::Session(
+                        caller.session_id.0.clone(),
+                    );
+                    attachment_identity = Some(
+                        self.attachments
+                            .owner(id)
+                            .await
+                            .and_then(|r| r.preview_identity(&issuer.record()))
+                            .ok_or_else(denied)?,
+                    );
+                } else if t3_workspace::attachments::resolve_by_id(&self.attachments.base, id)
+                    .is_none()
+                    || !thread_has_attachment(caller, id, parsed.thread_segment).await
+                {
+                    return Err(denied());
+                }
+            }
             let context = match &resource {
                 AssetResource::DraftWorkspaceFile { cwd, .. } => {
                     let root = PathBuf::from(&cwd.0);
@@ -134,6 +178,7 @@ mod enabled {
                         workspace_root: context.workspace_root.as_deref(),
                         project_favicon_path: context.project_favicon_path.as_deref(),
                         checkout: context.checkout,
+                        attachment_identity,
                     },
                     now_ms,
                 )
@@ -163,18 +208,6 @@ mod enabled {
         ) -> Result<PersistChatAttachmentsResult> {
             self.attachments.persist_chat_attachments(input).await
         }
-        pub async fn create_upload_url(
-            &self,
-            input: AttachmentCreateUploadUrlInput,
-            now_ms: u64,
-        ) -> Result<AttachmentCreateUploadUrlResult> {
-            self.attachments.issue_upload(input, now_ms).await
-        }
-        pub async fn delete_attachment(&self, input: AttachmentDeleteInput) -> Result<()> {
-            self.attachments
-                .delete_pending(&input.attachment_id.0)
-                .await
-        }
         pub async fn resolve_asset(
             &self,
             token: &str,
@@ -197,6 +230,59 @@ mod enabled {
                 .await
                 .map(|_| ())
         }
+    }
+    #[cfg(feature = "orchestration")]
+    async fn thread_has_attachment(
+        caller: &crate::registry::Context,
+        id: &str,
+        segment: String,
+    ) -> bool {
+        // The RPC gate supplies the environment's orchestration:read grant. Membership is
+        // evaluated against live threads (including archives) in a single read transaction.
+        let Some(orchestration) = caller
+            .services
+            .domain::<crate::adapters::orchestration::OrchestrationAdapter>()
+        else {
+            return false;
+        };
+        let Some(runtime) = orchestration.composed() else {
+            return false;
+        };
+        let id = id.to_owned();
+        runtime.projections.database.read(move |db| {
+            // Chat and question references can be shared across threads. The filename
+            // prefix is not an authority for these records.
+            let recorded: bool = db.query_row(
+                "SELECT EXISTS (
+                   SELECT 1 FROM orchestration_v2_projection_messages m
+                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(m.payload_json,'$.attachments') a
+                   WHERE t.deleted_at IS NULL AND instr(m.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1
+                   UNION ALL
+                   SELECT 1 FROM orchestration_v2_projection_threads t, json_each(t.payload_json,'$.guestShare.messages') m, json_each(m.value,'$.attachments') a
+                   WHERE t.deleted_at IS NULL AND instr(t.payload_json,?1)>0 AND json_extract(m.value,'$.status')='pending' AND json_extract(a.value,'$.id')=?1
+                   UNION ALL
+                   SELECT 1 FROM orchestration_v2_projection_turn_items i
+                   JOIN orchestration_v2_projection_threads t USING(thread_id), json_each(i.payload_json,'$.questionAnswer.attachmentsByQuestionId') q, json_each(q.value) a
+                   WHERE t.deleted_at IS NULL AND i.type='user_input_request' AND instr(i.payload_json,?1)>0 AND json_extract(a.value,'$.id')=?1)",
+                [&id], |row| row.get(0))?;
+            if recorded { return Ok(true); }
+            // Tool-generated previews have additional producer and thread ownership rules.
+            // The projection reader implements those rules for the originating thread.
+            let mut statement = db.prepare("SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL")?;
+            let threads = statement.query_map([],|row| row.get::<_, String>(0))?;
+            for thread in threads {
+                let thread = t3_orchestration::api::ThreadId(thread?);
+                if t3_workspace::attachments::safe_thread_segment(&thread.0).as_ref() == Some(&segment)
+                    && t3_orchestration::projections::read::attachment_ids(db, &thread)?.contains(&id) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }).await.unwrap_or(false)
+    }
+    #[cfg(not(feature = "orchestration"))]
+    async fn thread_has_attachment(_: &crate::registry::Context, _: &str, _: String) -> bool {
+        false
     }
     fn context_error(resource: &AssetResource, error: Error) -> AssetAccessError {
         AssetAccessError::WorkspaceContextResolutionError(AssetWorkspaceContextResolutionError {

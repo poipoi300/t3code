@@ -588,6 +588,9 @@ mod authority {
                     paths.attachments(),
                     signer,
                     Arc::new(NoDocumentText),
+                )
+                .with_reference_directory(
+                    paths.attachments().with_file_name("attachment-references"),
                 ),
                 authority,
             }))
