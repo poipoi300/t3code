@@ -33,6 +33,13 @@ pub trait EditorDiscovery: Send + Sync {
         std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
     }
     async fn launch(&self, command: EditorCommand) -> Result<()>;
+    /// On Linux, ask the desktop file manager over D-Bus (`org.freedesktop.FileManager1.ShowItems`)
+    /// to reveal a path. Only `SystemEditorDiscovery` talks to the live session bus; fake/test
+    /// discoveries default to `false` so tests fall through to `launch` instead of opening real
+    /// file-manager windows on the developer's desktop.
+    async fn reveal_linux(&self, _path: &Path) -> bool {
+        false
+    }
 }
 #[async_trait]
 pub trait EditorRoots: Send + Sync {
@@ -63,6 +70,9 @@ impl SystemEditorDiscovery {
 impl EditorDiscovery for SystemEditorDiscovery {
     async fn launch(&self, command: EditorCommand) -> Result<()> {
         self.launcher.launch(command).await
+    }
+    async fn reveal_linux(&self, path: &Path) -> bool {
+        try_reveal_linux(path).await
     }
     async fn discover(&self) -> Result<DiscoveredEditors> {
         let roots = self.roots.roots().await?;
@@ -392,7 +402,7 @@ impl ExternalLauncher {
                 } else if distro.is_some() {
                     // `wsl_explorer_arguments` already chose the containing folder.
                 } else {
-                    if try_reveal_linux(&path).await {
+                    if self.discovery.reveal_linux(&path).await {
                         return Ok(());
                     }
                     args = vec![

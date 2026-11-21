@@ -344,21 +344,25 @@ async fn hostile_file_names_reach_the_file_manager_and_editors_as_data() {
             project_root: None,
             reveal,
         };
-        // Linux reveal first asks the desktop's file manager over D-Bus; not run here.
-        if !cfg!(target_os = "linux") {
-            s.launch_editor(&launch(EditorId::FileManager, Some(Some(true))))
-                .await
-                .unwrap();
-            let reveal = d.commands.lock().await.pop().unwrap();
-            assert_eq!(reveal.command, file_manager, "{name}");
-            if cfg!(windows) {
-                // Explorer's own `/select,"<path>"` syntax, verbatim: NTFS names cannot hold `"`.
-                assert_eq!(reveal.args, vec![format!("/select,\"{real}\"")], "{name}");
-                assert!(reveal.verbatim, "{name}");
-            } else {
-                assert_eq!(reveal.args, vec!["-R".to_string(), real.clone()], "{name}");
-                assert!(!reveal.verbatim);
-            }
+        s.launch_editor(&launch(EditorId::FileManager, Some(Some(true))))
+            .await
+            .unwrap();
+        let reveal = d.commands.lock().await.pop().unwrap();
+        assert_eq!(reveal.command, file_manager, "{name}");
+        if cfg!(windows) {
+            // Explorer's own `/select,"<path>"` syntax, verbatim: NTFS names cannot hold `"`.
+            assert_eq!(reveal.args, vec![format!("/select,\"{real}\"")], "{name}");
+            assert!(reveal.verbatim, "{name}");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(reveal.args, vec!["-R".to_string(), real.clone()], "{name}");
+            assert!(!reveal.verbatim);
+        } else {
+            let parent = dunce::canonicalize(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(reveal.args, vec![parent], "{name}");
+            assert!(!reveal.verbatim, "{name}");
         }
         s.launch_editor(&launch(EditorId::FileManager, None))
             .await
@@ -501,4 +505,63 @@ fn the_dbus_show_items_argument_holds_no_escape() {
     let argument = show_items_argument("file:///home/me/a%22b/c\\d\\%22.txt");
     assert_eq!(argument, "[\"file:///home/me/a%22b/c%5Cd%5C%22.txt\"]");
     assert!(!argument[2..argument.len() - 2].contains(['\\', '"']));
+}
+
+/// On Linux, reveal routes through `EditorDiscovery::reveal_linux` rather than calling `gdbus`
+/// directly, so test discoveries never open real file-manager windows over the session D-Bus.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_reveal_uses_discovery_hook_before_falling_back_to_launch() {
+    use tokio::sync::Mutex;
+
+    struct DbusStub {
+        root: PathBuf,
+        revealed: Mutex<Vec<PathBuf>>,
+        commands: Mutex<Vec<EditorCommand>>,
+    }
+    #[async_trait]
+    impl EditorDiscovery for DbusStub {
+        async fn discover(&self) -> Result<DiscoveredEditors> {
+            Ok(DiscoveredEditors {
+                roots: vec![self.root.clone()],
+                editors: vec![DiscoveredEditor {
+                    id: EditorId::FileManager,
+                    command: PathBuf::from("/usr/bin/xdg-open"),
+                    base_args: vec![],
+                    style: EditorLaunchStyle::DirectPath,
+                }],
+            })
+        }
+        async fn launch(&self, c: EditorCommand) -> Result<()> {
+            self.commands.lock().await.push(c);
+            Ok(())
+        }
+        async fn reveal_linux(&self, path: &std::path::Path) -> bool {
+            self.revealed.lock().await.push(path.to_path_buf());
+            true
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("notes.md");
+    std::fs::write(&file, "notes\n").unwrap();
+    let d = Arc::new(DbusStub {
+        root: temp.path().to_path_buf(),
+        revealed: Mutex::new(vec![]),
+        commands: Mutex::new(vec![]),
+    });
+    let s = ExternalLauncher::new(d.clone());
+    s.launch_editor(&LaunchEditorInput {
+        cwd: file.to_string_lossy().into_owned().into(),
+        editor: EditorId::FileManager,
+        project_root: None,
+        reveal: Some(Some(true)),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *d.revealed.lock().await,
+        vec![dunce::canonicalize(&file).unwrap()]
+    );
+    assert!(d.commands.lock().await.is_empty());
 }

@@ -329,11 +329,6 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
             json!({"cwd": file.display().to_string(), "editor": "file-manager", "reveal": true}),
         )
         .await);
-        if cfg!(target_os = "linux") {
-            // Linux asks the desktop over D-Bus first; the fallback opens the folder.
-            while launches.try_recv().is_ok() {}
-            continue;
-        }
         let launched = launches.try_recv().expect("revealed");
         assert_eq!(launched.command, file_manager, "{name}");
         let last = launched.args.last().unwrap();
@@ -344,9 +339,18 @@ async fn editor_links_open_only_local_targets_inside_server_workspaces() {
                 last.starts_with("/select,\"") && last.ends_with(&format!("{name}\"")),
                 "{last}"
             );
-        } else {
+        } else if cfg!(target_os = "macos") {
             assert_eq!(launched.args[0], "-R");
             assert!(last.ends_with(name), "{last}");
+        } else {
+            // Fixed test discovery does not hit session D-Bus (`reveal_linux` defaults to false),
+            // so Linux reveal falls back to opening the containing scratch folder.
+            assert_eq!(launched.args.len(), 1, "{name}");
+            assert_eq!(
+                Path::new(last),
+                std::fs::canonicalize(&scratch).unwrap(),
+                "{last}"
+            );
         }
         assert!(
             launches.try_recv().is_err(),
