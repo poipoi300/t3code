@@ -433,3 +433,137 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
             .await
     }
 }
+
+#[derive(Clone)]
+pub struct PullRequestReviewSession {
+    endpoint: crate::rpc::SessionEndpoint,
+    http: crate::permissions::EnvironmentHttpClient,
+    reference: PullRequestRef,
+}
+impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
+    pub fn pull_request_review_session(
+        &self,
+        env: &EnvironmentId,
+        reference: PullRequestRef,
+    ) -> Option<PullRequestReviewSession> {
+        let client = self.client(env)?;
+        Some(PullRequestReviewSession {
+            endpoint: client.session()?,
+            http: client.pull_request_http()?,
+            reference,
+        })
+    }
+}
+impl PullRequestReviewSession {
+    pub fn can_write(&self) -> bool {
+        self.endpoint
+            .grants_scope(t3_contracts::auth::AuthEnvironmentScope::SourceControlWrite)
+            == Some(true)
+    }
+    pub async fn activity(&self) -> Result<PullRequestActivity, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint
+            .command::<WsPullRequestsActivityRpc>(self.reference.clone())
+            .await
+    }
+    pub async fn files_viewed(&self) -> Result<PullRequestFilesViewedResult, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint
+            .command::<WsPullRequestsFilesViewedRpc>(self.reference.clone())
+            .await
+    }
+    pub async fn diff(
+        &self,
+        cursor: Option<t3_contracts::base_schemas::TrimmedNonEmptyString>,
+    ) -> Result<PullRequestDiffResult, super::diff_http::DiffLoadError> {
+        let input = PullRequestDiffInput {
+            project_id: self.reference.project_id.clone(),
+            host: self.reference.host.clone(),
+            expected_account_id: self.reference.expected_account_id.clone(),
+            allow_stale: self.reference.allow_stale,
+            repository: self.reference.repository.clone(),
+            number: self.reference.number,
+            cursor: cursor.map(Some),
+            commit: None,
+        };
+        let authorized = || {
+            self.endpoint
+                .grants_scope(t3_contracts::auth::AuthEnvironmentScope::OrchestrationRead)
+                == Some(true)
+        };
+        if !authorized() {
+            return Err(super::diff_http::DiffLoadError::PermissionDenied);
+        }
+        self.http.pull_request_diff(&input, authorized).await
+    }
+    pub async fn thread_comments(
+        &self,
+        thread_id: t3_contracts::base_schemas::TrimmedNonEmptyString,
+        cursor: t3_contracts::base_schemas::TrimmedNonEmptyString,
+    ) -> Result<PullRequestThreadCommentsResult, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let r = &self.reference;
+        self.endpoint
+            .command::<WsPullRequestsThreadCommentsRpc>(PullRequestThreadCommentsInput {
+                project_id: r.project_id.clone(),
+                host: r.host.clone(),
+                expected_account_id: r.expected_account_id.clone(),
+                allow_stale: r.allow_stale,
+                repository: r.repository.clone(),
+                number: r.number,
+                thread_id,
+                cursor,
+            })
+            .await
+    }
+    pub async fn set_viewed(
+        &self,
+        file: PullRequestSetFilesViewedInputFiles,
+    ) -> Result<(), RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint
+            .command::<WsPullRequestsSetFilesViewedRpc>(PullRequestSetFilesViewedInput {
+                project_id: self.reference.project_id.clone(),
+                host: self.reference.host.clone(),
+                expected_account_id: self.reference.expected_account_id.clone(),
+                allow_stale: self.reference.allow_stale,
+                repository: self.reference.repository.clone(),
+                number: self.reference.number,
+                files: vec![file],
+            })
+            .await
+    }
+    pub async fn comment(
+        &self,
+        thread: Option<t3_contracts::base_schemas::TrimmedNonEmptyString>,
+        body: String,
+    ) -> Result<(), RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        if let Some(thread_id) = thread {
+            self.endpoint
+                .command::<WsPullRequestsReplyToThreadRpc>(PullRequestThreadReplyInput {
+                    project_id: self.reference.project_id.clone(),
+                    host: self.reference.host.clone(),
+                    expected_account_id: self.reference.expected_account_id.clone(),
+                    allow_stale: self.reference.allow_stale,
+                    repository: self.reference.repository.clone(),
+                    number: self.reference.number,
+                    thread_id,
+                    body,
+                })
+                .await
+        } else {
+            self.endpoint
+                .command::<WsPullRequestsCommentRpc>(PullRequestCommentInput {
+                    project_id: self.reference.project_id.clone(),
+                    host: self.reference.host.clone(),
+                    expected_account_id: self.reference.expected_account_id.clone(),
+                    allow_stale: self.reference.allow_stale,
+                    repository: self.reference.repository.clone(),
+                    number: self.reference.number,
+                    body,
+                })
+                .await
+        }
+    }
+}

@@ -45,6 +45,8 @@ pub enum DiffLoadError {
     },
     #[error("invalid pull request diff response")]
     InvalidResponse,
+    #[error("Pull request diff requires orchestration:read")]
+    PermissionDenied,
     #[error("pull request diff session changed")]
     Cancelled,
 }

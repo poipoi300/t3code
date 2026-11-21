@@ -484,6 +484,29 @@ impl EnvironmentHttpClient {
             authorization_revision,
         }
     }
+    pub(crate) async fn pull_request_diff(
+        &self,
+        input: &t3_contracts::pull_request::PullRequestDiffInput,
+        current: impl Fn() -> bool,
+    ) -> Result<
+        t3_contracts::pull_request::PullRequestDiffResult,
+        crate::workspace::pr_views::diff_http::DiffLoadError,
+    > {
+        use crate::workspace::pr_views::diff_http::DiffLoader;
+        if let Some(remote) = &self.remote {
+            remote
+                .validate_session_at(&self.prepared.session, self.authorization_revision)
+                .await?;
+        }
+        DiffLoader {
+            platform: self.platform.as_ref(),
+            signer: self.signer.as_deref(),
+            remote_authorization: self.remote.as_ref(),
+        }
+        .load(&self.prepared, input, self.relay_route, current, None)
+        .await
+    }
+
     pub async fn execute<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,

@@ -118,6 +118,9 @@ impl ConnectedClient {
         .then(|| self.owner.settings_http.borrow().clone())
         .flatten()
     }
+    pub(crate) fn pull_request_http(&self) -> Option<crate::permissions::EnvironmentHttpClient> {
+        self.owner.settings_http.borrow().clone()
+    }
     /// Read-only verification of the installed route for the permissions disclosure.
     pub(crate) async fn verify_session(
         &self,

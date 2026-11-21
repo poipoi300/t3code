@@ -990,3 +990,33 @@ pub fn repository_link(raw: &str, number: u64) -> Option<String> {
     url.set_fragment(None);
     Some(url.into())
 }
+
+/// Object IDs for the exact file versions displayed in a whole-PR patch.
+/// Use the panel parser's file ranges and decoded paths, including rename destinations.
+pub fn diff_file_revisions(patch: &str) -> std::collections::BTreeMap<String, String> {
+    crate::workspace::diff_panel::files::parse_patch_files(patch)
+        .into_iter()
+        .filter_map(|file| {
+            let index = patch[file.range.clone()]
+                .lines()
+                .take_while(|line| !line.starts_with("@@"))
+                .find_map(|line| line.strip_prefix("index "))?;
+            let (_, new) = index.split_whitespace().next()?.split_once("..")?;
+            if new.is_empty() || !new.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some((file.path().to_owned(), new.to_owned()))
+        })
+        .collect()
+}
+#[cfg(test)]
+mod review_revision_tests {
+    #[test]
+    fn revisions_follow_paths_and_ignore_hunk_content() {
+        let patch = "diff --git a/before b/after\nsimilarity index 85%\nrename from before\nrename to after\nindex abc..def 100644\n--- a/before\n+++ b/after\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/other b/other\n--- a/other\n+++ b/other\n@@ -1 +1 @@\n-x\n+index abc..999\n";
+        assert_eq!(
+            super::diff_file_revisions(patch),
+            [("after".into(), "def".into())].into()
+        );
+    }
+}
