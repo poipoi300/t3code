@@ -183,6 +183,7 @@ pub fn app_tree(runtime: Rt, route: Route, provide_services: impl FnOnce()) -> A
                 .app_class(theme::tw("absolute size-0"))
                 .child(crate::screens::connect::connection_notices()),
         )
+        .child(crate::screens::onboarding::welcome::first_run_gate())
         // ThreadNotificationCoordinator, started once from the app root (hidden, effects only).
         .child(crate::screens::notifications::thread_notifications())
         .into_element();
