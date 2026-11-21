@@ -36,6 +36,11 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
         );
         let router = router.route("/ws", get(crate::ws::upgrade));
         let router = mcp_oauth::routes(auth::routes(router));
+        #[cfg(feature = "pull-requests")]
+        let router = router.route(
+            "/api/pull-requests/diff",
+            axum::routing::post(pull_request_diff),
+        );
         #[cfg(feature = "mcp")]
         let router = mcp::routes(router, &services);
         #[cfg(feature = "preview")]
@@ -69,3 +74,73 @@ pub fn router(services: Arc<ServiceRegistry>) -> Router {
 
 #[cfg(feature = "local-services")]
 pub(crate) use auth::error as auth_error;
+
+#[cfg(feature = "pull-requests")]
+async fn pull_request_diff(
+    axum::extract::State(services): axum::extract::State<Arc<ServiceRegistry>>,
+    axum::extract::ConnectInfo(remote): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{Json, http::StatusCode, response::IntoResponse};
+    use t3_contracts::{
+        auth::AuthEnvironmentScope, environment_http::EnvironmentInternalErrorReason,
+    };
+    let (req, headers, body) = auth::split(remote, request);
+    if let Err(error) = auth::authenticate(
+        &services,
+        &req,
+        Some(AuthEnvironmentScope::OrchestrationRead),
+    )
+    .await
+    {
+        return error.into_response();
+    }
+    let input = match body::json(&headers, body).await {
+        Ok(payload) => match decode_diff_input(payload) {
+            Some(input) => input,
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        Err(error) => return error.into_response(),
+    };
+    let Some(adapter) = services.domain::<crate::adapters::pull_requests::PullRequestAdapter>()
+    else {
+        return error::ApiError::internal(EnvironmentInternalErrorReason::InternalError)
+            .into_response();
+    };
+    match adapter.service.diff(input).await {
+        Ok(page) => Json(page).into_response(),
+        Err(error) => match error.unavailable_error() {
+            Some(unavailable) => {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(unavailable)).into_response()
+            }
+            None => (StatusCode::BAD_GATEWAY, Json(error.operation_error())).into_response(),
+        },
+    }
+}
+
+#[cfg(feature = "pull-requests")]
+fn decode_diff_input(
+    mut payload: serde_json::Value,
+) -> Option<t3_contracts::pull_request::PullRequestDiffInput> {
+    // HTTP JSON has no RPC encoding for undefined. Optional fields must be absent or typed.
+    let fields = payload.as_object_mut()?;
+    if [
+        "host",
+        "expectedAccountId",
+        "allowStale",
+        "cursor",
+        "commit",
+    ]
+    .iter()
+    .any(|key| fields.get(*key).is_some_and(serde_json::Value::is_null))
+    {
+        return None;
+    }
+    let number = fields.get_mut("number")?;
+    let value = t3_contracts::wire::JsNumber::from_f64(number.as_f64()?)?.as_u64()?;
+    if value == 0 {
+        return None;
+    }
+    *number = value.into();
+    serde_json::from_value(payload).ok()
+}

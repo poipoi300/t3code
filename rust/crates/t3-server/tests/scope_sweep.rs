@@ -300,6 +300,20 @@ async fn sweep(env: std::collections::BTreeMap<String, String>, expected_unserve
             .await
             .unwrap();
         let (cookie, _) = session(&origin, &grant["credential"]).await;
+        #[cfg(feature = "pull-requests")]
+        if withheld == "orchestration:read" {
+            let denied = reqwest::Client::new()
+                .post(format!("{origin}/api/pull-requests/diff"))
+                .header("cookie", &cookie)
+                .json(&json!({"projectId":"bound","repository":"owner/repo","number":1}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), 403);
+            let error: Value = denied.json().await.unwrap();
+            assert_eq!(error["_tag"], "EnvironmentScopeRequiredError");
+            assert_eq!(error["requiredScope"], withheld);
+        }
         let mut socket = connect(&origin, server.address, &cookie).await;
         let mut client = Client::new(0, Default::default());
         for (tag, payload, streams) in calls {

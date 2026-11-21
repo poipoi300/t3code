@@ -853,3 +853,22 @@ async fn client_session_revocation() {
     assert_eq!(session["authenticated"], true);
     f.stop().await;
 }
+
+#[cfg(feature = "pull-requests")]
+#[tokio::test]
+async fn pull_request_diff_requires_a_read_grant_for_bearer_sessions() {
+    let f = fixture(&[]).await;
+    let admin = f.admin_cookie().await;
+    let grant = f.credential(&admin, &["access:read"]).await;
+    let bearer = f.bearer(&grant, None).await;
+    let denied = f
+        .post("/api/pull-requests/diff")
+        .bearer_auth(bearer)
+        .json(&json!({"projectId":"bound","repository":"owner/repo","number":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(json(denied).await["requiredScope"], "orchestration:read");
+    f.stop().await;
+}

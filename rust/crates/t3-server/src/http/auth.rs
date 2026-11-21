@@ -125,7 +125,7 @@ pub fn split(remote: SocketAddr, request_in: axum::extract::Request) -> (Request
     (req, parts.headers, body)
 }
 
-async fn authenticate(
+pub(super) async fn authenticate(
     s: &ServiceRegistry,
     req: &Request,
     scope: Option<AuthEnvironmentScope>,

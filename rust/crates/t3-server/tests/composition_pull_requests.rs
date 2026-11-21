@@ -106,6 +106,36 @@ impl Host for FakeForge {
         );
         Ok(decode(value))
     }
+    async fn diff(
+        &self,
+        ctx: &Context,
+        input: &PullRequestDiffInput,
+    ) -> Result<PullRequestDiffResult> {
+        let cursor = input
+            .cursor
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|s| s.as_str());
+        self.record(format!(
+            "diff {} {:?} {:?}",
+            ctx.project.id.0,
+            cursor,
+            input
+                .commit
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|s| s.as_str())
+        ));
+        let (patch, next) = match cursor {
+            None => ("patch one", Some("opaque-2")),
+            Some("opaque-2") => ("patch two", None),
+            Some("unsupported") => return Err(t3_pull_request::Error::unsupported("diff")),
+            _ => return Err(t3_pull_request::Error::invalid("diff", "bad cursor")),
+        };
+        Ok(decode(
+            json!({"patch":patch, "truncated":next.is_some(), "nextCursor":next}),
+        ))
+    }
     async fn permissions(&self, _: &Context, _: bool) -> Result<PullRequestViewerPermissions> {
         Ok(decode(
             json!({"actions": [], "comment": true, "resolve": true, "verdicts": [], "requestReviewers": false}),
@@ -243,7 +273,7 @@ impl Server {
         self.temp.path()
     }
     /// Replaces this connection with one whose session holds only `scopes`.
-    async fn reconnect_with(&mut self, scopes: &[&str]) {
+    async fn scoped_cookie(&self, scopes: &[&str]) -> String {
         let http = reqwest::Client::new();
         let grant: Value = http
             .post(format!("{}/api/auth/pairing-token", self.origin))
@@ -261,13 +291,16 @@ impl Server {
             .send()
             .await
             .unwrap();
-        let cookie = paired.headers()["set-cookie"]
+        paired.headers()["set-cookie"]
             .to_str()
             .unwrap()
             .split(';')
             .next()
             .unwrap()
-            .to_owned();
+            .to_owned()
+    }
+    async fn reconnect_with(&mut self, scopes: &[&str]) {
+        let cookie = self.scoped_cookie(scopes).await;
         self.socket = connect(&self.origin, &self.runtime.address.to_string(), &cookie).await;
         self.client = Client::new(0, Default::default());
     }
@@ -634,5 +667,85 @@ async fn renaming_a_persisted_linked_thread_publishes_a_revision_and_reconnectin
     s.reconnect().await;
     s.client.start(method, json!({}), CallKind::Stream).unwrap();
     assert_eq!(s.chunk().await, json!(1));
+    s.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn http_diff_authenticates_and_pages_the_bound_checkout() {
+    let s = Server::start().await;
+    s.insert_project("bound", "github-app");
+    let http = reqwest::Client::new();
+    let url = format!("{}/api/pull-requests/diff", s.origin);
+    let mut input = reference("bound", 7);
+    input["commit"] = json!("abc1234");
+    let denied = http.post(&url).json(&input).send().await.unwrap();
+    assert_eq!(denied.status(), 401);
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["_tag"],
+        "EnvironmentAuthInvalidError"
+    );
+    let cookie = s.scoped_cookie(&["orchestration:read"]).await;
+    let post = |value: &Value| http.post(&url).header("cookie", &cookie).json(value);
+    for (field, value) in [
+        ("number", json!(0)),
+        ("number", json!(9007199254740992_u64)),
+        ("cursor", Value::Null),
+        ("allowStale", Value::Null),
+    ] {
+        let mut invalid = input.clone();
+        invalid[field] = value;
+        assert_eq!(
+            post(&invalid).send().await.unwrap().status(),
+            400,
+            "{field}"
+        );
+    }
+    input["number"] = json!(7.0);
+    let first = post(&input)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<PullRequestDiffResult>()
+        .await
+        .unwrap();
+    assert_eq!(first.patch, "patch one");
+    assert!(first.truncated);
+    input["cursor"] = json!(first.next_cursor.unwrap());
+    let last = post(&input)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<PullRequestDiffResult>()
+        .await
+        .unwrap();
+    assert_eq!(last.patch, "patch two");
+    assert!(!last.truncated);
+    assert!(last.next_cursor.is_none());
+    assert_eq!(
+        s.checkout.calls(),
+        [
+            "diff bound None Some(\"abc1234\")",
+            "diff bound Some(\"opaque-2\") Some(\"abc1234\")"
+        ]
+    );
+    assert!(s.public.calls().is_empty());
+    input["cursor"] = json!("unknown");
+    let bad = post(&input).send().await.unwrap();
+    assert_eq!(bad.status(), 502);
+    assert_eq!(
+        bad.json::<Value>().await.unwrap()["_tag"],
+        "PullRequestOperationError"
+    );
+    input["cursor"] = json!("unsupported");
+    let unavailable = post(&input).send().await.unwrap();
+    assert_eq!(unavailable.status(), 503);
+    assert_eq!(
+        unavailable.json::<Value>().await.unwrap()["_tag"],
+        "PullRequestUnavailableError"
+    );
     s.runtime.shutdown().await.unwrap();
 }
