@@ -254,6 +254,79 @@ fn count_term(count: usize, singular: &'static str, plural: &'static str) -> Str
     if count == 1 { t(singular) } else { t(plural) }
 }
 
+struct StackActionPlan {
+    layers: Vec<PullRequestStackLayers>,
+    expected_heads: Vec<PullRequestStackHead>,
+    target_number: Option<u64>,
+    selected_open: bool,
+    has_closed: bool,
+    has_draft: bool,
+    blocked: bool,
+}
+
+fn build_action_plan(stack: &PullRequestStack, pr_number: u64, is_merge: bool) -> StackActionPlan {
+    let position_idx = stack.layers.iter().position(|l| l.number == pr_number);
+    let position = position_idx.map(|i| i + 1);
+    let layers: Vec<_> = if is_merge {
+        position.map_or_else(Vec::new, |p| {
+            stack
+                .layers
+                .iter()
+                .take(p)
+                .filter(|l| l.state != PullRequestState::Merged)
+                .cloned()
+                .collect()
+        })
+    } else {
+        stack
+            .layers
+            .iter()
+            .filter(|l| l.state != PullRequestState::Merged)
+            .cloned()
+            .collect()
+    };
+    let expected_heads: Vec<_> = layers
+        .iter()
+        .filter_map(|l| {
+            l.head_sha
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|sha| PullRequestStackHead {
+                    number: l.number,
+                    head_sha: sha.clone(),
+                })
+        })
+        .collect();
+    let has_closed = layers.iter().any(|l| l.state != PullRequestState::Open);
+    let has_draft = layers.iter().any(|l| l.is_draft.flatten() == Some(true));
+    let target = if is_merge {
+        position_idx.and_then(|i| stack.layers.get(i))
+    } else {
+        stack.layers.last()
+    };
+    let selected_open = position_idx
+        .and_then(|i| stack.layers.get(i))
+        .is_some_and(|l| l.state == PullRequestState::Open);
+    let blocked = if is_merge {
+        !selected_open
+            || expected_heads.len() != layers.len()
+            || has_closed
+            || has_draft
+            || layers.is_empty()
+    } else {
+        expected_heads.len() != layers.len() || has_closed || layers.is_empty() || target.is_none()
+    };
+    StackActionPlan {
+        layers,
+        expected_heads,
+        target_number: target.map(|l| l.number),
+        selected_open,
+        has_closed,
+        has_draft,
+        blocked,
+    }
+}
+
 /// Renders `PullRequestStackMenu`, optional `Merge stack` primary button, and confirmation dialogs.
 pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let stack_data = match input.stack.get() {
@@ -266,63 +339,16 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let total = stack_data.layers.len().max(1);
     let trigger_label = stack_label(
         stack_data.number,
-        position.unwrap_or(1) as u64,
+        position.unwrap_or(0) as u64,
         total as u64,
     );
     let ratio = position.map_or_else(|| format!("-/{total}"), |p| format!("{p}/{total}"));
 
-    let unmerged: Vec<_> = stack_data
-        .layers
-        .iter()
-        .filter(|l| l.state != PullRequestState::Merged)
-        .cloned()
-        .collect();
-    let merge_layers: Vec<_> = position.map_or_else(Vec::new, |p| {
-        stack_data
-            .layers
-            .iter()
-            .take(p)
-            .filter(|l| l.state != PullRequestState::Merged)
-            .cloned()
-            .collect()
-    });
-    let selected_layer = position_idx.and_then(|i| stack_data.layers.get(i).cloned());
-    let top_layer = stack_data.layers.last().cloned();
-
-    let merge_has_closed = merge_layers
-        .iter()
-        .any(|l| l.state != PullRequestState::Open);
-    let merge_has_draft = merge_layers
-        .iter()
-        .any(|l| l.is_draft.flatten() == Some(true));
-    let rebase_has_closed = unmerged.iter().any(|l| l.state != PullRequestState::Open);
-    let expected_rebase_heads: Vec<PullRequestStackHead> = unmerged
-        .iter()
-        .filter_map(|l| {
-            l.head_sha
-                .as_ref()
-                .and_then(Option::as_ref)
-                .map(|sha| PullRequestStackHead {
-                    number: l.number,
-                    head_sha: sha.clone(),
-                })
-        })
-        .collect();
-    let expected_merge_heads: Vec<PullRequestStackHead> = merge_layers
-        .iter()
-        .filter_map(|l| {
-            l.head_sha
-                .as_ref()
-                .and_then(Option::as_ref)
-                .map(|sha| PullRequestStackHead {
-                    number: l.number,
-                    head_sha: sha.clone(),
-                })
-        })
-        .collect();
+    let merge_plan = build_action_plan(&stack_data, pr.number, true);
+    let rebase_plan = build_action_plan(&stack_data, pr.number, false);
 
     let can_merge = input.stack_actions
-        && selected_layer.is_some()
+        && position_idx.is_some()
         && can_perform_action(&pr, &PullRequestAction::Merge)
         && input.methods_available;
     let can_rebase = input.stack_actions && pr.viewer_permissions.stack_rebase == Some(Some(true));
@@ -332,21 +358,25 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let confirmation = signal(None::<StackConfirm>);
     let last_confirm = signal(StackConfirm::Merge);
     let dialog_open = signal(false);
+    let dialog_stale = signal(None::<String>);
+    let dialog_revalidating = signal(false);
+    let dialog_seq = signal(0u64);
     effect(move || {
         dialog_open.set(confirmation.get().is_some());
     });
 
-    let merge_count = merge_layers.len();
-    let selected_open = selected_layer
-        .as_ref()
-        .is_some_and(|l| l.state == PullRequestState::Open);
-    let merge_blocked_static = !selected_open
-        || expected_merge_heads.len() != merge_layers.len()
-        || merge_has_closed
-        || merge_has_draft
-        || merge_layers.is_empty();
-    let rebase_blocked_static =
-        expected_rebase_heads.len() != unmerged.len() || rebase_has_closed || unmerged.is_empty();
+    let merge_count = merge_plan.layers.len();
+    let selected_open = merge_plan.selected_open;
+    let merge_blocked_static = merge_plan.blocked;
+    let rebase_blocked_static = rebase_plan.blocked;
+    let merge_has_closed = merge_plan.has_closed;
+    let merge_has_draft = merge_plan.has_draft;
+    let expected_merge_heads = merge_plan.expected_heads.clone();
+    let expected_rebase_heads = rebase_plan.expected_heads.clone();
+    let confirm_layers_merge = merge_plan.layers;
+    let confirm_layers_rebase = rebase_plan.layers;
+    let selected_for_run = merge_plan.target_number;
+    let top_for_run = rebase_plan.target_number;
     let can_write_session = input.session.can_write();
     let writable = input.writable;
     let merge_blocked =
@@ -363,6 +393,73 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let rebase_item_blocked = rebase_blocked;
     let show_merge_rule_hint = merge_has_closed || merge_has_draft;
     let stack_actions_enabled = input.stack_actions;
+
+    let open_confirm_session = input.session.clone();
+    let open_merge_heads = expected_merge_heads.clone();
+    let open_rebase_heads = expected_rebase_heads.clone();
+    let open_confirm_owner = input.owner;
+    let open_confirm = move |kind: StackConfirm| {
+        let is_merge = kind == StackConfirm::Merge;
+        if pending.get_untracked()
+            || !writable.get_untracked()
+            || !open_confirm_session.can_write()
+            || if is_merge {
+                merge_blocked_static
+            } else {
+                rebase_blocked_static
+            }
+        {
+            return;
+        }
+        let Some(expected_target) = (if is_merge {
+            selected_for_run
+        } else {
+            top_for_run
+        }) else {
+            return;
+        };
+        let expected_heads = if is_merge {
+            open_merge_heads.clone()
+        } else {
+            open_rebase_heads.clone()
+        };
+        last_confirm.set(kind);
+        confirmation.set(Some(kind));
+        dialog_stale.set(None);
+        dialog_revalidating.set(true);
+        let seq = dialog_seq.get_untracked() + 1;
+        dialog_seq.set(seq);
+        let session = open_confirm_session.clone();
+        open_confirm_owner.spawn(async move {
+            let result = session.stack().await;
+            if dialog_seq.try_get() != Some(seq) {
+                return;
+            }
+            dialog_revalidating.try_set(false);
+            match result {
+                Ok(Some(fresh)) => {
+                    let plan = build_action_plan(&fresh, current_number, is_merge);
+                    if fresh.number != stack_number
+                        || plan.blocked
+                        || plan.target_number != Some(expected_target)
+                        || plan.expected_heads != expected_heads
+                    {
+                        dialog_stale.try_set(Some(t(
+                            "Stack data may be stale. Refresh before running this action.",
+                        )));
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    dialog_stale
+                        .try_set(Some(t("Stack data may be stale. We couldn’t refresh it.")));
+                }
+            }
+        });
+    };
+
+    let open_from_merge_item = open_confirm.clone();
+    let open_from_rebase_item = open_confirm.clone();
+    let open_from_primary = open_confirm;
 
     let menu_btn = menu::menu_button(
         trigger_label,
@@ -404,6 +501,7 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                         &[("count", Value::Int(merge_count as i64))],
                     );
                     let blocked = merge_item_blocked;
+                    let open = open_from_merge_item.clone();
                     body = body.child(menu::menu_item(
                         label.clone(),
                         menu::ItemOptions {
@@ -414,15 +512,13 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                             .app_class(tw("flex flex-row items-center gap-2"))
                             .child(icon_with_class(Icon::GitMerge, "size-3.5"))
                             .child(text(label)),
-                        move || {
-                            last_confirm.set(StackConfirm::Merge);
-                            confirmation.set(Some(StackConfirm::Merge));
-                        },
+                        move || open(StackConfirm::Merge),
                     ));
                 }
                 if can_rebase {
                     let label = t("Rebase stack");
                     let blocked = rebase_item_blocked;
+                    let open = open_from_rebase_item.clone();
                     body = body.child(menu::menu_item(
                         label.clone(),
                         menu::ItemOptions {
@@ -433,10 +529,7 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                             .app_class(tw("flex flex-row items-center gap-2"))
                             .child(icon_with_class(Icon::RefreshCw, "size-3.5"))
                             .child(text(label)),
-                        move || {
-                            last_confirm.set(StackConfirm::Rebase);
-                            confirmation.set(Some(StackConfirm::Rebase));
-                        },
+                        move || open(StackConfirm::Rebase),
                     ));
                 }
                 if show_merge_rule_hint {
@@ -457,10 +550,7 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
         nsh_base::button()
             .accessibility_label(t("Merge stack"))
             .disabled(blocked)
-            .on_press(move || {
-                last_confirm.set(StackConfirm::Merge);
-                confirmation.set(Some(StackConfirm::Merge));
-            })
+            .on_press(move || open_from_primary(StackConfirm::Merge))
             .app_class(tw(
                 "inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs text-primary-foreground",
             ))
@@ -468,8 +558,6 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
             .child(text(t("Merge stack")))
     });
 
-    let confirm_layers_merge = merge_layers.clone();
-    let confirm_layers_rebase = unmerged.clone();
     let method = input.method;
     let host_label_for_run = input.host_label.clone();
     let host_label_for_dialog = input.host_label;
@@ -480,8 +568,6 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let refresh = input.refresh;
     let list = input.list;
     let owner = input.owner;
-    let selected_for_run = selected_layer.clone();
-    let top_for_run = top_layer.clone();
     let merge_heads_run = expected_merge_heads;
     let rebase_heads_run = expected_rebase_heads;
 
@@ -489,37 +575,72 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
         let Some(kind) = confirmation.get_untracked() else {
             return;
         };
-        let target = match kind {
-            StackConfirm::Merge => selected_for_run.clone(),
-            StackConfirm::Rebase => top_for_run.clone(),
-        };
-        let Some(target) = target else {
-            return;
-        };
-        let action_heads = match kind {
-            StackConfirm::Merge => merge_heads_run.clone(),
-            StackConfirm::Rebase => rebase_heads_run.clone(),
-        };
-        if pending.get_untracked() || !session.can_write() {
+        let is_merge = kind == StackConfirm::Merge;
+        if pending.get_untracked()
+            || dialog_revalidating.get_untracked()
+            || dialog_stale.with_untracked(Option::is_some)
+        {
             return;
         }
-        confirmation.set(None);
-        pending.set(true);
-        let is_merge = kind == StackConfirm::Merge;
-        let toasts = toast_manager();
-        let toast_id = toasts.add(ToastOptions {
-            variant: Variant::Loading,
-            title: Text::content(t(if is_merge {
-                "Merging stack..."
+        if !writable.get_untracked()
+            || !session.can_write()
+            || if is_merge {
+                merge_blocked_static
             } else {
-                "Rebasing stack..."
-            })),
-            ..Default::default()
-        });
+                rebase_blocked_static
+            }
+        {
+            dialog_stale.set(Some(t("This stack action is currently blocked.")));
+            return;
+        }
+        let Some(target_number) = (if is_merge {
+            selected_for_run
+        } else {
+            top_for_run
+        }) else {
+            return;
+        };
+        let action_heads = if is_merge {
+            merge_heads_run.clone()
+        } else {
+            rebase_heads_run.clone()
+        };
+        pending.set(true);
+        let toasts = toast_manager();
         let session = session.clone();
         let host_label = host_label_for_run.clone();
         let chosen_method = is_merge.then(|| method.get_untracked());
         owner.spawn(async move {
+            let preflight = session.stack().await;
+            let preflight_ok = match preflight {
+                Ok(Some(fresh)) => {
+                    let plan = build_action_plan(&fresh, current_number, is_merge);
+                    fresh.number == stack_number
+                        && !plan.blocked
+                        && plan.target_number == Some(target_number)
+                        && plan.expected_heads == action_heads
+                        && writable.get_untracked()
+                        && session.can_write()
+                }
+                Ok(None) | Err(_) => false,
+            };
+            if !preflight_ok {
+                pending.try_set(false);
+                dialog_stale.try_set(Some(t(
+                    "Stack data may be stale. We couldn’t refresh it.",
+                )));
+                return;
+            }
+            confirmation.try_set(None);
+            let toast_id = toasts.add(ToastOptions {
+                variant: Variant::Loading,
+                title: Text::content(t(if is_merge {
+                    "Merging stack..."
+                } else {
+                    "Rebasing stack..."
+                })),
+                ..Default::default()
+            });
             let result = session
                 .run_action_with(PullRequestActionOptions {
                     action: if is_merge {
@@ -529,7 +650,7 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                     },
                     merge_method: chosen_method,
                     update_method: (!is_merge).then_some(PullRequestUpdateMethod::Rebase),
-                    number_override: Some(target.number),
+                    number_override: Some(target_number),
                     stack_number: Some(stack_number),
                     expected_stack_heads: Some(action_heads),
                 })
@@ -597,6 +718,10 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
     let confirm_dialog = dialog(dialog_open, move |dlg| {
         dlg.on_open_change(move |next| {
             if !next {
+                let seq = dialog_seq.get_untracked() + 1;
+                dialog_seq.set(seq);
+                dialog_revalidating.set(false);
+                dialog_stale.set(None);
                 confirmation.set(None);
             }
         });
@@ -700,6 +825,11 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                                 )
                             })
                         }))
+                        .child(dynamic(move || {
+                            dialog_stale.get().map(|notice| {
+                                text(notice).app_class(tw("text-xs text-destructive"))
+                            })
+                        }))
                         .child(
                             view()
                                 .app_class(tw("flex max-h-48 flex-col"))
@@ -722,7 +852,13 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                             ButtonContent::Label(action_label),
                             ActionVariant::Default,
                             ButtonSize::Default,
-                            move || pending.get(),
+                            move || {
+                                pending.get()
+                                    || dialog_revalidating.get()
+                                    || dialog_stale.with(Option::is_some)
+                                    || !writable.get()
+                                    || !can_write_session
+                            },
                             run.clone(),
                         )),
                 ))

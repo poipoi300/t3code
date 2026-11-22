@@ -27,7 +27,8 @@ type Read<T> =
 type ReviewSession = PullRequestReviewSession;
 type ReviewSessionFactory = Rc<dyn Fn(&EnvironmentId, PullRequestRef) -> ReviewSession>;
 type MergeMethodRead = Rc<dyn Fn() -> LocalBoxFuture<'static, PullRequestMergeMethod>>;
-type MergeMethodSave = Rc<dyn Fn(PullRequestMergeMethod) -> LocalBoxFuture<'static, ()>>;
+type MergeMethodSave =
+    Rc<dyn Fn(PullRequestMergeMethod) -> LocalBoxFuture<'static, Result<(), String>>>;
 type LegacyDefaultMergeFn = Rc<
     dyn Fn(
         &[t3_client::workspace::projects::EnvironmentProject],
@@ -92,7 +93,10 @@ pub fn registration<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) ->
         save_merge_method: Rc::new(move |method| {
             let client = save_client.clone();
             async move {
-                let _ = client.set_pull_request_merge_method(method).await;
+                client
+                    .set_pull_request_merge_method(method)
+                    .await
+                    .map_err(|error| error.to_string())
             }
             .boxed_local()
         }),
@@ -194,12 +198,17 @@ fn load(
     back: impl Fn() + Copy + 'static,
 ) -> AnyElement {
     let revision = signal(0u64);
-    let detail = signal(None::<Result<Rc<PullRequestDetail>, String>>);
+    let loaded_detail = signal(None::<Rc<PullRequestDetail>>);
+    let detail_error = signal(None::<String>);
     let linked = signal(None::<Result<PullRequestLinkedThreadsResult, String>>);
     let remembered_method = signal(PullRequestMergeMethod::Merge);
+    let remembered_touched = signal(false);
     let read_merge = (reads.read_merge_method)();
     watch(async move {
-        remembered_method.try_set(read_merge.await);
+        let loaded = read_merge.await;
+        if !remembered_touched.with_untracked(|touched| *touched) {
+            remembered_method.try_set(loaded);
+        }
     });
     let thread_env = env.clone();
     let review_env = env.clone();
@@ -264,10 +273,19 @@ fn load(
     let tab = signal(Tab::Summary);
     effect(move || {
         revision.get();
-        detail.set(None);
         let result = (reads.detail)(env.clone(), reference.clone());
         watch(async move {
-            detail.set(Some(result.await.map(Rc::new)));
+            match result.await {
+                Ok(pr) => {
+                    detail_error.try_set(None);
+                    loaded_detail.try_set(Some(Rc::new(pr)));
+                }
+                Err(err) => {
+                    if loaded_detail.with_untracked(Option::is_none) {
+                        detail_error.try_set(Some(err));
+                    }
+                }
+            }
         });
     });
     effect(move || {
@@ -276,7 +294,9 @@ fn load(
         if !supports_links.get() {
             return;
         }
-        let Some(Ok(pr)) = detail.get() else { return };
+        let Some(pr) = loaded_detail.get() else {
+            return;
+        };
         let Some(reference) =
             t3_client::workspace::pr_views::detail::linked_thread_reference(&pr, &links_ref)
         else {
@@ -287,7 +307,19 @@ fn load(
             linked.set(Some(result.await));
         });
     });
-    let retry = move || revision.update(|n| *n += 1);
+    let ready = computed(move || {
+        if loaded_detail.with(Option::is_some) {
+            1u8
+        } else if detail_error.with(Option::is_some) {
+            2u8
+        } else {
+            0u8
+        }
+    });
+    let retry = move || {
+        detail_error.set(None);
+        revision.update(|n| *n += 1);
+    };
     let nav = navigator();
     scroll()
         .flex_1()
@@ -296,11 +328,12 @@ fn load(
             view()
                 .app_class(tw("flex min-w-0 flex-col gap-3 p-4"))
                 .child(button(t("Back to pull requests"), back))
-                .child(dynamic(move || match detail.get() {
-                    Some(Ok(pr)) => {
-                        let markdown = reads.media.scope(review_env.clone(), &pr);
+                .child(dynamic(move || match ready.get() {
+                    1 => {
+                        let initial = loaded_detail.with_untracked(|p| p.clone()).expect("loaded");
+                        let markdown = reads.media.scope(review_env.clone(), &initial);
                         detail_tabs(
-                            pr,
+                            loaded_detail,
                             session.clone(),
                             tab,
                             conversation,
@@ -308,18 +341,20 @@ fn load(
                             PanelOptions {
                                 revision,
                                 guides,
+                                supports_thread_prs: supports_links,
                                 default_method,
                                 remembered_method,
+                                remembered_touched,
                                 save_merge_method: reads.save_merge_method.clone(),
                                 on_select_layer: on_select_layer.clone(),
                             },
                         )
                     }
-                    Some(Err(_)) => view()
+                    2 => view()
                         .child(text(t("Could not load pull request")))
                         .child(button(t("Retry"), retry))
                         .into_element(),
-                    None => text(t("Loading pull request…")).into_element(),
+                    _ => text(t("Loading pull request…")).into_element(),
                 }))
                 .child(dynamic(move || {
                     let mut body = view().app_class(tw("flex min-w-0 flex-col gap-1"));
@@ -371,19 +406,22 @@ enum Tab {
 struct PanelOptions {
     revision: Signal<u64>,
     guides: Memo<bool>,
+    supports_thread_prs: Memo<bool>,
     default_method: Memo<Option<PullRequestMergeMethod>>,
     remembered_method: Signal<PullRequestMergeMethod>,
+    remembered_touched: Signal<bool>,
     save_merge_method: MergeMethodSave,
     on_select_layer: Rc<dyn Fn(u64)>,
 }
 fn detail_tabs(
-    pr: Rc<PullRequestDetail>,
+    pr_detail: Signal<Option<Rc<PullRequestDetail>>>,
     session: ReviewSession,
     tab: Signal<Tab>,
     conversation: super::review::Conversation,
     markdown: super::markdown::PrMarkdown,
     options: PanelOptions,
 ) -> AnyElement {
+    let initial_pr = pr_detail.with_untracked(|p| p.clone()).expect("loaded");
     let owner = crate::runtime::tasks::TaskOwner::here();
     let armed = signal(None);
     let activity = signal(None::<Rc<PullRequestActivity>>);
@@ -407,7 +445,7 @@ fn detail_tabs(
         (Tab::Timeline, "Timeline"),
         (Tab::Code, "Code"),
     ] {
-        if value != Tab::Code || pr.capabilities.diff {
+        if value != Tab::Code || initial_pr.capabilities.diff {
             tabs = tabs.child(button(t(label), move || select_tab(value)));
         }
     }
@@ -417,31 +455,48 @@ fn detail_tabs(
             .get()
             .then(|| button(t("Guide"), move || select_tab(Tab::Guide)))
     }));
-    let host_label = super::host_display_label(&pr.provider.0);
-    let controls = super::actions::controls(super::actions::ControlsInput {
-        pr: pr.clone(),
-        client: session.clone(),
-        writable: conversation.writable,
-        refresh: options.revision,
-        default: options.default_method,
-        remembered: options.remembered_method,
-        save_method: options.save_merge_method,
-        armed,
-        owner,
-        host_label,
-        on_select_layer: options.on_select_layer,
+    let host_label = super::host_display_label(&initial_pr.provider.0);
+    let header_session = session.clone();
+    let header_view = dynamic(move || {
+        let Some(pr) = pr_detail.get() else {
+            return view().into_element();
+        };
+        let base_branch = super::pickers::base_branch_indicator(
+            pr.clone(),
+            header_session.clone(),
+            conversation.writable,
+            options.revision,
+            owner,
+        );
+        header(&pr, base_branch)
     });
-    let composer = super::review::panel_composer(session.clone(), conversation, &pr);
-    let base_branch = super::pickers::base_branch_indicator(
-        pr.clone(),
-        session.clone(),
-        conversation.writable,
-        options.revision,
-        owner,
-    );
+    let controls_session = session.clone();
+    let controls_host = host_label.clone();
+    let controls_options = options.clone();
+    let controls = dynamic(move || {
+        let Some(pr) = pr_detail.get() else {
+            return view().into_element();
+        };
+        super::actions::controls(super::actions::ControlsInput {
+            pr,
+            client: controls_session.clone(),
+            writable: conversation.writable,
+            refresh: controls_options.revision,
+            supports_thread_prs: controls_options.supports_thread_prs,
+            default: controls_options.default_method,
+            remembered: controls_options.remembered_method,
+            remembered_touched: controls_options.remembered_touched,
+            save_method: controls_options.save_merge_method.clone(),
+            armed,
+            owner,
+            host_label: controls_host.clone(),
+            on_select_layer: controls_options.on_select_layer.clone(),
+        })
+    });
+    let composer = super::review::panel_composer(session.clone(), conversation, &initial_pr);
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
-        .child(header(&pr, base_branch))
+        .child(header_view)
         .child(controls)
         .child(tabs)
         .child(dynamic(move || {
@@ -449,16 +504,28 @@ fn detail_tabs(
                 return view()
                     .app_class(tw("flex min-w-0 flex-col gap-3"))
                     .child(super::pickers::summary_metadata(
-                        &pr,
+                        pr_detail,
                         activity,
                         session.clone(),
                         conversation.writable,
                         options.revision,
+                        owner,
                     ))
-                    .child(description(&pr, &markdown))
+                    .child(dynamic({
+                        let markdown = markdown.clone();
+                        move || {
+                            let Some(pr) = pr_detail.get() else {
+                                return view().into_element();
+                            };
+                            description(&pr, &markdown)
+                        }
+                    }))
                     .into_element();
             }
             let session = session.clone();
+            let pr = pr_detail
+                .with_untracked(|p| p.clone())
+                .unwrap_or_else(|| initial_pr.clone());
             match tab.get() {
                 Tab::Timeline => {
                     super::review::timeline(session, &pr, conversation, markdown.clone())

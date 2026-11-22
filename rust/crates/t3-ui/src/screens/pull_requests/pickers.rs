@@ -206,17 +206,22 @@ pub(super) fn base_branch_indicator(
 }
 
 fn reviewer_picker(
-    pr: &PullRequestDetail,
+    initial_pr: &PullRequestDetail,
+    pr_detail: Signal<Option<Rc<PullRequestDetail>>>,
     session: PullRequestReviewSession,
     writable: Signal<bool>,
     refresh: Signal<u64>,
+    owner: TaskOwner,
 ) -> AnyElement {
-    let allowed = pr.viewer_permissions.request_reviewers;
     let can_write = session.can_write();
-    let searchable = pr.capabilities.reviewers.search_candidates.flatten() == Some(true);
+    let searchable = initial_pr
+        .capabilities
+        .reviewers
+        .search_candidates
+        .flatten()
+        == Some(true);
     let label = t("Request a review");
 
-    let owner = TaskOwner::here();
     let handle = popover_create_handle();
     let query = signal(String::new());
     let debounced = signal(String::new());
@@ -248,12 +253,14 @@ fn reviewer_picker(
                 .map(|v| v.truncated)
         })
     });
+    let last_host_query = signal(None::<String>);
     let search_session = session.clone();
     effect(move || {
         if !handle.is_open() {
+            last_host_query.set(None);
             return;
         }
-        let q = query.get();
+        let q = query.get_untracked();
         let dq = debounced.get();
         let _ready = loaded_truncated.get();
         let host_query = loaded.with_untracked(|l| {
@@ -266,8 +273,13 @@ fn reviewer_picker(
             })
         });
         let Some(hq) = host_query else {
+            last_host_query.set(None);
             return;
         };
+        if last_host_query.with_untracked(|prev| prev.as_deref() == Some(hq.as_str())) {
+            return;
+        }
+        last_host_query.set(Some(hq.clone()));
         let session = search_session.clone();
         let key = hq.clone();
         watch(async move {
@@ -283,7 +295,12 @@ fn reviewer_picker(
     let trigger = popover_trigger(
         handle,
         label,
-        move || !allowed || !writable.get(),
+        move || {
+            !pr_detail.with(|d| {
+                d.as_ref()
+                    .is_some_and(|p| p.viewer_permissions.request_reviewers)
+            }) || !writable.get()
+        },
         icon_with_class(Icon::UserPlus, "size-3.5"),
     );
 
@@ -515,15 +532,14 @@ fn reviewer_picker(
 }
 
 fn label_picker(
-    pr: &PullRequestDetail,
+    pr_detail: Signal<Option<Rc<PullRequestDetail>>>,
     session: PullRequestReviewSession,
     writable: Signal<bool>,
     refresh: Signal<u64>,
+    owner: TaskOwner,
 ) -> AnyElement {
-    let allowed = pr.viewer_permissions.labels != Some(Some(false));
     let can_write = session.can_write();
     let label = t("Change labels");
-    let owner = TaskOwner::here();
     let handle = popover_create_handle();
     let query = signal(String::new());
     let loaded = signal(None::<Result<PullRequestLabelCandidateList, String>>);
@@ -549,7 +565,12 @@ fn label_picker(
     let trigger = popover_trigger(
         handle,
         label,
-        move || !allowed || !writable.get(),
+        move || {
+            !pr_detail.with(|d| {
+                d.as_ref()
+                    .is_some_and(|p| p.viewer_permissions.labels != Some(Some(false)))
+            }) || !writable.get()
+        },
         icon_with_class(Icon::Tag, "size-3.5"),
     );
 
@@ -729,20 +750,24 @@ fn label_picker(
 
 /// Renders the Reviewers and Labels metadata rows (with inline pickers) at the top of Summary.
 pub(super) fn summary_metadata(
-    pr: &Rc<PullRequestDetail>,
+    pr_detail: Signal<Option<Rc<PullRequestDetail>>>,
     activity: Signal<Option<Rc<PullRequestActivity>>>,
     session: PullRequestReviewSession,
     writable: Signal<bool>,
     refresh: Signal<u64>,
+    owner: TaskOwner,
 ) -> AnyElement {
-    let pr_chips = pr.clone();
+    let initial_pr = pr_detail.with_untracked(|p| p.clone()).expect("loaded");
     let chips = dynamic(move || {
+        let Some(pr) = pr_detail.get() else {
+            return view().into_element();
+        };
         let act = activity.get();
         let (comments, commits) = match act.as_deref() {
             Some(a) => (a.comments.as_slice(), a.commits.as_slice()),
             None => (&[][..], &[][..]),
         };
-        let entries = reviewer_entries(&pr_chips, comments, commits);
+        let entries = reviewer_entries(&pr, comments, commits);
         let mut list = view().app_class(tw("flex min-w-0 flex-wrap items-center gap-1.5"));
         if entries.is_empty() {
             list = list.child(text(t("None")).app_class(tw("text-xs text-muted-foreground")));
@@ -785,14 +810,22 @@ pub(super) fn summary_metadata(
                 );
             }
         }
-        list
+        list.into_element()
     });
     let mut reviewer_chips = view()
         .app_class(tw("flex min-w-0 flex-wrap items-center gap-1.5"))
         .child(chips);
-    if pr.capabilities.reviewers.request && pr.capabilities.reviewers.list_candidates {
-        reviewer_chips =
-            reviewer_chips.child(reviewer_picker(pr, session.clone(), writable, refresh));
+    if initial_pr.capabilities.reviewers.request
+        && initial_pr.capabilities.reviewers.list_candidates
+    {
+        reviewer_chips = reviewer_chips.child(reviewer_picker(
+            &initial_pr,
+            pr_detail,
+            session.clone(),
+            writable,
+            refresh,
+            owner,
+        ));
     }
 
     let mut rows = view().app_class(tw("flex min-w-0 flex-col gap-2")).child(
@@ -810,21 +843,30 @@ pub(super) fn summary_metadata(
             .child(reviewer_chips),
     );
 
-    if !pr.labels.is_empty() || pr.capabilities.labels == Some(Some(true)) {
-        let mut label_chips = view().app_class(tw("flex min-w-0 flex-wrap items-center gap-1"));
-        if pr.labels.is_empty() {
-            label_chips =
-                label_chips.child(text(t("None")).app_class(tw("text-xs text-muted-foreground")));
-        } else {
-            for label in &pr.labels {
-                label_chips = label_chips.child(
-                    text(label.name.0.clone())
-                        .app_class(tw("rounded-sm bg-muted/60 px-1.5 py-0.5 text-xs")),
-                );
+    if !initial_pr.labels.is_empty() || initial_pr.capabilities.labels == Some(Some(true)) {
+        let label_chip_list = dynamic(move || {
+            let Some(pr) = pr_detail.get() else {
+                return view().into_element();
+            };
+            let mut list = view().app_class(tw("flex min-w-0 flex-wrap items-center gap-1"));
+            if pr.labels.is_empty() {
+                list = list.child(text(t("None")).app_class(tw("text-xs text-muted-foreground")));
+            } else {
+                for label in &pr.labels {
+                    list = list.child(
+                        text(label.name.0.clone())
+                            .app_class(tw("rounded-sm bg-muted/60 px-1.5 py-0.5 text-xs")),
+                    );
+                }
             }
-        }
-        if pr.capabilities.labels == Some(Some(true)) {
-            label_chips = label_chips.child(label_picker(pr, session, writable, refresh));
+            list.into_element()
+        });
+        let mut label_chips = view()
+            .app_class(tw("flex min-w-0 flex-wrap items-center gap-1"))
+            .child(label_chip_list);
+        if initial_pr.capabilities.labels == Some(Some(true)) {
+            label_chips =
+                label_chips.child(label_picker(pr_detail, session, writable, refresh, owner));
         }
         rows = rows.child(
             view()

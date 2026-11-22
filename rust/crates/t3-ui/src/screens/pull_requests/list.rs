@@ -589,6 +589,22 @@ pub fn screen() -> AnyElement {
     super::bind_debounced_query(author_query, debounced_author_query);
     super::bind_debounced_query(label_query, debounced_label_query);
 
+    let prev_filters_open = stored(false);
+    effect(move || {
+        let open = filters_open.get();
+        let was_open = prev_filters_open.with(|prev| std::mem::replace(prev, open));
+        if open && !was_open {
+            author_query.set(String::new());
+            debounced_author_query.set(String::new());
+            label_query.set(String::new());
+            debounced_label_query.set(String::new());
+            hosted_authors.set(Vec::new());
+            hosted_labels.set(Vec::new());
+            hosted_authors_error.set(None);
+            hosted_labels_error.set(None);
+        }
+    });
+
     let fetch_filter_options =
         move |kind: PullRequestFilterOptionKind,
               q_sig: Signal<String>,
@@ -608,6 +624,7 @@ pub fn screen() -> AnyElement {
                 let dq = dq_sig.get();
                 if dq != q_sig.get_untracked().trim() {
                     pending_sig.set(true);
+                    on_done(Vec::new());
                     return;
                 }
                 pending_sig.set(true);
@@ -620,10 +637,8 @@ pub fn screen() -> AnyElement {
                 let on_done = on_done.clone();
                 let kind = kind.clone();
                 watch(async move {
-                    let mut responses = Vec::new();
-                    let mut first_error = None;
-                    for ((env, project_ids), _) in targets {
-                        let res = (client.filter_options)(
+                    let calls = targets.into_iter().map(|((env, project_ids), _)| {
+                        (client.filter_options)(
                             env,
                             PullRequestFilterOptionsInput {
                                 kind: kind.clone(),
@@ -634,7 +649,10 @@ pub fn screen() -> AnyElement {
                                 sigil: None,
                             },
                         )
-                        .await;
+                    });
+                    let mut responses = Vec::new();
+                    let mut first_error = None;
+                    for res in futures::future::join_all(calls).await {
                         match res {
                             Ok(ok) => responses.push(ok),
                             Err(e) if first_error.is_none() => first_error = Some(e),

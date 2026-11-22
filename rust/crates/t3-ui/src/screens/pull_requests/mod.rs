@@ -49,11 +49,15 @@ pub(super) fn bind_debounced_query(query: Signal<String>, debounced: Signal<Stri
         let next = seq.get_untracked() + 1;
         seq.set(next);
         if trimmed.is_empty() {
-            debounced.set(String::new());
+            if debounced.with_untracked(|cur| !cur.is_empty()) {
+                debounced.set(String::new());
+            }
             return;
         }
         set_timeout(Duration::from_millis(250), move || {
-            if seq.try_get() == Some(next) {
+            if seq.try_get() == Some(next)
+                && debounced.with_untracked(|cur| cur.as_str() != trimmed)
+            {
                 debounced.set(trimmed);
             }
         });
