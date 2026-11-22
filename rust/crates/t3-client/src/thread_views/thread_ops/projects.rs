@@ -193,11 +193,10 @@ impl<P: Platform + Clone + 'static> ThreadOperations<P> {
     ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
         let service = self.clone();
         async move {
-            let mut preferences = UiPreferences::load(&service.platform).await?;
-            preferences
-                .state
-                .reorder_projects(&current, &dragged, &target);
-            preferences.save(&service.platform).await?;
+            UiPreferences::update_state(&service.platform, |state| {
+                state.reorder_projects(&current, &dragged, &target);
+            })
+            .await?;
             service.state.actions.notify();
             Ok(())
         }

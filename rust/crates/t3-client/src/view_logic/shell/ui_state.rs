@@ -330,34 +330,28 @@ impl UiPreferences {
         })
     }
 
-    /// Reads the persisted pull-request merge method from `t3code:ui-state:v1` (or legacy fallback).
-    pub async fn read_pull_request_merge_method(
+    /// Atomically updates the `t3code:ui-state:v1` record via CAS without clobbering concurrent
+    /// writers. Corrupt v1 records recover to defaults just like `readPersistedState` in TSX.
+    pub async fn update_state(
         storage: &(impl crate::platform::Storage + ?Sized),
-    ) -> Result<t3_contracts::pull_request::PullRequestMergeMethod, crate::platform::PlatformError>
-    {
-        Ok(Self::load(storage).await?.state.pull_request_merge_method)
-    }
-
-    /// Atomically updates `pullRequestMergeMethod` in `t3code:ui-state:v1` without clobbering
-    /// concurrent sidebar preference writes.
-    pub async fn save_pull_request_merge_method(
-        storage: &(impl crate::platform::Storage + ?Sized),
-        method: t3_contracts::pull_request::PullRequestMergeMethod,
-    ) -> Result<(), crate::platform::PlatformError> {
+        mut update: impl FnMut(&mut UiState),
+    ) -> Result<UiState, crate::platform::PlatformError> {
         use crate::platform::{
             PlatformError, StorageArea, StorageCondition, StorageTransaction, StorageWrite,
         };
         let key = preference_key(STORAGE_KEY);
         let invalid = |error: &dyn std::fmt::Display| PlatformError::InvalidData(error.to_string());
-        for _ in 0..3 {
+        for _ in 0..8 {
             let expected = storage.get(StorageArea::Ordinary, key.clone()).await?;
             let mut state = if let Some(raw) = expected.as_deref() {
-                let raw = std::str::from_utf8(raw).map_err(|error| invalid(&error))?;
-                UiState::decode(raw, &crate::time::epoch_ms).map_err(|error| invalid(&error))?
+                std::str::from_utf8(raw)
+                    .ok()
+                    .and_then(|s| UiState::decode(s, &crate::time::epoch_ms).ok())
+                    .unwrap_or_default()
             } else {
                 Self::load(storage).await?.state
             };
-            state.pull_request_merge_method = method.clone();
+            update(&mut state);
             let value = state
                 .encode()
                 .map_err(|error| invalid(&error))?
@@ -377,12 +371,33 @@ impl UiPreferences {
                 })
                 .await?
             {
-                return Ok(());
+                return Ok(state);
             }
         }
         Err(PlatformError::Storage(
-            "Pull request merge method changed repeatedly while saving.".into(),
+            "UI preferences changed repeatedly while saving.".into(),
         ))
+    }
+
+    /// Reads the persisted pull-request merge method from `t3code:ui-state:v1` (or legacy fallback).
+    pub async fn read_pull_request_merge_method(
+        storage: &(impl crate::platform::Storage + ?Sized),
+    ) -> Result<t3_contracts::pull_request::PullRequestMergeMethod, crate::platform::PlatformError>
+    {
+        Ok(Self::load(storage).await?.state.pull_request_merge_method)
+    }
+
+    /// Atomically updates `pullRequestMergeMethod` in `t3code:ui-state:v1` without clobbering
+    /// concurrent sidebar preference writes.
+    pub async fn save_pull_request_merge_method(
+        storage: &(impl crate::platform::Storage + ?Sized),
+        method: t3_contracts::pull_request::PullRequestMergeMethod,
+    ) -> Result<(), crate::platform::PlatformError> {
+        Self::update_state(storage, |state| {
+            state.pull_request_merge_method = method.clone();
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Writes every record in one atomic write. Legacy records are left for older clients.

@@ -253,47 +253,13 @@ impl<P: crate::platform::Platform + Clone + 'static> SidebarShelves<P> {
         aliases: Vec<String>,
         expanded: bool,
     ) -> futures::future::LocalBoxFuture<'static, Result<(), PlatformError>> {
-        use super::ui_state::{STORAGE_KEY, UiPreferences, UiState};
-        use crate::platform::{StorageCondition, StorageTransaction};
         let platform = self.platform.clone();
         Box::pin(async move {
-            let key = StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY);
-            let invalid =
-                |error: &dyn std::fmt::Display| PlatformError::InvalidData(error.to_string());
-            for _ in 0..3 {
-                let expected = platform.get(StorageArea::Ordinary, key.clone()).await?;
-                let mut state = if let Some(raw) = expected.as_deref() {
-                    let raw = std::str::from_utf8(raw).map_err(|error| invalid(&error))?;
-                    UiState::decode(raw, &crate::time::epoch_ms).map_err(|error| invalid(&error))?
-                } else {
-                    UiPreferences::load(&platform).await?.state
-                };
+            super::ui_state::UiPreferences::update_state(&platform, |state| {
                 state.set_project_expanded(&aliases, expanded);
-                let value = state
-                    .encode()
-                    .map_err(|error| invalid(&error))?
-                    .into_bytes();
-                if platform
-                    .transaction(StorageTransaction {
-                        conditions: vec![StorageCondition {
-                            area: StorageArea::Ordinary,
-                            key: key.clone(),
-                            expected,
-                        }],
-                        ordinary: vec![StorageWrite {
-                            key: key.clone(),
-                            value: Some(value),
-                        }],
-                        secure: vec![],
-                    })
-                    .await?
-                {
-                    return Ok(());
-                }
-            }
-            Err(PlatformError::Storage(
-                "Project expansion changed repeatedly while saving.".into(),
-            ))
+            })
+            .await
+            .map(|_| ())
         })
     }
 

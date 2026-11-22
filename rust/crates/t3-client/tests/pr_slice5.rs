@@ -302,3 +302,196 @@ fn resolve_legacy_merge_method_override_matches_logical_project_scope() {
         Some(PullRequestMergeMethod::Rebase)
     );
 }
+
+#[test]
+fn interleaved_reorder_projects_and_merge_method_save_preserve_both_fields() {
+    use futures::{
+        FutureExt,
+        channel::{mpsc, oneshot},
+        executor::LocalPool,
+        future::LocalBoxFuture,
+        stream::LocalBoxStream,
+        task::LocalSpawnExt,
+    };
+    use std::{cell::RefCell, rc::Rc};
+    use t3_client::{
+        ClientStore,
+        composition::{ClientRuntime, Spawner},
+        navigation::RoutePolicy,
+        platform::{
+            HostAction, HostFuture, HostReply, HttpRequest, HttpResponse, Platform, PlatformError,
+            PlatformEvent, SocketRequest, StorageTransaction, WebSocket,
+        },
+    };
+    use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
+
+    type HeldRead = Rc<RefCell<Option<oneshot::Receiver<Option<Vec<u8>>>>>>;
+
+    #[derive(Clone)]
+    struct RacePlatform {
+        inner: FakePlatform,
+        held: HeldRead,
+    }
+    impl Storage for RacePlatform {
+        fn transaction(&self, tx: StorageTransaction) -> HostFuture<'_, bool> {
+            self.inner.transaction(tx)
+        }
+        fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+            if area == StorageArea::Ordinary
+                && key.record == STORAGE_KEY
+                && let Some(rx) = self.held.borrow_mut().take()
+            {
+                return async move { rx.await.map_err(|_| PlatformError::Cancelled) }.boxed_local();
+            }
+            self.inner.get(area, key)
+        }
+        fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
+            self.inner.write(area, writes)
+        }
+        fn list(&self, area: StorageArea, namespace: String) -> HostFuture<'_, Vec<StorageKey>> {
+            self.inner.list(area, namespace)
+        }
+    }
+    impl Platform for RacePlatform {
+        fn now_epoch_ms(&self) -> u64 {
+            self.inner.now_epoch_ms()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.inner.monotonic_ms()
+        }
+        fn random_bytes(&self, length: usize) -> Result<Vec<u8>, PlatformError> {
+            self.inner.random_bytes(length)
+        }
+        fn sleep(&self, milliseconds: u64) -> LocalBoxFuture<'_, ()> {
+            self.inner.sleep(milliseconds)
+        }
+        fn yield_to_host(&self) -> LocalBoxFuture<'_, ()> {
+            self.inner.yield_to_host()
+        }
+        fn set_route_policy(&self, policy: RoutePolicy) {
+            self.inner.set_route_policy(policy)
+        }
+        fn events(&self) -> LocalBoxStream<'static, PlatformEvent> {
+            let (_tx, rx) = mpsc::unbounded();
+            Box::pin(rx)
+        }
+        fn http(&self, request: HttpRequest) -> HostFuture<'_, HttpResponse> {
+            self.inner.http(request)
+        }
+        fn websocket(&self, request: SocketRequest) -> HostFuture<'_, Box<dyn WebSocket>> {
+            self.inner.websocket(request)
+        }
+        fn host(&self, action: HostAction) -> HostFuture<'_, HostReply> {
+            self.inner.host(action)
+        }
+    }
+
+    let mut pool = LocalPool::new();
+    let pool_spawner = pool.spawner();
+    let spawner: Spawner = Rc::new(move |fut| {
+        pool_spawner.spawn_local(fut).expect("spawn local");
+    });
+
+    let base = FakePlatform::default();
+    let key = StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY);
+    let initial =
+        br#"{"projectOrder":["a","b"],"pullRequestMergeMethod":"merge","futureFlag":42}"#.to_vec();
+    pool.run_until(async {
+        base.write(
+            StorageArea::Ordinary,
+            vec![StorageWrite {
+                key: key.clone(),
+                value: Some(initial.clone()),
+            }],
+        )
+        .await
+        .unwrap();
+    });
+
+    let (held_tx, held_rx) = oneshot::channel();
+    let platform = RacePlatform {
+        inner: base.clone(),
+        held: Rc::new(RefCell::new(Some(held_rx))),
+    };
+    let client = ClientRuntime::new(
+        platform,
+        ClientStore::default(),
+        OrchestrationV2CreationSource::Web,
+        spawner,
+    );
+
+    let ops = client.project_actions();
+    let reorder_handle = pool
+        .spawner()
+        .spawn_local_with_handle(
+            ops.reorder_projects(
+                vec!["a".into(), "b".into()],
+                vec!["b".into()],
+                vec!["a".into()],
+            )
+            .map(|r| r.expect("reorder_projects")),
+        )
+        .expect("spawn reorder");
+
+    // Advance reorder_projects until it is parked awaiting the held storage read.
+    pool.run_until_stalled();
+
+    // Commit a concurrent merge-method update while reorder_projects holds the stale snapshot.
+    pool.run_until(async {
+        client
+            .set_pull_request_merge_method(PullRequestMergeMethod::Squash)
+            .await
+            .expect("save merge method");
+    });
+
+    // Deliver the stale pre-Squash snapshot to reorder_projects and let it finish.
+    held_tx.send(Some(initial)).expect("deliver stale snapshot");
+    pool.run_until(reorder_handle);
+
+    let (method, raw) = pool.run_until(async {
+        let method = UiPreferences::read_pull_request_merge_method(&base)
+            .await
+            .unwrap();
+        let raw = base.get(StorageArea::Ordinary, key).await.unwrap().unwrap();
+        (method, raw)
+    });
+    let decoded = UiState::decode(std::str::from_utf8(&raw).unwrap(), &parse_ms).unwrap();
+    assert_eq!(method, PullRequestMergeMethod::Squash);
+    assert_eq!(
+        decoded.pull_request_merge_method,
+        PullRequestMergeMethod::Squash
+    );
+    assert_eq!(
+        decoded.project_order,
+        vec!["b".to_string(), "a".to_string()]
+    );
+    assert_eq!(decoded.unknown.get("futureFlag"), Some(&json!(42)));
+}
+
+#[test]
+fn save_pull_request_merge_method_recovers_from_corrupt_v1_record() {
+    futures::executor::block_on(async {
+        let platform = FakePlatform::default();
+        let key = StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY);
+        platform
+            .write(
+                StorageArea::Ordinary,
+                vec![StorageWrite {
+                    key: key.clone(),
+                    value: Some(b"{not valid json".to_vec()),
+                }],
+            )
+            .await
+            .unwrap();
+
+        UiPreferences::save_pull_request_merge_method(&platform, PullRequestMergeMethod::Rebase)
+            .await
+            .expect("corrupt v1 record should recover to defaults with updated method");
+        assert_eq!(
+            UiPreferences::read_pull_request_merge_method(&platform)
+                .await
+                .unwrap(),
+            PullRequestMergeMethod::Rebase
+        );
+    });
+}
