@@ -118,6 +118,8 @@ mod pr_2;
 mod pr_3;
 #[path = "ui/pr_4.rs"]
 mod pr_4;
+#[path = "ui/pr_5.rs"]
+mod pr_5;
 #[path = "ui/prv_1.rs"]
 mod prv_1;
 #[path = "ui/prv_2.rs"]

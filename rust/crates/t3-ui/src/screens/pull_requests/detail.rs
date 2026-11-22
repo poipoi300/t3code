@@ -14,15 +14,27 @@ use t3_client::{
     composition::ClientRuntime,
     platform::Platform,
     types::{EnvironmentId, ThreadKey},
-    workspace::pr_views::detail::{describe_checks, group_checks},
+    workspace::pr_views::{
+        detail::{describe_checks, group_checks, resolve_legacy_merge_method_override},
+        service::PullRequestReviewSession,
+    },
 };
 use t3_contracts::{base_schemas::TrimmedNonEmptyString, pull_request::*};
 
 type Read<T> =
     Rc<dyn Fn(EnvironmentId, PullRequestRef) -> LocalBoxFuture<'static, Result<T, String>>>;
 
-type ReviewSession = t3_client::workspace::pr_views::service::PullRequestReviewSession;
+type ReviewSession = PullRequestReviewSession;
 type ReviewSessionFactory = Rc<dyn Fn(&EnvironmentId, PullRequestRef) -> ReviewSession>;
+type MergeMethodRead = Rc<dyn Fn() -> LocalBoxFuture<'static, PullRequestMergeMethod>>;
+type MergeMethodSave = Rc<dyn Fn(PullRequestMergeMethod) -> LocalBoxFuture<'static, ()>>;
+type LegacyDefaultMergeFn = Rc<
+    dyn Fn(
+        &[t3_client::workspace::projects::EnvironmentProject],
+        &EnvironmentId,
+        &t3_client::types::ProjectId,
+    ) -> Option<PullRequestMergeMethod>,
+>;
 
 #[derive(Clone)]
 struct Reads {
@@ -30,12 +42,18 @@ struct Reads {
     review: ReviewSessionFactory,
     media: super::markdown::Media,
     links: Read<PullRequestLinkedThreadsResult>,
+    read_merge_method: MergeMethodRead,
+    save_merge_method: MergeMethodSave,
+    legacy_default_merge_method: LegacyDefaultMergeFn,
 }
 
 pub fn registration<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> PanelRegistration {
     let detail_client = client.clone();
     let link_client = client.clone();
     let review_client = client.clone();
+    let read_client = client.clone();
+    let save_client = client.clone();
+    let legacy_client = client.clone();
     let reads = Reads {
         media: super::markdown::Media::new(client),
         review: Rc::new(move |env, reference| {
@@ -60,6 +78,27 @@ pub fn registration<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) ->
                     .map_err(|e| e.into_client_error().to_string())
             }
             .boxed_local()
+        }),
+        read_merge_method: Rc::new(move || {
+            let client = read_client.clone();
+            async move {
+                client
+                    .pull_request_merge_method()
+                    .await
+                    .unwrap_or(PullRequestMergeMethod::Merge)
+            }
+            .boxed_local()
+        }),
+        save_merge_method: Rc::new(move |method| {
+            let client = save_client.clone();
+            async move {
+                let _ = client.set_pull_request_merge_method(method).await;
+            }
+            .boxed_local()
+        }),
+        legacy_default_merge_method: Rc::new(move |projects, env, project| {
+            let settings = legacy_client.settings().client_settings();
+            resolve_legacy_merge_method_override(&settings, projects, env, project)
         }),
     };
     let nav = navigator();
@@ -106,7 +145,25 @@ fn surface(context: SurfaceContext, reads: Reads) -> AnyElement {
         let Some((env, reference)) = target.get() else {
             return view().into_element();
         };
-        load(reads.clone(), env, reference, move || {
+        let select_env = env.clone();
+        let select_ref = reference.clone();
+        let on_select_layer: Rc<dyn Fn(u64)> = Rc::new(move |number| {
+            host.apply(
+                &key.get(),
+                Action::OpenSurface(crate::screens::panel::Surface::pull_request(
+                    Some(&select_env.0),
+                    &select_ref.project_id.0,
+                    select_ref
+                        .host
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .map(|h| h.0.as_str()),
+                    &select_ref.repository.0,
+                    number,
+                )),
+            );
+        });
+        load(reads.clone(), env, reference, on_select_layer, move || {
             host.apply(&key.get(), Action::Close)
         })
     })
@@ -133,21 +190,31 @@ fn load(
     reads: Reads,
     env: EnvironmentId,
     reference: PullRequestRef,
+    on_select_layer: Rc<dyn Fn(u64)>,
     back: impl Fn() + Copy + 'static,
 ) -> AnyElement {
     let revision = signal(0u64);
     let detail = signal(None::<Result<Rc<PullRequestDetail>, String>>);
     let linked = signal(None::<Result<PullRequestLinkedThreadsResult, String>>);
+    let remembered_method = signal(PullRequestMergeMethod::Merge);
+    let read_merge = (reads.read_merge_method)();
+    watch(async move {
+        remembered_method.try_set(read_merge.await);
+    });
     let thread_env = env.clone();
     let review_env = env.clone();
     let session = (reads.review)(&env, reference.clone());
     let conversation = super::review::Conversation::new(session.clone());
     let links_env = env.clone();
     let links_ref = reference.clone();
-    let config = crate::runtime::rt().store.environment_config(env.clone());
+    let runtime = crate::runtime::rt();
+    let config = runtime.store.environment_config(env.clone());
+    let shell = runtime.store.shell(env.clone());
+    let legacy_resolver = reads.legacy_default_merge_method.clone();
     let project = reference.project_id.clone();
+    let env_for_default = env.clone();
     let default_method = computed(move || {
-        config.with(|c| {
+        let scoped = config.with(|c| {
             c.as_ref().and_then(|c| {
                 t3_client::services::settings::scoped::resolve_project_settings(
                     &Rc::new(c.0.settings.clone()),
@@ -157,7 +224,34 @@ fn load(
                 .pull_request_merge_method
                 .clone()
             })
-        })
+        });
+        if scoped.is_some() {
+            return scoped;
+        }
+        let scratch = config.with(|c| {
+            c.as_ref()
+                .and_then(|c| c.0.scratch_workspace_root.as_ref())
+                .map(|r| r.0.clone())
+        });
+        let env_projects = shell.with(|s| {
+            s.as_ref()
+                .map(|s| {
+                    s.projects
+                        .iter()
+                        .map(|p| t3_client::workspace::projects::EnvironmentProject {
+                            environment: env_for_default.clone(),
+                            project: p.as_ref().clone(),
+                            is_scratch:
+                                t3_client::workspace::git_panel::details::is_scratch_project(
+                                    &p.workspace_root.0,
+                                    scratch.as_deref(),
+                                ),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        (legacy_resolver)(&env_projects, &env_for_default, &project)
     });
     let guides = computed(move || {
         config.with(|c| {
@@ -215,6 +309,9 @@ fn load(
                                 revision,
                                 guides,
                                 default_method,
+                                remembered_method,
+                                save_merge_method: reads.save_merge_method.clone(),
+                                on_select_layer: on_select_layer.clone(),
                             },
                         )
                     }
@@ -270,11 +367,14 @@ enum Tab {
     Code,
     Guide,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PanelOptions {
     revision: Signal<u64>,
     guides: Memo<bool>,
     default_method: Memo<Option<PullRequestMergeMethod>>,
+    remembered_method: Signal<PullRequestMergeMethod>,
+    save_merge_method: MergeMethodSave,
+    on_select_layer: Rc<dyn Fn(u64)>,
 }
 fn detail_tabs(
     pr: Rc<PullRequestDetail>,
@@ -284,7 +384,19 @@ fn detail_tabs(
     markdown: super::markdown::PrMarkdown,
     options: PanelOptions,
 ) -> AnyElement {
+    let owner = crate::runtime::tasks::TaskOwner::here();
     let armed = signal(None);
+    let activity = signal(None::<Rc<PullRequestActivity>>);
+    let activity_session = session.clone();
+    effect(move || {
+        let _rev = options.revision.get();
+        let session = activity_session.clone();
+        watch(async move {
+            if let Ok(value) = session.activity().await {
+                activity.try_set(Some(Rc::new(value)));
+            }
+        });
+    });
     let select_tab = move |value| {
         armed.set(None);
         tab.set(value);
@@ -305,23 +417,46 @@ fn detail_tabs(
             .get()
             .then(|| button(t("Guide"), move || select_tab(Tab::Guide)))
     }));
-    let controls = super::actions::controls(
+    let host_label = super::host_display_label(&pr.provider.0);
+    let controls = super::actions::controls(super::actions::ControlsInput {
+        pr: pr.clone(),
+        client: session.clone(),
+        writable: conversation.writable,
+        refresh: options.revision,
+        default: options.default_method,
+        remembered: options.remembered_method,
+        save_method: options.save_merge_method,
+        armed,
+        owner,
+        host_label,
+        on_select_layer: options.on_select_layer,
+    });
+    let composer = super::review::panel_composer(session.clone(), conversation, &pr);
+    let base_branch = super::pickers::base_branch_indicator(
         pr.clone(),
         session.clone(),
         conversation.writable,
         options.revision,
-        options.default_method,
-        armed,
+        owner,
     );
-    let composer = super::review::panel_composer(session.clone(), conversation, &pr);
     view()
         .app_class(tw("flex min-w-0 flex-col gap-2"))
-        .child(header(&pr))
+        .child(header(&pr, base_branch))
         .child(controls)
         .child(tabs)
         .child(dynamic(move || {
             if tab.get() == Tab::Summary {
-                return description(&pr, &markdown);
+                return view()
+                    .app_class(tw("flex min-w-0 flex-col gap-3"))
+                    .child(super::pickers::summary_metadata(
+                        &pr,
+                        activity,
+                        session.clone(),
+                        conversation.writable,
+                        options.revision,
+                    ))
+                    .child(description(&pr, &markdown))
+                    .into_element();
             }
             let session = session.clone();
             match tab.get() {
@@ -349,7 +484,7 @@ fn detail_tabs(
         .into_element()
 }
 
-fn header(pr: &PullRequestDetail) -> AnyElement {
+fn header(pr: &PullRequestDetail, base_branch: AnyElement) -> AnyElement {
     let state = match pr.state {
         PullRequestState::Merged => "Merged",
         PullRequestState::Closed => "Closed",
@@ -415,7 +550,13 @@ fn header(pr: &PullRequestDetail) -> AnyElement {
                         .as_ref()
                         .map_or_else(|| t("ghost"), |a| a.login.0.clone()),
                 ))
-                .child(text(format!("{} → {}", pr.head_branch.0, pr.base_branch.0)))
+                .child(
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-1"))
+                        .child(text(pr.head_branch.0.clone()))
+                        .child(text(t("→")))
+                        .child(base_branch),
+                )
                 .child(text(format!("+{} −{}", pr.additions, pr.deletions)))
                 .child(text(tr(
                     if pr.changed_files == 1 {

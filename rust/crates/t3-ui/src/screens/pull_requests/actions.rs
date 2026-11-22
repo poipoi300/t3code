@@ -1,5 +1,5 @@
-//! Header controls from PullRequestPrimaryAction and PullRequestActionsMenu.
-use super::detail::button;
+//! Header controls from PullRequestPrimaryAction, PullRequestStackMenu and PullRequestActionsMenu.
+use super::stack::{DetailStackInput, StackMembership, detail_stack_controls};
 use crate::{
     i18n::{Text, t, tr},
     runtime::tasks::{TaskOwner, watch},
@@ -9,6 +9,7 @@ use crate::{
         toast::{ToastOptions, Variant, toast_manager},
     },
 };
+use futures::future::LocalBoxFuture;
 use nsh_core::prelude::*;
 use std::{rc::Rc, time::Duration};
 use t3_client::workspace::pr_views::{
@@ -21,8 +22,7 @@ use t3_client::workspace::pr_views::{
 };
 use t3_contracts::pull_request::*;
 
-#[derive(Clone, Default, PartialEq)]
-struct LastMethod(Option<PullRequestMergeMethod>);
+type SaveMethodFn = Rc<dyn Fn(PullRequestMergeMethod) -> LocalBoxFuture<'static, ()>>;
 
 #[derive(Clone, Copy)]
 struct Controls {
@@ -35,20 +35,18 @@ struct Controls {
     writable: Signal<bool>,
     method: Memo<PullRequestMergeMethod>,
     selected: Signal<Option<PullRequestMergeMethod>>,
-    last: Signal<LastMethod>,
-    stack: Signal<Membership>,
+    remembered: Signal<PullRequestMergeMethod>,
+    save_method: Stored<SaveMethodFn>,
+    stack: Signal<StackMembership>,
+    stack_actions: bool,
     list: Option<super::list::ListRefresh>,
     owner: TaskOwner,
     refresh: Signal<u64>,
 }
-#[derive(Clone, PartialEq)]
-enum Membership {
-    Pending,
-    Failed,
-    Single,
-    Stack(Rc<PullRequestStack>),
-}
 impl Controls {
+    fn single_merge_allowed(self) -> bool {
+        !self.stack_actions || self.stack.get() == StackMembership::Single
+    }
     fn disabled(self) -> bool {
         !self.writable.get() || self.pending.with(Option::is_some)
     }
@@ -79,7 +77,7 @@ impl Controls {
         {
             return;
         }
-        if action == PullRequestAction::Merge && self.stack.get() != Membership::Single {
+        if action == PullRequestAction::Merge && !self.single_merge_allowed() {
             return;
         }
         if matches!(action, PullRequestAction::Merge | PullRequestAction::Close)
@@ -205,71 +203,90 @@ fn failure_copy(action: &PullRequestAction, term: &str) -> (String, &'static str
         _ => unreachable!("only lifecycle actions have header controls"),
     }
 }
-pub(super) fn controls(
-    pr: Rc<PullRequestDetail>,
-    client: PullRequestReviewSession,
-    writable: Signal<bool>,
-    refresh: Signal<u64>,
-    default: Memo<Option<PullRequestMergeMethod>>,
-    armed: Signal<Option<PullRequestAction>>,
-) -> AnyElement {
-    let stack_actions = pr.capabilities.stacks == Some(Some(true))
-        && pr.capabilities.stack_actions == Some(Some(true));
-    let stack = signal(if stack_actions {
-        Membership::Pending
+pub(super) struct ControlsInput {
+    pub pr: Rc<PullRequestDetail>,
+    pub client: PullRequestReviewSession,
+    pub writable: Signal<bool>,
+    pub refresh: Signal<u64>,
+    pub default: Memo<Option<PullRequestMergeMethod>>,
+    pub remembered: Signal<PullRequestMergeMethod>,
+    pub save_method: SaveMethodFn,
+    pub armed: Signal<Option<PullRequestAction>>,
+    pub owner: TaskOwner,
+    pub host_label: String,
+    pub on_select_layer: Rc<dyn Fn(u64)>,
+}
+
+pub(super) fn controls(input: ControlsInput) -> AnyElement {
+    let ControlsInput {
+        pr,
+        client,
+        writable,
+        refresh,
+        default,
+        remembered,
+        save_method,
+        armed,
+        owner,
+        host_label,
+        on_select_layer,
+    } = input;
+    let has_stacks = pr.capabilities.stacks == Some(Some(true));
+    let stack_actions = has_stacks && pr.capabilities.stack_actions == Some(Some(true));
+    let stack = signal(if has_stacks {
+        StackMembership::Pending
     } else {
-        Membership::Single
+        StackMembership::Single
     });
-    let revision = signal(0u64);
-    if stack_actions {
+    let stack_revision = signal(0u64);
+    if has_stacks {
         let session = client.clone();
         effect(move || {
-            revision.get();
-            stack.set(Membership::Pending);
+            stack_revision.get();
+            stack.set(StackMembership::Pending);
             let session = session.clone();
             watch(async move {
                 stack.set(match session.stack().await {
-                    Ok(Some(s)) => Membership::Stack(Rc::new(s)),
-                    Ok(None) => Membership::Single,
-                    Err(_) => Membership::Failed,
+                    Ok(Some(s)) => StackMembership::Stack(Rc::new(s)),
+                    Ok(None) => StackMembership::Single,
+                    Err(_) => StackMembership::Failed,
                 });
             });
         });
     }
     let methods = stored(allowed_merge_methods(&pr));
-    let selected = signal(None);
-    let last = global::<LastMethod>();
+    let selected = signal(pr.auto_merge_method.clone().flatten());
     let method = computed(move || {
         resolve_merge_method(
             &methods.get(),
             selected.get().as_ref(),
             default.get().as_ref(),
-            last.get()
-                .0
-                .as_ref()
-                .unwrap_or(&PullRequestMergeMethod::Merge),
+            &remembered.get(),
         )
     });
-    let term = if pr.provider.0 == "gitlab" {
-        "merge request"
+    let (term_singular, term_plural) = if pr.provider.0 == "gitlab" {
+        ("merge request", "merge requests")
     } else {
-        "pull request"
+        ("pull request", "pull requests")
     };
     let list = use_context::<super::list::ListRefresh>();
+    let controls_owner = list.map_or(owner, |list| list.owner);
     let c = Controls {
         detail: stored(pr.clone()),
-        session: stored(client),
-        term,
+        session: stored(client.clone()),
+        term: term_singular,
         pending: signal(None),
         armed,
         open: signal(false),
         writable,
         method,
         selected,
-        last,
+        remembered,
+        save_method: stored(save_method),
         stack,
+        stack_actions,
         list,
-        owner: list.map_or_else(TaskOwner::here, |list| list.owner),
+        owner: controls_owner,
         refresh,
     };
     effect(move || {
@@ -297,30 +314,34 @@ pub(super) fn controls(
         && pr.mergeability != PullRequestMergeability::Conflicting
         && can(PullRequestAction::Merge)
         && methods.with(|m| m.len() > 1);
-    let more = tr("More {term} actions", &[("term", t(term).into())]);
+    let more = tr("More {term} actions", &[("term", t(term_singular).into())]);
+    let methods_available = methods.with(|m| !m.is_empty());
+    let stack_pr = pr.clone();
+    let stack_session = client.clone();
+    let primary_pr = pr.clone();
     let primary = computed(move || {
-        let checks = match classify_checks(&pr.checks) {
+        let checks = match classify_checks(&primary_pr.checks) {
             ChecksState::None => None,
             ChecksState::Passing => Some(PullRequestChecksState::Passing),
             ChecksState::Pending => Some(PullRequestChecksState::Pending),
             ChecksState::Failing => Some(PullRequestChecksState::Failing),
         };
-        let single = !matches!(stack.get(), Membership::Stack(_));
+        let single = !stack_actions || !matches!(stack.get(), StackMembership::Stack(_));
         primary_control(PrimaryControlInput {
-            state: &pr.state,
-            is_draft: pr.is_draft,
-            mergeability: &pr.mergeability,
+            state: &primary_pr.state,
+            is_draft: primary_pr.is_draft,
+            mergeability: &primary_pr.mergeability,
             checks: checks.as_ref(),
-            auto_merge_enabled: pr.auto_merge_enabled.flatten(),
+            auto_merge_enabled: primary_pr.auto_merge_enabled.flatten(),
             has_merge_method: methods.with(|m| !m.is_empty()),
-            can_merge: single && can_perform_action(&pr, &PullRequestAction::Merge),
-            can_mark_ready: can_perform_action(&pr, &PullRequestAction::Ready),
+            can_merge: single && can_perform_action(&primary_pr, &PullRequestAction::Merge),
+            can_mark_ready: can_perform_action(&primary_pr, &PullRequestAction::Ready),
             can_enable_auto_merge: single
-                && can_perform_action(&pr, &PullRequestAction::EnableAutoMerge),
+                && can_perform_action(&primary_pr, &PullRequestAction::EnableAutoMerge),
         })
     });
     let merge_now = computed(move || {
-        stack.get() == Membership::Single
+        c.single_merge_allowed()
             && matches!(
                 primary.get(),
                 Some("enable-auto-merge" | "auto-merge-armed")
@@ -340,14 +361,37 @@ pub(super) fn controls(
                     && can_perform_action(p, &PullRequestAction::Ready)
             })
     });
+    let stack_view = dynamic(move || match stack.get() {
+        StackMembership::Stack(_) => detail_stack_controls(DetailStackInput {
+            detail: stack_pr.clone(),
+            session: stack_session.clone(),
+            stack,
+            stack_revision,
+            writable,
+            method,
+            methods_available,
+            stack_actions,
+            host_label: host_label.clone(),
+            term_singular,
+            term_plural,
+            list,
+            refresh,
+            owner: controls_owner,
+            on_select: on_select_layer.clone(),
+        }),
+        StackMembership::Failed if stack_actions => {
+            let label = t("Retry stack lookup");
+            nsh_base::button()
+                .accessibility_label(label.clone())
+                .on_press(move || stack_revision.update(|n| *n += 1))
+                .child(text(label))
+                .into_element()
+        }
+        _ => view().into_element(),
+    });
     view()
         .app_class(tw("flex flex-row flex-wrap items-center gap-1"))
-        .child(dynamic(move || match stack.get() {
-            Membership::Failed => button(t("Retry stack lookup"), move || {
-                revision.update(|n| *n += 1)
-            }),
-            _ => view().into_element(),
-        }))
+        .child(stack_view)
         .child(dynamic(move || {
             let a = match primary.get() {
                 Some("merge") => PullRequestAction::Merge,
@@ -361,17 +405,16 @@ pub(super) fn controls(
                 .accessibility_label(move || SharedString::from(c.label(&a)))
                 .child(text(move || c.label(&caption)))
                 .disabled(move || {
-                    c.disabled()
-                        || primary.get() == Some("merge") && stack.get() != Membership::Single
+                    c.disabled() || (primary.get() == Some("merge") && !c.single_merge_allowed())
                 })
                 .on_press(move || c.activate(click.clone()));
             c.confirmation_target(target, control)
         }))
         .child(dynamic(move || match (primary.get(), stack.get()) {
-            (Some("merge"), Membership::Pending) => {
+            (Some("merge"), StackMembership::Pending) if stack_actions => {
                 text(t("Checking stack membership…")).into_element()
             }
-            (Some("merge"), Membership::Failed) => {
+            (Some("merge"), StackMembership::Failed) if stack_actions => {
                 text(t("Couldn't check stack membership")).into_element()
             }
             _ => view().into_element(),
@@ -408,7 +451,12 @@ pub(super) fn controls(
                             text(label),
                             move || {
                                 c.selected.set(Some(m.clone()));
-                                c.last.set(LastMethod(Some(m.clone())));
+                                c.remembered.set(m.clone());
+                                let chosen = m.clone();
+                                let save = c.save_method.get();
+                                c.owner.spawn(async move {
+                                    (save)(chosen).await;
+                                });
                             },
                         )
                     }));

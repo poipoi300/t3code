@@ -8,14 +8,14 @@ use t3_client::{
     platform::Platform,
     types::{EnvironmentId, ProjectId},
     workspace::{
-        pr_list::{self, ListSort},
+        pr_list::{self, AuthorFacet, EnvironmentPullRequestEntry, LabelFacet, ListSort},
         pr_views::preferences::ListSearch,
     },
 };
 use t3_contracts::pull_request::*;
 
 use crate::{
-    i18n::{t, tr},
+    i18n::{Value, t, tr},
     runtime::{rt, tasks::watch},
     state::{
         clock,
@@ -35,22 +35,55 @@ type ListRead = dyn Fn(
     EnvironmentId,
     PullRequestListInput,
 ) -> LocalBoxFuture<'static, Result<PullRequestListResult, String>>;
+type FilterOptionsRead =
+    dyn Fn(
+        EnvironmentId,
+        PullRequestFilterOptionsInput,
+    ) -> LocalBoxFuture<'static, Result<PullRequestFilterOptions, String>>;
 
 #[derive(Clone)]
-pub struct ListClient(Rc<ListRead>);
+pub struct ListClient {
+    list: Rc<ListRead>,
+    filter_options: Rc<FilterOptionsRead>,
+    stack: super::stack::StackRead,
+}
 
 pub fn bind<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> ListClient {
-    let client = client.clone();
-    ListClient(Rc::new(move |environment, input| {
-        let client = client.clone();
-        async move {
-            client
-                .pull_request_list(&environment, input)
-                .await
-                .map_err(|e| e.into_client_error().to_string())
-        }
-        .boxed_local()
-    }))
+    let list_client = client.clone();
+    let filter_client = client.clone();
+    let stack_client = client.clone();
+    ListClient {
+        list: Rc::new(move |environment, input| {
+            let client = list_client.clone();
+            async move {
+                client
+                    .pull_request_list(&environment, input)
+                    .await
+                    .map_err(|e| e.into_client_error().to_string())
+            }
+            .boxed_local()
+        }),
+        filter_options: Rc::new(move |environment, input| {
+            let client = filter_client.clone();
+            async move {
+                client
+                    .pull_request_filter_options(&environment, input)
+                    .await
+                    .map_err(|e| e.into_client_error().to_string())
+            }
+            .boxed_local()
+        }),
+        stack: Rc::new(move |environment, reference| {
+            let session = stack_client.pull_request_review_session(&environment, reference);
+            async move {
+                session
+                    .stack()
+                    .await
+                    .map_err(|e| e.into_client_error().to_string())
+            }
+            .boxed_local()
+        }),
+    }
 }
 
 use crate::screens::panel::{self, Action, PanelRegistry, Surface, SurfaceContent};
@@ -198,6 +231,24 @@ impl Filters {
         next.set(key, value);
         self.replace(next);
     }
+
+    fn set_pairs(self, pairs: &[(&str, &str)]) {
+        let mut next = self.search.get_untracked();
+        for &(key, value) in pairs {
+            next.set(key, value);
+        }
+        self.replace(next);
+    }
+
+    fn selected_labels(self) -> Vec<String> {
+        self.search.with(ListSearch::labels)
+    }
+
+    fn set_labels(self, labels: &[String]) {
+        let mut next = self.search.get_untracked();
+        next.set_labels(labels);
+        self.replace(next);
+    }
 }
 
 fn radio_group(
@@ -325,7 +376,7 @@ fn read_pages(
             next
         };
         replies.update(|map| map.entry(target.clone()).or_default().loading = true);
-        let result = (client.0)(target.0.clone(), request.clone());
+        let result = (client.list)(target.0.clone(), request.clone());
         let target = target.clone();
         watch(async move {
             let result = result.await;
@@ -522,6 +573,588 @@ pub fn screen() -> AnyElement {
         });
     });
     let nav = navigator();
+    let owner = crate::runtime::tasks::TaskOwner::here();
+    let filters_open = signal(false);
+    let author_query = signal(String::new());
+    let debounced_author_query = signal(String::new());
+    let label_query = signal(String::new());
+    let debounced_label_query = signal(String::new());
+    let hosted_authors = signal(Vec::<PullRequestActor>::new());
+    let hosted_authors_error = signal(None::<String>);
+    let hosted_authors_pending = signal(false);
+    let hosted_labels = signal(Vec::<PullRequestLabel>::new());
+    let hosted_labels_error = signal(None::<String>);
+    let hosted_labels_pending = signal(false);
+
+    super::bind_debounced_query(author_query, debounced_author_query);
+    super::bind_debounced_query(label_query, debounced_label_query);
+
+    let fetch_filter_options =
+        move |kind: PullRequestFilterOptionKind,
+              q_sig: Signal<String>,
+              dq_sig: Signal<String>,
+              pending_sig: Signal<bool>,
+              err_sig: Signal<Option<String>>,
+              on_done: Rc<dyn Fn(Vec<PullRequestFilterOptions>)>| {
+            effect(move || {
+                if !filters_open.get() {
+                    return;
+                }
+                let Some(client) = service.get() else {
+                    return;
+                };
+                let targets = scope.get().unwrap_or_default();
+                let req = input.get();
+                let dq = dq_sig.get();
+                if dq != q_sig.get_untracked().trim() {
+                    pending_sig.set(true);
+                    return;
+                }
+                pending_sig.set(true);
+                err_sig.set(None);
+                let q = (!dq.is_empty()).then(|| {
+                    Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                        t3_client::workspace::pr_views::markdown::bound_utf16(&dq, 100, ""),
+                    ))
+                });
+                let on_done = on_done.clone();
+                let kind = kind.clone();
+                watch(async move {
+                    let mut responses = Vec::new();
+                    let mut first_error = None;
+                    for ((env, project_ids), _) in targets {
+                        let res = (client.filter_options)(
+                            env,
+                            PullRequestFilterOptionsInput {
+                                kind: kind.clone(),
+                                project_id: req.project_id.clone(),
+                                project_ids: project_ids.map(Some),
+                                host: req.host.clone(),
+                                query: q.clone(),
+                                sigil: None,
+                            },
+                        )
+                        .await;
+                        match res {
+                            Ok(ok) => responses.push(ok),
+                            Err(e) if first_error.is_none() => first_error = Some(e),
+                            Err(_) => {}
+                        }
+                    }
+                    on_done(responses);
+                    err_sig.try_set(first_error);
+                    pending_sig.try_set(false);
+                });
+            });
+        };
+
+    fetch_filter_options(
+        PullRequestFilterOptionKind::Authors,
+        author_query,
+        debounced_author_query,
+        hosted_authors_pending,
+        hosted_authors_error,
+        Rc::new(move |responses| {
+            let merged = responses.into_iter().flat_map(|ok| ok.authors).collect();
+            hosted_authors.try_set(merged);
+        }),
+    );
+    fetch_filter_options(
+        PullRequestFilterOptionKind::Labels,
+        label_query,
+        debounced_label_query,
+        hosted_labels_pending,
+        hosted_labels_error,
+        Rc::new(move |responses| {
+            let merged = responses.into_iter().flat_map(|ok| ok.labels).collect();
+            hosted_labels.try_set(merged);
+        }),
+    );
+
+    let facets = computed(move || {
+        let state = input.with(|i| i.state.clone());
+        replies.with(|map| {
+            let entries: Vec<EnvironmentPullRequestEntry> = map
+                .iter()
+                .flat_map(|((env, _), page)| {
+                    page.answers.iter().flat_map(move |answer| {
+                        let env = env.clone();
+                        answer.entries.iter().cloned().map(move |entry| {
+                            EnvironmentPullRequestEntry {
+                                environment: env.clone(),
+                                entry,
+                            }
+                        })
+                    })
+                })
+                .collect();
+            pr_list::collect_facets(&entries, &state)
+        })
+    });
+
+    let observed_hosts = computed(move || {
+        replies.with(|map| {
+            let mut list: Vec<PullRequestProviderSummary> = Vec::new();
+            for page in map.values() {
+                for answer in &page.answers {
+                    for summary in &answer.providers {
+                        if let Some(existing) =
+                            list.iter_mut().find(|item| item.host == summary.host)
+                        {
+                            *existing = summary.clone();
+                        } else {
+                            list.push(summary.clone());
+                        }
+                    }
+                }
+            }
+            list
+        })
+    });
+
+    let env_labels = computed(move || {
+        runtime.store.track_environments();
+        runtime
+            .environments()
+            .into_iter()
+            .map(|entry| (entry.id, entry.label))
+            .collect::<BTreeMap<_, _>>()
+    });
+
+    let filters_label = t("Filters");
+    let _filters_owner = owner;
+    let filters_menu = menu::menu_button(
+        filters_label.clone(),
+        || false,
+        view()
+            .app_class(tw(
+                "flex flex-row items-center gap-2 rounded-md border border-input px-3 py-2",
+            ))
+            .child(icon_with_class(Icon::ListFilter, "size-4"))
+            .child(text(filters_label)),
+        menu::MenuOptions {
+            open: Some(filters_open),
+            align: Align::Start,
+            ..Default::default()
+        },
+        menu::menu_popup_with(move || {
+            let hosts = observed_hosts.get();
+            let servers = catalog.get();
+            let labels_map = env_labels.get();
+            let (projects, _) = checkouts.get();
+
+            let author_sub = menu::menu_sub(
+                menu::menu_sub_trigger(
+                    t("Author"),
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::UserRound, "size-4"))
+                        .child(text(t("Author"))),
+                ),
+                || false,
+                menu::menu_sub_popup(
+                    view()
+                        .child(menu::menu_search_input(
+                            author_query,
+                            t("Search authors"),
+                            t("Search authors"),
+                            move || hosted_authors_pending.get(),
+                        ))
+                        .child(dynamic(move || {
+                            let (author_facets, _) = facets.get();
+                            let q = author_query.get();
+                            let h_authors = hosted_authors.get();
+                            let h_err = hosted_authors_error.get();
+                            let h_pending = hosted_authors_pending.get();
+                            let chosen = filters.search.with_untracked(|s| {
+                                let a = s.value("author").trim().to_owned();
+                                (!a.is_empty()).then_some(a)
+                            });
+                            let sel = pr_list::selected_author(
+                                &author_facets,
+                                &h_authors,
+                                chosen.as_deref(),
+                            );
+                            let chosen_key =
+                                chosen.as_deref().map(str::to_lowercase).unwrap_or_default();
+                            let mut visible = Vec::<AuthorFacet>::new();
+                            if let Some(selected_item) = sel.clone() {
+                                visible.push(selected_item);
+                            }
+                            for option in pr_list::author_choices(&author_facets, &h_authors, &q) {
+                                if option.actor.login.0.to_lowercase() != chosen_key {
+                                    visible.push(option);
+                                }
+                                if visible.len() >= 30 {
+                                    break;
+                                }
+                            }
+                            let mut group = view().child(menu::menu_radio_item(
+                                t("Anyone"),
+                                String::new(),
+                                Default::default(),
+                                view()
+                                    .app_class(tw("flex flex-row items-center gap-2"))
+                                    .child(icon_with_class(Icon::Layers, "size-4"))
+                                    .child(text(t("Anyone")))
+                                    .child(menu::menu_radio_item_indicator()),
+                                || {},
+                            ));
+                            for option in &visible {
+                                let login = option.actor.login.0.clone();
+                                let mut row = view()
+                                    .app_class(tw("flex flex-row items-center gap-2"))
+                                    .child(text(login.clone()))
+                                    .child(menu::menu_radio_item_indicator());
+                                if option.merged_count > 0 {
+                                    row = row.child(
+                                        text(tr(
+                                            "{count} merges loaded",
+                                            &[("count", Value::Int(option.merged_count as i64))],
+                                        ))
+                                        .app_class(tw("text-xs text-muted-foreground")),
+                                    );
+                                }
+                                group = group.child(menu::menu_radio_item(
+                                    login.clone(),
+                                    login,
+                                    Default::default(),
+                                    row,
+                                    || {},
+                                ));
+                            }
+                            if visible.is_empty() && !h_pending {
+                                let empty_msg = t(if h_err.is_none() {
+                                    "No authors found"
+                                } else {
+                                    "Couldn't search authors on the host"
+                                });
+                                group = group.child(menu::menu_item(
+                                    empty_msg.clone(),
+                                    menu::ItemOptions {
+                                        disabled: Prop::new(true),
+                                        ..Default::default()
+                                    },
+                                    text(empty_msg),
+                                    || {},
+                                ));
+                            }
+                            let selected_val = filters.search.with(|s| {
+                                sel.map(|v| v.actor.login.0).unwrap_or_else(|| {
+                                    let a = s.value("author").trim().to_owned();
+                                    if a.is_empty() { String::new() } else { a }
+                                })
+                            });
+                            menu::menu_radio_group(
+                                t("Author"),
+                                move || selected_val.clone(),
+                                group,
+                                move |next| filters.set("author", &next),
+                            )
+                        })),
+                ),
+            );
+
+            let labels_sub = menu::menu_sub(
+                menu::menu_sub_trigger(
+                    t("Labels"),
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::Tag, "size-4"))
+                        .child(text(t("Labels"))),
+                ),
+                || false,
+                menu::menu_sub_popup(
+                    view()
+                        .child(menu::menu_search_input(
+                            label_query,
+                            t("Search labels"),
+                            t("Search labels"),
+                            move || hosted_labels_pending.get(),
+                        ))
+                        .child(dynamic(move || {
+                            let (_, label_facets) = facets.get();
+                            let q = label_query.get();
+                            let h_labels = hosted_labels.get();
+                            let h_err = hosted_labels_error.get();
+                            let h_pending = hosted_labels_pending.get();
+                            let current = filters.selected_labels();
+                            let choices = pr_list::label_choices(&label_facets, &h_labels, &q);
+                            let mut visible = Vec::<LabelFacet>::new();
+                            for name in &current {
+                                let key = name.to_lowercase();
+                                if !choices.iter().any(|o| o.label.name.0.to_lowercase() == key)
+                                    && let Ok(trimmed) =
+                                        t3_contracts::base_schemas::TrimmedNonEmptyString::checked(
+                                            name,
+                                        )
+                                {
+                                    visible.push(LabelFacet {
+                                        label: PullRequestLabel {
+                                            name: trimmed,
+                                            color: None,
+                                            description: None,
+                                        },
+                                        count: 0,
+                                    });
+                                }
+                            }
+                            visible.extend(choices);
+                            let mut list = view();
+                            if visible.is_empty() && !h_pending {
+                                let empty_msg = t(if h_err.is_none() {
+                                    "No labels found"
+                                } else {
+                                    "Couldn't search labels on the host"
+                                });
+                                list = list.child(menu::menu_item(
+                                    empty_msg.clone(),
+                                    menu::ItemOptions {
+                                        disabled: Prop::new(true),
+                                        ..Default::default()
+                                    },
+                                    text(empty_msg),
+                                    || {},
+                                ));
+                            }
+                            for option in visible {
+                                let label_name = option.label.name.0.clone();
+                                let key = label_name.to_lowercase();
+                                let name_for_toggle = label_name.clone();
+                                list = list.child(menu::menu_checkbox_item(
+                                    label_name.clone(),
+                                    move || {
+                                        filters
+                                            .selected_labels()
+                                            .iter()
+                                            .any(|item| item.to_lowercase() == key)
+                                    },
+                                    menu::CheckboxVariant::Icon,
+                                    menu::ItemOptions {
+                                        close_on_select: false,
+                                        ..Default::default()
+                                    },
+                                    text(label_name),
+                                    move |next| {
+                                        let mut updated = filters.selected_labels();
+                                        if next {
+                                            if !updated
+                                                .iter()
+                                                .any(|v| v.eq_ignore_ascii_case(&name_for_toggle))
+                                            {
+                                                updated.push(name_for_toggle.clone());
+                                            }
+                                        } else {
+                                            updated.retain(|v| {
+                                                !v.eq_ignore_ascii_case(&name_for_toggle)
+                                            });
+                                        }
+                                        filters.set_labels(&updated);
+                                    },
+                                ));
+                            }
+                            list
+                        })),
+                ),
+            );
+
+            let mut popup = view()
+                .child(submenu("State", "state", filters, STATE))
+                .child(submenu("Involvement", "involvement", filters, INVOLVEMENT))
+                .child(menu::menu_separator())
+                .child(author_sub)
+                .child(labels_sub)
+                .child(submenu("Draft", "draft", filters, DRAFT))
+                .child(submenu("Review", "review", filters, REVIEW))
+                .child(submenu("Checks", "checks", filters, CHECKS));
+
+            if hosts.len() > 1 {
+                let sharing_count =
+                    |kind: &t3_contracts::source_control::SourceControlProviderKind| {
+                        hosts.iter().filter(|h| &h.kind == kind).count()
+                    };
+                let mut host_items = view().child(menu::menu_radio_item(
+                    t("All"),
+                    String::new(),
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::Globe, "size-4"))
+                        .child(text(t("All")))
+                        .child(menu::menu_radio_item_indicator()),
+                    || {},
+                ));
+                for entry in &hosts {
+                    let label = if sharing_count(&entry.kind) > 1 {
+                        entry.host.0.clone()
+                    } else {
+                        super::host_display_label(&entry.kind.0)
+                    };
+                    let icon = match entry.kind.0.as_str() {
+                        "github" => Icon::Github,
+                        "gitlab" => Icon::Gitlab,
+                        _ => Icon::Globe,
+                    };
+                    let disabled = !entry.configured;
+                    host_items = host_items.child(menu::menu_radio_item(
+                        label.clone(),
+                        entry.host.0.clone(),
+                        menu::ItemOptions {
+                            disabled: Prop::new(disabled),
+                            ..Default::default()
+                        },
+                        view()
+                            .app_class(tw("flex flex-row items-center gap-2"))
+                            .child(icon_with_class(icon, "size-4"))
+                            .child(text(label))
+                            .child(menu::menu_radio_item_indicator()),
+                        || {},
+                    ));
+                }
+                popup = popup.child(menu::menu_separator()).child(menu::menu_sub(
+                    menu::menu_sub_trigger(
+                        t("Host"),
+                        Default::default(),
+                        view()
+                            .app_class(tw("flex flex-row items-center gap-2"))
+                            .child(icon_with_class(Icon::Globe, "size-4"))
+                            .child(text(t("Host"))),
+                    ),
+                    || false,
+                    menu::menu_sub_popup(menu::menu_radio_group(
+                        t("Host"),
+                        move || filters.search.with(|s| s.value("host").to_owned()),
+                        host_items,
+                        move |next| filters.set("host", &next),
+                    )),
+                ));
+            }
+
+            if servers.len() > 1 {
+                let mut server_items = view().child(menu::menu_radio_item(
+                    t("All servers"),
+                    String::new(),
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::Layers, "size-4"))
+                        .child(text(t("All servers")))
+                        .child(menu::menu_radio_item_indicator()),
+                    || {},
+                ));
+                for (env_id, _, _) in &servers {
+                    let label = labels_map
+                        .get(env_id)
+                        .cloned()
+                        .unwrap_or_else(|| env_id.0.clone());
+                    server_items = server_items.child(menu::menu_radio_item(
+                        label.clone(),
+                        env_id.0.clone(),
+                        Default::default(),
+                        view()
+                            .app_class(tw("flex flex-row items-center gap-2"))
+                            .child(icon_with_class(Icon::Server, "size-4"))
+                            .child(text(label))
+                            .child(menu::menu_radio_item_indicator()),
+                        || {},
+                    ));
+                }
+                popup = popup.child(menu::menu_separator()).child(menu::menu_sub(
+                    menu::menu_sub_trigger(
+                        t("Server"),
+                        Default::default(),
+                        view()
+                            .app_class(tw("flex flex-row items-center gap-2"))
+                            .child(icon_with_class(Icon::Server, "size-4"))
+                            .child(text(t("Server"))),
+                    ),
+                    || false,
+                    menu::menu_sub_popup(menu::menu_radio_group(
+                        t("Server"),
+                        move || filters.search.with(|s| s.value("environmentId").to_owned()),
+                        server_items,
+                        move |next| {
+                            filters.set_pairs(&[("environmentId", &next), ("projectId", "")])
+                        },
+                    )),
+                ));
+            }
+
+            let projects_for_lookup = projects.clone();
+            let mut project_items = view().child(menu::menu_radio_item(
+                t("All projects"),
+                String::new(),
+                Default::default(),
+                view()
+                    .app_class(tw("flex flex-row items-center gap-2"))
+                    .child(icon_with_class(Icon::Layers, "size-4"))
+                    .child(text(t("All projects")))
+                    .child(menu::menu_radio_item_indicator()),
+                || {},
+            ));
+            for proj in &projects {
+                if proj.is_scratch {
+                    continue;
+                }
+                let title = proj.project.title.0.clone();
+                let value = format!("{}\0{}", proj.environment.0, proj.project.id.0);
+                project_items = project_items.child(menu::menu_radio_item(
+                    title.clone(),
+                    value,
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::FolderGit2, "size-4"))
+                        .child(text(title))
+                        .child(menu::menu_radio_item_indicator()),
+                    || {},
+                ));
+            }
+            popup.child(menu::menu_separator()).child(menu::menu_sub(
+                menu::menu_sub_trigger(
+                    t("Project"),
+                    Default::default(),
+                    view()
+                        .app_class(tw("flex flex-row items-center gap-2"))
+                        .child(icon_with_class(Icon::FolderGit2, "size-4"))
+                        .child(text(t("Project"))),
+                ),
+                || false,
+                menu::menu_sub_popup(menu::menu_radio_group(
+                    t("Project"),
+                    move || {
+                        filters.search.with(|s| {
+                            let p = s.value("projectId");
+                            let e = s.value("environmentId");
+                            if p.is_empty() {
+                                String::new()
+                            } else if e.is_empty() {
+                                projects_for_lookup
+                                    .iter()
+                                    .find(|cand| cand.project.id.0 == p)
+                                    .map_or_else(String::new, |cand| {
+                                        format!("{}\0{}", cand.environment.0, cand.project.id.0)
+                                    })
+                            } else {
+                                format!("{e}\0{p}")
+                            }
+                        })
+                    },
+                    project_items,
+                    move |next| {
+                        if let Some((env_id, proj_id)) = next.split_once('\0') {
+                            filters.set_pairs(&[("projectId", proj_id), ("environmentId", env_id)]);
+                        } else {
+                            filters.set("projectId", "");
+                        }
+                    },
+                )),
+            ))
+        }),
+    );
+
     let controls = view()
         .app_class(tw("flex flex-row flex-wrap items-center gap-2"))
         .child(toolbar_menu(
@@ -530,28 +1163,17 @@ pub fn screen() -> AnyElement {
             Icon::ArrowDownUp,
             radio_group("Sort pull requests", "sort", filters, SORT),
         ))
-        .child(toolbar_menu(
-            "Filters",
-            "Filters",
-            Icon::ListFilter,
-            view()
-                .child(submenu("State", "state", filters, STATE))
-                .child(submenu("Involvement", "involvement", filters, INVOLVEMENT))
-                .child(menu::menu_separator())
-                .child(submenu("Draft", "draft", filters, DRAFT))
-                .child(submenu("Review", "review", filters, REVIEW))
-                .child(submenu("Checks", "checks", filters, CHECKS)),
-        ))
+        .child(filters_menu)
         .child(action("Refresh pull requests", Icon::RefreshCw, reload));
     let content = dynamic(move || {
-        if service.with(|s| s.is_none()) {
+        let Some(client) = service.get() else {
             return view()
                 .child(text(t("Pull requests unavailable")))
                 .child(text(t(
                     "Update your T3 Code servers to browse pull requests.",
                 )))
                 .into_element();
-        }
+        };
         let targets = scope.get();
         let input = input.get();
         let sort = filters.search.with(ListSearch::sort);
@@ -568,6 +1190,7 @@ pub fn screen() -> AnyElement {
                         filters,
                         refresh,
                         more,
+                        stack: client.stack,
                     },
                 )
             })
@@ -638,11 +1261,12 @@ pub fn screen() -> AnyElement {
         .into_element()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ListActions {
     filters: Filters,
     refresh: Signal<u64>,
     more: Signal<u64>,
+    stack: super::stack::StackRead,
 }
 
 fn list_body(
@@ -760,21 +1384,61 @@ fn list_body(
         }
         for row in group.entries {
             let e = &row.entry;
+            let row_env = row.environment.clone();
+            let host_str = e.host.0.clone();
+            let proj_id = e.project_id.clone();
+            let repo_str = e.repository.0.clone();
             let selected = Surface::pull_request(
-                Some(&row.environment.0),
-                &e.project_id.0,
-                Some(&e.host.0),
-                &e.repository.0,
+                Some(&row_env.0),
+                &proj_id.0,
+                Some(&host_str),
+                &repo_str,
                 e.number,
             );
+            let filters = actions.filters;
+            let open_btn = nsh_base::button()
+                .accessibility_label(tr(
+                    "Open pull request #{number}",
+                    &[("number", e.number.to_string().into())],
+                ))
+                .on_press(move || filters.select(Some(&selected)))
+                .app_class(tw("min-w-0 flex-1"))
+                .child(list_row(e));
+            let stack_badge = e.stack.as_ref().and_then(Option::as_ref).map(|membership| {
+                let pr_ref = PullRequestRef {
+                    project_id: proj_id.clone(),
+                    host: Some(Some(e.host.clone())),
+                    repository: e.repository.clone(),
+                    number: e.number,
+                    expected_account_id: None,
+                    allow_stale: None,
+                };
+                let nav_env = row_env.0.clone();
+                let nav_proj = proj_id.0.clone();
+                let nav_host = host_str.clone();
+                let nav_repo = repo_str.clone();
+                super::stack::row_stack_popover(
+                    actions.stack.clone(),
+                    row_env,
+                    pr_ref,
+                    membership.clone(),
+                    Rc::new(move |number| {
+                        let target = Surface::pull_request(
+                            Some(&nav_env),
+                            &nav_proj,
+                            Some(&nav_host),
+                            &nav_repo,
+                            number,
+                        );
+                        filters.select(Some(&target));
+                    }),
+                )
+            });
             body = body.child(
-                nsh_base::button()
-                    .accessibility_label(tr(
-                        "Open pull request #{number}",
-                        &[("number", e.number.to_string().into())],
-                    ))
-                    .on_press(move || actions.filters.select(Some(&selected)))
-                    .child(list_row(e)),
+                view()
+                    .app_class(tw("flex w-full flex-row items-center gap-1"))
+                    .child(open_btn)
+                    .child(stack_badge),
             );
         }
     }
