@@ -612,23 +612,33 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
         let chosen_method = is_merge.then(|| method.get_untracked());
         owner.spawn(async move {
             let preflight = session.stack().await;
+            let mut stale_message = None;
             let preflight_ok = match preflight {
                 Ok(Some(fresh)) => {
                     let plan = build_action_plan(&fresh, current_number, is_merge);
-                    fresh.number == stack_number
+                    if fresh.number == stack_number
                         && !plan.blocked
                         && plan.target_number == Some(target_number)
                         && plan.expected_heads == action_heads
                         && writable.get_untracked()
                         && session.can_write()
+                    {
+                        true
+                    } else {
+                        stale_message = Some(t(
+                            "Stack data may be stale. Refresh before running this action.",
+                        ));
+                        false
+                    }
                 }
-                Ok(None) | Err(_) => false,
+                Ok(None) | Err(_) => {
+                    stale_message = Some(t("Stack data may be stale. We couldn’t refresh it."));
+                    false
+                }
             };
             if !preflight_ok {
                 pending.try_set(false);
-                dialog_stale.try_set(Some(t(
-                    "Stack data may be stale. We couldn’t refresh it.",
-                )));
+                dialog_stale.try_set(stale_message);
                 return;
             }
             confirmation.try_set(None);
@@ -715,14 +725,25 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
         });
     };
 
+    let refresh_for_dialog = refresh;
+    let stack_rev_for_dialog = stack_rev;
     let confirm_dialog = dialog(dialog_open, move |dlg| {
         dlg.on_open_change(move |next| {
             if !next {
                 let seq = dialog_seq.get_untracked() + 1;
                 dialog_seq.set(seq);
                 dialog_revalidating.set(false);
+                let had_stale = dialog_stale.with_untracked(Option::is_some);
                 dialog_stale.set(None);
                 confirmation.set(None);
+                if had_stale {
+                    if let Some(rev) = stack_rev_for_dialog.try_get() {
+                        stack_rev_for_dialog.set(rev + 1);
+                    }
+                    if let Some(rev) = refresh_for_dialog.try_get() {
+                        refresh_for_dialog.set(rev + 1);
+                    }
+                }
             }
         });
         let merge_layers_list = confirm_layers_merge.clone();
@@ -847,6 +868,30 @@ pub(super) fn detail_stack_controls(input: DetailStackInput) -> AnyElement {
                             ButtonSize::Default,
                             || false,
                         ))
+                        .child(dynamic(move || {
+                            dialog_stale.with(Option::is_some).then(|| {
+                                nsh_base::button()
+                                    .accessibility_label(t("Refresh stack"))
+                                    .disabled(move || pending.get() || dialog_revalidating.get())
+                                    .on_press(move || {
+                                        let seq = dialog_seq.get_untracked() + 1;
+                                        dialog_seq.set(seq);
+                                        dialog_revalidating.set(false);
+                                        dialog_stale.set(None);
+                                        confirmation.set(None);
+                                        if let Some(rev) = stack_rev_for_dialog.try_get() {
+                                            stack_rev_for_dialog.set(rev + 1);
+                                        }
+                                        if let Some(rev) = refresh_for_dialog.try_get() {
+                                            refresh_for_dialog.set(rev + 1);
+                                        }
+                                    })
+                                    .app_class(tw(
+                                        "inline-flex h-8 items-center justify-center rounded-md border border-input bg-background px-3 text-xs font-medium hover:bg-accent",
+                                    ))
+                                    .child(text(t("Refresh stack")))
+                            })
+                        }))
                         .child(dialog_action(
                             dlg,
                             ButtonContent::Label(action_label),

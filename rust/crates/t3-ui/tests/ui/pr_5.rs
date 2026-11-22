@@ -1014,7 +1014,7 @@ fn stale_stack_dialog_blocks_confirm_instead_of_running() {
         .expect("confirmation dialog open");
     app.press("id:pr-stack-confirm-dialog >> role:button[Merge stack]")
         .expect("press confirm");
-    app.wait_for("Stack data may be stale. We couldn’t refresh it.")
+    app.wait_for("Stack data may be stale. Refresh before running this action.")
         .expect("TSX stale stack notice shown instead of dispatching runAction");
     app.press_key("f9").expect("assert zero runAction calls");
     app.wait_for("Stale check passed").expect("verified");
@@ -1263,4 +1263,211 @@ fn picker_request_survives_tab_switch_and_surfaces_merge_save_error() {
     app.press("Squash and merge").expect("pick squash");
     app.wait_for("Could not save merge method")
         .expect("R8: save failure toast surfaced");
+}
+
+#[component]
+fn StaleRecoveryFixture() -> impl IntoElement {
+    let spawner = spawner_for_owner(Owner::current());
+    let server = FakeEnvironment::new("forge", spawner.clone());
+    server.set_permissions(&["orchestration:read", "source-control:write"]);
+    for tag in ["pullRequests.stack", "pullRequests.runAction"] {
+        server.register(tag, CallKind::Unary);
+    }
+
+    let mut row14 = entry(14, "Recovering stack PR", "open", 10);
+    row14["stack"] = json!({"number": 42, "position": 2, "size": 3, "base": "main"});
+    for _ in 0..4 {
+        server.reply("pullRequests.list", Ok(answer(vec![row14.clone()])));
+    }
+    for _ in 0..4 {
+        server.reply(
+            "pullRequests.detail",
+            Ok(seed_stack_detail(
+                14,
+                "Recovering stack PR",
+                "feat-2",
+                "feat-1",
+                false,
+            )),
+        );
+        server.reply("pullRequests.linkedThreads", Ok(json!({"threads": []})));
+    }
+    let mut moved = stack_payload();
+    moved["layers"][1]["headSha"] = json!("sha14-new");
+    // 1. Initial mount (`sha14`), 2. First open revalidation (`sha14`).
+    server.reply("pullRequests.stack", Ok(stack_payload()));
+    server.reply("pullRequests.stack", Ok(stack_payload()));
+    // 3. First confirm preflight (`sha14-new` -> stale!), 4-6. Refresh + reopen + confirm (`sha14-new`).
+    for _ in 0..4 {
+        server.reply("pullRequests.stack", Ok(moved.clone()));
+    }
+    server.reply("pullRequests.runAction", Ok(Value::Null));
+
+    let verified = signal(false);
+    let check_server = server.clone();
+    on_key("f9", move |_| {
+        let actions = check_server.calls("pullRequests.runAction");
+        assert_eq!(
+            actions.len(),
+            1,
+            "expected 1 runAction after refresh: {actions:?}"
+        );
+        assert_eq!(actions[0]["stackNumber"], json!(42));
+        assert_eq!(
+            actions[0]["expectedStackHeads"],
+            json!([{"number": 14, "headSha": "sha14-new"}])
+        );
+        verified.set(true);
+    });
+
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    let pair = client.pair(server.pairing());
+    spawner(
+        async move {
+            pair.await.expect("pair");
+        }
+        .boxed_local(),
+    );
+
+    view()
+        .w_full()
+        .h_full()
+        .child(t3_ui::app::app_tree(
+            Rt::new(store, Rc::new(client.clone()), Choice::Client),
+            Route::PullRequests,
+            move || {
+                t3_ui::state::url::UrlState::install(
+                    t3_ui::state::url::Location::parse("/pull-requests"),
+                    t3_ui::state::nav::navigator(),
+                    Rc::new(StaticUrl),
+                );
+                t3_ui::app::provide_client_services(&client);
+            },
+        ))
+        .child(text(move || {
+            if verified.get() {
+                "Stale recovery verified"
+            } else {
+                ""
+            }
+        }))
+}
+
+#[test]
+fn stale_stack_recovers_after_refresh_and_runs_with_new_heads() {
+    let mut app = app_at(DESKTOP, Root::of::<StaleRecoveryFixture>());
+    app.wait_for("Recovering stack PR").expect("list");
+    app.press("role:button[Open pull request #14]")
+        .expect("open #14");
+    app.wait_for("role:button[Merge stack]")
+        .expect("merge stack btn");
+    app.press("role:button[Merge stack]")
+        .expect("open confirm dialog");
+    app.wait_for("Merge 1 pull request?").expect("dialog open");
+    app.press("id:pr-stack-confirm-dialog >> role:button[Merge stack]")
+        .expect("confirm hits stale heads");
+    app.wait_for("Stack data may be stale. Refresh before running this action.")
+        .expect("stale notice rendered");
+    app.press("id:pr-stack-confirm-dialog >> role:button[Refresh stack]")
+        .expect("refresh stale stack");
+    app.wait_for_gone("Merge 1 pull request?", Duration::from_secs(2))
+        .expect("dialog closed on refresh");
+    app.wait_for("role:button[Merge stack]")
+        .expect("merge stack button restored from refreshed stack");
+    app.press("role:button[Merge stack]")
+        .expect("reopen confirm dialog on refreshed stack");
+    app.wait_for("Merge 1 pull request?")
+        .expect("reopened dialog");
+    app.press("id:pr-stack-confirm-dialog >> role:button[Merge stack]")
+        .expect("confirm against refreshed heads");
+    app.wait_for("Stack merge request completed")
+        .expect("runAction succeeded after stack refresh");
+    app.press_key("f9").expect("assert new heads");
+    app.wait_for("Stale recovery verified").expect("verified");
+}
+
+#[component]
+fn DetailRefreshErrorFixture() -> impl IntoElement {
+    let spawner = spawner_for_owner(Owner::current());
+    let server = FakeEnvironment::new("forge", spawner.clone());
+    server.set_permissions(&["orchestration:read", "source-control:write"]);
+    server.register("pullRequests.runAction", CallKind::Unary);
+
+    let row14 = entry(14, "Refresh error PR", "open", 5);
+    for _ in 0..4 {
+        server.reply("pullRequests.list", Ok(answer(vec![row14.clone()])));
+    }
+    let mut initial = seed_stack_detail(14, "Initial detail title", "feat-1", "main", true);
+    let mut updated = seed_stack_detail(14, "Refreshed detail title", "feat-1", "main", false);
+    initial["capabilities"]["stacks"] = json!(false);
+    updated["capabilities"]["stacks"] = json!(false);
+
+    server.reply("pullRequests.detail", Ok(initial));
+    server.reply(
+        "pullRequests.detail",
+        Err(json!({"message": "Gateway timeout"})),
+    );
+    server.reply("pullRequests.detail", Ok(updated));
+    for _ in 0..3 {
+        server.reply("pullRequests.linkedThreads", Ok(json!({"threads": []})));
+    }
+    server.reply("pullRequests.runAction", Ok(Value::Null));
+
+    let store = ClientStore::default();
+    let client = ClientRuntime::new(
+        server.platform(),
+        store.clone(),
+        OrchestrationV2CreationSource::Web,
+        spawner.clone(),
+    );
+    let pair = client.pair(server.pairing());
+    spawner(
+        async move {
+            pair.await.expect("pair");
+        }
+        .boxed_local(),
+    );
+
+    view().w_full().h_full().child(t3_ui::app::app_tree(
+        Rt::new(store, Rc::new(client.clone()), Choice::Client),
+        Route::PullRequests,
+        move || {
+            t3_ui::state::url::UrlState::install(
+                t3_ui::state::url::Location::parse("/pull-requests"),
+                t3_ui::state::nav::navigator(),
+                Rc::new(StaticUrl),
+            );
+            t3_ui::app::provide_client_services(&client);
+        },
+    ))
+}
+
+#[test]
+fn detail_refresh_failure_preserves_loaded_detail_and_surfaces_retry() {
+    let mut app = app_at(DESKTOP, Root::of::<DetailRefreshErrorFixture>());
+    app.wait_for("Refresh error PR").expect("list");
+    app.press("role:button[Open pull request #14]")
+        .expect("open #14");
+    app.wait_for("Initial detail title")
+        .expect("initial detail loaded");
+    app.press("role:button[Ready for review]")
+        .expect("mark ready triggers detail refresh");
+    app.wait_for("Could not refresh pull request")
+        .expect("refresh failure banner surfaced");
+    assert!(
+        app.screen().shows("Initial detail title"),
+        "loaded detail must stay visible when refresh fails"
+    );
+    app.press("role:button[Retry pull request refresh]")
+        .expect("retry detail refresh");
+    app.wait_for("Refreshed detail title")
+        .expect("updated detail rendered after retry");
+    app.wait_for_gone("Could not refresh pull request", Duration::from_secs(2))
+        .expect("refresh failure notice cleared on success");
 }

@@ -281,9 +281,7 @@ fn load(
                     loaded_detail.try_set(Some(Rc::new(pr)));
                 }
                 Err(err) => {
-                    if loaded_detail.with_untracked(Option::is_none) {
-                        detail_error.try_set(Some(err));
-                    }
+                    detail_error.try_set(Some(err));
                 }
             }
         });
@@ -328,6 +326,35 @@ fn load(
             view()
                 .app_class(tw("flex min-w-0 flex-col gap-3 p-4"))
                 .child(button(t("Back to pull requests"), back))
+                .child(dynamic(move || {
+                    if loaded_detail.with(Option::is_none) {
+                        return view().into_element();
+                    }
+                    let Some(err) = detail_error.get() else {
+                        return view().into_element();
+                    };
+                    view()
+                        .app_class(tw(
+                            "flex flex-row flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive",
+                        ))
+                        .child(
+                            view()
+                                .app_class(tw("flex min-w-0 flex-1 flex-col gap-0.5"))
+                                .child(text(t("Could not refresh pull request")))
+                                .child(
+                                    (!err.is_empty()).then(|| {
+                                        text(err).app_class(tw("text-muted-foreground"))
+                                    }),
+                                ),
+                        )
+                        .child(
+                            nsh_base::button()
+                                .accessibility_label(t("Retry pull request refresh"))
+                                .child(text(t("Retry")))
+                                .on_press(retry),
+                        )
+                        .into_element()
+                }))
                 .child(dynamic(move || match ready.get() {
                     1 => {
                         let initial = loaded_detail.with_untracked(|p| p.clone()).expect("loaded");
