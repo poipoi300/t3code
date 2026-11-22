@@ -132,7 +132,28 @@ fn preferences_round_trip_and_fall_back_to_legacy_records_without_deleting_them(
         assert_eq!(preferences.state.project_order, vec!["a".to_owned()]);
         preferences.working_shelf_expanded = true;
         preferences.sidebar_width = Some(320.5);
-        preferences.save(&storage).await.unwrap();
+        let expected_state = preferences.state.clone();
+        UiPreferences::update_state(&storage, |state| *state = expected_state.clone())
+            .await
+            .unwrap();
+        storage
+            .write(
+                StorageArea::Ordinary,
+                vec![
+                    StorageWrite {
+                        key: key(WORKING_SHELF_EXPANDED_KEY),
+                        value: Some(
+                            serde_json::to_vec(&preferences.working_shelf_expanded).unwrap(),
+                        ),
+                    },
+                    StorageWrite {
+                        key: key(SIDEBAR_WIDTH_KEY),
+                        value: Some(serde_json::to_vec(&320.5f64).unwrap()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
         let loaded = UiPreferences::load(&storage).await.unwrap();
         assert_eq!(loaded, preferences);
         assert!(

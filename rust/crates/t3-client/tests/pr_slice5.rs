@@ -495,3 +495,107 @@ fn save_pull_request_merge_method_recovers_from_corrupt_v1_record() {
         );
     });
 }
+
+#[test]
+fn cas_retry_exhaustion_returns_error_without_overwriting_storage() {
+    use futures::FutureExt;
+    use std::{cell::RefCell, rc::Rc};
+    use t3_client::platform::{
+        HostFuture, PlatformError, Storage, StorageArea, StorageKey, StorageTransaction,
+        StorageWrite,
+    };
+
+    #[derive(Clone)]
+    struct ContendingCasStorage {
+        inner: FakePlatform,
+        attempts: Rc<RefCell<usize>>,
+    }
+    impl Storage for ContendingCasStorage {
+        fn get(&self, area: StorageArea, key: StorageKey) -> HostFuture<'_, Option<Vec<u8>>> {
+            self.inner.get(area, key)
+        }
+        fn write(&self, area: StorageArea, writes: Vec<StorageWrite>) -> HostFuture<'_, ()> {
+            self.inner.write(area, writes)
+        }
+        fn list(&self, area: StorageArea, namespace: String) -> HostFuture<'_, Vec<StorageKey>> {
+            self.inner.list(area, namespace)
+        }
+        fn transaction(&self, transaction: StorageTransaction) -> HostFuture<'_, bool> {
+            let mut n = self.attempts.borrow_mut();
+            *n += 1;
+            let count = *n;
+            drop(n);
+            let inner = self.inner.clone();
+            let target_key = transaction
+                .ordinary
+                .first()
+                .map(|w| w.key.clone())
+                .unwrap_or_else(|| StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY));
+            async move {
+                inner
+                    .write(
+                        StorageArea::Ordinary,
+                        vec![StorageWrite {
+                            key: target_key,
+                            value: Some(
+                                serde_json::json!({
+                                    "pullRequestMergeMethod": "merge",
+                                    "concurrentEdit": count
+                                })
+                                .to_string()
+                                .into_bytes(),
+                            ),
+                        }],
+                    )
+                    .await?;
+                Ok(false)
+            }
+            .boxed_local()
+        }
+    }
+
+    futures::executor::block_on(async {
+        let base = FakePlatform::default();
+        let key = StorageKey::new(PREFERENCES_NAMESPACE, None, STORAGE_KEY);
+        base.write(
+            StorageArea::Ordinary,
+            vec![StorageWrite {
+                key: key.clone(),
+                value: Some(br#"{"pullRequestMergeMethod":"merge"}"#.to_vec()),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let attempts = Rc::new(RefCell::new(0usize));
+        let contending = ContendingCasStorage {
+            inner: base.clone(),
+            attempts: attempts.clone(),
+        };
+
+        let err = UiPreferences::save_pull_request_merge_method(
+            &contending,
+            PullRequestMergeMethod::Rebase,
+        )
+        .await
+        .expect_err("exhausted CAS retries must return error");
+        assert!(
+            matches!(err, PlatformError::Storage(ref msg) if msg.contains("changed repeatedly")),
+            "expected CAS exhaustion storage error, got: {err:?}"
+        );
+        assert_eq!(
+            *attempts.borrow(),
+            8,
+            "expected 8 CAS attempts before aborting"
+        );
+
+        let raw = base.get(StorageArea::Ordinary, key).await.unwrap().unwrap();
+        let decoded = UiState::decode(std::str::from_utf8(&raw).unwrap(), &parse_ms).unwrap();
+        assert_eq!(
+            decoded.pull_request_merge_method,
+            PullRequestMergeMethod::Merge,
+            "exhausted save must not overwrite concurrent writer's value"
+        );
+        assert_eq!(decoded.unknown.get("concurrentEdit"), Some(&json!(8)));
+    });
+}

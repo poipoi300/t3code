@@ -400,14 +400,21 @@ impl UiPreferences {
         .map(|_| ())
     }
 
-    /// Writes every record in one atomic write. Legacy records are left for older clients.
-    pub async fn save(
+    /// Test helper: writes all UI preference records, routing `t3code:ui-state:v1` through
+    /// atomic CAS (`update_state`) so no unconditional whole-record v1 writer exists.
+    #[cfg(test)]
+    pub(crate) async fn save(
         &self,
         storage: &(impl crate::platform::Storage + ?Sized),
     ) -> Result<(), crate::platform::PlatformError> {
         let invalid = |error: serde_json::Error| {
             crate::platform::PlatformError::InvalidData(error.to_string())
         };
+        let state_snapshot = self.state.clone();
+        Self::update_state(storage, move |state| {
+            *state = state_snapshot.clone();
+        })
+        .await?;
         let write = |record: &str, value: Option<Vec<u8>>| crate::platform::StorageWrite {
             key: preference_key(record),
             value,
@@ -416,10 +423,6 @@ impl UiPreferences {
             .write(
                 crate::platform::StorageArea::Ordinary,
                 vec![
-                    write(
-                        STORAGE_KEY,
-                        Some(self.state.encode().map_err(invalid)?.into_bytes()),
-                    ),
                     write(
                         SETTLED_SHELF_EXPANDED_KEY,
                         Some(serde_json::to_vec(&self.settled_shelf_expanded).map_err(invalid)?),
