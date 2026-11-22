@@ -28,6 +28,11 @@ impl NativeGuestHttp {
                 "guest requests need an https origin".into(),
             ));
         }
+        let builder = if loopback(&origin) {
+            builder.no_proxy()
+        } else {
+            builder
+        };
         let client = builder
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -139,6 +144,11 @@ impl GuestHttp for NativeGuestHttp {
         Box::pin(async move {
             let response = self.dispatch(request).await?;
             let status = response.status().as_u16();
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let mut body = Body(response);
             let mut bytes = Vec::new();
             while let Some(chunk) = body.next().await? {
@@ -150,6 +160,7 @@ impl GuestHttp for NativeGuestHttp {
             Ok(GuestResponse {
                 status,
                 body: bytes,
+                retry_after,
             })
         })
     }
@@ -162,9 +173,15 @@ impl GuestHttp for NativeGuestHttp {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             Ok(GuestStreamResponse {
                 status: response.status().as_u16(),
                 content_type,
+                retry_after,
                 chunks: Box::new(Body(response)),
             })
         })
@@ -172,6 +189,23 @@ impl GuestHttp for NativeGuestHttp {
 
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()> {
         Box::pin(tokio::time::sleep(std::time::Duration::from_millis(millis)))
+    }
+
+    fn random(&self) -> f64 {
+        use ring::rand::{SecureRandom, SystemRandom};
+        let mut bytes = [0u8; 8];
+        if SystemRandom::new().fill(&mut bytes).is_ok() {
+            ((u64::from_le_bytes(bytes) >> 11) as f64) / ((1u64 << 53) as f64)
+        } else {
+            0.5
+        }
+    }
+
+    fn now_epoch_ms(&self) -> Option<u64> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
     }
 }
 
@@ -341,5 +375,23 @@ mod tests {
             host.send(redeem()).await,
             Err(GuestError::Network(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_loopback_origin_never_uses_a_proxy() {
+        let (proxy_port, proxy_seen) =
+            serve(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec()).await;
+        let (server_port, server_seen) = serve(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()).await;
+        let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+            .unwrap_or_else(|_| unreachable!("loopback proxy URL"));
+        let host = NativeGuestHttp::new(
+            builder().proxy(proxy),
+            origin(&format!("http://127.0.0.1:{server_port}")),
+        )
+        .unwrap_or_else(|_| unreachable!("loopback origin"));
+        let reply = host.send(redeem()).await.ok();
+        assert_eq!(reply.map(|reply| reply.status), Some(204));
+        assert_eq!(server_seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+        assert_eq!(proxy_seen.lock().map(|seen| seen.len()).unwrap_or(99), 0);
     }
 }

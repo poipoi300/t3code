@@ -125,6 +125,7 @@ impl GuestHttp for BrowserGuestHttp {
         Box::pin(async move {
             let (response, abort) = self.fetch(request).await?;
             let status = response.status();
+            let retry_after = response.headers().get("retry-after").ok().flatten();
             let mut body = Vec::new();
             if let Ok(reader) = reader(&response) {
                 let mut chunks = BodyReader {
@@ -139,7 +140,11 @@ impl GuestHttp for BrowserGuestHttp {
                     body.extend(chunk);
                 }
             }
-            Ok(GuestResponse { status, body })
+            Ok(GuestResponse {
+                status,
+                body,
+                retry_after,
+            })
         })
     }
 
@@ -148,6 +153,7 @@ impl GuestHttp for BrowserGuestHttp {
             let (response, abort) = self.fetch(request).await?;
             let status = response.status();
             let content_type = response.headers().get("content-type").ok().flatten();
+            let retry_after = response.headers().get("retry-after").ok().flatten();
             // A rejection without a body (a bare 403 from a proxy) is still a rejection; only an
             // accepted stream must have a body to read.
             let chunks: Box<dyn GuestChunks> = match (reader(&response), status) {
@@ -163,6 +169,7 @@ impl GuestHttp for BrowserGuestHttp {
             Ok(GuestStreamResponse {
                 status,
                 content_type,
+                retry_after,
                 chunks,
             })
         })
@@ -177,6 +184,15 @@ impl GuestHttp for BrowserGuestHttp {
                 None => std::future::pending().await,
             }
         })
+    }
+
+    fn random(&self) -> f64 {
+        js_sys::Math::random()
+    }
+
+    fn now_epoch_ms(&self) -> Option<u64> {
+        let now = js_sys::Date::now();
+        (now.is_finite() && now >= 0.0).then_some(now as u64)
     }
 }
 

@@ -27,9 +27,16 @@ struct Wire {
     redeem: RefCell<VecDeque<Result<(), GuestError>>>,
     session: RefCell<VecDeque<Result<(), GuestError>>>,
     streams: RefCell<VecDeque<Result<Script, GuestError>>>,
+    history: RefCell<
+        VecDeque<
+            Result<t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage, GuestError>,
+        >,
+    >,
+    command_outputs: RefCell<VecDeque<Result<Script, GuestError>>>,
     submit: RefCell<VecDeque<Result<(), GuestError>>>,
     calls: RefCell<Vec<String>>,
     sleeps: RefCell<Vec<u64>>,
+    random: RefCell<f64>,
 }
 
 struct Fake(Rc<Wire>);
@@ -77,6 +84,42 @@ impl GuestTransport for Fake {
             }
         })
     }
+    fn history(
+        &self,
+        share: &str,
+        cursor: &str,
+    ) -> GuestFuture<'_, t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage> {
+        self.0
+            .calls
+            .borrow_mut()
+            .push(format!("history {share} {cursor}"));
+        let answer = self.0.history.borrow_mut().pop_front();
+        Box::pin(async move {
+            answer.unwrap_or_else(|| Err(GuestError::Network("no scripted history".into())))
+        })
+    }
+    fn command_output(
+        &self,
+        share: &str,
+        item: &str,
+    ) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+        self.0
+            .calls
+            .borrow_mut()
+            .push(format!("command-output {share} {item}"));
+        let answer = self.0.command_outputs.borrow_mut().pop_front();
+        Box::pin(async move {
+            match answer {
+                Some(Ok(script)) => Ok(Box::new(Stream(script)) as Box<dyn GuestStreamHandle>),
+                Some(Err(error)) => Err(error),
+                None => Err(GuestError::Rejected {
+                    status: 403,
+                    reason: GuestFailure::Unavailable,
+                    message: "no scripted output".into(),
+                }),
+            }
+        })
+    }
     fn submit(&self, share: &str, text: &str) -> GuestFuture<'_, ()> {
         self.0
             .calls
@@ -88,6 +131,9 @@ impl GuestTransport for Fake {
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()> {
         self.0.sleeps.borrow_mut().push(millis);
         Box::pin(async {})
+    }
+    fn random(&self) -> f64 {
+        *self.0.random.borrow()
     }
 }
 
@@ -141,6 +187,7 @@ struct Page {
 
 fn page(credential: bool) -> Page {
     let wire = Rc::new(Wire::default());
+    *wire.random.borrow_mut() = 0.5;
     let phases = Rc::new(RefCell::new(Vec::new()));
     if credential {
         // The cookie check that precedes the name form: no cookie yet.
@@ -323,7 +370,7 @@ fn an_offline_start_retries_until_the_network_returns() {
         assert!(page.client.resume().now_or_never().is_none());
     });
     assert_eq!(phase(&page), GuestPhase::Live);
-    assert_eq!(page.wire.sleeps.borrow().as_slice(), [1_000]);
+    assert_eq!(page.wire.sleeps.borrow().as_slice(), [750]);
 }
 
 #[test]
@@ -380,7 +427,7 @@ fn a_dropped_stream_keeps_the_transcript_and_reconnects_with_backoff() {
         page.client.run().await;
     });
     assert_eq!(phase(&page), GuestPhase::Ended(GuestEnd::Inactive));
-    assert_eq!(page.wire.sleeps.borrow().as_slice(), [1_000, 2_000, 1_000]);
+    assert_eq!(page.wire.sleeps.borrow().as_slice(), [750, 1_500, 750]);
     let phases = page.phases.borrow();
     assert!(phases.contains(&GuestPhase::Reconnecting));
     assert!(phases.contains(&GuestPhase::Live));
@@ -511,4 +558,454 @@ fn the_transcript_follows_ordered_deltas_and_ignores_replays() {
 fn the_invite_never_appears_in_debug_output() {
     let credential = GuestCredential::new("share_1.signature");
     assert!(!format!("{credential:?}").contains("signature"));
+}
+
+#[test]
+fn reconnect_backoff_adds_jitter_and_honours_retry_after_capped_at_15s() {
+    use t3_client::guest::session::reconnect_delay_ms;
+    assert_eq!(reconnect_delay_ms(0, 0.0, None), 500);
+    assert_eq!(reconnect_delay_ms(0, 1.0, None), 1_000);
+    assert_eq!(reconnect_delay_ms(4, 0.0, None), 7_500);
+    assert_eq!(reconnect_delay_ms(4, 1.0, None), 15_000);
+    // Retry-After is honoured and capped at 15 s.
+    assert_eq!(reconnect_delay_ms(0, 0.0, Some(5_000)), 5_000);
+    assert_eq!(reconnect_delay_ms(0, 1.0, Some(60_000)), 15_000);
+    assert_eq!(reconnect_delay_ms(2, 1.0, Some(1_000)), 4_000);
+
+    let page = page(false);
+    page.wire.streams.borrow_mut().extend([
+        Err(GuestError::RetryAfter {
+            millis: 5_000,
+            message: "HTTP 429".into(),
+        }),
+        Err(GuestError::RetryAfter {
+            millis: 60_000,
+            message: "HTTP 429".into(),
+        }),
+        Err(rejected(403, GuestFailure::Inactive)),
+    ]);
+    block_on(async {
+        page.client.start().await;
+        page.client.run().await;
+    });
+    assert_eq!(page.wire.sleeps.borrow().as_slice(), [5_000, 15_000]);
+
+    // Different jitter samples produce distinct backoff sleeps within [base/2, base].
+    let p_low = page_with_random(0.0);
+    let p_high = page_with_random(1.0);
+    for p in [&p_low, &p_high] {
+        p.wire.streams.borrow_mut().extend([
+            Err(GuestError::Network("drop".into())),
+            Err(rejected(403, GuestFailure::Inactive)),
+        ]);
+    }
+    block_on(async {
+        p_low.client.start().await;
+        p_low.client.run().await;
+        p_high.client.start().await;
+        p_high.client.run().await;
+    });
+    assert_eq!(p_low.wire.sleeps.borrow().as_slice(), [500]);
+    assert_eq!(p_high.wire.sleeps.borrow().as_slice(), [1_000]);
+}
+
+fn page_with_random(random: f64) -> Page {
+    let p = page(false);
+    *p.wire.random.borrow_mut() = random;
+    p
+}
+
+fn assistant_row(id: &str, ordinal: u64, text: &str) -> Value {
+    json!({
+        "position": 0,
+        "visibility": "local",
+        "sourceThreadId": "thread:shared",
+        "sourceItemId": id,
+        "item": {
+            "id": id,
+            "type": "assistant_message",
+            "threadId": "thread:shared",
+            "runId": null,
+            "nodeId": null,
+            "providerThreadId": null,
+            "providerTurnId": null,
+            "nativeItemRef": null,
+            "parentItemId": null,
+            "ordinal": ordinal,
+            "status": "completed",
+            "title": null,
+            "startedAt": null,
+            "completedAt": null,
+            "updatedAt": NOW,
+            "messageId": format!("msg-{id}"),
+            "phase": "final_answer",
+            "streaming": false,
+            "text": text,
+            "attachments": []
+        }
+    })
+}
+
+fn command_row(id: &str, ordinal: u64, input: &str, exit_code: Option<i64>) -> Value {
+    json!({
+        "position": 0,
+        "visibility": "local",
+        "sourceThreadId": "thread:shared",
+        "sourceItemId": id,
+        "item": {
+            "id": id,
+            "type": "command_execution",
+            "threadId": "thread:shared",
+            "runId": null,
+            "nodeId": null,
+            "providerThreadId": null,
+            "providerTurnId": null,
+            "nativeItemRef": null,
+            "parentItemId": null,
+            "ordinal": ordinal,
+            "status": "completed",
+            "title": null,
+            "startedAt": null,
+            "completedAt": null,
+            "updatedAt": NOW,
+            "input": input,
+            "outputOmitted": true,
+            "exitCode": exit_code
+        }
+    })
+}
+
+#[test]
+fn history_paging_merges_older_items_without_duplicates_or_reordering_and_ignores_stale_cursors() {
+    let page = page(false);
+    let mut stream = VecDeque::from([
+        Step::Frame(view(0)),
+        Step::Frame(json!({
+            "type": "thread",
+            "item": {
+                "kind": "snapshot",
+                "snapshotSequence": 1,
+                "historyCursor": "c1",
+                "hasMoreHistory": true,
+                "projection": {
+                    "thread": thread_json("thread:shared"),
+                    "runs": [], "attempts": [], "nodes": [], "subagents": [],
+                    "providerSessions": [], "providerThreads": [], "providerTurns": [],
+                    "runtimeRequests": [], "messages": [], "plans": [],
+                    "turnItems": [assistant_row("a2", 2, "Latest")["item"]],
+                    "checkpointScopes": [], "checkpoints": [], "contextHandoffs": [],
+                    "contextTransfers": [],
+                    "visibleTurnItems": [assistant_row("a2", 2, "Latest")],
+                    "updatedAt": NOW
+                }
+            }
+        })),
+        Step::Hang,
+    ]);
+    let _ = &mut stream;
+    page.wire.streams.borrow_mut().push_back(Ok(stream));
+    page.wire.history.borrow_mut().extend([
+        Err(GuestError::Network("offline".into())),
+        Ok(serde_json::from_value(json!({
+            "snapshotSequence": 1,
+            "items": [
+                assistant_row("a0", 0, "Oldest"),
+                assistant_row("a1", 1, "Middle"),
+                assistant_row("a2", 2, "Latest duplicate")
+            ],
+            "nextCursor": "c2",
+            "hasMoreHistory": true
+        }))
+        .unwrap()),
+        Ok(serde_json::from_value(json!({
+            "snapshotSequence": 1,
+            "items": [],
+            "nextCursor": null,
+            "hasMoreHistory": false
+        }))
+        .unwrap()),
+    ]);
+    block_on(async {
+        page.client.start().await;
+        assert!(page.client.run().now_or_never().is_none());
+        assert_eq!(
+            page.client
+                .snapshot(|s| s.history_cursor().map(str::to_owned)),
+            Some("c1".into())
+        );
+
+        page.client.load_earlier().await;
+        assert_eq!(
+            page.client.snapshot(|s| s.history().error),
+            Some("Could not reach the server.".into())
+        );
+        assert!(page.client.snapshot(|s| s.has_more_history()));
+
+        page.client.load_earlier().await;
+        assert_eq!(page.client.snapshot(|s| s.history().error), None);
+        assert_eq!(
+            page.client
+                .snapshot(|s| s.history_cursor().map(str::to_owned)),
+            Some("c2".into())
+        );
+
+        let texts: Vec<_> = page
+            .client
+            .snapshot(|s| s.transcript().into_iter().map(|r| (r.id, r.text)).collect());
+        assert_eq!(
+            texts,
+            vec![
+                ("a0".into(), "Oldest".into()),
+                ("a1".into(), "Middle".into()),
+                ("a2".into(), "Latest".into()),
+            ]
+        );
+
+        page.client.load_earlier().await;
+        assert!(!page.client.snapshot(|s| s.has_more_history()));
+        assert_eq!(
+            page.client
+                .snapshot(|s| s.history_cursor().map(str::to_owned)),
+            None
+        );
+    });
+}
+
+#[test]
+fn a_reconnect_snapshot_discards_an_in_flight_history_page_for_an_older_cursor() {
+    use futures::channel::oneshot;
+    struct GatedHistory {
+        fake: Fake,
+        gate: RefCell<Option<oneshot::Sender<()>>>,
+        reply: RefCell<Option<t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage>>,
+    }
+    impl GuestTransport for GatedHistory {
+        fn redeem(&self, _: &str, _: &str) -> GuestFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn session(&self, share: &str) -> GuestFuture<'_, ()> {
+            self.fake.session(share)
+        }
+        fn open_stream(&self, share: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+            self.fake.open_stream(share)
+        }
+        fn history(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> GuestFuture<'_, t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage>
+        {
+            let (tx, rx) = oneshot::channel();
+            *self.gate.borrow_mut() = Some(tx);
+            let reply = self.reply.borrow_mut().take().unwrap();
+            Box::pin(async move {
+                let _ = rx.await;
+                Ok(reply)
+            })
+        }
+        fn command_output(
+            &self,
+            share: &str,
+            item: &str,
+        ) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+            self.fake.command_output(share, item)
+        }
+        fn submit(&self, share: &str, text: &str) -> GuestFuture<'_, ()> {
+            self.fake.submit(share, text)
+        }
+        fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()> {
+            self.fake.sleep(millis)
+        }
+    }
+
+    let wire = Rc::new(Wire::default());
+    let snap = |seq: u64, cursor: &str, id: &str| {
+        json!({
+            "type": "thread",
+            "item": {
+                "kind": "snapshot",
+                "snapshotSequence": seq,
+                "historyCursor": cursor,
+                "hasMoreHistory": true,
+                "projection": {
+                    "thread": thread_json("thread:shared"),
+                    "runs": [], "attempts": [], "nodes": [], "subagents": [],
+                    "providerSessions": [], "providerThreads": [], "providerTurns": [],
+                    "runtimeRequests": [], "messages": [], "plans": [],
+                    "turnItems": [assistant_row(id, seq, id)["item"]],
+                    "checkpointScopes": [], "checkpoints": [], "contextHandoffs": [],
+                    "contextTransfers": [],
+                    "visibleTurnItems": [assistant_row(id, seq, id)],
+                    "updatedAt": NOW
+                }
+            }
+        })
+    };
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    tx.unbounded_send(view(0)).unwrap();
+    tx.unbounded_send(snap(1, "c1", "before")).unwrap();
+    struct LiveChan(futures::channel::mpsc::UnboundedReceiver<Value>);
+    impl GuestStreamHandle for LiveChan {
+        fn next(&mut self) -> GuestFuture<'_, Option<Value>> {
+            use futures::StreamExt;
+            Box::pin(async move { Ok(self.0.next().await) })
+        }
+    }
+    struct ChanTransport(Rc<GatedHistory>, RefCell<Option<LiveChan>>);
+    impl GuestTransport for ChanTransport {
+        fn redeem(&self, c: &str, n: &str) -> GuestFuture<'_, ()> {
+            self.0.redeem(c, n)
+        }
+        fn session(&self, s: &str) -> GuestFuture<'_, ()> {
+            self.0.session(s)
+        }
+        fn open_stream(&self, _: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+            let s = self.1.borrow_mut().take().unwrap();
+            Box::pin(async move { Ok(Box::new(s) as Box<dyn GuestStreamHandle>) })
+        }
+        fn history(
+            &self,
+            s: &str,
+            c: &str,
+        ) -> GuestFuture<'_, t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage>
+        {
+            self.0.history(s, c)
+        }
+        fn command_output(&self, s: &str, i: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+            self.0.command_output(s, i)
+        }
+        fn submit(&self, s: &str, t: &str) -> GuestFuture<'_, ()> {
+            self.0.submit(s, t)
+        }
+        fn sleep(&self, m: u64) -> LocalBoxFuture<'_, ()> {
+            self.0.sleep(m)
+        }
+    }
+
+    let stale_page: t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage =
+        serde_json::from_value(json!({
+            "snapshotSequence": 1,
+            "items": [assistant_row("stale-old", 0, "Stale")],
+            "nextCursor": null,
+            "hasMoreHistory": false
+        }))
+        .unwrap();
+    let gated = Rc::new(GatedHistory {
+        fake: Fake(wire),
+        gate: RefCell::new(None),
+        reply: RefCell::new(Some(stale_page)),
+    });
+    let transport = Rc::new(ChanTransport(
+        gated.clone(),
+        RefCell::new(Some(LiveChan(rx))),
+    ));
+    let client = GuestClient::new(transport, "share_1", None, |_| {});
+
+    use futures::task::LocalSpawnExt;
+    let mut pool = futures::executor::LocalPool::new();
+    let spawner = pool.spawner();
+    pool.run_until(client.start());
+    let run_client = client.clone();
+    spawner
+        .spawn_local(async move { run_client.run().await })
+        .unwrap();
+    pool.run_until_stalled();
+    assert_eq!(
+        client.snapshot(|s| s.history_cursor().map(str::to_owned)),
+        Some("c1".into())
+    );
+
+    let load_client = client.clone();
+    let (done_tx, done_rx) = oneshot::channel();
+    spawner
+        .spawn_local(async move {
+            load_client.load_earlier().await;
+            let _ = done_tx.send(());
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    assert!(gated.gate.borrow().is_some());
+
+    // Reconnect snapshot moves cursor to c2 before the c1 reply resolves.
+    tx.unbounded_send(snap(2, "c2", "after")).unwrap();
+    pool.run_until_stalled();
+    assert_eq!(
+        client.snapshot(|s| s.history_cursor().map(str::to_owned)),
+        Some("c2".into())
+    );
+
+    gated.gate.borrow_mut().take().unwrap().send(()).unwrap();
+    pool.run_until(async {
+        let _ = done_rx.await;
+    });
+
+    assert_eq!(
+        client.snapshot(|s| s.history_cursor().map(str::to_owned)),
+        Some("c2".into())
+    );
+    assert!(client.snapshot(|s| s.has_more_history()));
+    let ids: Vec<_> = client.snapshot(|s| s.transcript().into_iter().map(|r| r.id).collect());
+    assert_eq!(ids, vec!["after".to_owned()]);
+}
+
+#[test]
+fn command_rows_appear_in_transcript_and_stream_output_until_settled() {
+    use futures::task::LocalSpawnExt;
+    let page = page(false);
+    page.wire.streams.borrow_mut().push_back(Ok(VecDeque::from([
+        Step::Frame(view(0)),
+        Step::Frame(json!({
+            "type": "thread",
+            "item": {
+                "kind": "snapshot",
+                "snapshotSequence": 1,
+                "projection": {
+                    "thread": thread_json("thread:shared"),
+                    "runs": [], "attempts": [], "nodes": [], "subagents": [],
+                    "providerSessions": [], "providerThreads": [], "providerTurns": [],
+                    "runtimeRequests": [], "messages": [], "plans": [],
+                    "turnItems": [command_row("cmd-1", 1, "vp run check:changed", Some(0))["item"]],
+                    "checkpointScopes": [], "checkpoints": [], "contextHandoffs": [],
+                    "contextTransfers": [],
+                    "visibleTurnItems": [command_row("cmd-1", 1, "vp run check:changed", Some(0))],
+                    "updatedAt": NOW
+                }
+            }
+        })),
+        Step::Hang,
+    ])));
+    page.wire.command_outputs.borrow_mut().push_back(Ok(VecDeque::from([
+        Step::Frame(json!({"kind":"replace","text":"checking...\n","truncated":false,"running":true})),
+        Step::Frame(json!({"kind":"append","text":"4 files checked\n","truncated":false,"running":false})),
+    ])));
+
+    let mut pool = futures::executor::LocalPool::new();
+    let spawner_handle = pool.spawner();
+    let spawner: t3_client::composition::Spawner = Rc::new(move |fut| {
+        let _ = spawner_handle.spawn_local(fut);
+    });
+    pool.run_until(async {
+        page.client.start().await;
+        assert!(page.client.run().now_or_never().is_none());
+        let rows = page.client.snapshot(|s| s.transcript());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].role,
+            t3_client::guest::session::TranscriptRole::Command
+        );
+        assert_eq!(rows[0].text, "vp run check:changed");
+        assert_eq!(rows[0].exit_code, Some(0));
+
+        let lease = page.client.command_output("cmd-1", &spawner);
+        let mut changes = lease.changes();
+        use futures::StreamExt;
+        while lease.read(None).is_none_or(|delta| delta.running) {
+            changes.next().await;
+        }
+        assert_eq!(
+            lease.text().as_deref(),
+            Some("checking...\n4 files checked\n")
+        );
+        assert!(!lease.read(None).unwrap().running);
+    });
 }

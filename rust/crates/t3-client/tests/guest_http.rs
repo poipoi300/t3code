@@ -33,9 +33,24 @@ fn requests_use_the_guest_routes_and_keep_the_invite_out_of_every_url() {
     assert_eq!(submit.path, "/api/guest/messages?share=s1");
     let body: Value = serde_json::from_str(submit.json.as_deref().unwrap()).unwrap();
     assert_eq!(body, json!({"shareId": "s1", "text": "hi \"there\""}));
-    for request in [&redeem, &session, &submit, &requests::stream("s1")] {
+    for request in [
+        &redeem,
+        &session,
+        &submit,
+        &requests::stream("s1"),
+        &requests::history("s1", "c1"),
+        &requests::command_output("s1", "cmd-1"),
+    ] {
         assert!(!request.path.contains("secret"), "{}", request.path);
     }
+    assert_eq!(
+        requests::history("s1", "c&1").path,
+        "/api/guest/history?share=s1&cursor=c%261"
+    );
+    assert_eq!(
+        requests::command_output("s1", "item/1").path,
+        "/api/guest/command-output?share=s1&item=item%2F1"
+    );
 }
 
 #[test]
@@ -149,6 +164,7 @@ impl GuestHttp for Backend {
                 Some(Reply::Plain(status, body)) => Ok(GuestResponse {
                     status,
                     body: body.as_bytes().to_vec(),
+                    retry_after: None,
                 }),
                 _ => Err(GuestError::Network("offline".into())),
             }
@@ -163,6 +179,7 @@ impl GuestHttp for Backend {
                 Some(Reply::Html) => Ok(GuestStreamResponse {
                     status: 200,
                     content_type: Some("text/html".into()),
+                    retry_after: None,
                     chunks: Box::new(Chunks {
                         chunks: VecDeque::from([Ok(b"<html>".to_vec())]),
                         dropped,
@@ -171,6 +188,7 @@ impl GuestHttp for Backend {
                 Some(Reply::Stream(status, chunks)) => Ok(GuestStreamResponse {
                     status,
                     content_type: Some("text/event-stream".into()),
+                    retry_after: None,
                     chunks: Box::new(Chunks {
                         chunks: chunks.into(),
                         dropped,
@@ -179,6 +197,7 @@ impl GuestHttp for Backend {
                 Some(Reply::Plain(status, body)) => Ok(GuestStreamResponse {
                     status,
                     content_type: Some("application/json".into()),
+                    retry_after: None,
                     chunks: Box::new(Chunks {
                         chunks: VecDeque::from([Ok(body.as_bytes().to_vec())]),
                         dropped,
@@ -342,4 +361,115 @@ fn a_ok_response_that_is_not_an_event_stream_ends_the_page_instead_of_retrying()
             })
         ));
     });
+}
+
+#[test]
+fn retry_after_header_is_carried_on_retryable_stream_responses() {
+    use t3_client::guest::http::{parse_retry_after_ms, rejection_with_retry_after};
+    assert_eq!(parse_retry_after_ms("5", None), Some(5_000));
+    assert_eq!(parse_retry_after_ms(" 120 ", None), Some(120_000));
+    assert_eq!(parse_retry_after_ms("not-a-delay", None), None);
+    assert_eq!(
+        parse_retry_after_ms("Wed, 21 Oct 2015 07:28:05 GMT", Some(1_445_412_480_000)),
+        Some(5_000)
+    );
+    assert_eq!(
+        rejection_with_retry_after(429, b"", Some(5_000)),
+        GuestError::RetryAfter {
+            millis: 5_000,
+            message: "HTTP 429".into(),
+        }
+    );
+    assert_eq!(
+        rejection_with_retry_after(503, b"", Some(7_000)),
+        GuestError::RetryAfter {
+            millis: 7_000,
+            message: "HTTP 503".into(),
+        }
+    );
+}
+
+#[test]
+fn history_fetches_decodes_pages_and_maps_ts_errors() {
+    let page_json = r#"{"snapshotSequence":2,"items":[],"nextCursor":"c2","hasMoreHistory":true}"#;
+    let (transport, backend) = transport(vec![
+        Reply::Plain(200, page_json),
+        Reply::Plain(
+            403,
+            r#"{"reason":"inactive","message":"This guest link is no longer active."}"#,
+        ),
+        Reply::Plain(502, "bad gateway"),
+        Reply::Plain(200, "{not valid json"),
+    ]);
+    block_on(async {
+        let page = transport.history("s1", "c1").await.unwrap();
+        assert!(page.has_more_history);
+        assert_eq!(page.next_cursor.as_ref().map(|c| c.0.as_str()), Some("c2"));
+
+        assert_eq!(
+            transport.history("s1", "c1").await.unwrap_err(),
+            GuestError::Rejected {
+                status: 403,
+                reason: GuestFailure::Inactive,
+                message: "This guest link is no longer active.".into(),
+            }
+        );
+        assert_eq!(
+            transport.history("s1", "c1").await.unwrap_err(),
+            GuestError::Rejected {
+                status: 502,
+                reason: GuestFailure::Unknown,
+                message: "Could not load earlier turns. Try again.".into(),
+            }
+        );
+        assert_eq!(
+            transport.history("s1", "c1").await.unwrap_err(),
+            GuestError::Rejected {
+                status: 200,
+                reason: GuestFailure::Unknown,
+                message: "Could not load earlier turns. Try again.".into(),
+            }
+        );
+        assert!(matches!(
+            transport.history("s1", "c1").await,
+            Err(GuestError::Network(_))
+        ));
+    });
+    assert_eq!(
+        backend.seen.borrow()[0].path,
+        "/api/guest/history?share=s1&cursor=c1"
+    );
+}
+
+#[test]
+fn command_output_streams_frames_through_open_and_releases_on_drop() {
+    let (transport, backend) = transport(vec![Reply::Stream(
+        200,
+        vec![
+            Ok(b"data: {\"kind\":\"replace\",\"text\":\"line 1\\n\",\"truncated\":false,\"running\":true}\n\n".to_vec()),
+            Ok(b"data: {\"kind\":\"append\",\"text\":\"line 2\\n\",\"truncated\":false,\"running\":false}\n\n".to_vec()),
+        ],
+    )]);
+    block_on(async {
+        let mut stream = transport.command_output("s1", "cmd-1").await.unwrap();
+        assert_eq!(
+            stream.next().await,
+            Ok(Some(
+                json!({"kind":"replace","text":"line 1\n","truncated":false,"running":true})
+            ))
+        );
+        assert_eq!(
+            stream.next().await,
+            Ok(Some(
+                json!({"kind":"append","text":"line 2\n","truncated":false,"running":false})
+            ))
+        );
+        assert!(!*backend.dropped.borrow());
+        drop(stream);
+        assert!(*backend.dropped.borrow());
+    });
+    assert_eq!(
+        backend.seen.borrow()[0].path,
+        "/api/guest/command-output?share=s1&item=cmd-1"
+    );
 }

@@ -2,6 +2,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use futures::StreamExt;
 use serde_json::Value;
 use t3_contracts::{
     base_schemas::ThreadId,
@@ -10,13 +11,18 @@ use t3_contracts::{
         ThreadGuestMessageStatus,
     },
     guest_stream::GuestShareView,
-    orchestration_v2::OrchestrationV2ThreadStreamItem,
+    orchestration_v2::{
+        OrchestrationV2CommandOutputFrame, OrchestrationV2ThreadStreamItem, OrchestrationV2TurnItem,
+    },
     orchestration_v2_id_table::IdOrIndex,
 };
 
-use super::transport::{GuestError, GuestFailure, GuestTransport};
+use super::transport::{GuestError, GuestFailure, GuestStreamHandle, GuestTransport};
 use crate::{
-    state::{decoding, thread::ThreadState},
+    ClientError,
+    composition::Spawner,
+    services::command_output::CommandOutputLease,
+    state::{decoding, items, thread::ThreadState},
     types::Generation,
 };
 
@@ -25,6 +31,7 @@ pub enum TranscriptRole {
     /// Anyone who wrote into the thread (the owner or an approved guest).
     Person,
     Assistant,
+    Command,
 }
 
 /// One readable row of the shared conversation.
@@ -33,6 +40,22 @@ pub struct TranscriptRow {
     pub id: String,
     pub role: TranscriptRole,
     pub text: String,
+    pub exit_code: Option<i64>,
+    pub running: bool,
+}
+
+/// Paging state for "Load earlier turns" on the guest page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuestHistoryState {
+    pub cursor: Option<String>,
+    pub has_more: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
+/// Plain command output text with SGR escapes removed for simple display.
+pub fn plain_command_output(text: &str) -> String {
+    t3_shared::terminal_output::terminal_output_plain_text(text)
 }
 
 /// An invite credential. It lives only in memory, is never printed, and is dropped once it has
@@ -110,8 +133,34 @@ impl GuestSession {
         self.thread.as_ref()
     }
 
-    /// The conversation as the guest reads it, in thread order. Tools, commands and files are
-    /// not rendered on this page.
+    pub fn history(&self) -> GuestHistoryState {
+        let Some(thread) = &self.thread else {
+            return GuestHistoryState::default();
+        };
+        let has_more = thread.history.has_more && thread.history.cursor.is_some();
+        GuestHistoryState {
+            cursor: has_more.then(|| thread.history.cursor.clone()).flatten(),
+            has_more,
+            loading: thread.history.loading,
+            error: thread.history.error.clone(),
+        }
+    }
+
+    pub fn has_more_history(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| thread.history.has_more && thread.history.cursor.is_some())
+    }
+
+    pub fn history_cursor(&self) -> Option<&str> {
+        self.thread
+            .as_ref()
+            .filter(|thread| thread.history.has_more)
+            .and_then(|thread| thread.history.cursor.as_deref())
+    }
+
+    /// The conversation as the guest reads it, in thread order, including command rows whose
+    /// output loads on expand.
     pub fn transcript(&self) -> Vec<TranscriptRow> {
         let Some(projection) = self
             .thread
@@ -120,28 +169,51 @@ impl GuestSession {
         else {
             return Vec::new();
         };
-        let mut rows: Vec<(u64, TranscriptRow)> = projection
-            .turn_items
-            .iter()
-            .filter_map(|item| {
-                let item = serde_json::to_value(item).ok()?;
-                let role = match item.get("type")?.as_str()? {
-                    "user_message" => TranscriptRole::Person,
-                    "assistant_message" => TranscriptRole::Assistant,
-                    _ => return None,
-                };
-                Some((
-                    item.get("ordinal")?.as_u64()?,
-                    TranscriptRow {
-                        id: item.get("id")?.as_str()?.to_owned(),
-                        role,
-                        text: item.get("text")?.as_str()?.to_owned(),
-                    },
-                ))
-            })
-            .collect();
-        rows.sort_by_key(|(ordinal, _)| *ordinal);
-        rows.into_iter().map(|(_, row)| row).collect()
+        let row_of = |item: &OrchestrationV2TurnItem| -> Option<TranscriptRow> {
+            let IdOrIndex::Id(id) = items::id(item) else {
+                return None;
+            };
+            let id = id.0.clone();
+            match item {
+                OrchestrationV2TurnItem::UserMessage(v) => Some(TranscriptRow {
+                    id,
+                    role: TranscriptRole::Person,
+                    text: v.text.clone(),
+                    exit_code: None,
+                    running: false,
+                }),
+                OrchestrationV2TurnItem::AssistantMessage(v) => Some(TranscriptRow {
+                    id,
+                    role: TranscriptRole::Assistant,
+                    text: v.text.clone(),
+                    exit_code: None,
+                    running: v.streaming,
+                }),
+                OrchestrationV2TurnItem::CommandExecution(v) => Some(TranscriptRow {
+                    id,
+                    role: TranscriptRole::Command,
+                    text: v.input.clone(),
+                    exit_code: v.exit_code.flatten(),
+                    running: items::active(item),
+                }),
+                _ => None,
+            }
+        };
+        if !projection.visible_turn_items.is_empty() {
+            projection
+                .visible_turn_items
+                .iter()
+                .filter_map(|row| row_of(&row.item))
+                .collect()
+        } else {
+            let mut rows: Vec<(u64, TranscriptRow)> = projection
+                .turn_items
+                .iter()
+                .filter_map(|item| row_of(item).map(|row| (items::ordinal(item), row)))
+                .collect();
+            rows.sort_by_key(|(ordinal, _)| *ordinal);
+            rows.into_iter().map(|(_, row)| row).collect()
+        }
     }
 
     pub fn pending_count(&self) -> usize {
@@ -259,7 +331,32 @@ pub struct GuestClient {
     listener: Listener,
 }
 
-const BACKOFF_MS: [u64; 5] = [1_000, 2_000, 4_000, 8_000, 15_000];
+const MAX_BACKOFF_MS: u64 = 15_000;
+const BACKOFF_MS: [u64; 5] = [1_000, 2_000, 4_000, 8_000, MAX_BACKOFF_MS];
+
+/// Exponential backoff with equal jitter in `[base / 2, base]`, respecting `Retry-After` up to
+/// [`MAX_BACKOFF_MS`].
+pub fn reconnect_delay_ms(attempt: usize, random: f64, retry_after_ms: Option<u64>) -> u64 {
+    let base = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
+    let sample = if random.is_nan() {
+        0.5
+    } else {
+        random.clamp(0.0, 1.0)
+    };
+    let backoff = ((base as f64 / 2.0) * (1.0 + sample)).round() as u64;
+    retry_after_ms
+        .map_or(backoff, |retry_after| backoff.max(retry_after))
+        .min(MAX_BACKOFF_MS)
+}
+
+fn history_error_text(error: &GuestError) -> String {
+    match error {
+        GuestError::Rejected { message, .. } => message.clone(),
+        GuestError::Network(_) | GuestError::RetryAfter { .. } => {
+            "Could not reach the server.".into()
+        }
+    }
+}
 
 impl GuestClient {
     pub fn new(
@@ -301,7 +398,7 @@ impl GuestClient {
             Err(GuestError::Rejected { reason, .. }) => {
                 self.update(|state| state.phase = GuestPhase::Ended(end_for(reason)));
             }
-            Err(GuestError::Network(_)) => {
+            Err(GuestError::Network(_) | GuestError::RetryAfter { .. }) => {
                 self.update(|state| state.phase = GuestPhase::Reconnecting);
             }
         }
@@ -357,7 +454,7 @@ impl GuestClient {
                     self.update(|state| state.phase = GuestPhase::Ended(end_for(reason)));
                 }
             }
-            Err(GuestError::Network(_)) => {
+            Err(GuestError::Network(_) | GuestError::RetryAfter { .. }) => {
                 *self.credential.borrow_mut() = Some(credential);
                 self.update(|state| {
                     state.phase = GuestPhase::NeedsName {
@@ -375,6 +472,7 @@ impl GuestClient {
             if matches!(self.state.borrow().phase, GuestPhase::Ended(_)) {
                 return;
             }
+            let mut retry_after_ms = None;
             match self.transport.open_stream(&self.share).await {
                 Err(GuestError::Rejected { reason, .. }) => {
                     self.update(|state| {
@@ -385,7 +483,9 @@ impl GuestClient {
                     });
                     return;
                 }
-                Err(GuestError::Network(_)) => {}
+                Err(error) => {
+                    retry_after_ms = error.retry_after_ms();
+                }
                 Ok(mut stream) => {
                     self.update(|state| state.generation += 1);
                     loop {
@@ -399,7 +499,12 @@ impl GuestClient {
                                     return;
                                 }
                             }
-                            Ok(None) | Err(GuestError::Network(_)) => break,
+                            Ok(None) => break,
+                            Err(GuestError::Network(_)) => break,
+                            Err(GuestError::RetryAfter { millis, .. }) => {
+                                retry_after_ms = Some(millis);
+                                break;
+                            }
                             Err(GuestError::Rejected { reason, .. }) => {
                                 self.update(|state| {
                                     state.phase = GuestPhase::Ended(end_for(reason));
@@ -416,10 +521,112 @@ impl GuestClient {
                 }
                 state.phase = GuestPhase::Reconnecting;
             });
-            let wait = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
+            let wait = reconnect_delay_ms(attempt, self.transport.random(), retry_after_ms);
             attempt += 1;
             self.transport.sleep(wait).await;
         }
+    }
+
+    /// Load the next page of older turns at the current history cursor, ignoring stale answers
+    /// if a reconnect snapshot moved the cursor while the request was in flight.
+    pub async fn load_earlier(&self) {
+        let request = {
+            let mut state = self.state.borrow_mut();
+            let Some(thread) = state.thread.as_mut() else {
+                return;
+            };
+            thread.history_request()
+        };
+        let Some(request) = request else {
+            return;
+        };
+        (self.listener)(&self.state.borrow());
+        match self.transport.history(&self.share, &request.cursor).await {
+            Ok(page) => {
+                self.update(|state| {
+                    let Some(thread) = state.thread.as_mut() else {
+                        return;
+                    };
+                    let _ = thread.apply_history(&request, page);
+                });
+            }
+            Err(error) => {
+                let message = history_error_text(&error);
+                self.update(|state| {
+                    let Some(thread) = state.thread.as_mut() else {
+                        return;
+                    };
+                    if thread.session == request.session
+                        && thread.generation == request.generation
+                        && thread.history.cursor.as_deref() == Some(request.cursor.as_str())
+                    {
+                        thread.history.loading = false;
+                        thread.history.error = Some(message);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Stream one expanded command row's output through `/api/guest/command-output`, releasing
+    /// the connection as soon as the command settles or the returned lease is dropped.
+    pub fn command_output(&self, item_id: &str, spawn: &Spawner) -> CommandOutputLease {
+        let transport = self.transport.clone();
+        let share = self.share.clone();
+        let item_id = item_id.to_owned();
+        enum State {
+            Connect,
+            Open(Box<dyn GuestStreamHandle>),
+            Done,
+        }
+        let frames = futures::stream::unfold(State::Connect, move |state| {
+            let transport = transport.clone();
+            let share = share.clone();
+            let item_id = item_id.clone();
+            async move {
+                match state {
+                    State::Done => None,
+                    State::Connect => match transport.command_output(&share, &item_id).await {
+                        Ok(stream) => Some((None, State::Open(stream))),
+                        Err(_) => Some((
+                            Some(Err(ClientError::Rejected {
+                                message: "Output is no longer available.".into(),
+                                detail: None,
+                            })),
+                            State::Done,
+                        )),
+                    },
+                    State::Open(mut stream) => loop {
+                        match stream.next().await {
+                            Ok(Some(raw)) => {
+                                let Ok(frame) = serde_json::from_value::<
+                                    OrchestrationV2CommandOutputFrame,
+                                >(raw) else {
+                                    continue;
+                                };
+                                let next = if frame.running {
+                                    State::Open(stream)
+                                } else {
+                                    State::Done
+                                };
+                                return Some((Some(Ok(frame)), next));
+                            }
+                            Ok(None) | Err(_) => {
+                                return Some((
+                                    Some(Err(ClientError::Rejected {
+                                        message: "Output is no longer available.".into(),
+                                        detail: None,
+                                    })),
+                                    State::Done,
+                                ));
+                            }
+                        }
+                    },
+                }
+            }
+        })
+        .filter_map(futures::future::ready);
+        CommandOutputLease::from_frames(Box::pin(frames), spawn)
     }
 
     /// Send one message to the owner's approval queue.
@@ -450,7 +657,9 @@ impl GuestClient {
                 }
                 Err(SubmitRefusal::Server(reason, message))
             }
-            Err(GuestError::Network(_)) => Err(SubmitRefusal::Network),
+            Err(GuestError::Network(_) | GuestError::RetryAfter { .. }) => {
+                Err(SubmitRefusal::Network)
+            }
         }
     }
 }

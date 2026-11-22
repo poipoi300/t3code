@@ -3,6 +3,7 @@
 
 use futures::future::LocalBoxFuture;
 use serde_json::Value;
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage;
 
 /// How the server (or the network) refused a guest request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,21 @@ pub enum GuestError {
     },
     /// No answer, a dropped stream or a 5xx: the page reconnects.
     Network(String),
+    /// A retryable HTTP answer (`429`, `503`, ...) that carried a `Retry-After` header.
+    RetryAfter { millis: u64, message: String },
+}
+
+impl GuestError {
+    pub fn is_network(&self) -> bool {
+        matches!(self, Self::Network(_) | Self::RetryAfter { .. })
+    }
+
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RetryAfter { millis, .. } => Some(*millis),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +85,24 @@ pub trait GuestTransport {
     fn session(&self, share: &str) -> GuestFuture<'_, ()>;
     /// `GET /api/guest/stream?share=`.
     fn open_stream(&self, share: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>>;
+    /// `GET /api/guest/history?share=&cursor=`.
+    fn history(
+        &self,
+        share: &str,
+        cursor: &str,
+    ) -> GuestFuture<'_, OrchestrationV2ThreadHistoryPage>;
+    /// `GET /api/guest/command-output?share=&item=`.
+    fn command_output(
+        &self,
+        share: &str,
+        item: &str,
+    ) -> GuestFuture<'_, Box<dyn GuestStreamHandle>>;
     /// `POST /api/guest/messages?share=` with `{shareId, text}`.
     fn submit(&self, share: &str, text: &str) -> GuestFuture<'_, ()>;
     /// Reconnect backoff, supplied by the host so tests control time.
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()>;
+    /// Unit-interval sample `[0.0, 1.0)` for reconnect jitter; fakes keep the default.
+    fn random(&self) -> f64 {
+        0.5
+    }
 }

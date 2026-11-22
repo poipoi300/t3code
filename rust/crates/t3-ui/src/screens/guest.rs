@@ -1,22 +1,27 @@
 //! Port of apps/web/src/components/guest/GuestPage.tsx (standalone mount and access notices).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use futures::StreamExt as _;
+use nsh_core::AccessibilityState;
 use nsh_core::prelude::*;
+use t3_client::composition::{CommandOutputLease, Spawner};
 use t3_client::guest::session::{
-    GuestClient, GuestCredential, GuestEnd, GuestPhase, SubmitRefusal, TranscriptRole,
-    TranscriptRow,
+    GuestClient, GuestCredential, GuestEnd, GuestHistoryState, GuestPhase, SubmitRefusal,
+    TranscriptRole, TranscriptRow, plain_command_output,
 };
 use t3_client::guest::transport::{GuestFailure, GuestTransport};
 use t3_contracts::guest_share::{
     GUEST_PENDING_MESSAGE_LIMIT, ThreadGuestMessage, ThreadGuestMessageStatus,
 };
 
-use crate::i18n::{self, t};
+use crate::i18n::{self, t, tr};
 use crate::runtime::tasks::{TaskOwner, watch};
 use crate::theme::{self, tw};
 use crate::ui::button::{ButtonContent, ButtonSize, ButtonVariant, button};
+use crate::ui::icon::{Icon, icon_with_class};
 use crate::ui::input::{InputSize, text_field};
 use crate::ui::scroll_area::scroll_area;
 pub(crate) use t3_client::guest::GuestAddress;
@@ -146,10 +151,19 @@ fn live_page(
     share: String,
     credential: Option<GuestCredential>,
 ) -> AnyElement {
+    #[derive(Clone, PartialEq, Eq)]
+    enum ScreenKind {
+        Checking,
+        NeedsName { error: Option<String> },
+        Thread,
+        Ended(GuestEnd),
+    }
+
     let phase = signal(GuestPhase::Checking);
     let rows = signal(Vec::<TranscriptRow>::new());
     let title = signal(String::new());
     let messages = signal(Vec::<ThreadGuestMessage>::new());
+    let history = signal(GuestHistoryState::default());
     let client = GuestClient::new(transport, &share, credential, move |state| {
         phase.set(state.phase.clone());
         rows.set(state.transcript());
@@ -167,31 +181,38 @@ fn live_page(
                 .map(|view| view.messages.clone())
                 .unwrap_or_default(),
         );
+        history.set(state.history());
     });
     let owner = TaskOwner::here();
     let boot_client = client.clone();
     watch(async move {
         boot_client.resume().await;
     });
-    dynamic(move || match phase.get() {
-        GuestPhase::Checking | GuestPhase::Joining | GuestPhase::Connecting => {
-            notice("Connecting...", None)
-        }
-        GuestPhase::NeedsName { error } => join_form(client.clone(), owner, error),
-        GuestPhase::Live | GuestPhase::Reconnecting => thread_view(
+    let screen = computed(move || match phase.get() {
+        GuestPhase::Checking | GuestPhase::Joining | GuestPhase::Connecting => ScreenKind::Checking,
+        GuestPhase::NeedsName { error } => ScreenKind::NeedsName { error },
+        GuestPhase::Live | GuestPhase::Reconnecting => ScreenKind::Thread,
+        GuestPhase::Ended(end) => ScreenKind::Ended(end),
+    });
+    let reconnecting = computed(move || phase.get() == GuestPhase::Reconnecting);
+    dynamic(move || match screen.get() {
+        ScreenKind::Checking => notice("Connecting...", None),
+        ScreenKind::NeedsName { error } => join_form(client.clone(), owner, error),
+        ScreenKind::Thread => thread_view(
             client.clone(),
             owner,
             title,
             rows,
             messages,
-            phase.get() == GuestPhase::Reconnecting,
+            history,
+            reconnecting,
         ),
-        GuestPhase::Ended(GuestEnd::Invalid) => invalid_link(),
-        GuestPhase::Ended(GuestEnd::Used) => notice(
+        ScreenKind::Ended(GuestEnd::Invalid) => invalid_link(),
+        ScreenKind::Ended(GuestEnd::Used) => notice(
             "This link was already used",
             Some("Ask the owner for a new link. Each link works in one browser."),
         ),
-        GuestPhase::Ended(GuestEnd::Inactive) => notice(
+        ScreenKind::Ended(GuestEnd::Inactive) => notice(
             "This link has ended",
             Some("The owner stopped sharing this thread."),
         ),
@@ -262,22 +283,61 @@ fn thread_view(
     title: Signal<String>,
     rows: Signal<Vec<TranscriptRow>>,
     messages: Signal<Vec<ThreadGuestMessage>>,
-    reconnecting: bool,
+    history: Signal<GuestHistoryState>,
+    reconnecting: Memo<bool>,
 ) -> AnyElement {
     let draft = signal(String::new());
     let problem = signal(None::<String>);
-    let send = move || {
-        let text = draft.get_untracked();
+    let thread_owner = Owner::current();
+    let expanded_commands = signal(BTreeSet::<String>::new());
+    let command_leases: Stored<BTreeMap<String, (CommandOutputLease, Signal<u64>)>> =
+        stored(BTreeMap::new());
+    let spawner: Spawner = Rc::new(move |future| owner.spawn(future));
+    let send = {
         let client = client.clone();
-        owner.spawn(async move {
-            match client.submit(&text).await {
-                Ok(()) => {
-                    draft.set(String::new());
-                    problem.set(None);
+        move || {
+            let text = draft.get_untracked();
+            let client = client.clone();
+            owner.spawn(async move {
+                match client.submit(&text).await {
+                    Ok(()) => {
+                        draft.set(String::new());
+                        problem.set(None);
+                    }
+                    Err(refusal) => problem.set(Some(refusal_text(&refusal))),
                 }
-                Err(refusal) => problem.set(Some(refusal_text(&refusal))),
+            });
+        }
+    };
+    let toggle_command = {
+        let client = client.clone();
+        let spawner = spawner.clone();
+        move |item_id: &str| {
+            let already_expanded = expanded_commands.with(|set| set.contains(item_id));
+            if already_expanded {
+                command_leases.with(|map| {
+                    map.remove(item_id);
+                });
+                expanded_commands.update(|set| {
+                    set.remove(item_id);
+                });
+            } else {
+                let lease = client.command_output(item_id, &spawner);
+                let revision = thread_owner.run(|| signal(0u64));
+                let mut changes = lease.changes();
+                owner.spawn(async move {
+                    while changes.next().await.is_some() {
+                        revision.update(|count| *count = count.saturating_add(1));
+                    }
+                });
+                command_leases.with(|map| {
+                    map.insert(item_id.to_owned(), (lease, revision));
+                });
+                expanded_commands.update(|set| {
+                    set.insert(item_id.to_owned());
+                });
             }
-        });
+        }
     };
     let at_limit = move || {
         messages.with(|all| {
@@ -297,7 +357,7 @@ fn thread_view(
                         .app_class(tw("min-w-0 flex-1 truncate text-sm font-medium")),
                 )
                 .child(when(
-                    move || reconnecting,
+                    move || reconnecting.get(),
                     || text(t("Reconnecting...")).app_class(tw("text-xs text-muted-foreground")),
                 )),
         )
@@ -305,7 +365,44 @@ fn thread_view(
             false,
             dynamic(move || {
                 let mut column = view().app_class(tw("flex flex-col gap-3 p-4"));
+                let current_history = history.get();
+                if current_history.has_more || current_history.error.is_some() {
+                    let history_client = client.clone();
+                    let label = if current_history.loading {
+                        t("Loading earlier turns…")
+                    } else {
+                        t("Load earlier turns")
+                    };
+                    let mut history_box = view()
+                        .app_class(tw("flex flex-col items-center gap-1"))
+                        .child(button(
+                            ButtonContent::Label(label),
+                            ButtonVariant::Outline,
+                            ButtonSize::Sm,
+                            move || history.with(|state| state.loading),
+                            move || {
+                                let history_client = history_client.clone();
+                                owner.spawn(async move {
+                                    history_client.load_earlier().await;
+                                });
+                            },
+                        ));
+                    if let Some(error) = current_history.error {
+                        history_box = history_box
+                            .child(text(error).app_class(tw("text-xs text-destructive")));
+                    }
+                    column = column.child(history_box);
+                }
                 for row in rows.get() {
+                    if row.role == TranscriptRole::Command {
+                        column = column.child(command_row_view(
+                            &row,
+                            expanded_commands,
+                            command_leases,
+                            toggle_command.clone(),
+                        ));
+                        continue;
+                    }
                     let mine = row.role == TranscriptRole::Person;
                     column = column.child(
                         view()
@@ -367,6 +464,121 @@ fn thread_view(
                 ),
         )
         .into_element()
+}
+
+fn command_row_view(
+    row: &TranscriptRow,
+    expanded_commands: Signal<BTreeSet<String>>,
+    command_leases: Stored<BTreeMap<String, (CommandOutputLease, Signal<u64>)>>,
+    toggle: impl Fn(&str) + Clone + 'static,
+) -> AnyElement {
+    let item_id = row.id.clone();
+    let is_expanded = expanded_commands.with(|set| set.contains(&item_id));
+    let command_label = row.text.clone();
+    let toggle_id = item_id.clone();
+
+    let mut header = view()
+        .role(AccessibilityRole::Button)
+        .label(SharedString::from(command_label.clone()))
+        .accessibility_state(AccessibilityState {
+            expanded: Some(is_expanded),
+            ..Default::default()
+        })
+        .app_class(tw(
+            "flex w-full cursor-pointer items-center gap-2 py-1 text-left text-xs text-muted-foreground hover:text-foreground",
+        ))
+        .on_press(move || toggle(&toggle_id))
+        .child(icon_with_class(Icon::Terminal, "size-3.5 shrink-0"))
+        .child(
+            text(command_label).app_class(tw("min-w-0 flex-1 truncate font-mono text-xs")),
+        );
+    if let Some(code) = row.exit_code.filter(|code| *code != 0) {
+        header = header.child(
+            text(tr("exit {code}", &[("code", i18n::Value::Int(code))]))
+                .app_class(tw("shrink-0 text-2xs text-destructive")),
+        );
+    }
+    header = header.child(icon_with_class(
+        if is_expanded {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        "size-3.5 shrink-0",
+    ));
+
+    let mut container = view()
+        .app_class(tw("flex w-full flex-col gap-1"))
+        .child(header);
+
+    if is_expanded
+        && let Some(revision) =
+            command_leases.with(|map| map.get(&item_id).map(|(_, revision)| *revision))
+    {
+        let body_id = item_id.clone();
+        container = container.child(dynamic(move || {
+            let _ = revision.get();
+            command_leases.with(|map| {
+                let Some((lease, _)) = map.get(&body_id) else {
+                    return view().into_element();
+                };
+                command_output_panel(lease)
+            })
+        }));
+    }
+
+    container.into_element()
+}
+
+fn command_output_panel(lease: &CommandOutputLease) -> AnyElement {
+    let delta = lease.read(None);
+    let output_text = lease.text();
+    let error = lease.error();
+    let truncated = delta.as_ref().is_some_and(|frame| frame.truncated);
+    let running = delta.as_ref().is_some_and(|frame| frame.running);
+
+    let mut panel = view().app_class(tw(
+        "ml-5 flex flex-col gap-1 border-l border-border/60 py-1 pl-3",
+    ));
+    if let Some(error) = error {
+        let message = if error == "Output is no longer available." {
+            t("Output is no longer available.")
+        } else {
+            tr(
+                "Couldn't load output: {error}",
+                &[("error", i18n::Value::Text(error))],
+            )
+        };
+        return panel
+            .child(text(message).app_class(tw("text-xs text-destructive")))
+            .into_element();
+    }
+    if delta.is_none() {
+        return panel
+            .child(text(t("Loading output…")).app_class(tw("text-xs text-muted-foreground")))
+            .into_element();
+    }
+    if truncated {
+        panel = panel.child(
+            text(t("Earlier output not shown")).app_class(tw("text-2xs text-muted-foreground")),
+        );
+    }
+    let rendered = output_text
+        .map(|raw| plain_command_output(&raw))
+        .unwrap_or_default();
+    if rendered.is_empty() {
+        let label = if running {
+            t("Loading output…")
+        } else {
+            t("No output.")
+        };
+        panel = panel.child(text(label).app_class(tw("text-xs text-muted-foreground")));
+    } else {
+        panel = panel.child(text(rendered).select_text().app_class(tw(
+            "cursor-text font-mono text-2xs leading-relaxed text-muted-foreground select-text",
+        )));
+    }
+    panel.into_element()
 }
 
 fn refusal_text(refusal: &SubmitRefusal) -> String {

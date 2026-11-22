@@ -6,6 +6,7 @@
 
 use futures::future::LocalBoxFuture;
 use serde_json::Value;
+use t3_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage;
 
 use super::transport::{GuestError, GuestFailure, GuestFuture, GuestStreamHandle, GuestTransport};
 
@@ -40,6 +41,7 @@ impl std::fmt::Debug for GuestRequest {
 pub struct GuestResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub retry_after: Option<String>,
 }
 
 /// The body of an open response, one network read at a time. Dropping it releases the connection.
@@ -52,6 +54,7 @@ pub struct GuestStreamResponse {
     pub status: u16,
     /// The response's `content-type`, if it sent one.
     pub content_type: Option<String>,
+    pub retry_after: Option<String>,
     pub chunks: Box<dyn GuestChunks>,
 }
 
@@ -62,6 +65,12 @@ pub trait GuestHttp {
     /// A request whose body is read incrementally (`stream`, `command-output`).
     fn open(&self, request: GuestRequest) -> GuestFuture<'_, GuestStreamResponse>;
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()>;
+    fn random(&self) -> f64 {
+        0.5
+    }
+    fn now_epoch_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl<T: GuestHttp + ?Sized> GuestHttp for std::rc::Rc<T> {
@@ -73,6 +82,12 @@ impl<T: GuestHttp + ?Sized> GuestHttp for std::rc::Rc<T> {
     }
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()> {
         (**self).sleep(millis)
+    }
+    fn random(&self) -> f64 {
+        (**self).random()
+    }
+    fn now_epoch_ms(&self) -> Option<u64> {
+        (**self).now_epoch_ms()
     }
 }
 
@@ -139,12 +154,70 @@ pub mod requests {
     }
 }
 
+/// Parses `Retry-After` as either integer delay-seconds or an IMF-fixdate HTTP-date.
+pub fn parse_retry_after_ms(header: &str, now_epoch_ms: Option<u64>) -> Option<u64> {
+    let trimmed = header.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return trimmed
+            .parse::<u64>()
+            .ok()
+            .map(|seconds| seconds.saturating_mul(1_000));
+    }
+    let now_epoch_ms = now_epoch_ms?;
+    let target_ms = parse_http_date_epoch_ms(trimmed)?;
+    let target_u64 = u64::try_from(target_ms).unwrap_or(0);
+    Some(target_u64.saturating_sub(now_epoch_ms))
+}
+
+fn parse_http_date_epoch_ms(value: &str) -> Option<i64> {
+    let rest = value
+        .split_once(',')
+        .map_or(value, |(_, after)| after)
+        .trim();
+    let mut parts = rest.split_ascii_whitespace();
+    let day: u8 = parts.next()?.parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: u16 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    if parts.next()? != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let iso = format!("{year:04}-{month:02}-{day:02}T{time}Z");
+    crate::time::epoch_ms(&iso)
+}
+
 /// Maps a non-2xx answer: 4xx is terminal with the server's `{reason, message}` (the TS fallback
-/// copy when the body is not that); 5xx and anything else means try again.
-pub fn rejection(status: u16, body: &[u8]) -> GuestError {
+/// copy when the body is not that); 5xx and anything else means try again, carrying `Retry-After`
+/// when present.
+pub fn rejection_with_retry_after(
+    status: u16,
+    body: &[u8],
+    retry_after_ms: Option<u64>,
+) -> GuestError {
     // 408, 425 and 429 are a proxy or server saying "later", not "never".
     if !(400..500).contains(&status) || matches!(status, 408 | 425 | 429) {
-        return GuestError::Network(format!("HTTP {status}"));
+        let message = format!("HTTP {status}");
+        return match retry_after_ms {
+            Some(millis) => GuestError::RetryAfter { millis, message },
+            None => GuestError::Network(message),
+        };
     }
     let parsed: Option<Value> = serde_json::from_slice(body).ok();
     let field = |name: &str| {
@@ -160,6 +233,10 @@ pub fn rejection(status: u16, body: &[u8]) -> GuestError {
             .unwrap_or("Something went wrong. Try again.")
             .to_owned(),
     }
+}
+
+pub fn rejection(status: u16, body: &[u8]) -> GuestError {
+    rejection_with_retry_after(status, body, None)
 }
 
 /// The most one unterminated line or one event's joined `data` may hold. Guest events are bounded
@@ -309,24 +386,19 @@ impl<H: GuestHttp> HttpGuestTransport<H> {
         if (200..300).contains(&response.status) {
             Ok(())
         } else {
-            Err(rejection(response.status, &response.body))
+            let retry_after_ms = response
+                .retry_after
+                .as_deref()
+                .and_then(|header| parse_retry_after_ms(header, self.host.now_epoch_ms()));
+            Err(rejection_with_retry_after(
+                response.status,
+                &response.body,
+                retry_after_ms,
+            ))
         }
     }
-}
 
-impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
-    fn redeem(&self, credential: &str, name: &str) -> GuestFuture<'_, ()> {
-        let request = requests::redeem(credential, name);
-        Box::pin(async move { self.expect_ok(request).await })
-    }
-
-    fn session(&self, share: &str) -> GuestFuture<'_, ()> {
-        let request = requests::session(share);
-        Box::pin(async move { self.expect_ok(request).await })
-    }
-
-    fn open_stream(&self, share: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
-        let request = requests::stream(share);
+    fn open_sse(&self, request: GuestRequest) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
         Box::pin(async move {
             let mut response = self.host.open(request).await?;
             if response.status != 200 {
@@ -337,7 +409,15 @@ impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
                         _ => break,
                     }
                 }
-                return Err(rejection(response.status, &body));
+                let retry_after_ms = response
+                    .retry_after
+                    .as_deref()
+                    .and_then(|header| parse_retry_after_ms(header, self.host.now_epoch_ms()));
+                return Err(rejection_with_retry_after(
+                    response.status,
+                    &body,
+                    retry_after_ms,
+                ));
             }
             // A 200 that is not an event stream (an SPA fallback, a captive portal) never becomes one.
             let is_stream = response.content_type.as_deref().is_some_and(|kind| {
@@ -359,6 +439,71 @@ impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
             }) as Box<dyn GuestStreamHandle>)
         })
     }
+}
+
+impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
+    fn redeem(&self, credential: &str, name: &str) -> GuestFuture<'_, ()> {
+        let request = requests::redeem(credential, name);
+        Box::pin(async move { self.expect_ok(request).await })
+    }
+
+    fn session(&self, share: &str) -> GuestFuture<'_, ()> {
+        let request = requests::session(share);
+        Box::pin(async move { self.expect_ok(request).await })
+    }
+
+    fn open_stream(&self, share: &str) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+        self.open_sse(requests::stream(share))
+    }
+
+    fn history(
+        &self,
+        share: &str,
+        cursor: &str,
+    ) -> GuestFuture<'_, OrchestrationV2ThreadHistoryPage> {
+        let request = requests::history(share, cursor);
+        Box::pin(async move {
+            let response = self.host.send(request).await?;
+            if !(200..300).contains(&response.status) {
+                let parsed: Option<Value> = serde_json::from_slice(&response.body).ok();
+                let reason = parsed
+                    .as_ref()
+                    .and_then(|body| body.get("reason"))
+                    .and_then(Value::as_str)
+                    .map_or(GuestFailure::Unknown, GuestFailure::from_reason);
+                let message = parsed
+                    .as_ref()
+                    .and_then(|body| body.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Could not load earlier turns. Try again.")
+                    .to_owned();
+                return Err(GuestError::Rejected {
+                    status: response.status,
+                    reason,
+                    message,
+                });
+            }
+            let raw: Value =
+                serde_json::from_slice(&response.body).map_err(|_| GuestError::Rejected {
+                    status: response.status,
+                    reason: GuestFailure::Unknown,
+                    message: "Could not load earlier turns. Try again.".into(),
+                })?;
+            crate::state::decoding::history_page(raw).map_err(|_| GuestError::Rejected {
+                status: response.status,
+                reason: GuestFailure::Unknown,
+                message: "Could not load earlier turns. Try again.".into(),
+            })
+        })
+    }
+
+    fn command_output(
+        &self,
+        share: &str,
+        item: &str,
+    ) -> GuestFuture<'_, Box<dyn GuestStreamHandle>> {
+        self.open_sse(requests::command_output(share, item))
+    }
 
     fn submit(&self, share: &str, text: &str) -> GuestFuture<'_, ()> {
         let request = requests::submit(share, text);
@@ -367,5 +512,9 @@ impl<H: GuestHttp> GuestTransport for HttpGuestTransport<H> {
 
     fn sleep(&self, millis: u64) -> LocalBoxFuture<'_, ()> {
         self.host.sleep(millis)
+    }
+
+    fn random(&self) -> f64 {
+        self.host.random()
     }
 }

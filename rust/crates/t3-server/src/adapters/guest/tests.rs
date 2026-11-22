@@ -585,3 +585,191 @@ async fn the_guest_client_joins_reads_and_submits_over_the_real_routes() {
     let _ = server.await;
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn the_guest_client_pages_history_and_reads_command_output_over_the_real_routes() {
+    use std::rc::Rc;
+    use t3_client::{
+        composition::Spawner,
+        guest::{
+            http::HttpGuestTransport,
+            session::{GuestClient, GuestCredential, GuestPhase, GuestSession, TranscriptRole},
+        },
+    };
+    use t3_orchestration::api::{CommitGuard, CommitRequest, Decision, EventCommitter};
+    use t3_platform::guest::NativeGuestHttp;
+
+    let Harness {
+        http: _,
+        base,
+        id,
+        credential,
+        runtime,
+        server,
+        _root,
+    } = harness(Arc::new(t3_cloud::SystemClock)).await;
+
+    let now = "2026-11-21T00:00:00.000Z";
+    let mut events = Vec::new();
+    for ordinal in 1..=12u64 {
+        let item_id = format!("msg-item-{ordinal}");
+        let event_id = format!("ev-msg-{ordinal}");
+        events.push(
+            serde_json::from_value(json!({
+                "id": event_id,
+                "threadId": "thread:shared",
+                "occurredAt": now,
+                "type": "turn-item.updated",
+                "payload": {
+                    "id": item_id,
+                    "type": "user_message",
+                    "threadId": "thread:shared",
+                    "runId": null,
+                    "nodeId": null,
+                    "providerThreadId": null,
+                    "providerTurnId": null,
+                    "nativeItemRef": null,
+                    "parentItemId": null,
+                    "ordinal": ordinal,
+                    "status": "completed",
+                    "title": null,
+                    "startedAt": null,
+                    "completedAt": null,
+                    "updatedAt": now,
+                    "createdBy": "user",
+                    "creationSource": "web",
+                    "messageId": format!("msg-{ordinal}"),
+                    "inputIntent": "turn_start",
+                    "text": format!("Turn {ordinal}"),
+                    "attachments": []
+                }
+            }))
+            .unwrap(),
+        );
+    }
+    events.push(
+        serde_json::from_value(json!({
+            "id": "ev-cmd-13",
+            "threadId": "thread:shared",
+            "occurredAt": now,
+            "type": "turn-item.updated",
+            "payload": {
+                "id": "cmd-e2e",
+                "type": "command_execution",
+                "threadId": "thread:shared",
+                "runId": null,
+                "nodeId": null,
+                "providerThreadId": null,
+                "providerTurnId": null,
+                "nativeItemRef": null,
+                "parentItemId": null,
+                "ordinal": 13,
+                "status": "completed",
+                "title": null,
+                "startedAt": null,
+                "completedAt": null,
+                "updatedAt": now,
+                "input": "vp check",
+                "output": "all checks green\n",
+                "outputOmitted": true,
+                "exitCode": 0
+            }
+        }))
+        .unwrap(),
+    );
+    runtime
+        .events
+        .commit(CommitRequest {
+            receipt: None,
+            decision: Decision {
+                events,
+                ..Default::default()
+            },
+            guard: CommitGuard::None,
+        })
+        .await
+        .unwrap();
+
+    let origin: url::Url = base.parse().unwrap();
+    let transport = Rc::new(HttpGuestTransport::new(Rc::new(
+        NativeGuestHttp::new(reqwest::Client::builder(), origin).unwrap(),
+    )));
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let notify = {
+        let wake = wake.clone();
+        move |_: &GuestSession| wake.notify_one()
+    };
+    let close_runtime = runtime.clone();
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let client = GuestClient::new(
+                transport,
+                &id,
+                Some(GuestCredential::new(credential)),
+                notify,
+            );
+            client.start().await;
+            client.join("Guest").await;
+            let running = tokio::task::spawn_local({
+                let client = client.clone();
+                async move { client.run().await }
+            });
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !client.snapshot(|s| s.phase == GuestPhase::Live && s.has_more_history()) {
+                    wake.notified().await;
+                }
+            })
+            .await
+            .unwrap();
+            let initial = client.snapshot(|s| s.transcript());
+            assert!(initial.iter().any(|row| row.text == "Turn 12"));
+            assert!(!initial.iter().any(|row| row.text == "Turn 1"));
+            assert!(
+                initial
+                    .iter()
+                    .any(|row| row.id == "cmd-e2e" && row.role == TranscriptRole::Command)
+            );
+
+            client.load_earlier().await;
+            let paged = client.snapshot(|s| (s.transcript(), s.has_more_history()));
+            assert!(!paged.1);
+            assert!(paged.0.iter().any(|row| row.text == "Turn 1"));
+            assert!(paged.0.iter().any(|row| row.text == "Turn 12"));
+
+            let spawner: Spawner = Rc::new(|future| {
+                tokio::task::spawn_local(future);
+            });
+            let lease = client.command_output("cmd-e2e", &spawner);
+            let output = tokio::time::timeout(Duration::from_secs(10), async {
+                use futures::StreamExt as _;
+                let mut changes = lease.changes();
+                loop {
+                    if let Some(text) = lease.text() {
+                        break text;
+                    }
+                    assert!(lease.error().is_none(), "{:?}", lease.error());
+                    if changes.next().await.is_none() {
+                        break lease.text().unwrap_or_default();
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(output, "all checks green\n");
+            drop(lease);
+
+            command(
+                &close_runtime,
+                json!({"type":"thread.guest-share.close","commandId":"test:e2e-history-close","threadId":"thread:shared"}),
+            )
+            .await;
+            tokio::time::timeout(Duration::from_secs(10), running)
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await;
+    server.abort();
+    let _ = server.await;
+    runtime.shutdown().await.unwrap();
+}
