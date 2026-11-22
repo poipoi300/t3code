@@ -146,19 +146,6 @@ impl GuestSession {
         }
     }
 
-    pub fn has_more_history(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_some_and(|thread| thread.history.has_more && thread.history.cursor.is_some())
-    }
-
-    pub fn history_cursor(&self) -> Option<&str> {
-        self.thread
-            .as_ref()
-            .filter(|thread| thread.history.has_more)
-            .and_then(|thread| thread.history.cursor.as_deref())
-    }
-
     /// The conversation as the guest reads it, in thread order, including command rows whose
     /// output loads on expand.
     pub fn transcript(&self) -> Vec<TranscriptRow> {
@@ -334,8 +321,8 @@ pub struct GuestClient {
 const MAX_BACKOFF_MS: u64 = 15_000;
 const BACKOFF_MS: [u64; 5] = [1_000, 2_000, 4_000, 8_000, MAX_BACKOFF_MS];
 
-/// Exponential backoff with equal jitter in `[base / 2, base]`, respecting `Retry-After` up to
-/// [`MAX_BACKOFF_MS`].
+/// Exponential backoff with equal jitter in `[base / 2, base]`; when `Retry-After` exceeds
+/// `base / 2`, adds `[0, base / 2]` jitter on top of `Retry-After`, capped at [`MAX_BACKOFF_MS`].
 pub fn reconnect_delay_ms(attempt: usize, random: f64, retry_after_ms: Option<u64>) -> u64 {
     let base = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
     let sample = if random.is_nan() {
@@ -343,10 +330,10 @@ pub fn reconnect_delay_ms(attempt: usize, random: f64, retry_after_ms: Option<u6
     } else {
         random.clamp(0.0, 1.0)
     };
-    let backoff = ((base as f64 / 2.0) * (1.0 + sample)).round() as u64;
-    retry_after_ms
-        .map_or(backoff, |retry_after| backoff.max(retry_after))
-        .min(MAX_BACKOFF_MS)
+    let half = base as f64 / 2.0;
+    let floor = retry_after_ms.map_or(half, |retry_after| half.max(retry_after as f64));
+    let delay = floor + half * sample;
+    delay.round().min(MAX_BACKOFF_MS as f64) as u64
 }
 
 fn history_error_text(error: &GuestError) -> String {
@@ -568,60 +555,94 @@ impl GuestClient {
         }
     }
 
-    /// Stream one expanded command row's output through `/api/guest/command-output`, releasing
-    /// the connection as soon as the command settles or the returned lease is dropped.
+    /// Stream one expanded command row's output through `/api/guest/command-output`, reconnecting
+    /// with backoff on transient errors until settled (`running == false`), rejected, or dropped.
     pub fn command_output(&self, item_id: &str, spawn: &Spawner) -> CommandOutputLease {
         let transport = self.transport.clone();
         let share = self.share.clone();
         let item_id = item_id.to_owned();
         enum State {
-            Connect,
-            Open(Box<dyn GuestStreamHandle>),
+            Connect {
+                attempt: usize,
+            },
+            Open {
+                stream: Box<dyn GuestStreamHandle>,
+                attempt: usize,
+            },
             Done,
         }
-        let frames = futures::stream::unfold(State::Connect, move |state| {
+        fn unavailable() -> ClientError {
+            ClientError::Rejected {
+                message: "Output is no longer available.".into(),
+                detail: None,
+            }
+        }
+        let frames = futures::stream::unfold(State::Connect { attempt: 0 }, move |state| {
             let transport = transport.clone();
             let share = share.clone();
             let item_id = item_id.clone();
             async move {
                 match state {
                     State::Done => None,
-                    State::Connect => match transport.command_output(&share, &item_id).await {
-                        Ok(stream) => Some((None, State::Open(stream))),
-                        Err(_) => Some((
-                            Some(Err(ClientError::Rejected {
-                                message: "Output is no longer available.".into(),
-                                detail: None,
-                            })),
-                            State::Done,
-                        )),
-                    },
-                    State::Open(mut stream) => loop {
-                        match stream.next().await {
-                            Ok(Some(raw)) => {
-                                let Ok(frame) = serde_json::from_value::<
-                                    OrchestrationV2CommandOutputFrame,
-                                >(raw) else {
-                                    continue;
-                                };
-                                let next = if frame.running {
-                                    State::Open(stream)
-                                } else {
-                                    State::Done
-                                };
-                                return Some((Some(Ok(frame)), next));
+                    State::Connect { attempt } => {
+                        match transport.command_output(&share, &item_id).await {
+                            Ok(stream) => Some((None, State::Open { stream, attempt })),
+                            Err(GuestError::Rejected { .. }) => {
+                                Some((Some(Err(unavailable())), State::Done))
                             }
-                            Ok(None) | Err(_) => {
-                                return Some((
-                                    Some(Err(ClientError::Rejected {
-                                        message: "Output is no longer available.".into(),
-                                        detail: None,
-                                    })),
-                                    State::Done,
-                                ));
+                            Err(error) => {
+                                let wait = reconnect_delay_ms(
+                                    attempt,
+                                    transport.random(),
+                                    error.retry_after_ms(),
+                                );
+                                transport.sleep(wait).await;
+                                Some((
+                                    None,
+                                    State::Connect {
+                                        attempt: attempt + 1,
+                                    },
+                                ))
                             }
                         }
-                    },
+                    }
+                    State::Open {
+                        mut stream,
+                        mut attempt,
+                    } => {
+                        let retry_after_ms = loop {
+                            match stream.next().await {
+                                Ok(Some(raw)) => {
+                                    let Ok(frame) = serde_json::from_value::<
+                                        OrchestrationV2CommandOutputFrame,
+                                    >(raw) else {
+                                        continue;
+                                    };
+                                    attempt = 0;
+                                    let next = if frame.running {
+                                        State::Open { stream, attempt }
+                                    } else {
+                                        State::Done
+                                    };
+                                    return Some((Some(Ok(frame)), next));
+                                }
+                                Ok(None) | Err(GuestError::Network(_)) => break None,
+                                Err(GuestError::RetryAfter { millis, .. }) => break Some(millis),
+                                Err(GuestError::Rejected { .. }) => {
+                                    return Some((Some(Err(unavailable())), State::Done));
+                                }
+                            }
+                        };
+                        drop(stream);
+                        let wait = reconnect_delay_ms(attempt, transport.random(), retry_after_ms);
+                        transport.sleep(wait).await;
+                        Some((
+                            None,
+                            State::Connect {
+                                attempt: attempt + 1,
+                            },
+                        ))
+                    }
                 }
             }
         })

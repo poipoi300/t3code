@@ -277,6 +277,21 @@ fn status_label(status: &ThreadGuestMessageStatus) -> &'static str {
     }
 }
 
+struct ExpandedCommand {
+    owner: Owner,
+    lease: CommandOutputLease,
+    revision: Signal<u64>,
+    alive: Rc<std::cell::Cell<bool>>,
+}
+
+impl Drop for ExpandedCommand {
+    fn drop(&mut self) {
+        // Free the per-expand signal and cancel row-owned driver/pump tasks on collapse or teardown.
+        self.alive.set(false);
+        self.owner.dispose();
+    }
+}
+
 fn thread_view(
     client: GuestClient,
     owner: TaskOwner,
@@ -288,11 +303,8 @@ fn thread_view(
 ) -> AnyElement {
     let draft = signal(String::new());
     let problem = signal(None::<String>);
-    let thread_owner = Owner::current();
     let expanded_commands = signal(BTreeSet::<String>::new());
-    let command_leases: Stored<BTreeMap<String, (CommandOutputLease, Signal<u64>)>> =
-        stored(BTreeMap::new());
-    let spawner: Spawner = Rc::new(move |future| owner.spawn(future));
+    let command_leases: Stored<BTreeMap<String, ExpandedCommand>> = stored(BTreeMap::new());
     let send = {
         let client = client.clone();
         move || {
@@ -311,7 +323,6 @@ fn thread_view(
     };
     let toggle_command = {
         let client = client.clone();
-        let spawner = spawner.clone();
         move |item_id: &str| {
             let already_expanded = expanded_commands.with(|set| set.contains(item_id));
             if already_expanded {
@@ -322,16 +333,31 @@ fn thread_view(
                     set.remove(item_id);
                 });
             } else {
-                let lease = client.command_output(item_id, &spawner);
-                let revision = thread_owner.run(|| signal(0u64));
+                let (row_owner, (revision, row_tasks)) =
+                    nsh_core::element::create_root(|| (signal(0u64), TaskOwner::here()));
+                let alive = Rc::new(std::cell::Cell::new(true));
+                let pump_alive = alive.clone();
+                let row_spawner: Spawner = Rc::new(move |future| row_tasks.spawn(future));
+                let lease = client.command_output(item_id, &row_spawner);
                 let mut changes = lease.changes();
-                owner.spawn(async move {
+                row_tasks.spawn(async move {
                     while changes.next().await.is_some() {
+                        if !pump_alive.get() {
+                            break;
+                        }
                         revision.update(|count| *count = count.saturating_add(1));
                     }
                 });
                 command_leases.with(|map| {
-                    map.insert(item_id.to_owned(), (lease, revision));
+                    map.insert(
+                        item_id.to_owned(),
+                        ExpandedCommand {
+                            owner: row_owner,
+                            lease,
+                            revision,
+                            alive,
+                        },
+                    );
                 });
                 expanded_commands.update(|set| {
                     set.insert(item_id.to_owned());
@@ -469,7 +495,7 @@ fn thread_view(
 fn command_row_view(
     row: &TranscriptRow,
     expanded_commands: Signal<BTreeSet<String>>,
-    command_leases: Stored<BTreeMap<String, (CommandOutputLease, Signal<u64>)>>,
+    command_leases: Stored<BTreeMap<String, ExpandedCommand>>,
     toggle: impl Fn(&str) + Clone + 'static,
 ) -> AnyElement {
     let item_id = row.id.clone();
@@ -513,16 +539,16 @@ fn command_row_view(
 
     if is_expanded
         && let Some(revision) =
-            command_leases.with(|map| map.get(&item_id).map(|(_, revision)| *revision))
+            command_leases.with(|map| map.get(&item_id).map(|entry| entry.revision))
     {
         let body_id = item_id.clone();
         container = container.child(dynamic(move || {
             let _ = revision.get();
             command_leases.with(|map| {
-                let Some((lease, _)) = map.get(&body_id) else {
+                let Some(entry) = map.get(&body_id) else {
                     return view().into_element();
                 };
-                command_output_panel(lease)
+                command_output_panel(&entry.lease)
             })
         }));
     }

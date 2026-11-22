@@ -28,11 +28,15 @@ struct Probe {
     frames: Arc<Mutex<Option<Frames>>>,
     history_gates: Arc<Mutex<VecDeque<HistoryGate>>>,
     command_pending: CommandReceiverQueue,
+    command_drops: Arc<Mutex<Vec<String>>>,
 }
 
 impl Probe {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    fn command_drops(&self) -> Vec<String> {
+        self.command_drops.lock().unwrap().clone()
     }
     fn push(&self, frame: Value) {
         let frames = self.frames.lock().unwrap();
@@ -67,11 +71,22 @@ struct Wire {
     session_ok: bool,
 }
 
-struct Frames_(mpsc::UnboundedReceiver<Value>);
+struct Frames_ {
+    rx: mpsc::UnboundedReceiver<Value>,
+    drop_record: Option<(Arc<Mutex<Vec<String>>>, String)>,
+}
+
+impl Drop for Frames_ {
+    fn drop(&mut self) {
+        if let Some((drops, tag)) = self.drop_record.take() {
+            drops.lock().unwrap().push(tag);
+        }
+    }
+}
 
 impl GuestStreamHandle for Frames_ {
     fn next(&mut self) -> GuestFuture<'_, Option<Value>> {
-        Box::pin(async move { Ok(self.0.next().await) })
+        Box::pin(async move { Ok(self.rx.next().await) })
     }
 }
 
@@ -112,7 +127,10 @@ impl GuestTransport for Wire {
         let receiver = self.stream.borrow_mut().take();
         Box::pin(async move {
             match receiver {
-                Some(receiver) => Ok(Box::new(Frames_(receiver)) as Box<dyn GuestStreamHandle>),
+                Some(rx) => Ok(Box::new(Frames_ {
+                    rx,
+                    drop_record: None,
+                }) as Box<dyn GuestStreamHandle>),
                 None => Err(GuestError::Network("one stream per page".into())),
             }
         })
@@ -145,9 +163,14 @@ impl GuestTransport for Wire {
             .unwrap()
             .push(format!("command-output {share} {item}"));
         let next = self.probe.command_pending.lock().unwrap().pop_front();
+        let drops = self.probe.command_drops.clone();
+        let item_tag = item.to_owned();
         Box::pin(async move {
             match next {
-                Some(Ok(rx)) => Ok(Box::new(Frames_(rx)) as Box<dyn GuestStreamHandle>),
+                Some(Ok(rx)) => Ok(Box::new(Frames_ {
+                    rx,
+                    drop_record: Some((drops, item_tag)),
+                }) as Box<dyn GuestStreamHandle>),
                 Some(Err(err)) => Err(err),
                 None => Err(GuestError::Rejected {
                     status: 403,
@@ -366,11 +389,12 @@ fn assistant_row(thread_id: &str, id: &str, ordinal: u64, text: &str) -> Value {
     })
 }
 
-fn command_row(
+fn command_row_with_status(
     thread_id: &str,
     id: &str,
     ordinal: u64,
     input: &str,
+    status: &str,
     exit_code: Option<i64>,
 ) -> Value {
     json!({
@@ -389,7 +413,7 @@ fn command_row(
             "nativeItemRef": null,
             "parentItemId": null,
             "ordinal": ordinal,
-            "status": "completed",
+            "status": status,
             "title": null,
             "startedAt": null,
             "completedAt": null,
@@ -399,6 +423,16 @@ fn command_row(
             "exitCode": exit_code
         }
     })
+}
+
+fn command_row(
+    thread_id: &str,
+    id: &str,
+    ordinal: u64,
+    input: &str,
+    exit_code: Option<i64>,
+) -> Value {
+    command_row_with_status(thread_id, id, ordinal, input, "completed", exit_code)
 }
 
 fn history_paging(window: (f32, f32), share: &str) {
@@ -477,6 +511,7 @@ fn command_rows(window: (f32, f32), share: &str) {
         reason: GuestFailure::Unavailable,
         message: "This item is not available.".into(),
     });
+    let live_tx = probe.queue_command_output();
     let mut app = start_on_web(
         window,
         &format!("https://guest.example/guest?share={share}"),
@@ -496,14 +531,16 @@ fn command_rows(window: (f32, f32), share: &str) {
                 "turnItems": [
                     command_row("thread:shared", "cmd-1", 1, "vp run check:changed", Some(0))["item"],
                     command_row("thread:shared", "cmd-err", 2, "cargo test", Some(1))["item"],
-                    assistant_row("thread:shared", "a1", 3, "All checks pass.")["item"]
+                    command_row_with_status("thread:shared", "cmd-live", 3, "tail -f build.log", "running", None)["item"],
+                    assistant_row("thread:shared", "a1", 4, "All checks pass.")["item"]
                 ],
                 "checkpointScopes": [], "checkpoints": [], "contextHandoffs": [],
                 "contextTransfers": [],
                 "visibleTurnItems": [
                     command_row("thread:shared", "cmd-1", 1, "vp run check:changed", Some(0)),
                     command_row("thread:shared", "cmd-err", 2, "cargo test", Some(1)),
-                    assistant_row("thread:shared", "a1", 3, "All checks pass.")
+                    command_row_with_status("thread:shared", "cmd-live", 3, "tail -f build.log", "running", None),
+                    assistant_row("thread:shared", "a1", 4, "All checks pass.")
                 ],
                 "updatedAt": NOW
             }
@@ -535,6 +572,12 @@ fn command_rows(window: (f32, f32), share: &str) {
         .unwrap();
     app.wait_for("text:/4 files checked/")
         .expect("settled output");
+    app.wait_until(
+        "settled stream handle dropped",
+        std::time::Duration::from_secs(5),
+        |_| probe.command_drops().iter().any(|tag| tag == "cmd-1"),
+    )
+    .expect("settled output drops stream handle");
 
     // Collapse hides the output again.
     app.press("role:button[vp run check:changed]")
@@ -552,10 +595,98 @@ fn command_rows(window: (f32, f32), share: &str) {
     app.wait_for("Output is no longer available.")
         .expect("error state");
     app.wait_for("exit 1").expect("non-zero exit code");
+
+    // Expanding a still-running command keeps its SSE stream open until collapsed.
+    app.press("role:button[tail -f build.log]")
+        .expect("expand live command");
+    live_tx
+        .unbounded_send(
+            json!({"kind":"replace","text":"building crate...\n","truncated":false,"running":true}),
+        )
+        .unwrap();
+    app.wait_for("building crate...").expect("live output");
+    assert!(
+        !probe.command_drops().iter().any(|tag| tag == "cmd-live"),
+        "running command stream stays open while expanded"
+    );
+    app.press("role:button[tail -f build.log]")
+        .expect("collapse live command");
+    app.wait_until(
+        "collapsing live command drops lease and SSE handle",
+        std::time::Duration::from_secs(5),
+        |screen| {
+            !screen.shows("building crate...")
+                && probe.command_drops().iter().any(|tag| tag == "cmd-live")
+        },
+    )
+    .expect("collapse releases running stream handle");
 }
 
 #[test]
 fn guest_command_output_row_streams_only_when_expanded_at_both_widths() {
     command_rows(DESKTOP, "guest_cmd_d");
     command_rows(PHONE, "guest_cmd_p");
+}
+
+fn ending_with_buffered_command_output(window: (f32, f32), share: &str) {
+    let probe = install(share, true);
+    let live_tx = probe.queue_command_output();
+    let mut app = start_on_web(
+        window,
+        &format!("https://guest.example/guest?share={share}"),
+    );
+    stream_open(&mut app, &probe);
+    probe.push(view_frame(&[]));
+    probe.push(json!({
+        "type": "thread",
+        "item": {
+            "kind": "snapshot",
+            "snapshotSequence": 1,
+            "projection": {
+                "thread": thread("thread:shared"),
+                "runs": [], "attempts": [], "nodes": [], "subagents": [],
+                "providerSessions": [], "providerThreads": [], "providerTurns": [],
+                "runtimeRequests": [], "messages": [], "plans": [],
+                "turnItems": [
+                    command_row_with_status("thread:shared", "cmd-live", 1, "tail -f build.log", "running", None)["item"]
+                ],
+                "checkpointScopes": [], "checkpoints": [], "contextHandoffs": [],
+                "contextTransfers": [],
+                "visibleTurnItems": [
+                    command_row_with_status("thread:shared", "cmd-live", 1, "tail -f build.log", "running", None)
+                ],
+                "updatedAt": NOW
+            }
+        }
+    }));
+    app.wait_for("tail -f build.log").expect("command row");
+
+    app.press("role:button[tail -f build.log]")
+        .expect("expand live command");
+    live_tx
+        .unbounded_send(
+            json!({"kind":"replace","text":"step 1\n","truncated":false,"running":true}),
+        )
+        .unwrap();
+    app.wait_for("step 1").expect("initial live output");
+
+    // Buffer a command output frame in the same turn as share revocation: tearing down thread_view
+    // disposes the per-row signal without panicking on a buffered pump write and drops the handle.
+    live_tx
+        .unbounded_send(json!({"kind":"append","text":"step 2\n","truncated":false,"running":true}))
+        .unwrap();
+    probe.push(json!({"type":"ended"}));
+    app.wait_for("This link has ended").expect("ended notice");
+    app.wait_until(
+        "ending share drops expanded command stream handle",
+        std::time::Duration::from_secs(5),
+        |_| probe.command_drops().iter().any(|tag| tag == "cmd-live"),
+    )
+    .expect("Ended teardown drops expanded lease and SSE handle");
+}
+
+#[test]
+fn ending_the_share_with_buffered_command_output_releases_and_does_not_panic() {
+    ending_with_buffered_command_output(DESKTOP, "guest_end_cmd_d");
+    ending_with_buffered_command_output(PHONE, "guest_end_cmd_p");
 }

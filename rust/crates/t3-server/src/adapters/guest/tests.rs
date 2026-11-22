@@ -715,7 +715,7 @@ async fn the_guest_client_pages_history_and_reads_command_output_over_the_real_r
                 async move { client.run().await }
             });
             tokio::time::timeout(Duration::from_secs(10), async {
-                while !client.snapshot(|s| s.phase == GuestPhase::Live && s.has_more_history()) {
+                while !client.snapshot(|s| s.phase == GuestPhase::Live && s.history().has_more) {
                     wake.notified().await;
                 }
             })
@@ -731,7 +731,7 @@ async fn the_guest_client_pages_history_and_reads_command_output_over_the_real_r
             );
 
             client.load_earlier().await;
-            let paged = client.snapshot(|s| (s.transcript(), s.has_more_history()));
+            let paged = client.snapshot(|s| (s.transcript(), s.history().has_more));
             assert!(!paged.1);
             assert!(paged.0.iter().any(|row| row.text == "Turn 1"));
             assert!(paged.0.iter().any(|row| row.text == "Turn 12"));

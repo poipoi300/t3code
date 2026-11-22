@@ -21,10 +21,6 @@ pub enum GuestError {
 }
 
 impl GuestError {
-    pub fn is_network(&self) -> bool {
-        matches!(self, Self::Network(_) | Self::RetryAfter { .. })
-    }
-
     pub fn retry_after_ms(&self) -> Option<u64> {
         match self {
             Self::RetryAfter { millis, .. } => Some(*millis),
