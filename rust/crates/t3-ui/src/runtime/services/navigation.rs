@@ -625,7 +625,11 @@ pub trait PaletteClient: PaletteSearchClient {
     fn toggle_project_pin(
         &self,
         project: ProjectKey,
-    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    ) -> LocalBoxFuture<'static, Result<(), PaletteHostFailure>>;
+    /// The `thread.copyReference` shortcut: `None` when no reference is offered right now.
+    fn copy_active_thread_reference(
+        &self,
+    ) -> Option<LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>>>;
     fn pull_request_linking_supported(&self, environment: &EnvironmentId) -> bool;
     fn resolve_link_pull_request(
         &self,
@@ -701,9 +705,15 @@ impl<P: Platform + Clone + 'static> PaletteClient for PaletteService<P> {
     fn toggle_project_pin(
         &self,
         project: ProjectKey,
-    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+    ) -> LocalBoxFuture<'static, Result<(), PaletteHostFailure>> {
         let client = self.clone();
         async move { PaletteService::toggle_project_pin(&client, &project).await }.boxed_local()
+    }
+
+    fn copy_active_thread_reference(
+        &self,
+    ) -> Option<LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>>> {
+        PaletteService::copy_active_thread_reference(self)
     }
 
     fn pull_request_linking_supported(&self, environment: &EnvironmentId) -> bool {

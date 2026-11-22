@@ -480,8 +480,10 @@ fn result_icon(item: &Item) -> Option<Icon> {
         | "action:copy-prompt-link-with-context"
         | "action:copy-thread-reference" => Some(Icon::Link),
         "action:share-thread-with-guest" => Some(Icon::UserPlus),
-        "action:link-pull-request" => Some(Icon::GitPullRequest),
-        "action:project-pin" => Some(if item.title.starts_with("Unpin") {
+        "action:link-pull-request" | "action:open-thread-pull-requests" => {
+            Some(Icon::GitPullRequest)
+        }
+        "action:project-pin" => Some(if item.pinned == Some(true) {
             Icon::PinOff
         } else {
             Icon::Pin

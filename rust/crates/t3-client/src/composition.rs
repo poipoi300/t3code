@@ -159,6 +159,8 @@ struct Inner<P: Platform + Clone + 'static> {
     composer_task: AbortHandle,
     navigation: crate::navigation::UrlClient<P>,
     new_threads: Rc<crate::navigation::new_thread::NewThreadState>,
+    /// This build's hosted app origin (`VITE_HOSTED_APP_URL`); unset means the default.
+    hosted_app_url: RefCell<Option<String>>,
 }
 
 impl<P: Platform + Clone + 'static> Drop for Inner<P> {
@@ -312,6 +314,7 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
                 storage_notice: RefCell::default(),
                 restored: std::cell::Cell::default(),
                 first_run_gate: Default::default(),
+                hosted_app_url: RefCell::default(),
             }),
         };
         runtime.timeline_rewind().bind_rewind_attachments(Rc::new(
@@ -341,11 +344,18 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
         )
     }
 
+    /// The hosted app origin links copied from this client point at; `None` is the default.
+    pub fn set_hosted_app_url(&self, origin: Option<String>) {
+        *self.inner.hosted_app_url.borrow_mut() = origin;
+    }
+
     pub fn palette(&self) -> crate::navigation::palette_service::PaletteService<P> {
-        crate::navigation::palette_service::PaletteService::new(
+        let palette = crate::navigation::palette_service::PaletteService::new(
             self.clone(),
             self.inner.platform.clone(),
-        )
+        );
+        palette.set_hosted_app_url(self.inner.hosted_app_url.borrow().clone());
+        palette
     }
 
     pub fn add_project(&self) -> crate::navigation::project_flow::AddProjectSession<P> {

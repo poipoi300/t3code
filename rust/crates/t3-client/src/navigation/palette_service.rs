@@ -58,6 +58,7 @@ pub enum HostCommand {
     CopyPromptContext,
     CopyReference,
     LinkPullRequest,
+    ShowPullRequests,
     ShareGuest,
     RestartSession,
     Triage,
@@ -105,6 +106,8 @@ pub struct ThreadReferenceCopyTarget {
     pub kind: ThreadReferenceKind,
     pub value: String,
     pub description: String,
+    /// The composer-context fragment that pastes a thread back as a chip (`None` for a PR link).
+    pub fragment: Option<String>,
     pub success_title: &'static str,
     pub failure_title: &'static str,
 }
@@ -281,7 +284,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             }
             HostCommand::RestartSession => !self.is_draft() && server.is_some(),
             HostCommand::CopyReference => self.active_thread_reference_copy_target().is_some(),
-            HostCommand::LinkPullRequest => {
+            HostCommand::LinkPullRequest | HostCommand::ShowPullRequests => {
                 !self.is_draft() && server.is_some() && config.is_some()
             }
             HostCommand::ShareGuest => key.as_ref().is_some_and(|key| {
@@ -366,8 +369,13 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             hosted_origin.as_deref(),
         ))
     }
+    /// The thread's or draft's project, else the one the landing state starts threads in.
+    fn contextual_project(&self) -> Option<ProjectKey> {
+        self.active_project()
+            .or_else(|| self.runtime.new_threads().default_project_key())
+    }
     fn pin_project_target(&self) -> Option<PinProjectTarget> {
-        let project = self.active_project()?;
+        let project = self.contextual_project()?;
         self.pin_target_for_project(&project)
     }
     fn pin_target_for_project(&self, project: &ProjectKey) -> Option<PinProjectTarget> {
@@ -626,6 +634,15 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                         .map(str::to_owned)
                         .into();
                 }
+                HostCommand::ShowPullRequests => {
+                    item.search_terms = ["pull requests", "linked", "stack", "prs"]
+                        .map(str::to_owned)
+                        .into();
+                    item.disabled = self
+                        .key()
+                        .and_then(|key| self.server_thread(&key))
+                        .is_none_or(|thread| thread_pull_requests_of(&thread).is_empty());
+                }
                 HostCommand::ShareGuest => {
                     item.search_terms = ["share", "guest", "invite", "link", "teammate"]
                         .map(str::to_owned)
@@ -646,6 +663,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                         } else {
                             "Pin project".into()
                         };
+                        item.pinned = Some(pin.pinned);
                         item.description = Some(pin.display_name);
                         item.search_terms = ["pin", "unpin", "project", "favorite"]
                             .map(str::to_owned)
@@ -884,7 +902,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
                 Action::Host {
                     command,
                     thread: self.key(),
-                    project: self.active_project(),
+                    project: self.contextual_project(),
                 }
             }
         })
@@ -903,14 +921,17 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         };
         let hosted_origin = self.hosted_app_url.borrow().clone();
         let target = reference_copy_target(key, &thread, hosted_origin.as_deref());
-        if let Err(error) = self
-            .platform
-            .clipboard_write(vec![MimeData {
-                mime: "text/plain".into(),
-                bytes: target.value.into_bytes(),
-            }])
-            .await
-        {
+        let mut flavours = vec![MimeData {
+            mime: "text/plain".into(),
+            bytes: target.value.clone().into_bytes(),
+        }];
+        if let Some(fragment) = &target.fragment {
+            flavours.push(MimeData {
+                mime: "text/html".into(),
+                bytes: clipboard_html(&target.value, fragment).into_bytes(),
+            });
+        }
+        if let Err(error) = self.platform.clipboard_write(flavours).await {
             return Err(PaletteHostFailure {
                 title: target.failure_title,
                 description: error.to_string(),
@@ -965,8 +986,10 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             .prompt
             .clone();
         let trimmed = trimmed_linkable_prompt(&prompt)?;
+        let hosted_origin = self.hosted_app_url.borrow().clone();
         if !with_context {
-            return build_new_thread_link(&trimmed, None, None, None, None).ok();
+            return build_new_thread_link(&trimmed, None, None, None, hosted_origin.as_deref())
+                .ok();
         }
         let repo = self.active_prompt_repository()?;
         let server_thread = key.and_then(|k| self.server_thread(k));
@@ -1009,7 +1032,7 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
             Some(&repo),
             provider.as_deref(),
             model.as_deref(),
-            None,
+            hosted_origin.as_deref(),
         )
         .ok()
     }
@@ -1135,14 +1158,43 @@ impl<P: Platform + Clone + 'static> PaletteService<P> {
         Ok(())
     }
 
-    pub async fn toggle_project_pin(&self, project: &ProjectKey) -> Result<(), ClientError> {
+    /// A project that can no longer be pinned (gone, or no scope) is skipped without a toast.
+    pub async fn toggle_project_pin(&self, project: &ProjectKey) -> Result<(), PaletteHostFailure> {
         let Some(target) = self.pin_target_for_project(project) else {
-            return Err(ClientError::Cancelled);
+            return Ok(());
         };
-        self.runtime
+        let title = if target.pinned {
+            "Failed to unpin project"
+        } else {
+            "Failed to pin project"
+        };
+        match self
+            .runtime
             .thread_actions()
             .set_project_group_pinned(target.members, !target.pinned)
             .await
+        {
+            Err(ClientError::Cancelled) => Ok(()),
+            Err(error) => Err(PaletteHostFailure {
+                title,
+                description: error.to_string(),
+            }),
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Copy the active thread's reference when one is offered (the `thread.copyReference`
+    /// shortcut); `None` when the palette row would not be offered.
+    pub fn copy_active_thread_reference(
+        &self,
+    ) -> Option<futures::future::LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>>>
+    {
+        self.active_thread_reference_copy_target()?;
+        let key = self.key()?;
+        let service = self.clone();
+        Some(futures::FutureExt::boxed_local(async move {
+            service.copy_thread_reference(&key).await
+        }))
     }
 
     pub fn pull_request_linking_supported(&self, environment: &EnvironmentId) -> bool {
@@ -1520,6 +1572,37 @@ fn resolve_thread_current_pull_request_link(
     links.into_iter().next()
 }
 
+/// `threadContextRecord` in a version 1 `ComposerContextClipboardFragment`.
+fn thread_chip_fragment(key: &ThreadKey, label: &str) -> String {
+    serde_json::json!({
+        "version": 1,
+        "source": { "environmentId": key.environment.0 },
+        "records": [{
+            "version": 1,
+            "kind": "thread",
+            "contextId": crate::view_logic::context_references::kind_scoped_id("thread", &key.thread.0),
+            "label": label,
+            "environmentId": key.environment.0,
+            "threadId": key.thread.0,
+            "title": label,
+        }],
+    })
+    .to_string()
+}
+
+/// `encodeComposerContextClipboardHtml` without HTML of its own: hosts carry only plain text and
+/// HTML, so the fragment travels in the HTML flavour.
+fn clipboard_html(text: &str, fragment: &str) -> String {
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        "<pre data-t3-context-fragment=\"{}\">{escaped}</pre>",
+        crate::persistence::encode_uri_component(fragment)
+    )
+}
+
 fn reference_copy_target(
     key: &ThreadKey,
     thread: &OrchestrationV2ThreadShell,
@@ -1531,6 +1614,7 @@ fn reference_copy_target(
             kind: ThreadReferenceKind::PullRequest,
             value: url.clone(),
             description: url,
+            fragment: None,
             success_title: "PR link copied",
             failure_title: "Failed to copy PR link",
         };
@@ -1550,10 +1634,13 @@ fn reference_copy_target(
         )
     })
     .unwrap_or_default();
+    let label = crate::thread_views::user_message::sanitize_label(&thread.title, "thread");
+    let fragment = thread_chip_fragment(key, &label);
     ThreadReferenceCopyTarget {
         kind: ThreadReferenceKind::Thread,
         value: url,
-        description: thread.title.clone(),
+        description: label,
+        fragment: Some(fragment),
         success_title: "Thread copied",
         failure_title: "Failed to copy thread",
     }
@@ -1566,6 +1653,7 @@ fn thread_command(command: &HostCommand) -> bool {
             | HostCommand::CopyPromptContext
             | HostCommand::CopyReference
             | HostCommand::LinkPullRequest
+            | HostCommand::ShowPullRequests
             | HostCommand::ShareGuest
             | HostCommand::RestartSession
     )
@@ -1591,6 +1679,11 @@ fn host_items() -> Vec<(HostCommand, &'static str, &'static str)> {
             LinkPullRequest,
             "action:link-pull-request",
             "Link pull request to thread",
+        ),
+        (
+            ShowPullRequests,
+            "action:open-thread-pull-requests",
+            "Show linked pull requests",
         ),
         (
             ShareGuest,
@@ -1761,6 +1854,37 @@ mod tests {
         assert_eq!(
             target.value,
             "https://web.internal.example/threads/env%2E1/thr%2E%28a%29"
+        );
+    }
+
+    #[test]
+    fn thread_reference_carries_a_sanitised_label_and_a_chip_fragment_and_html_escapes_the_link() {
+        let mut json = base_thread_json();
+        json["title"] = serde_json::json!("[wip]\n  foo\\bar ");
+        let thread = shell_with_json(json);
+        let key = ThreadKey {
+            environment: EnvironmentId("env".into()),
+            thread: ThreadId("thr".into()),
+        };
+        let target = reference_copy_target(&key, &thread, None);
+        assert_eq!(target.description, "wip foo bar");
+        let fragment: serde_json::Value =
+            serde_json::from_str(&target.fragment.expect("a thread copy carries a fragment"))
+                .unwrap();
+        assert_eq!(fragment["version"], 1);
+        assert_eq!(fragment["source"]["environmentId"], "env");
+        assert_eq!(
+            fragment["records"][0],
+            serde_json::json!({
+                "version": 1, "kind": "thread", "contextId": "thread_thr",
+                "label": "wip foo bar", "environmentId": "env", "threadId": "thr",
+                "title": "wip foo bar",
+            })
+        );
+        let html = clipboard_html("https://x.test/a?b=1&c=<2>", "{\"a\":1}");
+        assert_eq!(
+            html,
+            "<pre data-t3-context-fragment=\"%7B%22a%22%3A1%7D\">https://x.test/a?b=1&amp;c=&lt;2&gt;</pre>"
         );
     }
 }

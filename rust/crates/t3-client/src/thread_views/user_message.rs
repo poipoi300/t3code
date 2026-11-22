@@ -203,7 +203,7 @@ pub struct Reference {
     pub end: usize,
 }
 
-fn sanitize_label(label: &str, kind: &str) -> String {
+pub fn sanitize_label(label: &str, kind: &str) -> String {
     let mut cleaned = String::new();
     let mut separator = false;
     for ch in label.chars() {

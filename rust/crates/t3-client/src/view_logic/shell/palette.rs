@@ -211,6 +211,8 @@ pub struct Item {
     pub shortcut: Option<String>,
     pub keep_open: bool,
     pub checked: Option<bool>,
+    /// Whether a pin/unpin action's project is pinned now; picks its icon.
+    pub pinned: Option<bool>,
     pub groups: Option<Vec<Group>>,
 }
 impl Item {
@@ -232,6 +234,7 @@ impl Item {
             shortcut: None,
             keep_open: false,
             checked: None,
+            pinned: None,
             groups: None,
         }
     }

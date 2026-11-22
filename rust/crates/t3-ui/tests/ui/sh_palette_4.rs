@@ -58,6 +58,49 @@ impl ClipboardPlatform {
         }
     }
 
+    /// What the HTML flavour of the last write that carried a thread chip says, decoded.
+    fn fragment_summary(&self) -> String {
+        let writes = self.writes.borrow();
+        let Some(html) = writes.iter().rev().find_map(|batch| {
+            batch
+                .iter()
+                .find(|mime| mime.mime == "text/html")
+                .and_then(|mime| String::from_utf8(mime.bytes.clone()).ok())
+        }) else {
+            return "none".into();
+        };
+        let encoded = html
+            .split("data-t3-context-fragment=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_default();
+        let mut bytes = Vec::new();
+        let raw = encoded.as_bytes();
+        let mut at = 0;
+        while at < raw.len() {
+            if raw[at] == b'%' && at + 2 < raw.len() {
+                bytes.push(u8::from_str_radix(&encoded[at + 1..at + 3], 16).unwrap_or(b'?'));
+                at += 3;
+            } else {
+                bytes.push(raw[at]);
+                at += 1;
+            }
+        }
+        let fragment: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let record = &fragment["records"][0];
+        format!(
+            "v{} source={} kind={} env={} thread={} label={} title={}",
+            fragment["version"],
+            fragment["source"]["environmentId"].as_str().unwrap_or(""),
+            record["kind"].as_str().unwrap_or(""),
+            record["environmentId"].as_str().unwrap_or(""),
+            record["threadId"].as_str().unwrap_or(""),
+            record["label"].as_str().unwrap_or(""),
+            record["title"].as_str().unwrap_or(""),
+        )
+    }
+
     fn plain_texts(&self) -> Vec<String> {
         self.writes
             .borrow()
@@ -159,6 +202,8 @@ struct Scenario {
     operate_scope: bool,
     guest_sharing: bool,
     initial_prompt: Option<&'static str>,
+    hosted_app_url: Option<&'static str>,
+    thread_title: &'static str,
 }
 
 impl Default for Scenario {
@@ -175,6 +220,8 @@ impl Default for Scenario {
             operate_scope: true,
             guest_sharing: true,
             initial_prompt: None,
+            hosted_app_url: None,
+            thread_title: "Alpha thread",
         }
     }
 }
@@ -210,7 +257,7 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
     } else {
         server.set_permissions(&["orchestration:read"]);
     }
-    let mut sh = shell(&[("alpha", "Alpha thread")]);
+    let mut sh = shell(&[("alpha", scenario.thread_title)]);
     sh["projects"][0]["repositoryIdentity"] = if scenario.github_repo {
         json!({
             "canonicalKey": "github.com/t3/code",
@@ -252,8 +299,12 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
     }
     server.set_shell(sh);
 
-    let mut proj =
-        t3_client::testing::environment::projection("alpha", "Alpha thread", json!([]), json!([]));
+    let mut proj = t3_client::testing::environment::projection(
+        "alpha",
+        scenario.thread_title,
+        json!([]),
+        json!([]),
+    );
     if scenario.has_provider_session {
         proj["thread"]["latestRunId"] = json!("run-1");
         proj["thread"]["status"] = json!("completed");
@@ -340,6 +391,7 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
         OrchestrationV2CreationSource::Web,
         spawner.clone(),
     );
+    client.set_hosted_app_url(scenario.hosted_app_url.map(str::to_owned));
     let pairing = client.pair(server.pairing());
     let initial_prompt = scenario.initial_prompt;
     let draft_only = scenario.draft_only;
@@ -376,7 +428,6 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
     let diag_dups = signal(String::new());
     let diag_server = server.clone();
     let diag_platform = platform.clone();
-    let diag_client = client.clone();
     on_key_with(
         "f9",
         KeyOptions {
@@ -424,30 +475,12 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
                 .collect::<Vec<_>>()
                 .join(",");
             let clips = diag_platform.plain_texts().join("|");
-            let dups = {
-                let palette = diag_client.palette();
-                palette.set_route(navigator().top());
-                let catalogue = palette.catalogue();
-                let mut seen = std::collections::BTreeSet::new();
-                let mut dup_values = Vec::new();
-                for group in catalogue.groups.iter() {
-                    for item in &group.items {
-                        if !seen.insert(item.value.clone()) {
-                            dup_values.push(item.value.clone());
-                        }
-                    }
-                }
-                if dup_values.is_empty() {
-                    "none".into()
-                } else {
-                    dup_values.join(",")
-                }
-            };
+            let html = diag_platform.fragment_summary();
             diag_dispatch.set(format!("Dispatch: [{dispatches}]"));
             diag_refresh.set(format!("Refresh: [{refreshes}]"));
             diag_mutate.set(format!("Mutate: [{mutations}]"));
             diag_clip.set(format!("Clip: [{clips}]"));
-            diag_dups.set(format!("Dups: {dups}"));
+            diag_dups.set(format!("Fragment: {html}"));
         },
     );
 
@@ -478,6 +511,26 @@ fn build_workspace(scenario: Scenario) -> impl IntoElement {
                     "commandId": "cmd-1",
                     "commandType": "thread.pull-request.link",
                     "message": "Server rejected command"
+                })),
+            );
+        },
+    );
+
+    let fail_pin_server = server.clone();
+    on_key_with(
+        "f4",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            fail_pin_server.reply(
+                WsProjectsMutateRpc::TAG,
+                Err(json!({
+                    "_tag": "OrchestrationV2DispatchCommandError",
+                    "commandId": "cmd-1",
+                    "commandType": "project.update",
+                    "message": "Pin rejected"
                 })),
             );
         },
@@ -600,6 +653,23 @@ fn ThreadReadOnly() -> impl IntoElement {
 }
 
 #[component]
+fn ThreadAtStaging() -> impl IntoElement {
+    build_workspace(Scenario {
+        hosted_app_url: Some("https://staging.example.test"),
+        thread_find: true,
+        ..Default::default()
+    })
+}
+
+#[component]
+fn ThreadWithAwkwardTitle() -> impl IntoElement {
+    build_workspace(Scenario {
+        thread_title: "[wip]\nfoo",
+        ..Default::default()
+    })
+}
+
+#[component]
 fn HomeView() -> impl IntoElement {
     build_workspace(Scenario {
         home: true,
@@ -618,11 +688,17 @@ fn DraftWithPrompt() -> impl IntoElement {
 }
 
 fn start(root: Root) -> Headless {
+    start_waiting(root, "role:button[Alpha thread, Project]")
+}
+
+fn start_waiting(root: Root, row: &str) -> Headless {
     let mut fixtures = Registry::new();
     fixtures.register::<ThreadWithSession>();
     fixtures.register::<ThreadNoSessionNoRepo>();
     fixtures.register::<ThreadWithLinkedPr>();
     fixtures.register::<ThreadReadOnly>();
+    fixtures.register::<ThreadAtStaging>();
+    fixtures.register::<ThreadWithAwkwardTitle>();
     fixtures.register::<HomeView>();
     fixtures.register::<DraftWithPrompt>();
     let mut sets = t3_ui::registries();
@@ -635,8 +711,7 @@ fn start(root: Root) -> Headless {
     config.environment.os = nsh_core::platform::Os::Linux;
     config.environment.idiom = nsh_core::platform::Idiom::Desktop;
     let mut app = Headless::start(config).expect("workspace starts");
-    app.wait_for("role:button[Alpha thread, Project]")
-        .expect("paired thread row");
+    app.wait_for(row).expect("paired thread row");
     app
 }
 
@@ -644,6 +719,9 @@ fn open_palette_and_filter(app: &mut Headless, query: &str) {
     app.press_key("mod+k").expect("open command palette");
     app.wait_for("role:combobox[Command palette]")
         .expect("command palette input");
+    // A reopened palette restores the last search; start from an empty query.
+    app.clear("role:combobox[Command palette]")
+        .expect("clear the restored query");
     app.type_text("role:combobox[Command palette]", query)
         .expect("filter commands");
 }
@@ -670,10 +748,9 @@ fn restart_session_offered_on_thread_detaches_session_and_refreshes_and_hidden_o
     app.wait_for("text:Refresh: [claude-1:/workspace/project:fresh=true]")
         .expect("providers refreshed fresh with runtime providerInstanceId");
 
-    // Dead `Show linked pull requests` entry is absent from palette catalogue.
     open_palette_and_filter(&mut app, "show linked pull requests");
-    app.wait_for("No matching commands, projects, or threads.")
-        .expect("dead LinkedPullRequests entry is removed");
+    app.wait_for("Show linked pull requests")
+        .expect("offered (disabled without links) on an active thread");
     app.clear("role:combobox[Command palette]")
         .expect("clear filter before next search");
 
@@ -930,10 +1007,6 @@ fn find_thread_pin_project_dedup_and_share_guest_regression() {
     open_palette_and_filter(&mut restricted, "pin project");
     assert!(!restricted.screen().shows("role:option[Pin project]"));
     restricted.press_key("escape").expect("close palette");
-    restricted.press_key("f9").expect("check duplicates");
-    restricted
-        .wait_for("text:Dups: none")
-        .expect("no duplicate palette entries");
 
     // Without orchestration:operate, Pin project is hidden.
     let mut readonly = start(Root::of::<ThreadReadOnly>());
@@ -949,6 +1022,12 @@ fn find_thread_pin_project_dedup_and_share_guest_regression() {
         .expect("activate Find in current thread");
     app.wait_for("Find in thread")
         .expect("thread find bar opened");
+    // The dialog restores focus as it closes; typing must still land in the find input.
+    app.press_key("w").expect("type into the find bar");
+    app.press_key("i").expect("type into the find bar");
+    app.wait_for("text:wi")
+        .expect("find input kept focus after the palette closed");
+    app.press_key("escape").expect("close find bar");
 
     open_palette_and_filter(&mut app, "pin project");
     app.wait_for("role:option[Pin project]")
@@ -972,9 +1051,6 @@ fn find_thread_pin_project_dedup_and_share_guest_regression() {
     pinned
         .wait_for("text:Mutate: [project.update:pinned=false]")
         .expect("project unpinned via RPC");
-    pinned
-        .wait_for("text:Dups: none")
-        .expect("no duplicate palette entries");
 
     // Share with guest still works cleanly.
     open_palette_and_filter(&mut app, "share with guest");
@@ -984,4 +1060,187 @@ fn find_thread_pin_project_dedup_and_share_guest_regression() {
         .expect("open guest share dialog");
     app.wait_for("The link works once and expires in 24 hours.")
         .expect("guest share dialog opened");
+}
+
+fn assert_offered_once(app: &mut Headless, query: &str, option: &str) {
+    open_palette_and_filter(app, query);
+    app.wait_for(option).expect("command offered");
+    assert_eq!(app.screen().count(option), Ok(1), "{option} listed once");
+    app.press_key("escape").expect("close palette");
+}
+
+#[test]
+fn every_host_command_is_listed_exactly_once_where_offered() {
+    let mut app = start(Root::of::<ThreadWithLinkedPr>());
+    app.press_key("f7").expect("set draft prompt");
+    for (query, option) in [
+        ("copy prompt link", "role:option[Copy prompt link]"),
+        (
+            "repo and model",
+            "role:option[Copy prompt link with repo and model]",
+        ),
+        ("copy pr link", "role:option[Copy PR link]"),
+        (
+            "link pull request",
+            "role:option[Link pull request to thread]",
+        ),
+        (
+            "show linked pull requests",
+            "role:option[Show linked pull requests]",
+        ),
+        ("share with guest", "role:option[Share with guest]"),
+        (
+            "restart agent session",
+            "role:option[Restart agent session]",
+        ),
+        ("unpin project", "role:option[Unpin project]"),
+    ] {
+        assert_offered_once(&mut app, query, option);
+    }
+}
+
+#[test]
+fn thread_commands_are_hidden_on_a_draft() {
+    let mut draft = start(Root::of::<DraftWithPrompt>());
+    draft.press_key("f6").expect("open draft");
+    draft.wait_for("Draft: ready").expect("draft opened");
+    for (query, option) in [
+        (
+            "find in current thread",
+            "role:option[Find in current thread]",
+        ),
+        (
+            "restart agent session",
+            "role:option[Restart agent session]",
+        ),
+        ("share with guest", "role:option[Share with guest]"),
+        ("copy thread", "role:option[Copy thread]"),
+        (
+            "link pull request",
+            "role:option[Link pull request to thread]",
+        ),
+    ] {
+        open_palette_and_filter(&mut draft, query);
+        assert!(!draft.screen().shows(option), "{option} hidden on a draft");
+        draft.press_key("escape").expect("close palette");
+    }
+}
+
+#[test]
+fn copied_links_use_the_configured_hosted_app_url() {
+    let mut app = start(Root::of::<ThreadAtStaging>());
+    app.press_key("f7").expect("set draft prompt");
+    open_palette_and_filter(&mut app, "copy thread");
+    app.press("role:option[Copy thread]").expect("copy thread");
+    app.wait_for("Thread copied").expect("toast");
+    open_palette_and_filter(&mut app, "copy prompt link with repo");
+    app.press("role:option[Copy prompt link with repo and model]")
+        .expect("copy prompt link with context");
+    app.wait_for("Prompt link copied").expect("toast");
+    open_palette_and_filter(&mut app, "copy prompt link");
+    app.press("role:option[Copy prompt link]")
+        .expect("copy plain prompt link");
+    app.press_key("f9").expect("read diagnostics");
+    app.wait_for(
+        "text:Clip: [https://staging.example.test/threads/remote/alpha|https://staging.example.test/new?prompt=Investigate+bug&repo=t3%2Fcode&provider=codex&model=gpt-5.4|https://staging.example.test/new?prompt=Investigate+bug]",
+    )
+    .expect("every copied link points at the configured origin");
+}
+
+#[test]
+fn copy_thread_also_writes_the_thread_chip_fragment_with_a_sanitised_label() {
+    let mut app = start_waiting(Root::of::<ThreadWithAwkwardTitle>(), "text:[wip]\nfoo");
+    open_palette_and_filter(&mut app, "copy thread");
+    app.press("role:option[Copy thread]").expect("copy thread");
+    app.wait_for("Thread copied").expect("toast");
+    app.wait_for("wip foo")
+        .expect("the toast shows the sanitised label, not the raw title");
+    app.press_key("f9").expect("read diagnostics");
+    app.wait_for(
+        "text:Fragment: v1 source=remote kind=thread env=remote thread=alpha label=wip foo title=wip foo",
+    )
+    .expect("the HTML flavour carries the thread chip fragment");
+
+    let mut plain = start(Root::of::<ThreadWithSession>());
+    open_palette_and_filter(&mut plain, "copy thread");
+    plain
+        .press("role:option[Copy thread]")
+        .expect("copy thread");
+    plain.wait_for("Thread copied").expect("toast");
+    plain.press_key("f9").expect("read diagnostics");
+    plain
+        .wait_for("text:Fragment: v1 source=remote kind=thread env=remote thread=alpha label=Alpha thread title=Alpha thread")
+        .expect("an ordinary title is kept as the label");
+}
+
+#[test]
+fn the_copy_reference_shortcut_copies_like_the_palette_row() {
+    let mut app = start(Root::of::<ThreadWithSession>());
+    app.press_key("mod+shift+c")
+        .expect("copy reference shortcut");
+    app.wait_for("Thread copied")
+        .expect("the advertised shortcut runs the command");
+    app.press_key("f9").expect("read diagnostics");
+    app.wait_for("text:Clip: [https://app.t3.codes/threads/remote/alpha]")
+        .expect("hosted thread URL copied");
+
+    let mut pr = start(Root::of::<ThreadWithLinkedPr>());
+    pr.press_key("mod+shift+c")
+        .expect("copy reference shortcut");
+    pr.wait_for("PR link copied")
+        .expect("a linked pull request is copied instead");
+}
+
+#[test]
+fn pin_project_on_home_falls_back_to_the_default_project() {
+    let mut home = start(Root::of::<HomeView>());
+    open_palette_and_filter(&mut home, "pin project");
+    home.wait_for("role:option[Pin project]")
+        .expect("offered on Home through the default project");
+    home.press("role:option[Pin project]").expect("pin");
+    home.press_key("f9").expect("check project mutation");
+    home.wait_for("text:Mutate: [project.update:pinned=true]")
+        .expect("default project pinned via RPC");
+}
+
+#[test]
+fn pin_and_unpin_failures_use_the_pin_specific_titles() {
+    let mut app = start(Root::of::<ThreadWithSession>());
+    app.press_key("f4").expect("script a pin failure");
+    open_palette_and_filter(&mut app, "pin project");
+    app.press("role:option[Pin project]").expect("pin");
+    app.wait_for("Failed to pin project")
+        .expect("pin failure title");
+
+    let mut pinned = start(Root::of::<ThreadWithLinkedPr>());
+    pinned.press_key("f4").expect("script an unpin failure");
+    open_palette_and_filter(&mut pinned, "unpin project");
+    pinned.press("role:option[Unpin project]").expect("unpin");
+    pinned
+        .wait_for("Failed to unpin project")
+        .expect("unpin failure title");
+}
+
+#[test]
+fn show_linked_pull_requests_is_gated_on_visible_links_and_opens_the_panel() {
+    let mut none = start(Root::of::<ThreadWithSession>());
+    open_palette_and_filter(&mut none, "show linked pull requests");
+    none.wait_for("Show linked pull requests")
+        .expect("listed even without links, as the web lists it");
+    assert!(
+        !none
+            .screen()
+            .shows("role:option[Show linked pull requests]"),
+        "the row is disabled, not an actionable option"
+    );
+
+    let mut linked = start(Root::of::<ThreadWithLinkedPr>());
+    open_palette_and_filter(&mut linked, "show linked pull requests");
+    linked
+        .press("role:option[Show linked pull requests]")
+        .expect("open the pull requests panel");
+    linked
+        .wait_for("role:tab[Pull requests]")
+        .expect("the thread's pull requests panel opened");
+    assert!(!linked.screen().shows("role:combobox[Command palette]"));
 }

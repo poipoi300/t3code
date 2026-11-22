@@ -380,6 +380,26 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
             .or_else(|| fallback.filter(|id| offering.contains(id)).cloned())
             .or_else(|| (offering.len() == 1).then(|| offering[0].clone()))
     }
+    /// The project the chat landing state starts a thread in (TSX `defaultProjectRef`), and
+    /// whether every environment has synced enough for that choice to be final.
+    fn default_project_target(&self) -> (Option<ProjectKey>, bool) {
+        let snapshot = self.runtime.store().snapshot();
+        let ready = !snapshot.environments.is_empty()
+            && snapshot
+                .environments
+                .values()
+                .all(|e| e.shell.status == SyncStatus::Live);
+        let project = default_project(
+            &self.projects(),
+            &self.state.project_order.borrow(),
+            self.state.last_used.borrow().as_deref(),
+            ready,
+        );
+        (project, ready)
+    }
+    pub fn default_project_key(&self) -> Option<ProjectKey> {
+        self.default_project_target().0
+    }
     pub async fn resolve(&self, target: &Target) -> Result<NewThreadView, ClientError> {
         self.drafts.load().await?;
         if let Some(destination) = self.state.destinations.borrow().get(target).cloned() {
@@ -390,18 +410,7 @@ impl<P: Platform + Clone + 'static> NewThreadRuntime<P> {
                 if self.state.errors.borrow().contains_key(target) {
                     return Ok(NewThreadView::StartFailed);
                 }
-                let snapshot = self.runtime.store().snapshot();
-                let ready = !snapshot.environments.is_empty()
-                    && snapshot
-                        .environments
-                        .values()
-                        .all(|e| e.shell.status == SyncStatus::Live);
-                let project = default_project(
-                    &self.projects(),
-                    &self.state.project_order.borrow(),
-                    self.state.last_used.borrow().as_deref(),
-                    ready,
-                );
+                let (project, ready) = self.default_project_target();
                 if let Some(project) = project {
                     let id = self.open_project(project, None, None).await?;
                     return Ok(NewThreadView::Navigate(Destination::Draft(id)));

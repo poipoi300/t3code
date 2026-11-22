@@ -112,6 +112,9 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
 
     fn palette(&self) -> Option<Rc<dyn PaletteClient>> {
         use t3_client::navigation::palette_service::HostCommand;
+        if let Some(origin) = configured_hosted_app_url(option_env!("T3_HOSTED_APP_URL")) {
+            self.set_hosted_app_url(Some(origin));
+        }
         let palette = ClientRuntime::palette(self);
         // The commands this UI can carry out (`screens/palette` handles `Action::Host`); without
         // this the service offers no host command at all.
@@ -122,6 +125,7 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
                 HostCommand::CopyPromptContext,
                 HostCommand::CopyReference,
                 HostCommand::LinkPullRequest,
+                HostCommand::ShowPullRequests,
                 HostCommand::ShareGuest,
                 HostCommand::RestartSession,
                 HostCommand::PinProject,
@@ -239,5 +243,28 @@ mod tests {
         );
         backend.open_thread(&key);
         backend.close_thread(&key);
+    }
+}
+
+/// `configuredHostedAppUrl()` without its default: this build's hosted app origin, when one was
+/// set at build time (`VITE_HOSTED_APP_URL` on the web).
+pub(crate) fn configured_hosted_app_url(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod hosted_app_url_tests {
+    use super::configured_hosted_app_url;
+
+    #[test]
+    fn a_blank_or_missing_setting_leaves_the_default_in_force() {
+        assert_eq!(configured_hosted_app_url(None), None);
+        assert_eq!(configured_hosted_app_url(Some("  \n")), None);
+        assert_eq!(
+            configured_hosted_app_url(Some(" https://staging.example.test \n")).as_deref(),
+            Some("https://staging.example.test")
+        );
     }
 }

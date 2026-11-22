@@ -37,7 +37,17 @@ pub fn open_link_pull_request_dialog(key: ThreadKey) -> bool {
 
 pub fn link_pull_request_dialog_host() -> AnyElement {
     let target = signal(None::<ThreadKey>);
-    OPENER.with(|slot| *slot.borrow_mut() = Some(Rc::new(move |key| target.set(Some(key)))));
+    let opener: Opener = Rc::new(move |key| target.set(Some(key)));
+    OPENER.with(|slot| *slot.borrow_mut() = Some(opener.clone()));
+    // A rebuilt host registers before the old one is dropped, so clear only our own entry.
+    cleanup(move || {
+        OPENER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|open| Rc::ptr_eq(open, &opener)) {
+                *slot = None;
+            }
+        });
+    });
     dynamic(move || {
         target.get().and_then(|key| {
             let service = use_context::<Rc<dyn PaletteClient>>()

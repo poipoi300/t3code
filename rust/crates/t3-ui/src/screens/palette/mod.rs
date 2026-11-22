@@ -20,7 +20,7 @@ pub use t3_client::view_logic::shell::palette::{
 use t3_client::view_logic::shell::shortcuts::DispatchEvent;
 
 use crate::i18n::{Text, t};
-use crate::keys::bindings::Keybindings;
+use crate::keys::bindings::{Keybindings, Scope};
 use crate::runtime::tasks::{TaskOwner, watch};
 use crate::runtime::{Rt, Shared, services::navigation::PaletteClient};
 use crate::screens::panel::{Action as PanelAction, workspace_panel_host};
@@ -177,6 +177,21 @@ pub fn command_palette(children: impl IntoElement) -> impl IntoElement {
                 );
             }),
         });
+        // The palette row advertises `thread.copyReference`, so the shortcut must run it.
+        if let Some(keys) = use_context::<Keybindings>() {
+            let copier = client.clone();
+            let owner = TaskOwner::here();
+            keys.register(
+                Scope::default().command("thread.copyReference", move |event| {
+                    let Some(copy) = copier.copy_active_thread_reference() else {
+                        return false;
+                    };
+                    event.claim();
+                    owner.spawn(async move { show_host_result(Some(toast_manager()), copy.await) });
+                    true
+                }),
+            );
+        }
         provide_context(client);
     }
     let palette = palette_controller();
@@ -358,6 +373,34 @@ fn open_intent_view(intent: Option<&Intent>) -> Option<View> {
     })
 }
 
+fn show_host_result(
+    toast: Option<crate::ui::toast::ToastManager>,
+    result: Result<
+        t3_client::navigation::palette_service::PaletteToast,
+        t3_client::navigation::palette_service::PaletteHostFailure,
+    >,
+) {
+    let Some(toast) = toast else { return };
+    match result {
+        Ok(ok) => {
+            toast.add(ToastOptions {
+                variant: Variant::Success,
+                title: Text::client_key(ok.title),
+                description: ok.description.map(Text::content),
+                ..Default::default()
+            });
+        }
+        Err(err) => {
+            toast.add(ToastOptions {
+                variant: Variant::Error,
+                title: Text::client_key(err.title),
+                description: Some(Text::content(err.description)),
+                ..Default::default()
+            });
+        }
+    }
+}
+
 fn show_host_command_error(
     toast: Option<crate::ui::toast::ToastManager>,
     result: Result<(), t3_client::ClientError>,
@@ -468,31 +511,6 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                         project,
                     }) => {
                         use t3_client::navigation::palette_service::HostCommand;
-                        let toast_result = move |toast: Option<crate::ui::toast::ToastManager>,
-                                                 result: Result<
-                            t3_client::navigation::palette_service::PaletteToast,
-                            t3_client::navigation::palette_service::PaletteHostFailure,
-                        >| {
-                            let Some(toast) = toast else { return };
-                            match result {
-                                Ok(ok) => {
-                                    toast.add(ToastOptions {
-                                        variant: Variant::Success,
-                                        title: Text::client_key(ok.title),
-                                        description: ok.description.map(Text::content),
-                                        ..Default::default()
-                                    });
-                                }
-                                Err(err) => {
-                                    toast.add(ToastOptions {
-                                        variant: Variant::Error,
-                                        title: Text::client_key(err.title),
-                                        description: Some(Text::content(err.description)),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        };
                         match command {
                             HostCommand::ShareGuest => {
                                 if let Some(key) = thread {
@@ -508,6 +526,13 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                                     link_pr_dialog::open_link_pull_request_dialog(key);
                                 }
                             }
+                            HostCommand::ShowPullRequests => {
+                                if let Some(key) = thread {
+                                    palette.close();
+                                    workspace_panel_host()
+                                        .apply(&key, PanelAction::Open("pull-requests".into()));
+                                }
+                            }
                             HostCommand::FindThread => {
                                 palette.close();
                                 if let Some(keys) = keys {
@@ -520,7 +545,7 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                                     let service = service.clone();
                                     host_tasks.spawn(async move {
                                         let result = service.copy_thread_reference(key).await;
-                                        toast_result(toast, result);
+                                        show_host_result(toast, result);
                                     });
                                 }
                             }
@@ -532,7 +557,7 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                                 host_tasks.spawn(async move {
                                     let result =
                                         service.copy_prompt_link(thread, with_context).await;
-                                    toast_result(toast, result);
+                                    show_host_result(toast, result);
                                 });
                             }
                             HostCommand::RestartSession => {
@@ -567,10 +592,11 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                                     palette.close();
                                     let service = service.clone();
                                     host_tasks.spawn(async move {
-                                        show_host_command_error(
-                                            toast,
-                                            service.toggle_project_pin(project).await,
-                                        );
+                                        if let Err(failure) =
+                                            service.toggle_project_pin(project).await
+                                        {
+                                            show_host_result(toast, Err(failure));
+                                        }
                                     });
                                 }
                             }
