@@ -7,7 +7,7 @@ use crate::{
     types::QueryState,
     view_logic::shell::palette_files::{ContentSearchView, FileSearchView, SearchOptions},
 };
-use t3_contracts::{base_schemas::*, project::*, rpc::*};
+use t3_contracts::{project::*, rpc::*};
 
 impl<P: Platform + Clone + 'static> PaletteService<P> {
     fn guarded_query<M, V>(
