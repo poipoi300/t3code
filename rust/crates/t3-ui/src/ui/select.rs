@@ -429,20 +429,24 @@ pub fn select_value(
             })
         })
     });
-    text(move || title.get().unwrap_or_else(|| placeholder.with(Text::resolve)))
-        .app_class(move || {
-            let attrs: Vec<_> = title
-                .get()
-                .is_none()
-                .then_some(("data-placeholder", ""))
-                .into_iter()
-                .collect();
-            Some(tw_with(
-                Scope::Root,
-                "flex-1 truncate data-placeholder:text-placeholder",
-                &attrs,
-            ))
-        })
+    text(move || {
+        title
+            .get()
+            .unwrap_or_else(|| placeholder.with(Text::resolve))
+    })
+    .app_class(move || {
+        let attrs: Vec<_> = title
+            .get()
+            .is_none()
+            .then_some(("data-placeholder", ""))
+            .into_iter()
+            .collect();
+        Some(tw_with(
+            Scope::Root,
+            "flex-1 truncate data-placeholder:text-placeholder",
+            &attrs,
+        ))
+    })
 }
 
 /// NSH supplies the surrounding option's behavior and state. Web's `hideIndicator` is unused.

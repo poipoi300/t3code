@@ -94,8 +94,10 @@ fn describe_transport(error: &HubTransportError) -> String {
         .code
         .as_deref()
         .filter(|code| (1..=64).contains(&code.len()))
-        .filter(|code| code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
-    {
+        .filter(|code| {
+            code.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        }) {
         Some(code) if UNTRUSTED_CERTIFICATE_CODES.contains(&code) => format!(
             "The hub's TLS certificate is not trusted ({code}). If it comes from a private CA, add that CA to NODE_EXTRA_CA_CERTS."
         ),
@@ -132,14 +134,22 @@ fn parse_json(bytes: &[u8]) -> Option<Value> {
 }
 
 // Effect Schema struct checks: an optional field may be absent but not null or mistyped.
-fn optional<'a>(object: &'a Map<String, Value>, key: &str, ok: fn(&Value) -> bool) -> Outcome<Option<&'a Value>> {
+fn optional<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    ok: fn(&Value) -> bool,
+) -> Outcome<Option<&'a Value>> {
     match object.get(key) {
         None => Ok(None),
         Some(value) if ok(value) => Ok(Some(value)),
         Some(_) => Err(Failure::Schema),
     }
 }
-fn required<'a>(object: &'a Map<String, Value>, key: &str, ok: fn(&Value) -> bool) -> Outcome<&'a Value> {
+fn required<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    ok: fn(&Value) -> bool,
+) -> Outcome<&'a Value> {
     optional(object, key, ok)?.ok_or(Failure::Schema)
 }
 fn object(value: &Value) -> Outcome<&Map<String, Value>> {
@@ -198,10 +208,12 @@ fn auth_files(value: &Value) -> Outcome<Vec<AuthFile>> {
             };
             Ok(AuthFile {
                 id: text(Some(required(file, "id", is_string)?)).unwrap_or_default(),
-                auth_index: text(Some(required(file, "auth_index", is_string)?)).unwrap_or_default(),
+                auth_index: text(Some(required(file, "auth_index", is_string)?))
+                    .unwrap_or_default(),
                 provider: text(Some(required(file, "provider", is_string)?)).unwrap_or_default(),
                 email: text(optional(file, "email", is_string)?),
-                disabled: optional(file, "disabled", is_bool)?.and_then(Value::as_bool) == Some(true),
+                disabled: optional(file, "disabled", is_bool)?.and_then(Value::as_bool)
+                    == Some(true),
                 project_id: text(optional(file, "project_id", is_string)?),
                 chatgpt_account_id: token_field("chatgpt_account_id")?,
                 chatgpt_plan_type: token_field("chatgpt_plan_type")?,
@@ -288,14 +300,24 @@ impl HubProvider {
         match self {
             Self::Codex => {
                 let mut header = json!({"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","OpenAI-Beta":"codex-1","Originator":"Codex Desktop"});
-                if let Some(id) = account.chatgpt_account_id.as_deref().filter(|id| !id.is_empty()) {
+                if let Some(id) = account
+                    .chatgpt_account_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                {
                     header["Chatgpt-Account-Id"] = json!(id);
                 }
                 header
             }
-            Self::Claude => json!({"Authorization":"Bearer $TOKEN$","anthropic-beta":"oauth-2025-04-20","User-Agent":"claude-code/2.1.273"}),
-            Self::Xai => json!({"Authorization":"Bearer $TOKEN$","x-xai-token-auth":"xai-grok-cli","x-grok-client-version":GROK_CLI_VERSION,"User-Agent":format!("grok-cli/{GROK_CLI_VERSION}")}),
-            Self::Antigravity => json!({"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":format!("antigravity/hub/2.24.0 (aidev_client; os_type={platform}; arch={architecture}; cl=963137146)")}),
+            Self::Claude => {
+                json!({"Authorization":"Bearer $TOKEN$","anthropic-beta":"oauth-2025-04-20","User-Agent":"claude-code/2.1.273"})
+            }
+            Self::Xai => {
+                json!({"Authorization":"Bearer $TOKEN$","x-xai-token-auth":"xai-grok-cli","x-grok-client-version":GROK_CLI_VERSION,"User-Agent":format!("grok-cli/{GROK_CLI_VERSION}")})
+            }
+            Self::Antigravity => {
+                json!({"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":format!("antigravity/hub/2.24.0 (aidev_client; os_type={platform}; arch={architecture}; cl=963137146)")})
+            }
         }
     }
 }
@@ -341,7 +363,10 @@ impl CliproxyApi {
             .map_err(|_| source("The hub did not answer within 15 seconds."))?
             .map_err(|error| source(describe_transport(&error)))?;
         if !(200..300).contains(&response.status) {
-            return Err(source(format!("The hub answered with HTTP {}.", response.status)));
+            return Err(source(format!(
+                "The hub answered with HTTP {}.",
+                response.status
+            )));
         }
         parse_json(&response.body).ok_or_else(|| source("The hub management request failed."))
     }
@@ -370,8 +395,12 @@ impl CliproxyApi {
         }
         let raw = self.management(hub, "api-call", Some(body)).await?;
         let raw = object(&raw)?;
-        let status = required(raw, "status_code", is_number)?.as_f64().unwrap_or(0.0);
-        let text = required(raw, "body", is_string)?.as_str().unwrap_or_default();
+        let status = required(raw, "status_code", is_number)?
+            .as_f64()
+            .unwrap_or(0.0);
+        let text = required(raw, "body", is_string)?
+            .as_str()
+            .unwrap_or_default();
         if !(200.0..300.0).contains(&status) {
             return Err(source(format!(
                 "The provider refused the hub request (HTTP {}).",
@@ -385,7 +414,12 @@ impl CliproxyApi {
         crate::iso(self.clock.now_ms())
     }
 
-    async fn read_account(&self, hub: &Hub<'_>, account: &AuthFile, provider: HubProvider) -> Value {
+    async fn read_account(
+        &self,
+        hub: &Hub<'_>,
+        account: &AuthFile,
+        provider: HubProvider,
+    ) -> Value {
         let checked_at = self.checked_at();
         let reading = match self.read(hub, account, provider, &checked_at).await {
             Ok(reading) => reading,
@@ -428,7 +462,9 @@ impl CliproxyApi {
                     let Some(rate) = rate_limit.as_object() else {
                         return Ok(Value::Null);
                     };
-                    let Some(window) = optional(rate, key, nullable_object)?.and_then(Value::as_object) else {
+                    let Some(window) =
+                        optional(rate, key, nullable_object)?.and_then(Value::as_object)
+                    else {
                         return Ok(Value::Null);
                     };
                     let used = required(window, "used_percent", is_number)?;
@@ -449,9 +485,11 @@ impl CliproxyApi {
                 if let Some(label) = codex_plan_label(plan_type.as_deref()) {
                     reading.insert("plan".into(), json!(label));
                 }
-                let snapshot = json!({"planType":plan_type,"primary":primary,"secondary":secondary});
+                let snapshot =
+                    json!({"planType":plan_type,"primary":primary,"secondary":secondary});
                 let mut usage_limits = serde_json::to_value(
-                    limits::codex_limits(&snapshot, None, None, checked_at).map_err(|_| Failure::Schema)?,
+                    limits::codex_limits(&snapshot, None, None, checked_at)
+                        .map_err(|_| Failure::Schema)?,
                 )
                 .map_err(|_| Failure::Schema)?;
                 if let Some(available) = available {
@@ -466,7 +504,13 @@ impl CliproxyApi {
             }
             HubProvider::Claude => {
                 let usage = self
-                    .relay(hub, account, provider, "https://api.anthropic.com/api/oauth/usage", None)
+                    .relay(
+                        hub,
+                        account,
+                        provider,
+                        "https://api.anthropic.com/api/oauth/usage",
+                        None,
+                    )
                     .await?;
                 let usage = object(&usage)?;
                 let claude_window = |key: &str| -> Outcome<Value> {
@@ -479,8 +523,11 @@ impl CliproxyApi {
                         }
                     }
                 };
-                let (five_hour, seven_day) = (claude_window("five_hour")?, claude_window("seven_day")?);
-                let extra = match optional(usage, "extra_usage", nullable_object)?.and_then(Value::as_object) {
+                let (five_hour, seven_day) =
+                    (claude_window("five_hour")?, claude_window("seven_day")?);
+                let extra = match optional(usage, "extra_usage", nullable_object)?
+                    .and_then(Value::as_object)
+                {
                     None => Value::Null,
                     Some(extra) => {
                         required(extra, "is_enabled", is_bool)?;
@@ -500,9 +547,12 @@ impl CliproxyApi {
                     let kind = required(limit, "kind", is_string)?;
                     let percent = optional(limit, "percent", nullable_number)?;
                     let resets_at = optional(limit, "resets_at", nullable_string)?;
-                    let scope = optional(limit, "scope", nullable_object)?.and_then(Value::as_object);
+                    let scope =
+                        optional(limit, "scope", nullable_object)?.and_then(Value::as_object);
                     let model = match scope {
-                        Some(scope) => optional(scope, "model", nullable_object)?.and_then(Value::as_object),
+                        Some(scope) => {
+                            optional(scope, "model", nullable_object)?.and_then(Value::as_object)
+                        }
                         None => None,
                     };
                     let name = match model {
@@ -510,7 +560,8 @@ impl CliproxyApi {
                         None => None,
                     };
                     if kind == "weekly_scoped"
-                        && let (Some(name), Some(percent)) = (name, percent.filter(|p| p.is_number()))
+                        && let (Some(name), Some(percent)) =
+                            (name, percent.filter(|p| p.is_number()))
                     {
                         model_scoped.push(json!({"display_name":name,"utilization":percent,"resets_at":resets_at.cloned().unwrap_or(Value::Null)}));
                     }
@@ -525,20 +576,33 @@ impl CliproxyApi {
                     checked_at,
                 )
                 .map_err(|_| Failure::Schema)?;
-                reading.insert("usageLimits".into(), serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?);
+                reading.insert(
+                    "usageLimits".into(),
+                    serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?,
+                );
             }
             HubProvider::Xai => {
-                let usage = self.relay(hub, account, provider, GROK_USAGE_URL, None).await?;
+                let usage = self
+                    .relay(hub, account, provider, GROK_USAGE_URL, None)
+                    .await?;
                 let usage_object = object(&usage)?;
-                if let Some(config) = optional(usage_object, "config", is_object)?.and_then(Value::as_object) {
+                if let Some(config) =
+                    optional(usage_object, "config", is_object)?.and_then(Value::as_object)
+                {
                     optional(config, "creditUsagePercent", is_number)?;
-                    if let Some(period) = optional(config, "currentPeriod", is_object)?.and_then(Value::as_object) {
+                    if let Some(period) =
+                        optional(config, "currentPeriod", is_object)?.and_then(Value::as_object)
+                    {
                         optional(period, "type", is_string)?;
                         optional(period, "end", is_string)?;
                     }
                 }
-                let usage_limits = limits::grok_limits(&usage, checked_at).map_err(|_| Failure::Schema)?;
-                reading.insert("usageLimits".into(), serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?);
+                let usage_limits =
+                    limits::grok_limits(&usage, checked_at).map_err(|_| Failure::Schema)?;
+                reading.insert(
+                    "usageLimits".into(),
+                    serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?,
+                );
             }
             HubProvider::Antigravity => {
                 let Some(project) = account
@@ -551,7 +615,13 @@ impl CliproxyApi {
                 };
                 let requested_at = self.clock.now_ms();
                 let summary = self
-                    .relay(hub, account, provider, ANTIGRAVITY_SUMMARY_URL, Some(json!({"project":project})))
+                    .relay(
+                        hub,
+                        account,
+                        provider,
+                        ANTIGRAVITY_SUMMARY_URL,
+                        Some(json!({"project":project})),
+                    )
                     .await?;
                 object(&summary)?;
                 let usage_limits = limits::antigravity_limits(&summary, checked_at, requested_at)
@@ -559,7 +629,8 @@ impl CliproxyApi {
                 if usage_limits.windows.is_empty() {
                     return Err(source("No Antigravity quota reported."));
                 }
-                let mut usage_limits = serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?;
+                let mut usage_limits =
+                    serde_json::to_value(usage_limits).map_err(|_| Failure::Schema)?;
                 // Local Antigravity reports no e-mail, so the Google account fingerprint pools the two.
                 let fingerprint = self
                     .relay(hub, account, provider, GOOGLE_USERINFO_URL, None)
@@ -608,9 +679,16 @@ impl CliproxyApi {
         {
             let credit = object(credit)?;
             let field = |key: &str| -> Outcome<&str> {
-                Ok(required(credit, key, is_string)?.as_str().unwrap_or_default())
+                Ok(required(credit, key, is_string)?
+                    .as_str()
+                    .unwrap_or_default())
             };
-            let (id, status, kind, expires) = (field("id")?, field("status")?, field("reset_type")?, field("expires_at")?);
+            let (id, status, kind, expires) = (
+                field("id")?,
+                field("status")?,
+                field("reset_type")?,
+                field("expires_at")?,
+            );
             if kind == "codex_rate_limits"
                 && status == "available"
                 && let Some(expires) = crate::timestamp_ms(expires).filter(|at| *at > now)
@@ -643,7 +721,10 @@ impl CliproxyApi {
         }
         values
             .into_iter()
-            .map(|value| serde_json::from_value(value).map_err(|_| source("The hub could not list accounts.")))
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(|_| source("The hub could not list accounts."))
+            })
             .collect()
     }
 
@@ -690,11 +771,17 @@ impl CliproxyApi {
         let mut result = json!({"outcome":outcome});
         if matches!(outcome, "reset" | "alreadyRedeemed")
             && self
-                .management(hub, "reset-quota", Some(json!({"auth_index":account.auth_index})))
+                .management(
+                    hub,
+                    "reset-quota",
+                    Some(json!({"auth_index":account.auth_index})),
+                )
                 .await
                 .is_err()
         {
-            result["warning"] = json!("Credit redeemed, but the hub cooldown could not be cleared. Routing may resume after its cooldown expires.");
+            result["warning"] = json!(
+                "Credit redeemed, but the hub cooldown could not be cleared. Routing may resume after its cooldown expires."
+            );
         }
         serde_json::from_value(result).map_err(|_| Failure::Schema)
     }
@@ -722,12 +809,18 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl LimitSourceProbe for CliproxyApi {
-    fn accounts<'a>(&'a self, url: &'a str, key: &'a str) -> ProbeFuture<'a, Vec<UsageLimitSourceAccount>> {
+    fn accounts<'a>(
+        &'a self,
+        url: &'a str,
+        key: &'a str,
+    ) -> ProbeFuture<'a, Vec<UsageLimitSourceAccount>> {
         Box::pin(async move {
-            self.read_accounts(&Hub { url, key }).await.map_err(|error| match error {
-                Failure::Source(detail) => Error::Probe(detail),
-                Failure::Schema => Error::Probe("The hub could not list accounts.".into()),
-            })
+            self.read_accounts(&Hub { url, key })
+                .await
+                .map_err(|error| match error {
+                    Failure::Source(detail) => Error::Probe(detail),
+                    Failure::Schema => Error::Probe("The hub could not list accounts.".into()),
+                })
         })
     }
     fn consume<'a>(

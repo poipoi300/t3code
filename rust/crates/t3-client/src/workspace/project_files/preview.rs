@@ -1,7 +1,9 @@
 //! Port of filePreviewMode.ts, filePath.ts, the preview flags of FilePreviewPanel.tsx, and the
 //! parts of @t3tools/shared (filePreview.ts, mediaPreview.ts, video.ts, delimitedPreview.ts,
 //! path.ts) the Files panel calls.
-use crate::view_logic::session::links::{is_absolute, is_windows_absolute, workspace_relative_file_path};
+use crate::view_logic::session::links::{
+    is_absolute, is_windows_absolute, workspace_relative_file_path,
+};
 use t3_contracts::{
     assets::AssetResource,
     base_schemas::{ThreadId, TrimmedNonEmptyString},
@@ -28,9 +30,21 @@ const IMAGE_EXTENSIONS: [&str; 13] = [
 ];
 const VIDEO_EXTENSIONS: [&str; 7] = ["avi", "m4v", "mkv", "mov", "mp4", "ogv", "webm"];
 const AUDIO_EXTENSIONS: [&str; 11] = [
-    "mp3", "wav", "ogg", "oga", "flac", "aac", "m4a", "opus", "aiff", "webm-audio", "weba",
+    "mp3",
+    "wav",
+    "ogg",
+    "oga",
+    "flac",
+    "aac",
+    "m4a",
+    "opus",
+    "aiff",
+    "webm-audio",
+    "weba",
 ];
-const OFFICE_KINDS: [&str; 9] = ["docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", "ipynb"];
+const OFFICE_KINDS: [&str; 9] = [
+    "docx", "xlsx", "pptx", "odt", "ods", "odp", "rtf", "epub", "ipynb",
+];
 
 fn extension(path: &str) -> Option<String> {
     let index = path.rfind('.')?;
@@ -71,7 +85,8 @@ pub fn is_browser_preview_file(path: &str) -> bool {
     path.ends_with(".html") || path.ends_with(".htm") || path.ends_with(".pdf")
 }
 pub fn is_markdown_preview_file(path: &str) -> bool {
-    extension(path).is_some_and(|e| matches!(e.as_str(), "md" | "mdx" | "markdown" | "mdown" | "mkd"))
+    extension(path)
+        .is_some_and(|e| matches!(e.as_str(), "md" | "mdx" | "markdown" | "mdown" | "mkd"))
 }
 pub fn is_mermaid_preview_file(path: &str) -> bool {
     extension(path).is_some_and(|e| matches!(e.as_str(), "mmd" | "mermaid"))
@@ -134,7 +149,9 @@ pub fn file_preview_read_error_message(error: &ProjectReadFileError) -> (String,
             owned("The path resolves to a location outside the workspace.")
         }
         Some(ProjectFileFailure::OperationFailed) => {
-            if error.operation.clone().flatten() == Some(ProjectFileOperation::RealpathWorkspaceRoot) {
+            if error.operation.clone().flatten()
+                == Some(ProjectFileOperation::RealpathWorkspaceRoot)
+            {
                 owned("The workspace folder could not be accessed.")
             } else {
                 owned("The file could not be accessed or read. It may be missing or inaccessible.")
@@ -145,7 +162,11 @@ pub fn file_preview_read_error_message(error: &ProjectReadFileError) -> (String,
 }
 
 /// filePreviewMode.ts `shouldShowFileExplorer`.
-pub fn should_show_file_explorer(relative_path: Option<&str>, explorer_open: bool, attachment_open: bool) -> bool {
+pub fn should_show_file_explorer(
+    relative_path: Option<&str>,
+    explorer_open: bool,
+    attachment_open: bool,
+) -> bool {
     if attachment_open || relative_path.is_some_and(is_host_path) {
         return false;
     }
@@ -209,7 +230,10 @@ pub fn file_breadcrumbs(project_name: &str, relative_path: &str) -> Vec<FileBrea
     let windows = is_windows_absolute(relative_path);
     let separator = if windows { "\\" } else { "/" };
     let parts: Vec<&str> = if windows {
-        relative_path.split(['\\', '/']).filter(|p| !p.is_empty()).collect()
+        relative_path
+            .split(['\\', '/'])
+            .filter(|p| !p.is_empty())
+            .collect()
     } else {
         relative_path.split('/').filter(|p| !p.is_empty()).collect()
     };
@@ -230,7 +254,8 @@ pub fn file_breadcrumbs(project_name: &str, relative_path: &str) -> Vec<FileBrea
     }
     for (index, part) in parts.iter().enumerate() {
         let path = format!("{root}{}", parts[..=index].join(separator));
-        let bare_drive = path.len() == 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.ends_with(':');
+        let bare_drive =
+            path.len() == 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.ends_with(':');
         let path = if bare_drive {
             format!("{path}\\")
         } else if host && path == "~" {
@@ -260,7 +285,9 @@ pub fn breadcrumb_path_of(relative_path: &str) -> String {
 
 fn trail_crumb_index(trail: &str, path: &str) -> Option<usize> {
     let crumb = breadcrumb_path_of(path);
-    file_breadcrumbs("", trail).iter().position(|c| c.path == crumb)
+    file_breadcrumbs("", trail)
+        .iter()
+        .position(|c| c.path == crumb)
 }
 
 /// filePath.ts `retainedBreadcrumbTrail`: navigating up keeps the descendant crumbs.
@@ -274,12 +301,18 @@ pub fn retained_breadcrumb_trail(trail: Option<&str>, path: &str) -> String {
 /// filePath.ts `trailChildOf`.
 pub fn trail_child_of(folder: &str, trail: &str) -> Option<String> {
     let index = trail_crumb_index(trail, folder)?;
-    file_breadcrumbs("", trail).get(index + 1).map(|c| c.label.clone())
+    file_breadcrumbs("", trail)
+        .get(index + 1)
+        .map(|c| c.label.clone())
 }
 
 /// filePath.ts `joinHostPath`.
 pub fn join_host_path(folder: &str, relative_path: &str) -> String {
-    let separator = if is_windows_absolute(folder) { "\\" } else { "/" };
+    let separator = if is_windows_absolute(folder) {
+        "\\"
+    } else {
+        "/"
+    };
     let base = if folder.ends_with(separator) {
         folder.to_owned()
     } else {
@@ -345,7 +378,9 @@ impl PathKinds {
                 || is_workspace_font_preview_path(path),
             markdown: is_markdown_preview_file(path),
             mermaid: is_mermaid_preview_file(path),
-            delimiter: (!attachment).then(|| file_preview_delimiter(path)).flatten(),
+            delimiter: (!attachment)
+                .then(|| file_preview_delimiter(path))
+                .flatten(),
         }
     }
     pub fn media(self) -> bool {
@@ -375,7 +410,11 @@ pub fn mask_markdown_frontmatter(markdown: &str) -> std::borrow::Cow<'_, str> {
     let line_end = |text: &str, from: usize| -> Option<(usize, usize)> {
         let rest = &text[from..];
         let index = rest.find(['\r', '\n'])?;
-        let width = if rest[index..].starts_with("\r\n") { 2 } else { 1 };
+        let width = if rest[index..].starts_with("\r\n") {
+            2
+        } else {
+            1
+        };
         Some((from + index, from + index + width))
     };
     let Some((first_end, mut cursor)) = line_end(body, 0) else {
@@ -424,8 +463,14 @@ mod tests {
 
     #[test]
     fn frontmatter_is_masked_with_its_line_breaks() {
-        assert_eq!(mask_markdown_frontmatter("---\na: 1\n---\n# T"), "   \n    \n   \n# T");
-        assert_eq!(mask_markdown_frontmatter("---\r\n...\r\nx"), "   \r\n   \r\nx");
+        assert_eq!(
+            mask_markdown_frontmatter("---\na: 1\n---\n# T"),
+            "   \n    \n   \n# T"
+        );
+        assert_eq!(
+            mask_markdown_frontmatter("---\r\n...\r\nx"),
+            "   \r\n   \r\nx"
+        );
         assert_eq!(mask_markdown_frontmatter("# no\n---\n"), "# no\n---\n");
         assert_eq!(mask_markdown_frontmatter("---\nunclosed"), "---\nunclosed");
         assert_eq!(file_highlight_language("src/main.RS"), "rs");
@@ -433,7 +478,10 @@ mod tests {
         assert_eq!(file_highlight_language("LICENSE"), "text");
     }
 
-    fn read_error(failure: Option<ProjectFileFailure>, operation: Option<ProjectFileOperation>) -> ProjectReadFileError {
+    fn read_error(
+        failure: Option<ProjectFileFailure>,
+        operation: Option<ProjectFileOperation>,
+    ) -> ProjectReadFileError {
         serde_json::from_value(serde_json::json!({
             "_tag": "ProjectReadFileError",
             "message": "Server says no",
@@ -447,7 +495,10 @@ mod tests {
     fn breadcrumbs_follow_file_path_ts() {
         let crumbs = file_breadcrumbs("Proj", "src/lib/a.ts");
         assert_eq!(
-            crumbs.iter().map(|c| (c.label.as_str(), c.path.as_str(), c.kind)).collect::<Vec<_>>(),
+            crumbs
+                .iter()
+                .map(|c| (c.label.as_str(), c.path.as_str(), c.kind))
+                .collect::<Vec<_>>(),
             vec![
                 ("Proj", "", CrumbKind::Project),
                 ("src", "src", CrumbKind::Directory),
@@ -465,7 +516,10 @@ mod tests {
 
     #[test]
     fn trails_are_retained_only_when_navigating_up() {
-        assert_eq!(retained_breadcrumb_trail(Some("a/b/c.ts"), "a/b"), "a/b/c.ts");
+        assert_eq!(
+            retained_breadcrumb_trail(Some("a/b/c.ts"), "a/b"),
+            "a/b/c.ts"
+        );
         assert_eq!(retained_breadcrumb_trail(Some("a/b/c.ts"), "x"), "x");
         assert_eq!(retained_breadcrumb_trail(None, "a"), "a");
         assert_eq!(trail_child_of("a", "a/b/c.ts").as_deref(), Some("b"));
@@ -477,8 +531,14 @@ mod tests {
     #[test]
     fn read_errors_say_what_failed() {
         assert_eq!(
-            file_preview_read_error_message(&read_error(Some(ProjectFileFailure::BinaryFile), None)),
-            ("The file is binary and cannot be displayed as text.".into(), true)
+            file_preview_read_error_message(&read_error(
+                Some(ProjectFileFailure::BinaryFile),
+                None
+            )),
+            (
+                "The file is binary and cannot be displayed as text.".into(),
+                true
+            )
         );
         assert_eq!(
             file_preview_read_error_message(&read_error(
@@ -499,7 +559,10 @@ mod tests {
     fn preview_paths_and_explorer_follow_file_preview_mode_ts() {
         assert_eq!(resolve_file_preview_path(Some("."), "/repo"), None);
         assert_eq!(resolve_file_preview_path(Some("/repo"), "/repo"), None);
-        assert_eq!(resolve_file_preview_path(Some("a.ts"), "/repo").as_deref(), Some("a.ts"));
+        assert_eq!(
+            resolve_file_preview_path(Some("a.ts"), "/repo").as_deref(),
+            Some("a.ts")
+        );
         assert!(should_show_file_explorer(None, false, false));
         assert!(!should_show_file_explorer(Some("/etc/hosts"), true, false));
         assert!(!should_show_file_explorer(Some("a.ts"), true, true));
@@ -510,15 +573,33 @@ mod tests {
     fn asset_resources_stay_inside_the_workspace() {
         let thread = ThreadId("t".into());
         assert!(matches!(
-            workspace_asset_resource(AssetKind::WorkspaceFile, &thread, false, "/repo", "/repo/a.png"),
+            workspace_asset_resource(
+                AssetKind::WorkspaceFile,
+                &thread,
+                false,
+                "/repo",
+                "/repo/a.png"
+            ),
             AssetResource::WorkspaceFile { .. }
         ));
         assert!(matches!(
-            workspace_asset_resource(AssetKind::WorkspaceFile, &thread, false, "/repo", "/elsewhere/a.png"),
+            workspace_asset_resource(
+                AssetKind::WorkspaceFile,
+                &thread,
+                false,
+                "/repo",
+                "/elsewhere/a.png"
+            ),
             AssetResource::MediaFile { .. }
         ));
         assert!(matches!(
-            workspace_asset_resource(AssetKind::WorkspaceFile, &thread, true, "/repo", "/repo/a.png"),
+            workspace_asset_resource(
+                AssetKind::WorkspaceFile,
+                &thread,
+                true,
+                "/repo",
+                "/repo/a.png"
+            ),
             AssetResource::DraftWorkspaceFile { .. }
         ));
     }
@@ -527,10 +608,19 @@ mod tests {
     fn path_kinds_follow_the_panel_precedence() {
         let kinds = PathKinds::of("clip.webm", false);
         assert!(kinds.video && !kinds.audio && !kinds.image);
-        assert_eq!(PathKinds::of("a.md", false).rendered_mode(), Some(RenderedMode::Markdown));
-        assert_eq!(PathKinds::of("a.csv", false).rendered_mode(), Some(RenderedMode::Table));
+        assert_eq!(
+            PathKinds::of("a.md", false).rendered_mode(),
+            Some(RenderedMode::Markdown)
+        );
+        assert_eq!(
+            PathKinds::of("a.csv", false).rendered_mode(),
+            Some(RenderedMode::Table)
+        );
         assert_eq!(PathKinds::of("a.csv", true).rendered_mode(), None);
-        assert_eq!(PathKinds::of("a.mmd", false).rendered_mode(), Some(RenderedMode::Mermaid));
+        assert_eq!(
+            PathKinds::of("a.mmd", false).rendered_mode(),
+            Some(RenderedMode::Mermaid)
+        );
         assert_eq!(PathKinds::of("x.pdf?x=1", false).rendered_mode(), None);
         assert!(PathKinds::of("x.pdf", false).pdf);
         assert!(PathKinds::of("book.xlsx", false).document);

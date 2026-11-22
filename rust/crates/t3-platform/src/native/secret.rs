@@ -125,13 +125,20 @@ pub(crate) mod keystore_failure {
         /// The exceptions AOSP raises, from `sources/android-31` (second re-review A1, A2).
         #[test]
         fn only_certain_keystore_failures_discard_saved_credentials() {
-            let facts = |site, thrown, cause| Facts { site, thrown, cause };
+            let facts = |site, thrown, cause| Facts {
+                site,
+                thrown,
+                cause,
+            };
             let replace = Failure::Permanent { replace_key: true };
             for (facts, expected) in [
                 // keystore2 `AndroidKeyStoreSpi.engineGetKey` (:108-114): a permanently
                 // invalidated key, rethrown with no cause. Also "Key algorithm unknown"
                 // (`AndroidKeyStoreProvider.java:387, 401`).
-                (facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::None), replace),
+                (
+                    facts(Site::GetKey, Thrown::UnrecoverableKey, Cause::None),
+                    replace,
+                ),
                 // A binder failure after one retry: `KeyStore2.handleRemoteExceptionWithRetry`
                 // (:103-127) raises SYSTEM_ERROR, wrapped by `loadAndroidKeyStoreKeyFromKeystore`
                 // (:350-365). API 31-32 have no `isTransientFailure`; API 33+ answers false.
@@ -139,7 +146,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: None, code: None },
+                        Cause::KeyStore {
+                            transient: None,
+                            code: None,
+                        },
                     ),
                     Failure::Transient,
                 ),
@@ -147,7 +157,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(false), code: Some(4) },
+                        Cause::KeyStore {
+                            transient: Some(false),
+                            code: Some(4),
+                        },
                     ),
                     Failure::Transient,
                 ),
@@ -155,7 +168,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(true), code: Some(4) },
+                        Cause::KeyStore {
+                            transient: Some(true),
+                            code: Some(4),
+                        },
                     ),
                     Failure::Transient,
                 ),
@@ -164,7 +180,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(false), code: Some(7) },
+                        Cause::KeyStore {
+                            transient: Some(false),
+                            code: Some(7),
+                        },
                     ),
                     replace,
                 ),
@@ -172,7 +191,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::GetKey,
                         Thrown::UnrecoverableKey,
-                        Cause::KeyStore { transient: Some(false), code: Some(6) },
+                        Cause::KeyStore {
+                            transient: Some(false),
+                            code: Some(6),
+                        },
                     ),
                     replace,
                 ),
@@ -181,7 +203,10 @@ pub(crate) mod keystore_failure {
                     facts(
                         Site::DoFinal,
                         Thrown::Other,
-                        Cause::KeyStore { transient: Some(false), code: Some(7) },
+                        Cause::KeyStore {
+                            transient: Some(false),
+                            code: Some(7),
+                        },
                     ),
                     Failure::Transient,
                 ),
@@ -190,17 +215,32 @@ pub(crate) mod keystore_failure {
                     Failure::Transient,
                 ),
                 // Older keystores raise the invalidation itself, at `Cipher.init`.
-                (facts(Site::Init, Thrown::KeyPermanentlyInvalidated, Cause::None), replace),
+                (
+                    facts(Site::Init, Thrown::KeyPermanentlyInvalidated, Cause::None),
+                    replace,
+                ),
                 // The blob was not wrapped by this key.
                 (
                     facts(Site::DoFinal, Thrown::AeadBadTag, Cause::None),
                     Failure::Permanent { replace_key: false },
                 ),
                 // Bad padding, an invalid key at init, anything else: not certain.
-                (facts(Site::DoFinal, Thrown::Other, Cause::None), Failure::Transient),
-                (facts(Site::Init, Thrown::Other, Cause::None), Failure::Transient),
-                (facts(Site::GetKey, Thrown::AeadBadTag, Cause::None), Failure::Transient),
-                (facts(Site::Other, Thrown::UnrecoverableKey, Cause::None), Failure::Transient),
+                (
+                    facts(Site::DoFinal, Thrown::Other, Cause::None),
+                    Failure::Transient,
+                ),
+                (
+                    facts(Site::Init, Thrown::Other, Cause::None),
+                    Failure::Transient,
+                ),
+                (
+                    facts(Site::GetKey, Thrown::AeadBadTag, Cause::None),
+                    Failure::Transient,
+                ),
+                (
+                    facts(Site::Other, Thrown::UnrecoverableKey, Cause::None),
+                    Failure::Transient,
+                ),
             ] {
                 assert_eq!(classify(&facts), expected, "{facts:?}");
             }

@@ -480,11 +480,11 @@ fn choosing_a_command_restores_the_opener_unless_the_action_moves_focus() {
             registry.register::<CommandFocusFixture>();
             let mut app = Headless::start(EngineConfig {
                 // Through `registries()`, as every UI test: it carries the engine-panic test switch.
-        ui_sets: {
-            let mut sets = t3_ui::registries();
-            sets.push(registry);
-            sets
-        },
+                ui_sets: {
+                    let mut sets = t3_ui::registries();
+                    sets.push(registry);
+                    sets
+                },
                 environment: Environment {
                     os,
                     idiom: Idiom::Desktop,

@@ -120,8 +120,7 @@ pub(super) fn composer_block_reason(
     {
         return Some("Antigravity model unavailable. Set up Antigravity on web or desktop, or choose another model.".into());
     }
-    if attachments.len() > t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS
-    {
+    if attachments.len() > t3_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
         return Some("Too many attachments. Remove some before sending.".into());
     }
     let max = config

@@ -50,13 +50,15 @@ async fn seed(origin: &str, token: &str, dir: &str, spec: serde_json::Value) -> 
     use t3_contracts::orchestration_v2::OrchestrationV2Command;
     use t3_contracts::project::ProjectMutation;
     use t3_contracts::rpc::{
-        Empty, WsOrchestrationV2DispatchCommandRpc, WsProjectsEnsureScratchRpc,
-        WsProjectsMutateRpc,
+        Empty, WsOrchestrationV2DispatchCommandRpc, WsProjectsEnsureScratchRpc, WsProjectsMutateRpc,
     };
     use t3_platform::{EphemeralSecretStore, NativeConfig, NativePlatform};
 
     let text = |value: &serde_json::Value, key: &str| -> Result<String, String> {
-        value[key].as_str().map(str::to_owned).ok_or(format!("spec: missing \"{key}\" in {value}"))
+        value[key]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(format!("spec: missing \"{key}\" in {value}"))
     };
     let platform = NativePlatform::open(NativeConfig::new(
         dir,

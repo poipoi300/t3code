@@ -626,7 +626,12 @@ fn notice_groups(
     match target {
         NoticeTarget::Checkout => groups
             .iter()
-            .filter(|group| search.project.as_ref().is_none_or(|p| &group.project_key == p))
+            .filter(|group| {
+                search
+                    .project
+                    .as_ref()
+                    .is_none_or(|p| &group.project_key == p)
+            })
             .map(|group| NoticeGroup {
                 title: (!group.display_name.is_empty()).then(|| group.display_name.clone()),
                 choices: group
@@ -637,9 +642,14 @@ fn notice_groups(
                             .iter()
                             .find(|e| e.environment_id == member.environment_id)
                         {
-                            Some(environment) => settings_scope_environment_labels(environment, environments),
+                            Some(environment) => {
+                                settings_scope_environment_labels(environment, environments)
+                            }
                             None => (
-                                member.environment_label.clone().unwrap_or_else(|| "Environment".into()),
+                                member
+                                    .environment_label
+                                    .clone()
+                                    .unwrap_or_else(|| "Environment".into()),
                                 member.environment_id.0.clone(),
                             ),
                         };
@@ -666,9 +676,10 @@ fn notice_groups(
             choices: groups
                 .iter()
                 .map(|group| {
-                    let same_name = groups
-                        .iter()
-                        .any(|other| other.project_key != group.project_key && other.display_name == group.display_name);
+                    let same_name = groups.iter().any(|other| {
+                        other.project_key != group.project_key
+                            && other.display_name == group.display_name
+                    });
                     let mut parts = Vec::new();
                     if same_name {
                         parts.extend(settings_scope_project_machines(group, environments, false));
@@ -694,7 +705,8 @@ fn notice_groups(
                 .iter()
                 .filter(|e| eligible.is_none_or(|ids| ids.contains(&e.environment_id)))
                 .map(|environment| {
-                    let (primary, secondary) = settings_scope_environment_labels(environment, environments);
+                    let (primary, secondary) =
+                        settings_scope_environment_labels(environment, environments);
                     NoticeChoice {
                         label: primary,
                         label_is_key: false,
@@ -737,11 +749,19 @@ pub fn search_target_notice(
         message,
         target,
         target_id: target_id.to_owned(),
-        groups: notice_groups(target, eligible, &view.search, &view.groups, &view.all_environments),
+        groups: notice_groups(
+            target,
+            eligible,
+            &view.search,
+            &view.groups,
+            &view.all_environments,
+        ),
     };
     if target.requires_thread_auto_settlement {
-        let availability =
-            get_thread_auto_settlement_search_availability(&view.all_environments, Some(&view.scope));
+        let availability = get_thread_auto_settlement_search_availability(
+            &view.all_environments,
+            Some(&view.scope),
+        );
         if !availability.is_target_available {
             let message = SettingsText::with(
                 if availability.eligible_environment_ids.is_empty() {

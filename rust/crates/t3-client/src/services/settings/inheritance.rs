@@ -50,7 +50,11 @@ pub fn format_value(key: &str, value: &Value) -> Shown {
             if key == "sidebarAutoSettleAfterDays" {
                 let count = number.to_string();
                 Shown::Text(SettingsText::with(
-                    if number.as_f64() == Some(1.0) { "{count} day" } else { "{count} days" },
+                    if number.as_f64() == Some(1.0) {
+                        "{count} day"
+                    } else {
+                        "{count} days"
+                    },
                     "count",
                     count,
                 ))
@@ -72,7 +76,11 @@ pub fn format_value(key: &str, value: &Value) -> Shown {
             _ => Shown::Content(text.clone()),
         },
         Value::Array(items) => Shown::Text(SettingsText::with(
-            if items.len() == 1 { "{count} item" } else { "{count} items" },
+            if items.len() == 1 {
+                "{count} item"
+            } else {
+                "{count} items"
+            },
             "count",
             items.len().to_string(),
         )),
@@ -339,12 +347,16 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
         _ => "environment".to_owned(),
     };
     let (state, summary) = if mixed {
-        (InheritanceState::Mixed, SettingsText::key("Mixed across selected environments"))
+        (
+            InheritanceState::Mixed,
+            SettingsText::key("Mixed across selected environments"),
+        )
     } else {
         match source {
-            Some(ScopedSettingSource::Project) => {
-                (InheritanceState::Overridden, SettingsText::key("Overridden for this project"))
-            }
+            Some(ScopedSettingSource::Project) => (
+                InheritanceState::Overridden,
+                SettingsText::key("Overridden for this project"),
+            ),
             Some(ScopedSettingSource::ProjectFile) => (
                 InheritanceState::Inherited,
                 SettingsText::key("Inherited from the repository's t3.json"),
@@ -353,8 +365,14 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
                 InheritanceState::Inherited,
                 SettingsText::with("Inherited from {label}", "label", inherited_from),
             ),
-            _ if customized => (InheritanceState::Environment, SettingsText::key("Set on the environment")),
-            _ => (InheritanceState::Default, SettingsText::key("Built-in default")),
+            _ if customized => (
+                InheritanceState::Environment,
+                SettingsText::key("Set on the environment"),
+            ),
+            _ => (
+                InheritanceState::Default,
+                SettingsText::key("Built-in default"),
+            ),
         }
     };
     let overriding = if project_scope {
@@ -365,7 +383,11 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
     let mut summary = vec![summary];
     if !overriding.is_empty() {
         summary.push(SettingsText::with(
-            if overriding.len() == 1 { "{count} project override" } else { "{count} project overrides" },
+            if overriding.len() == 1 {
+                "{count} project override"
+            } else {
+                "{count} project overrides"
+            },
             "count",
             overriding.len().to_string(),
         ));
@@ -375,20 +397,36 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
         .targets
         .iter()
         .filter_map(|target| {
-            let environment = connected.iter().find(|e| e.environment_id == target.environment_id)?;
+            let environment = connected
+                .iter()
+                .find(|e| e.environment_id == target.environment_id)?;
             let settings = environment_json(environment)?;
             let (primary, secondary) = settings_scope_environment_labels(environment, all);
             let path = view
                 .scope
                 .members
                 .iter()
-                .find(|m| m.environment_id == target.environment_id && Some(&m.id) == target.project_id.as_ref())
+                .find(|m| {
+                    m.environment_id == target.environment_id
+                        && Some(&m.id) == target.project_id.as_ref()
+                })
                 .map(|m| {
-                    let parts: Vec<&str> = m.workspace_root.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+                    let parts: Vec<&str> = m
+                        .workspace_root
+                        .split(['/', '\\'])
+                        .filter(|p| !p.is_empty())
+                        .collect();
                     parts[parts.len().saturating_sub(2)..].join("/")
                 })
                 .unwrap_or_default();
-            let join = |parts: &[&str]| parts.iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+            let join = |parts: &[&str]| {
+                parts
+                    .iter()
+                    .filter(|p| !p.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            };
             let tail = join(&[&secondary, &path]);
             Some(InheritanceChain {
                 id: format!(
@@ -425,7 +463,11 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
     let primary_index = chains
         .iter()
         .position(|c| {
-            target.is_some_and(|t| c.environment_id == t.environment_id.0 && c.id.ends_with(t.project_id.as_ref().map_or("", |p| p.0.as_str())))
+            target.is_some_and(|t| {
+                c.environment_id == t.environment_id.0
+                    && c.id
+                        .ends_with(t.project_id.as_ref().map_or("", |p| p.0.as_str()))
+            })
         })
         .unwrap_or(0);
     let mut ordered = chains.clone();
@@ -436,7 +478,11 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
     let resolution = |chain: &InheritanceChain, target_settings: Vec<Value>| {
         (
             chain.winning().map(|l| l.key),
-            chain.layers.iter().map(|l| (l.key, l.value.clone())).collect::<Vec<_>>(),
+            chain
+                .layers
+                .iter()
+                .map(|l| (l.key, l.value.clone()))
+                .collect::<Vec<_>>(),
             target_settings,
         )
     };
@@ -445,9 +491,15 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
             .iter()
             .find(|t| {
                 t.environment_id.0 == chain.environment_id
-                    && chain.id.ends_with(t.project_id.as_ref().map_or("", |p| p.0.as_str()))
+                    && chain
+                        .id
+                        .ends_with(t.project_id.as_ref().map_or("", |p| p.0.as_str()))
             })
-            .map(|t| keys.iter().map(|k| t.json.get(*k).cloned().unwrap_or(Value::Null)).collect())
+            .map(|t| {
+                keys.iter()
+                    .map(|k| t.json.get(*k).cloned().unwrap_or(Value::Null))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let mut groups: Vec<Vec<InheritanceChain>> = Vec::new();
@@ -465,8 +517,10 @@ pub fn row_inheritance(view: &SettingsScopeView, keys: &[&str]) -> Option<RowInh
         }
     }
     Some(RowInheritance {
-        quiet: matches!(state, InheritanceState::Default | InheritanceState::Environment)
-            && overriding.is_empty(),
+        quiet: matches!(
+            state,
+            InheritanceState::Default | InheritanceState::Environment
+        ) && overriding.is_empty(),
         state,
         summary,
         groups,
@@ -505,33 +559,61 @@ mod tests {
 
     #[test]
     fn values_format_as_the_web_shows_them() {
-        assert_eq!(format_value("sidebarAutoSettleAfterDays", &Value::Null).english(), "Never");
-        assert_eq!(format_value("sidebarAutoSettleAfterDays", &json!(1)).english(), "1 day");
-        assert_eq!(format_value("sidebarAutoSettleAfterDays", &json!(7)).english(), "7 days");
-        assert_eq!(format_value("confirm", &json!(true)).english(), "On");
-        assert_eq!(format_value("defaultThreadEnvMode", &json!("worktree")).english(), "New worktree");
         assert_eq!(
-            format_value("textGenerationModelSelection", &json!({"instanceId": "codex", "model": "gpt"})),
+            format_value("sidebarAutoSettleAfterDays", &Value::Null).english(),
+            "Never"
+        );
+        assert_eq!(
+            format_value("sidebarAutoSettleAfterDays", &json!(1)).english(),
+            "1 day"
+        );
+        assert_eq!(
+            format_value("sidebarAutoSettleAfterDays", &json!(7)).english(),
+            "7 days"
+        );
+        assert_eq!(format_value("confirm", &json!(true)).english(), "On");
+        assert_eq!(
+            format_value("defaultThreadEnvMode", &json!("worktree")).english(),
+            "New worktree"
+        );
+        assert_eq!(
+            format_value(
+                "textGenerationModelSelection",
+                &json!({"instanceId": "codex", "model": "gpt"})
+            ),
             Shown::Content("gpt".into())
         );
-        assert_eq!(format_value("worktreeCleanup", &json!({"mode": "off"})).english(), "Off");
+        assert_eq!(
+            format_value("worktreeCleanup", &json!({"mode": "off"})).english(),
+            "Off"
+        );
         assert_eq!(format_value("x", &json!([1, 2])).english(), "2 items");
         assert_eq!(format_value("x", &json!("")).english(), "Empty");
         assert_eq!(format_value("x", &json!({})).english(), "Custom");
     }
 
-    fn view(search: super::super::scope::SettingsScopeSearch, overrides: Value, policy: Option<Value>) -> SettingsScopeView {
+    fn view(
+        search: super::super::scope::SettingsScopeSearch,
+        overrides: Value,
+        policy: Option<Value>,
+    ) -> SettingsScopeView {
         use super::super::scope::{ScopeMember, resolve_settings_scope};
-        use super::super::scoped::{resolve_scoped_settings_targets, select_scoped_settings_environments};
+        use super::super::scoped::{
+            resolve_scoped_settings_targets, select_scoped_settings_environments,
+        };
         use crate::{connection::Phase, types::EnvironmentId};
         use std::rc::Rc;
         let environment = |id: &str, settings: Value| {
             let mut config: Value = serde_json::from_str(
-                include_str!("../../../../../fixtures/samples/ServerConfig.jsonl").lines().next().unwrap_or_default(),
+                include_str!("../../../../../fixtures/samples/ServerConfig.jsonl")
+                    .lines()
+                    .next()
+                    .unwrap_or_default(),
             )
             .expect("config sample");
             config["environment"]["environmentId"] = json!(id);
-            let mut base = serde_json::to_value(t3_contracts::settings::ServerSettings::default()).unwrap_or_default();
+            let mut base = serde_json::to_value(t3_contracts::settings::ServerSettings::default())
+                .unwrap_or_default();
             if let (Some(base), Some(extra)) = (base.as_object_mut(), settings.as_object()) {
                 base.extend(extra.clone());
             }
@@ -544,7 +626,9 @@ mod tests {
                 label: id.to_uppercase(),
                 display_url: None,
                 phase: Phase::Connected,
-                config: Some(Rc::new(serde_json::from_value(config).expect("server config"))),
+                config: Some(Rc::new(
+                    serde_json::from_value(config).expect("server config"),
+                )),
             }
         };
         let environments = vec![environment("a", overrides), environment("b", json!({}))];
@@ -579,27 +663,38 @@ mod tests {
 
     #[test]
     fn rows_report_overriding_projects_in_a_wide_scope_and_overrides_in_a_project_scope() {
-        let overrides = json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}});
+        let overrides =
+            json!({"projectSettingsOverrides": {"p1": {"responseStreamingMode": "turn"}}});
         let all = view(SettingsScopeSearch::default(), overrides.clone(), None);
         let marker = row_inheritance(&all, &["responseStreamingMode"]).expect("marker");
         assert_eq!(marker.state, InheritanceState::Default);
         assert_eq!(marker.overriding.len(), 1);
         assert_eq!(marker.overriding[0].label, "App");
         assert_eq!(marker.overriding[0].open.project.as_deref(), Some("app"));
-        assert!(!marker.quiet, "an overriding project keeps the marker visible");
+        assert!(
+            !marker.quiet,
+            "an overriding project keeps the marker visible"
+        );
         assert_eq!(marker.summary[1].english(), "1 project override");
         assert!(marker.multiple_environments);
         // Both environments resolve the same way, so they share one group.
         assert_eq!(marker.groups.len(), 1);
         let project = view(
-            SettingsScopeSearch { project: Some("app".into()), ..Default::default() },
+            SettingsScopeSearch {
+                project: Some("app".into()),
+                ..Default::default()
+            },
             overrides,
             None,
         );
         let marker = row_inheritance(&project, &["responseStreamingMode"]).expect("marker");
         assert_eq!(marker.state, InheritanceState::Mixed);
         assert!(marker.overriding.is_empty());
-        assert_eq!(marker.groups.len(), 2, "different winning layers split the groups");
+        assert_eq!(
+            marker.groups.len(),
+            2,
+            "different winning layers split the groups"
+        );
         let layers = &marker.groups[0][0].layers;
         assert_eq!(layers[0].key, LayerKey::Project);
         assert_eq!(layers.last().map(|l| l.key), Some(LayerKey::BuiltIn));
@@ -607,11 +702,18 @@ mod tests {
 
     #[test]
     fn an_environment_value_reads_as_set_on_the_environment() {
-        let set = view(SettingsScopeSearch::default(), json!({"autoResumeLimitedThreads": true}), None);
+        let set = view(
+            SettingsScopeSearch::default(),
+            json!({"autoResumeLimitedThreads": true}),
+            None,
+        );
         let marker = row_inheritance(&set, &["autoResumeLimitedThreads"]).expect("marker");
         assert_eq!(marker.state, InheritanceState::Mixed, "a and b differ");
         let one = view(
-            SettingsScopeSearch { machine: Some("a".into()), ..Default::default() },
+            SettingsScopeSearch {
+                machine: Some("a".into()),
+                ..Default::default()
+            },
             json!({"autoResumeLimitedThreads": true}),
             None,
         );
@@ -632,14 +734,21 @@ mod tests {
             "Project overview is not available for the selected target. Choose its owning scope to continue."
         );
         assert_eq!(notice.groups[0].choices[0].label, "App");
-        assert_eq!(notice.groups[0].choices[0].search.project.as_deref(), Some("app"));
-        let diagnostics = search_target_notice(&all, "telemetry-export").expect("needs an environment");
+        assert_eq!(
+            notice.groups[0].choices[0].search.project.as_deref(),
+            Some("app")
+        );
+        let diagnostics =
+            search_target_notice(&all, "telemetry-export").expect("needs an environment");
         assert_eq!(notice.target_id, "project-overview");
         assert_eq!(diagnostics.target, NoticeTarget::Environment);
         assert_eq!(diagnostics.groups[0].choices.len(), 2);
         assert!(search_target_notice(&all, "language").is_none());
         let project = view(
-            SettingsScopeSearch { project: Some("app".into()), ..Default::default() },
+            SettingsScopeSearch {
+                project: Some("app".into()),
+                ..Default::default()
+            },
             json!({}),
             None,
         );
@@ -651,9 +760,14 @@ mod tests {
         let locked = view(
             SettingsScopeSearch::default(),
             json!({}),
-            Some(json!({"organization": "Example Corp", "lockedSettings": ["autoResumeLimitedThreads"]})),
+            Some(
+                json!({"organization": "Example Corp", "lockedSettings": ["autoResumeLimitedThreads"]}),
+            ),
         );
-        assert_eq!(managed_by(&locked, &["autoResumeLimitedThreads"]).as_deref(), Some("Example Corp"));
+        assert_eq!(
+            managed_by(&locked, &["autoResumeLimitedThreads"]).as_deref(),
+            Some("Example Corp")
+        );
         assert_eq!(managed_by(&locked, &["snoozeLimitedThreads"]), None);
     }
 
@@ -665,7 +779,10 @@ mod tests {
         }))
         .expect("policy");
         assert!(is_managed_setting_path(&policy, "storageCleanup"));
-        assert!(is_managed_setting_path(&policy, "storageCleanup.logsAfterDays"));
+        assert!(is_managed_setting_path(
+            &policy,
+            "storageCleanup.logsAfterDays"
+        ));
         assert!(is_managed_setting_path(&policy, "enableTelemetry.x"));
         assert!(!is_managed_setting_path(&policy, "storage"));
     }

@@ -22,10 +22,9 @@ use t3_client::types::ThreadKey;
 pub fn screen(key: ThreadKey) -> AnyElement {
     // The header's "New thread in {project}" navigates through the client from this thread.
     if let Some(client) = crate::runtime::rt().backend().client() {
-        provide_context(crate::runtime::services::thread_ops::thread_header_navigation(
-            &client,
-            key.clone(),
-        ));
+        provide_context(
+            crate::runtime::services::thread_ops::thread_header_navigation(&client, key.clone()),
+        );
     }
     crate::screens::panel::thread_workspace(key).into_element()
 }

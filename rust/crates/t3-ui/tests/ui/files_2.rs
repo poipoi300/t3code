@@ -63,7 +63,10 @@ pub struct FakeViewer {
 }
 impl FileViewerService for FakeViewer {
     fn workspace(&self, _: &ThreadKey) -> Option<FilesWorkspace> {
-        Some(FilesWorkspace { cwd: "/repo".into(), project_name: "Proj".into() })
+        Some(FilesWorkspace {
+            cwd: "/repo".into(),
+            project_name: "Proj".into(),
+        })
     }
     fn workspace_mutation(&self, _: &ThreadKey) -> Option<String> {
         None
@@ -72,7 +75,9 @@ impl FileViewerService for FakeViewer {
         true
     }
     fn read(&self, _: &EnvironmentId, _: &str, path: &str) -> Rc<dyn FileReadHandle> {
-        Rc::new(FakeRead(self.files.borrow().get(path).cloned().unwrap_or_default()))
+        Rc::new(FakeRead(
+            self.files.borrow().get(path).cloned().unwrap_or_default(),
+        ))
     }
     fn asset_bytes(
         &self,
@@ -108,11 +113,20 @@ fn asset_path(resource: &AssetResource) -> Option<&str> {
 #[derive(Clone, Default)]
 struct Denied(FakeFiles);
 impl t3_ui::screens::panel::files_tree::FilesService for Denied {
-    fn tree(&self, e: &EnvironmentId, c: &str, h: bool) -> Rc<dyn t3_ui::screens::panel::files_tree::FileTreeHandle> {
+    fn tree(
+        &self,
+        e: &EnvironmentId,
+        c: &str,
+        h: bool,
+    ) -> Rc<dyn t3_ui::screens::panel::files_tree::FileTreeHandle> {
         self.0.tree(e, c, h)
     }
     fn read_access(&self, _: &EnvironmentId) -> ReadAccess {
-        ReadAccess { allowed: false, pending: false, error: None }
+        ReadAccess {
+            allowed: false,
+            pending: false,
+            error: None,
+        }
     }
     fn access_changes(&self, _: &EnvironmentId) -> LocalBoxStream<'static, ()> {
         futures::stream::pending().boxed_local()
@@ -143,7 +157,10 @@ pub fn surface_fixture_with_attachment(
     t3_ui::theme::install(&Default::default());
     provide_context(setup.files);
     provide_context(FileViewerRuntime(Rc::new(setup.viewer)));
-    let thread = ThreadKey { environment: EnvironmentId("env".into()), thread: ThreadId("t".into()) };
+    let thread = ThreadKey {
+        environment: EnvironmentId("env".into()),
+        thread: ThreadId("t".into()),
+    };
     let host = PanelHost::new(PanelStore::default(), |_| {});
     host.apply(
         &thread,
@@ -155,11 +172,24 @@ pub fn surface_fixture_with_attachment(
     );
     let panel = host.panel(thread.clone());
     let surface = computed(move || panel.with(|p| p.active().cloned()));
-    let tabs = computed(move || panel.with(|p| p.surfaces.iter().map(|s| s.id.clone()).collect::<Vec<_>>().join(",")));
+    let tabs = computed(move || {
+        panel.with(|p| {
+            p.surfaces
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+    });
     view()
         .flex_1()
         .child(text(move || format!("tabs:{}", tabs.get())))
-        .child(file_preview_panel(SurfaceContext { host, thread, surface, visible: computed(|| true) }))
+        .child(file_preview_panel(SurfaceContext {
+            host,
+            thread,
+            surface,
+            visible: computed(|| true),
+        }))
 }
 
 pub fn start_root(viewport: (f32, f32), root: Root) -> Headless {
@@ -174,28 +204,62 @@ pub fn start_root(viewport: (f32, f32), root: Root) -> Headless {
 pub fn setup(open: &str, files: &[(&str, FileReadView)]) -> Setup {
     let viewer = FakeViewer::default();
     for (path, view) in files {
-        viewer.files.borrow_mut().insert((*path).into(), view.clone());
+        viewer
+            .files
+            .borrow_mut()
+            .insert((*path).into(), view.clone());
     }
-    Setup { files: FilesRuntime(Rc::new(FakeFiles::default())), viewer, open: Some(open.into()) }
+    Setup {
+        files: FilesRuntime(Rc::new(FakeFiles::default())),
+        viewer,
+        open: Some(open.into()),
+    }
 }
 
 #[component]
 fn SourceCase() -> impl IntoElement {
-    surface_fixture(setup("src/main.rs", &[("src/main.rs", contents("src/main.rs", "fn main() {}
-"))]))
+    surface_fixture(setup(
+        "src/main.rs",
+        &[(
+            "src/main.rs",
+            contents(
+                "src/main.rs",
+                "fn main() {}
+",
+            ),
+        )],
+    ))
 }
 #[component]
 fn MarkdownCase() -> impl IntoElement {
-    surface_fixture(setup("notes.md", &[("notes.md", contents("notes.md", "---
+    surface_fixture(setup(
+        "notes.md",
+        &[(
+            "notes.md",
+            contents(
+                "notes.md",
+                "---
 title: x
 ---
 # Heading
-"))]))
+",
+            ),
+        )],
+    ))
 }
 #[component]
 fn ReadmeCase() -> impl IntoElement {
-    surface_fixture(setup("README.md", &[("README.md", contents("README.md", "hello
-"))]))
+    surface_fixture(setup(
+        "README.md",
+        &[(
+            "README.md",
+            contents(
+                "README.md",
+                "hello
+",
+            ),
+        )],
+    ))
 }
 #[component]
 fn FailureCase() -> impl IntoElement {
@@ -229,10 +293,14 @@ fn a_source_file_shows_its_text_breadcrumbs_and_the_tree() {
         app.wait_for("text:/fn main/").expect("file contents");
         assert!(app.screen().shows("Proj"), "the project crumb");
         assert!(app.screen().shows("main.rs"));
-        app.wait_for("text:README.md").expect("explorer beside the file");
-        app.press("role:button[Hide file explorer]").expect("hide explorer");
-        app.wait_for_gone("text:README.md", std::time::Duration::from_secs(5)).expect("explorer hidden");
-        app.press("role:button[Show file explorer]").expect("show explorer");
+        app.wait_for("text:README.md")
+            .expect("explorer beside the file");
+        app.press("role:button[Hide file explorer]")
+            .expect("hide explorer");
+        app.wait_for_gone("text:README.md", std::time::Duration::from_secs(5))
+            .expect("explorer hidden");
+        app.press("role:button[Show file explorer]")
+            .expect("show explorer");
         app.wait_for("text:README.md").expect("explorer back");
     }
 }
@@ -240,11 +308,17 @@ fn a_source_file_shows_its_text_breadcrumbs_and_the_tree() {
 #[test]
 fn markdown_toggles_between_source_and_rendered() {
     let mut app = start_root(DESKTOP, Root::of::<MarkdownCase>());
-    app.wait_for("text:/# Heading/").expect("source first, as the web defaults");
-    app.press("role:button[Show rendered markdown]").expect("render");
+    app.wait_for("text:/# Heading/")
+        .expect("source first, as the web defaults");
+    app.press("role:button[Show rendered markdown]")
+        .expect("render");
     app.wait_for("text:Heading").expect("rendered heading");
-    assert!(!app.screen().shows("title: x"), "frontmatter is masked when rendered");
-    app.press("role:button[Show markdown source]").expect("back to source");
+    assert!(
+        !app.screen().shows("title: x"),
+        "frontmatter is masked when rendered"
+    );
+    app.press("role:button[Show markdown source]")
+        .expect("back to source");
     app.wait_for("text:/# Heading/").expect("source again");
 }
 
@@ -254,19 +328,25 @@ fn a_tree_selection_opens_its_own_file_tab() {
     app.wait_for("text:/hello/").expect("readme");
     app.press("text:src").expect("expand src");
     app.press("text:main.rs").expect("open main.rs");
-    app.wait_for("text:tabs:file:README.md,file:src/main.rs").expect("a file tab per file");
+    app.wait_for("text:tabs:file:README.md,file:src/main.rs")
+        .expect("a file tab per file");
 }
 
 #[test]
 fn read_failures_say_what_failed_and_where() {
     let mut app = start_root(DESKTOP, Root::of::<FailureCase>());
-    app.wait_for("text:The requested path is outside the workspace.").expect("message");
+    app.wait_for("text:The requested path is outside the workspace.")
+        .expect("message");
     assert!(app.screen().shows("/elsewhere/a.rs"));
-    assert!(app.screen().shows("Workspace folder: /repo. Check the link's path or locate the file in Files."));
+    assert!(
+        app.screen()
+            .shows("Workspace folder: /repo. Check the link's path or locate the file in Files.")
+    );
 }
 
 #[test]
 fn refused_file_access_shows_the_web_reason_and_reads_nothing() {
     let mut app = start_root(DESKTOP, Root::of::<DeniedCase>());
-    app.wait_for("text:This connection cannot read host files.").expect("access reason");
+    app.wait_for("text:This connection cannot read host files.")
+        .expect("access reason");
 }

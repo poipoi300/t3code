@@ -23,7 +23,11 @@ fn the_route_policy_is_published_from_the_first_restore_and_follows_the_saved_en
         spawn,
     );
     pool.run_until_stalled();
-    assert_eq!(client.route_policy(), None, "unknown before the first restore");
+    assert_eq!(
+        client.route_policy(),
+        None,
+        "unknown before the first restore"
+    );
     assert!(platform.fake.route_policies().is_empty());
 
     pool.run_until(client.restore()).unwrap();

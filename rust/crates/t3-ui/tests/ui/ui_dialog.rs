@@ -919,12 +919,17 @@ fn ContentSlots() -> impl IntoElement {
         view()
             .w_full()
             .h_full()
-            .child(dialog_trigger(state, t3_ui::i18n::Text::content("Settings")))
+            .child(dialog_trigger(
+                state,
+                t3_ui::i18n::Text::content("Settings"),
+            ))
             .child(dialog_popup(state, PopupOptions::default(), move || {
                 dialog_header(
                     state,
                     view()
-                        .child(dialog_title(state, || t3_ui::i18n::Text::content("Settings")))
+                        .child(dialog_title(state, || {
+                            t3_ui::i18n::Text::content("Settings")
+                        }))
                         .child(dialog_description(state, || {
                             t3_ui::i18n::Text::content("Settings")
                         }))

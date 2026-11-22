@@ -20,10 +20,15 @@ use t3_rpc::{Exit, HandlerOutput};
 type Calls = Rc<RefCell<Vec<(String, Value)>>>;
 
 fn methods() -> Vec<(&'static str, t3_rpc::CallKind)> {
-    ["projects.listEntries", "projects.searchEntries", "projects.readFile", "assets.createUrl"]
-        .into_iter()
-        .map(|tag| (tag, t3_rpc::CallKind::Unary))
-        .collect()
+    [
+        "projects.listEntries",
+        "projects.searchEntries",
+        "projects.readFile",
+        "assets.createUrl",
+    ]
+    .into_iter()
+    .map(|tag| (tag, t3_rpc::CallKind::Unary))
+    .collect()
 }
 
 fn grant(runtime: &ClientRuntime<TestPlatform>, scopes: &[&str], valid: bool) {
@@ -65,8 +70,12 @@ fn serve_workspace(h: &Harness) -> Calls {
         let answer = match request.tag.as_str() {
             "projects.listEntries" => {
                 let entries = match payload["directoryPath"].as_str().unwrap_or("") {
-                    "" => json!([{"path":"src","kind":"directory"},{"path":"README.md","kind":"file"}]),
-                    "src" => json!([{"path":"src/main.rs","kind":"file"},{"path":"src/lib","kind":"directory"}]),
+                    "" => {
+                        json!([{"path":"src","kind":"directory"},{"path":"README.md","kind":"file"}])
+                    }
+                    "src" => {
+                        json!([{"path":"src/main.rs","kind":"file"},{"path":"src/lib","kind":"directory"}])
+                    }
                     "src/lib" => json!([{"path":"src/lib/mod.rs","kind":"file"}]),
                     _ => json!([]),
                 };
@@ -77,9 +86,15 @@ fn serve_workspace(h: &Harness) -> Calls {
                 "truncated": true
             })),
             "projects.readFile" => match payload["relativePath"].as_str().unwrap_or("") {
-                "logo.bin" => Err(json!({"_tag":"ProjectReadFileError","message":"binary","failure":"binary_file"})),
-                "src" => Err(json!({"_tag":"ProjectReadFileError","message":"not a file","failure":"path_not_file"})),
-                path => Ok(json!({"relativePath": path, "contents": "fn main() {}\n", "byteLength": 13, "truncated": false})),
+                "logo.bin" => Err(
+                    json!({"_tag":"ProjectReadFileError","message":"binary","failure":"binary_file"}),
+                ),
+                "src" => Err(
+                    json!({"_tag":"ProjectReadFileError","message":"not a file","failure":"path_not_file"}),
+                ),
+                path => Ok(
+                    json!({"relativePath": path, "contents": "fn main() {}\n", "byteLength": 13, "truncated": false}),
+                ),
             },
             _ => return None,
         };
@@ -116,19 +131,33 @@ fn the_tree_lists_lazily_and_notifies_its_readers() {
     let view = tree.view();
     assert!(view.ready && !view.pending);
     assert_eq!(labels(&view.nodes), ["src", "README.md"]);
-    assert_eq!(count(&calls, "projects.listEntries"), 1, "only the root is read");
-    assert_eq!(calls.borrow()[0].1, json!({"cwd": "/repo", "directoryPath": ""}));
+    assert_eq!(
+        count(&calls, "projects.listEntries"),
+        1,
+        "only the root is read"
+    );
+    assert_eq!(
+        calls.borrow()[0].1,
+        json!({"cwd": "/repo", "directoryPath": ""})
+    );
     assert!(h.run(async move { changes.next().await }).is_some());
 
     tree.set_expanded(&["src"]);
     h.settle();
     let view = tree.view();
-    assert_eq!(labels(view.nodes[0].children.as_ref().unwrap()), ["lib", "main.rs"]);
+    assert_eq!(
+        labels(view.nodes[0].children.as_ref().unwrap()),
+        ["lib", "main.rs"]
+    );
     assert_eq!(count(&calls, "projects.listEntries"), 2);
 
     let same = files.tree(&environment("env"), "/repo", false);
     h.settle();
-    assert_eq!(count(&calls, "projects.listEntries"), 2, "readers share one tree");
+    assert_eq!(
+        count(&calls, "projects.listEntries"),
+        2,
+        "readers share one tree"
+    );
     drop(same);
 }
 
@@ -151,7 +180,11 @@ fn expanded_folders_are_persisted_and_restored_by_the_next_tree() {
                 platform
                     .get(
                         StorageArea::Ordinary,
-                        StorageKey::new("local-preferences", None, "t3code.fileTreeExpandedDirectories"),
+                        StorageKey::new(
+                            "local-preferences",
+                            None,
+                            "t3code.fileTreeExpandedDirectories",
+                        ),
                     )
                     .await
             }
@@ -165,7 +198,11 @@ fn expanded_folders_are_persisted_and_restored_by_the_next_tree() {
     calls.borrow_mut().clear();
     let tree = files.tree(&environment("env"), "/repo", false);
     h.settle();
-    assert_eq!(count(&calls, "projects.listEntries"), 2, "the restored folder reopens once listed");
+    assert_eq!(
+        count(&calls, "projects.listEntries"),
+        2,
+        "the restored folder reopens once listed"
+    );
     assert!(tree.view().nodes[0].children.is_some());
 }
 
@@ -181,7 +218,9 @@ fn a_refused_read_shows_the_server_reason_and_a_new_session_retries() {
         if request.tag != "projects.listEntries" {
             return None;
         }
-        recorded.borrow_mut().push((request.tag.clone(), request.payload.clone()));
+        recorded
+            .borrow_mut()
+            .push((request.tag.clone(), request.payload.clone()));
         let failed = *failing.borrow();
         Some(HandlerOutput::Unary(
             async move {
@@ -194,16 +233,24 @@ fn a_refused_read_shows_the_server_reason_and_a_new_session_retries() {
             .boxed_local(),
         ))
     }));
-    let tree = runtime.project_files().tree(&environment("env"), "/repo", false);
+    let tree = runtime
+        .project_files()
+        .tree(&environment("env"), "/repo", false);
     h.settle();
     let error = tree.view().error.unwrap();
     assert_eq!(error.text, "Workspace root is gone.");
-    assert!(!error.owned, "server detail is content, not a translation key");
+    assert!(
+        !error.owned,
+        "server detail is content, not a translation key"
+    );
     *fail.borrow_mut() = false;
     h.server().hang_up();
     h.settle();
     h.advance(5_000);
-    assert!(count(&calls, "projects.listEntries") >= 2, "the failed folder is read again");
+    assert!(
+        count(&calls, "projects.listEntries") >= 2,
+        "the failed folder is read again"
+    );
     assert_eq!(tree.view().error, None);
     assert!(tree.view().ready);
 }
@@ -218,7 +265,10 @@ fn read_access_follows_the_session_grant() {
     let access = files.read_access(&environment("env"));
     assert!(!access.allowed && !access.pending);
     grant(&runtime, &[], false);
-    assert!(files.read_access(&environment("env")).pending, "grants not known yet");
+    assert!(
+        files.read_access(&environment("env")).pending,
+        "grants not known yet"
+    );
     assert!(!files.read_access(&environment("missing")).allowed);
 }
 
@@ -227,24 +277,43 @@ fn the_search_is_debounced_and_only_the_last_query_runs() {
     let mut h = Harness::new("env");
     let runtime = setup(&mut h);
     let calls = serve_workspace(&h);
-    let tree = runtime.project_files().tree(&environment("env"), "/repo", false);
+    let tree = runtime
+        .project_files()
+        .tree(&environment("env"), "/repo", false);
     h.settle();
     tree.set_query("m".into());
     tree.set_query("mo".into());
     tree.set_query("mod".into());
     h.settle();
-    assert_eq!(count(&calls, "projects.searchEntries"), 0, "nothing before the debounce");
+    assert_eq!(
+        count(&calls, "projects.searchEntries"),
+        0,
+        "nothing before the debounce"
+    );
     assert!(tree.view().search.pending);
     h.advance(250);
     assert_eq!(count(&calls, "projects.searchEntries"), 1);
-    let search = calls.borrow().iter().find(|(t, _)| t == "projects.searchEntries").unwrap().1.clone();
-    assert_eq!(search, json!({"cwd": "/repo", "query": "mod", "limit": 200}));
+    let search = calls
+        .borrow()
+        .iter()
+        .find(|(t, _)| t == "projects.searchEntries")
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(
+        search,
+        json!({"cwd": "/repo", "query": "mod", "limit": 200})
+    );
     let view = tree.view();
     assert!(!view.search.pending && view.search.truncated && !view.search.no_matches);
     assert_eq!(labels(&view.nodes), ["src"]);
     tree.set_query(String::new());
     h.advance(250);
-    assert_eq!(count(&calls, "projects.searchEntries"), 1, "a cleared search sends nothing");
+    assert_eq!(
+        count(&calls, "projects.searchEntries"),
+        1,
+        "a cleared search sends nothing"
+    );
 }
 
 #[test]
@@ -252,7 +321,9 @@ fn host_folders_never_search_the_server() {
     let mut h = Harness::new("env");
     let runtime = setup(&mut h);
     let calls = serve_workspace(&h);
-    let tree = runtime.project_files().tree(&environment("env"), "/etc", true);
+    let tree = runtime
+        .project_files()
+        .tree(&environment("env"), "/etc", true);
     h.settle();
     tree.set_query("x".into());
     h.advance(500);
@@ -277,7 +348,9 @@ fn dropping_the_last_reader_cancels_the_tree() {
         if request.tag != "projects.listEntries" {
             return None;
         }
-        recorded.borrow_mut().push((request.tag.clone(), request.payload.clone()));
+        recorded
+            .borrow_mut()
+            .push((request.tag.clone(), request.payload.clone()));
         let guard = Interrupted(interrupted.clone());
         Some(HandlerOutput::Unary(
             async move {
@@ -288,21 +361,34 @@ fn dropping_the_last_reader_cancels_the_tree() {
             .boxed_local(),
         ))
     }));
-    let tree = runtime.project_files().tree(&environment("env"), "/repo", false);
+    let tree = runtime
+        .project_files()
+        .tree(&environment("env"), "/repo", false);
     h.settle();
     assert!(tree.view().pending);
     assert!(!*observed.borrow());
     drop(tree);
     h.settle();
-    assert!(*observed.borrow(), "the server stops serving the cancelled read");
-    let again = runtime.project_files().tree(&environment("env"), "/repo", false);
+    assert!(
+        *observed.borrow(),
+        "the server stops serving the cancelled read"
+    );
+    let again = runtime
+        .project_files()
+        .tree(&environment("env"), "/repo", false);
     h.settle();
-    assert_eq!(held.borrow().len(), 2, "a new tree starts over; the old one is gone");
+    assert_eq!(
+        held.borrow().len(),
+        2,
+        "a new tree starts over; the old one is gone"
+    );
     assert_eq!(again.lists_started(), 1);
 }
 
 fn read_view(h: &mut Harness, runtime: &ClientRuntime<TestPlatform>, path: &str) -> FileReadView {
-    let read = runtime.project_files().read_file(&environment("env"), "/repo", path);
+    let read = runtime
+        .project_files()
+        .read_file(&environment("env"), "/repo", path);
     h.settle();
     read.view()
 }
@@ -321,7 +407,10 @@ fn file_reads_carry_contents_and_typed_failures() {
         binary.read_error.unwrap().failure.clone().flatten(),
         Some(ProjectFileFailure::BinaryFile)
     );
-    assert!(binary.is_file, "a binary file is still a file the document viewer opens");
+    assert!(
+        binary.is_file,
+        "a binary file is still a file the document viewer opens"
+    );
 
     let folder = read_view(&mut h, &runtime, "src");
     assert!(folder.is_not_file && !folder.is_file);
@@ -333,13 +422,22 @@ fn reads_refresh_on_each_new_mutation_and_keep_contents_meanwhile() {
     let mut h = Harness::new("env");
     let runtime = setup(&mut h);
     let calls = serve_workspace(&h);
-    let read = runtime.project_files().read_file(&environment("env"), "/repo", "a.rs");
+    let read = runtime
+        .project_files()
+        .read_file(&environment("env"), "/repo", "a.rs");
     h.settle();
     read.observe_mutation(Some("m1"));
     h.settle();
-    assert_eq!(read.reads(), 1, "the first token is the one the read was made under");
+    assert_eq!(
+        read.reads(),
+        1,
+        "the first token is the one the read was made under"
+    );
     read.observe_mutation(Some("m2"));
-    assert!(read.view().data.is_some(), "contents stay while the refresh runs");
+    assert!(
+        read.view().data.is_some(),
+        "contents stay while the refresh runs"
+    );
     h.settle();
     assert_eq!(read.reads(), 2);
     read.observe_mutation(Some("m2"));
@@ -354,7 +452,10 @@ fn reads_without_file_access_say_so_and_send_nothing() {
     let calls = serve_workspace(&h);
     grant(&runtime, &["orchestration:read"], true);
     let view = read_view(&mut h, &runtime, "a.rs");
-    assert_eq!(view.error.unwrap().text, "This connection cannot read host files.");
+    assert_eq!(
+        view.error.unwrap().text,
+        "This connection cannot read host files."
+    );
     assert_eq!(count(&calls, "projects.readFile"), 0);
 }
 
@@ -363,8 +464,12 @@ fn unserved_methods_surface_as_errors_not_success() {
     let mut h = Harness::new("env");
     let runtime = setup(&mut h);
     h.server().state.borrow_mut().extra_methods = vec![];
-    let tree = runtime.project_files().tree(&environment("env"), "/repo", false);
-    let read = runtime.project_files().read_file(&environment("env"), "/repo", "a.rs");
+    let tree = runtime
+        .project_files()
+        .tree(&environment("env"), "/repo", false);
+    let read = runtime
+        .project_files()
+        .read_file(&environment("env"), "/repo", "a.rs");
     h.settle();
     assert!(tree.view().error.is_some() && !tree.view().ready);
     let view = read.view();

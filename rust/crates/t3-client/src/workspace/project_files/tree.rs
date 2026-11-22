@@ -239,7 +239,11 @@ pub fn read_expanded_directories(stored: Option<&[u8]>, root: &str) -> Vec<Strin
         .map(|entry| entry.paths)
         .unwrap_or_default()
 }
-pub fn write_expanded_directories(stored: Option<&[u8]>, root: &str, paths: Vec<String>) -> Vec<u8> {
+pub fn write_expanded_directories(
+    stored: Option<&[u8]>,
+    root: &str,
+    paths: Vec<String>,
+) -> Vec<u8> {
     let mut next: Vec<StoredRoot> = stored_roots(stored)
         .into_iter()
         .filter(|entry| entry.root != root)
@@ -360,7 +364,10 @@ impl TreeModel {
     }
 
     fn reachable(&self, directory: &str) -> bool {
-        directory.is_empty() || self.known_directory(directory).is_some_and(|_| self.reachable(parent_of(directory)))
+        directory.is_empty()
+            || self
+                .known_directory(directory)
+                .is_some_and(|_| self.reachable(parent_of(directory)))
     }
 
     /// The compact chain from `head`: each folder whose listing is exactly one folder.
@@ -687,7 +694,10 @@ impl TreeModel {
             error,
             has_directories: self.directory_count > 0,
             expand_all: self.expand_all,
-            has_entries: self.directories.get("").is_some_and(|root| !root.is_empty()),
+            has_entries: self
+                .directories
+                .get("")
+                .is_some_and(|root| !root.is_empty()),
             ..FileTreeView::default()
         };
         view.search = SearchView {
@@ -934,25 +944,39 @@ mod tests {
         );
         let view = model.view();
         assert!(view.ready && !view.pending);
-        assert_eq!(labels(&view.nodes), ["Docs", "src", "b.txt", "File2", "file10"]);
+        assert_eq!(
+            labels(&view.nodes),
+            ["Docs", "src", "b.txt", "File2", "file10"]
+        );
     }
 
     #[test]
     fn at_most_four_reads_run_and_a_refresh_during_a_read_follows_it() {
         let mut model = TreeModel::new(vec![]);
         drain(&mut model);
-        model.complete("", Ok((0..6).map(|i| entry(&format!("d{i}"), true)).collect()));
+        model.complete(
+            "",
+            Ok((0..6).map(|i| entry(&format!("d{i}"), true)).collect()),
+        );
         model.set_expanded(&(0..6).map(|i| format!("d{i}")).collect::<Vec<_>>());
         assert_eq!(drain(&mut model).len(), MAX_CONCURRENT_LISTS);
         model.request("d0", true);
         model.request("d0", true);
         model.complete("d0", Ok(vec![]));
         let next = drain(&mut model);
-        assert_eq!(next, vec!["d4"], "one slot freed; the follow-up queues behind the others");
+        assert_eq!(
+            next,
+            vec!["d4"],
+            "one slot freed; the follow-up queues behind the others"
+        );
         model.complete("d1", Ok(vec![]));
         assert_eq!(drain(&mut model), vec!["d5"]);
         model.complete("d2", Ok(vec![]));
-        assert_eq!(drain(&mut model), vec!["d0"], "the refresh runs once after its read");
+        assert_eq!(
+            drain(&mut model),
+            vec!["d0"],
+            "the refresh runs once after its read"
+        );
         assert_eq!(model.lists_started, 8);
     }
 
@@ -977,10 +1001,16 @@ mod tests {
         model.set_expanded(&["a"]);
         assert_eq!(drain(&mut model), vec!["a"]);
         let view = model.view();
-        assert!(view.nodes[0].loading, "an expanded folder shows Pierre's loading row state");
+        assert!(
+            view.nodes[0].loading,
+            "an expanded folder shows Pierre's loading row state"
+        );
         model.complete("a", Ok(vec![entry("a/x.rs", false), entry("a/y", true)]));
         let view = model.view();
-        assert_eq!(labels(view.nodes[0].children.as_ref().unwrap()), ["y", "x.rs"]);
+        assert_eq!(
+            labels(view.nodes[0].children.as_ref().unwrap()),
+            ["y", "x.rs"]
+        );
         assert_eq!(&*view.expanded[0], "a");
     }
 
@@ -992,7 +1022,11 @@ mod tests {
         model.set_expanded(&["src"]);
         assert_eq!(drain(&mut model), vec!["src"]);
         model.complete("src", Ok(vec![entry("src/main", true)]));
-        assert_eq!(drain(&mut model), vec!["src/main"], "a chain member is read with its head");
+        assert_eq!(
+            drain(&mut model),
+            vec!["src/main"],
+            "a chain member is read with its head"
+        );
         model.complete("src/main", Ok(vec![entry("src/main/lib.rs", false)]));
         let view = model.view();
         assert_eq!(labels(&view.nodes), ["src/main"]);
@@ -1025,24 +1059,42 @@ mod tests {
         model.refresh();
         drain(&mut model);
         model.complete("", Ok(vec![]));
-        assert_eq!(model.view().error, None, "a folder removed from the tree no longer reports");
+        assert_eq!(
+            model.view().error,
+            None,
+            "a folder removed from the tree no longer reports"
+        );
     }
 
     #[test]
     fn expand_all_skips_ignored_folders_and_follows_new_listings() {
         let mut model = TreeModel::new(vec![]);
         drain(&mut model);
-        model.complete("", Ok(vec![entry("a", true), ignored("node_modules"), entry("f", false)]));
+        model.complete(
+            "",
+            Ok(vec![
+                entry("a", true),
+                ignored("node_modules"),
+                entry("f", false),
+            ]),
+        );
         assert!(!model.view().all_expanded);
         model.toggle_all();
         assert_eq!(drain(&mut model), vec!["a"]);
         model.complete("a", Ok(vec![entry("a/b", true), entry("a/c.rs", false)]));
-        assert_eq!(drain(&mut model), vec!["a/b"], "expand-all opens folders as they are listed");
+        assert_eq!(
+            drain(&mut model),
+            vec!["a/b"],
+            "expand-all opens folders as they are listed"
+        );
         model.complete("a/b", Ok(vec![]));
         let view = model.view();
         assert!(view.all_expanded && view.expand_all);
         model.set_expanded(&[] as &[&str]);
-        assert!(!model.view().expand_all, "collapsing by hand ends expand-all");
+        assert!(
+            !model.view().expand_all,
+            "collapsing by hand ends expand-all"
+        );
     }
 
     #[test]
@@ -1082,7 +1134,10 @@ mod tests {
         let roots = stored_roots(stored.as_deref());
         assert_eq!(roots.len(), MAX_STORED_ROOTS);
         assert_eq!(roots[0].root, "root24");
-        assert_eq!(read_expanded_directories(stored.as_deref(), "root24"), ["a"]);
+        assert_eq!(
+            read_expanded_directories(stored.as_deref(), "root24"),
+            ["a"]
+        );
         let cleared = write_expanded_directories(stored.as_deref(), "root24", vec![]);
         assert!(read_expanded_directories(Some(&cleared), "root24").is_empty());
         assert!(read_expanded_directories(Some(b"not json"), "x").is_empty());
@@ -1096,7 +1151,10 @@ mod tests {
         let generation = model.set_query("Lib".into(), true).unwrap();
         assert_eq!(model.search_input(generation).as_deref(), Some("Lib"));
         assert!(model.view().search.pending);
-        model.complete_search(generation, Ok((vec![entry("src/deep/lib.rs", false)], true)));
+        model.complete_search(
+            generation,
+            Ok((vec![entry("src/deep/lib.rs", false)], true)),
+        );
         let view = model.view();
         assert!(!view.search.no_matches && view.search.truncated);
         assert_eq!(labels(&view.nodes), ["src"]);
@@ -1144,7 +1202,11 @@ mod tests {
         drain(&mut model);
         model.load_ancestors("a/b/c.rs");
         model.complete("", Ok(vec![entry("a", true), entry("a2", true)]));
-        assert_eq!(model.reveal(Some("a/b/c.rs"), 1), None, "unknown until its folder is listed");
+        assert_eq!(
+            model.reveal(Some("a/b/c.rs"), 1),
+            None,
+            "unknown until its folder is listed"
+        );
         let reads = drain(&mut model);
         assert_eq!(reads, vec!["a", "a/b"]);
         model.complete("a", Ok(vec![entry("a/b", true), entry("a/z", false)]));
@@ -1154,9 +1216,17 @@ mod tests {
         assert_eq!(&*reveal.id, "a/b/c.rs");
         assert_eq!(model.query(), "", "an external reveal closes the search");
         assert!(model.view().expanded.iter().any(|id| &**id == "a"));
-        assert_eq!(model.reveal(Some("a/b/c.rs"), 1), None, "handled reveals do not replay");
+        assert_eq!(
+            model.reveal(Some("a/b/c.rs"), 1),
+            None,
+            "handled reveals do not replay"
+        );
         model.select_from_tree("a/z");
-        assert_eq!(model.reveal(Some("a/z"), 2), None, "a tree selection is already visible");
+        assert_eq!(
+            model.reveal(Some("a/z"), 2),
+            None,
+            "a tree selection is already visible"
+        );
         assert!(model.reveal(Some("a/b/c.rs"), 3).is_some());
     }
 
@@ -1177,7 +1247,9 @@ mod tests {
     fn view_work_follows_shown_rows_not_the_repository() {
         let mut model = TreeModel::new(vec![]);
         drain(&mut model);
-        let big: Vec<ProjectEntry> = (0..5_000).map(|i| entry(&format!("big/f{i}"), false)).collect();
+        let big: Vec<ProjectEntry> = (0..5_000)
+            .map(|i| entry(&format!("big/f{i}"), false))
+            .collect();
         model.complete("", Ok(vec![entry("big", true), entry("small", true)]));
         model.set_expanded(&["big"]);
         drain(&mut model);
@@ -1185,6 +1257,10 @@ mod tests {
         model.set_expanded(&[] as &[&str]);
         let view = model.view();
         assert!(view.nodes.iter().all(|node| node.children.is_none()));
-        assert_eq!(view.nodes.len(), 2, "a collapsed folder's 5,000 rows are not built");
+        assert_eq!(
+            view.nodes.len(),
+            2,
+            "a collapsed folder's 5,000 rows are not built"
+        );
     }
 }

@@ -59,19 +59,25 @@ impl ViewedImagesContext {
 
     pub fn with_assets(key: ThreadKey, assets: Option<AssetUrlBinding>) -> Self {
         let thread_id = key.thread.clone();
-        let workspace_root = rt().store.shell_state(key.environment.clone(), move |shell| {
-            let shell = shell?;
-            let thread = thread_shell(shell, &thread_id)?;
-            thread.worktree_path.as_ref().map(|path| path.0.clone()).or_else(|| {
-                shell
-                    .snapshot
-                    .as_ref()?
-                    .projects
-                    .iter()
-                    .find(|project| project.id == thread.project_id)
-                    .map(|project| project.workspace_root.0.clone())
-            })
-        });
+        let workspace_root = rt()
+            .store
+            .shell_state(key.environment.clone(), move |shell| {
+                let shell = shell?;
+                let thread = thread_shell(shell, &thread_id)?;
+                thread
+                    .worktree_path
+                    .as_ref()
+                    .map(|path| path.0.clone())
+                    .or_else(|| {
+                        shell
+                            .snapshot
+                            .as_ref()?
+                            .projects
+                            .iter()
+                            .find(|project| project.id == thread.project_id)
+                            .map(|project| project.workspace_root.0.clone())
+                    })
+            });
         Self {
             environment: key.environment,
             thread: ThreadId(key.thread.0),
@@ -236,7 +242,10 @@ mod tests {
         }))
         .expect("fixture");
         assert_eq!(
-            ViewedImagesRow::from_row(&row).expect("fixture").paths.as_slice(),
+            ViewedImagesRow::from_row(&row)
+                .expect("fixture")
+                .paths
+                .as_slice(),
             ["/repo/a.png", "/repo/b.png"]
         );
     }

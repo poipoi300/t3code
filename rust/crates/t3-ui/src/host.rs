@@ -139,6 +139,9 @@ mod tests {
     #[test]
     fn the_shipped_manifest_lets_the_composer_attach_files() {
         // A `capabilities` block without `"picker": true` would make every pick a silent cancel.
-        assert!(picker_granted_by(NSH_MANIFEST), "add \"picker\": true to shells/nsh.json");
+        assert!(
+            picker_granted_by(NSH_MANIFEST),
+            "add \"picker\": true to shells/nsh.json"
+        );
     }
 }

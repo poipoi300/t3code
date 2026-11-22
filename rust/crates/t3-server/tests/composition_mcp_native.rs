@@ -744,7 +744,10 @@ async fn token_hand_over(provider: Provider) {
         let env = launch["env"].to_string();
         for value in [&secret, &endpoint] {
             assert!(!argv.contains(value.as_str()), "argv: {argv}");
-            assert!(!env.contains(value.as_str()), "the environment holds the T3 MCP server");
+            assert!(
+                !env.contains(value.as_str()),
+                "the environment holds the T3 MCP server"
+            );
         }
     }
     let snapshot = server.snapshot().await;

@@ -9,7 +9,10 @@ use t3_client::{
     platform::Platform,
     services::filesystem::ReadAccess,
     types::EnvironmentId,
-    workspace::project_files::{FileTree, ProjectFiles, tree::{FileTreeView, Reveal}},
+    workspace::project_files::{
+        FileTree, ProjectFiles,
+        tree::{FileTreeView, Reveal},
+    },
 };
 
 struct FilesBinding<P: Platform + Clone + 'static>(ProjectFiles<P>);
@@ -20,7 +23,12 @@ pub fn files<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> FilesR
 }
 
 impl<P: Platform + Clone + 'static> FilesService for FilesBinding<P> {
-    fn tree(&self, environment: &EnvironmentId, cwd: &str, host_folder: bool) -> Rc<dyn FileTreeHandle> {
+    fn tree(
+        &self,
+        environment: &EnvironmentId,
+        cwd: &str,
+        host_folder: bool,
+    ) -> Rc<dyn FileTreeHandle> {
         Rc::new(TreeBinding(self.0.tree(environment, cwd, host_folder)))
     }
     fn read_access(&self, environment: &EnvironmentId) -> ReadAccess {
@@ -74,7 +82,9 @@ impl FileTreeHandle for TreeBinding {
 
 mod viewer {
     use super::*;
-    use crate::screens::panel::file_viewer::{FileReadHandle, FileViewerRuntime, FileViewerService};
+    use crate::screens::panel::file_viewer::{
+        FileReadHandle, FileViewerRuntime, FileViewerService,
+    };
     use t3_client::{
         types::ThreadKey,
         workspace::project_files::{
@@ -85,7 +95,9 @@ mod viewer {
     };
 
     /// The file viewer's services over the host client.
-    pub fn file_viewer<P: Platform + Clone + 'static>(client: &ClientRuntime<P>) -> FileViewerRuntime {
+    pub fn file_viewer<P: Platform + Clone + 'static>(
+        client: &ClientRuntime<P>,
+    ) -> FileViewerRuntime {
         FileViewerRuntime(Rc::new(FilesBinding(client.project_files())))
     }
 
@@ -99,8 +111,17 @@ mod viewer {
         fn can_write(&self, environment: &EnvironmentId) -> bool {
             self.0.can_write(environment)
         }
-        fn read(&self, environment: &EnvironmentId, cwd: &str, relative_path: &str) -> Rc<dyn FileReadHandle> {
-            Rc::new(ReadBinding(self.0.read_file(environment, cwd, relative_path)))
+        fn read(
+            &self,
+            environment: &EnvironmentId,
+            cwd: &str,
+            relative_path: &str,
+        ) -> Rc<dyn FileReadHandle> {
+            Rc::new(ReadBinding(self.0.read_file(
+                environment,
+                cwd,
+                relative_path,
+            )))
         }
         fn asset_bytes(
             &self,

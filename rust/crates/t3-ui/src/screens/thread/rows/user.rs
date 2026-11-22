@@ -1006,7 +1006,11 @@ fn message_copy_button(
         .child(dynamic(move || {
             let key = key.clone();
             let source = source.clone();
-            let icon = if copied.get() { Icon::Check } else { kind.icon() };
+            let icon = if copied.get() {
+                Icon::Check
+            } else {
+                kind.icon()
+            };
             untracked(|| {
                 button(
                     ButtonContent::Icon {

@@ -89,9 +89,10 @@ pub fn wizard_header(
         dialog_title(state, title_source).into_element()
     }];
     slots.extend(identity);
-    slots.extend(description.map(|description| {
-        dialog_description(state, move || description()).into_element()
-    }));
+    slots.extend(
+        description
+            .map(|description| dialog_description(state, move || description()).into_element()),
+    );
     slots.extend(children);
     dialog_header(state, slots)
 }

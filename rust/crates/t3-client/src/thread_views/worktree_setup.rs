@@ -78,7 +78,9 @@ impl<P: Platform + Clone + 'static> WorktreeSetup<P> {
         let driver = async move {
             let store = runtime.store().clone();
             let mut changes = store.subscribe_environment(&key.environment).fuse();
-            let mut frames: Option<LocalBoxStream<'_, Result<Option<WorktreeSetupSnapshot>, ClientError>>> = None;
+            let mut frames: Option<
+                LocalBoxStream<'_, Result<Option<WorktreeSetupSnapshot>, ClientError>>,
+            > = None;
             let mut latest: Option<Rc<WorktreeSetupSnapshot>> = None;
             let mut held: Option<Rc<WorktreeSetupSnapshot>> = None;
             let mut sent: Option<WorktreeSetupView> = None;

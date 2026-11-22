@@ -111,9 +111,9 @@ pub fn read_hosted_pairing_request(url: &Url) -> Option<HostedPairingRequest> {
 
 fn is_app_link_scheme(scheme: &str) -> bool {
     scheme == "t3code"
-        || scheme
-            .strip_prefix("t3code-")
-            .is_some_and(|channel| !channel.is_empty() && channel.bytes().all(|b| b.is_ascii_lowercase()))
+        || scheme.strip_prefix("t3code-").is_some_and(|channel| {
+            !channel.is_empty() && channel.bytes().all(|b| b.is_ascii_lowercase())
+        })
 }
 
 /// `readPairingAppLink`: the pairing link inside `t3code://pair?pairingUrl=…`.
@@ -238,7 +238,9 @@ fn has_scheme_prefix(value: &str) -> bool {
         return false;
     };
     let mut chars = scheme.chars();
-    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
@@ -348,10 +350,7 @@ pub fn parse_pairing_url(value: &str) -> (String, Sensitive<String>) {
         return (trimmed.to_owned(), Sensitive(String::new()));
     };
     if let Some(request) = read_hosted_pairing_request(&url) {
-        return (
-            request.host.trim_end_matches('/').to_owned(),
-            request.token,
-        );
+        return (request.host.trim_end_matches('/').to_owned(), request.token);
     }
     let code = pairing_token_from_url(&url).unwrap_or_else(|| Sensitive(String::new()));
     url.set_fragment(None);
@@ -473,9 +472,15 @@ mod tests {
     #[test]
     fn the_token_comes_from_the_fragment_first_then_the_query() {
         let both = url("https://h.test/pair?token=query#token=hash");
-        assert_eq!(pairing_token_from_url(&both).map(|t| t.0), Some("hash".into()));
+        assert_eq!(
+            pairing_token_from_url(&both).map(|t| t.0),
+            Some("hash".into())
+        );
         let query = url("https://h.test/pair?token=%20query%20");
-        assert_eq!(pairing_token_from_url(&query).map(|t| t.0), Some("query".into()));
+        assert_eq!(
+            pairing_token_from_url(&query).map(|t| t.0),
+            Some("query".into())
+        );
         let blank = url("https://h.test/pair#token=%20%20");
         assert_eq!(pairing_token_from_url(&blank), None);
     }
@@ -515,7 +520,10 @@ mod tests {
     fn the_launch_address_decides_how_the_page_pairs() {
         let hosted = read_pairing_launch("https://app.t3.codes/pair?host=box.test#token=abc");
         assert!(matches!(&hosted.launch, PairingLaunch::Hosted(r) if r.host == "box.test"));
-        assert_eq!(hosted.stripped.as_deref(), Some("https://app.t3.codes/pair?host=box.test"));
+        assert_eq!(
+            hosted.stripped.as_deref(),
+            Some("https://app.t3.codes/pair?host=box.test")
+        );
 
         let own = read_pairing_launch("http://127.0.0.1:3773/pair/#token=abc");
         assert_eq!(
@@ -576,8 +584,9 @@ mod tests {
     // ConnectionsSettings.logic.test.ts: parsePairingUrlFields / parseRemotePairingFields.
     #[test]
     fn a_pasted_pairing_link_fills_host_and_code() {
-        let fields = parse_pairing_url_fields("https://remote.example.com/pair#token=pairing-token", None)
-            .expect("a link");
+        let fields =
+            parse_pairing_url_fields("https://remote.example.com/pair#token=pairing-token", None)
+                .expect("a link");
         assert_eq!(fields.host, "https://remote.example.com");
         assert_eq!(fields.pairing_code.expose(), "pairing-token");
         let bare = parse_pairing_url_fields("remote.example.com:3773/pair?token=abc", None)
@@ -589,8 +598,9 @@ mod tests {
         )
         .expect("hosted");
         assert_eq!(hosted.host, "https://box.test");
-        let relative = parse_pairing_url_fields("//box.test/pair#token=abc", Some("http://page.test"))
-            .expect("scheme-relative");
+        let relative =
+            parse_pairing_url_fields("//box.test/pair#token=abc", Some("http://page.test"))
+                .expect("scheme-relative");
         assert_eq!(relative.host, "http://box.test");
         assert_eq!(parse_pairing_url_fields("remote.example.com", None), None);
         assert_eq!(parse_pairing_url_fields("   ", None), None);
@@ -604,7 +614,10 @@ mod tests {
                 .map_err(|failure| failure.detail)
         };
         assert_eq!(message("  ", "abc"), Err("Enter a backend host.".into()));
-        assert_eq!(message("box.test", " "), Err("Enter a pairing code.".into()));
+        assert_eq!(
+            message("box.test", " "),
+            Err("Enter a pairing code.".into())
+        );
         assert_eq!(
             message(" box.test ", " abc "),
             Ok(("box.test".into(), "abc".into()))
@@ -622,14 +635,23 @@ mod tests {
             build_pairing_url("192.168.1.100:3773", "abc").0,
             "http://192.168.1.100:3773/#token=abc"
         );
-        assert_eq!(build_pairing_url("box.test", "abc").0, "https://box.test/#token=abc");
+        assert_eq!(
+            build_pairing_url("box.test", "abc").0,
+            "https://box.test/#token=abc"
+        );
         assert_eq!(build_pairing_url("box.test", " ").0, "box.test");
         assert_eq!(build_pairing_url(" ", "abc").0, "");
         let (host, code) = parse_pairing_url("https://box.test:3773/pair?x=1#token=abc");
-        assert_eq!((host.as_str(), code.expose().as_str()), ("https://box.test:3773", "abc"));
+        assert_eq!(
+            (host.as_str(), code.expose().as_str()),
+            ("https://box.test:3773", "abc")
+        );
         let (host, code) =
             parse_pairing_url("https://app.t3.codes/pair?host=https%3A%2F%2Fbox.test%2F#token=abc");
-        assert_eq!((host.as_str(), code.expose().as_str()), ("https://box.test", "abc"));
+        assert_eq!(
+            (host.as_str(), code.expose().as_str()),
+            ("https://box.test", "abc")
+        );
         let (host, code) = parse_pairing_url("box.test");
         assert_eq!((host.as_str(), code.expose().as_str()), ("box.test", ""));
     }

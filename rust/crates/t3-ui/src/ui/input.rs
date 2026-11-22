@@ -30,7 +30,15 @@ pub fn masked_text_field(
     disabled: impl Fn() -> bool + 'static,
     on_submit: impl Fn() + 'static,
 ) -> impl IntoElement {
-    field(value, placeholder, label, InputSize::Default, true, disabled, on_submit)
+    field(
+        value,
+        placeholder,
+        label,
+        InputSize::Default,
+        true,
+        disabled,
+        on_submit,
+    )
 }
 
 fn field(

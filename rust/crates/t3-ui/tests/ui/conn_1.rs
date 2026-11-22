@@ -4,7 +4,6 @@
 use std::rc::Rc;
 use std::sync::Mutex;
 
-
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use nsh_core::prelude::*;

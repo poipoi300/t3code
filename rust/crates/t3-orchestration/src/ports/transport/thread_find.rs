@@ -1,11 +1,11 @@
 use crate::error::Result;
-pub use t3_shared::find_text::NativeThreadFindText;
 use async_trait::async_trait;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
 };
 use t3_contracts::{base_schemas::*, orchestration_v2::*};
+pub use t3_shared::find_text::NativeThreadFindText;
 
 /// Local projection shim: the store owns fork visibility and the single read transaction.
 #[async_trait]

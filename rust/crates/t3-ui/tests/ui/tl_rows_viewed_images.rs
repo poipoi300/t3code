@@ -52,7 +52,10 @@ impl AssetUrlClient for Assets {
             }
         } else {
             AssetUrlState::Success {
-                url: format!("https://server.test/api/assets/{}", path.0.trim_start_matches('/')),
+                url: format!(
+                    "https://server.test/api/assets/{}",
+                    path.0.trim_start_matches('/')
+                ),
                 asset: Rc::new(
                     serde_json::from_value::<AssetCreateUrlResult>(
                         json!({"relativeUrl":"/api/assets/x","expiresAt":1}),
@@ -93,7 +96,8 @@ fn ImagesFixture() -> impl IntoElement {
         .expect("fixture");
         Some(Shared(Rc::new(row)))
     });
-    let with = ViewedImagesContext::with_assets(key(), Some(AssetUrlBinding(Rc::new(Assets(calls)))));
+    let with =
+        ViewedImagesContext::with_assets(key(), Some(AssetUrlBinding(Rc::new(Assets(calls)))));
     let without = ViewedImagesContext::with_assets(key(), None);
     view()
         .w_full()
@@ -110,7 +114,9 @@ fn ImagesFixture() -> impl IntoElement {
             } else {
                 without.clone()
             };
-            Some(untracked(|| viewed_images_timeline_row(row, context).into_element()))
+            Some(untracked(|| {
+                viewed_images_timeline_row(row, context).into_element()
+            }))
         }))
 }
 
@@ -135,13 +141,11 @@ fn only_host_images_are_requested_each_as_a_media_file_of_the_thread() {
             "Watched: environment thread /repo/first.png, environment thread /repo/denied.png",
         )
         .expect("one signed URL per host image, in row order; text and remote paths skipped");
-        app.wait_for("text:/^Image unavailable · denied.png · This connection cannot read host files/")
-            .expect("a connection without file access explains itself");
-        assert_eq!(
-            app.screen().count("id:viewed-images"),
-            Ok(1),
-            "one gallery"
-        );
+        app.wait_for(
+            "text:/^Image unavailable · denied.png · This connection cannot read host files/",
+        )
+        .expect("a connection without file access explains itself");
+        assert_eq!(app.screen().count("id:viewed-images"), Ok(1), "one gallery");
     }
 }
 

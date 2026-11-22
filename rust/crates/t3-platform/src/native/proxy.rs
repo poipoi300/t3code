@@ -22,7 +22,11 @@ impl SystemProxy {
     /// `ProxyOverride` (`;`-separated patterns and `<local>`), read when `ProxyEnable` is set.
     pub(crate) fn from_windows(server: &str, overrides: &str) -> Self {
         let mut proxy = Self::default();
-        for entry in server.split(';').map(str::trim).filter(|entry| !entry.is_empty()) {
+        for entry in server
+            .split(';')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
             match entry.split_once('=') {
                 Some((scheme, address)) => match scheme.trim().to_ascii_lowercase().as_str() {
                     "http" => proxy.http = Some(address.trim().to_owned()),
@@ -85,9 +89,7 @@ impl SystemProxy {
 fn pattern_host(pattern: &str) -> &str {
     let pattern = pattern.split_once("://").map_or(pattern, |(_, rest)| rest);
     match pattern.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
-            host
-        }
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
         _ => pattern,
     }
 }
@@ -232,11 +234,24 @@ mod tests {
 
     #[test]
     fn a_proxy_per_scheme_applies_to_its_scheme_only() {
-        let proxy = SystemProxy::from_windows("http=web:80;https=secure:443;socks=ignored:1080", "");
-        assert_eq!(route(&proxy, "http://example.com/"), Some("http://web:80".into()));
-        assert_eq!(route(&proxy, "ws://example.com/"), Some("http://web:80".into()));
-        assert_eq!(route(&proxy, "https://example.com/"), Some("http://secure:443".into()));
-        assert_eq!(route(&proxy, "wss://example.com/"), Some("http://secure:443".into()));
+        let proxy =
+            SystemProxy::from_windows("http=web:80;https=secure:443;socks=ignored:1080", "");
+        assert_eq!(
+            route(&proxy, "http://example.com/"),
+            Some("http://web:80".into())
+        );
+        assert_eq!(
+            route(&proxy, "ws://example.com/"),
+            Some("http://web:80".into())
+        );
+        assert_eq!(
+            route(&proxy, "https://example.com/"),
+            Some("http://secure:443".into())
+        );
+        assert_eq!(
+            route(&proxy, "wss://example.com/"),
+            Some("http://secure:443".into())
+        );
         let https_only = SystemProxy::from_windows("https=secure:443", "");
         assert_eq!(route(&https_only, "http://example.com/"), None);
     }
@@ -244,6 +259,9 @@ mod tests {
     #[test]
     fn without_local_a_dotless_name_is_proxied() {
         let proxy = SystemProxy::from_windows("proxy:3128", "");
-        assert_eq!(route(&proxy, "http://intranet/"), Some("http://proxy:3128".into()));
+        assert_eq!(
+            route(&proxy, "http://intranet/"),
+            Some("http://proxy:3128".into())
+        );
     }
 }

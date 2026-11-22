@@ -53,7 +53,10 @@ impl Fixture {
         self.accounts = accounts;
         self
     }
-    fn upstream(mut self, upstream: impl Fn(&Value) -> (u16, Value) + Send + Sync + 'static) -> Self {
+    fn upstream(
+        mut self,
+        upstream: impl Fn(&Value) -> (u16, Value) + Send + Sync + 'static,
+    ) -> Self {
         self.upstream = Some(Box::new(upstream));
         self
     }
@@ -68,7 +71,10 @@ impl Fixture {
     fn answer(&self, request: &HubRequest) -> (u16, Value) {
         assert_eq!(request.authorization, "Bearer management-secret");
         let path = url::Url::parse(&request.url).unwrap().path().to_owned();
-        let body: Option<Value> = request.body.as_ref().map(|b| serde_json::from_slice(b).unwrap());
+        let body: Option<Value> = request
+            .body
+            .as_ref()
+            .map(|b| serde_json::from_slice(b).unwrap());
         self.requests.lock().unwrap().push(Seen {
             path: path.clone(),
             body: body.clone(),
@@ -100,7 +106,10 @@ impl Fixture {
                 json!({"plan_type":"pro","rate_limit":{"secondary_window":{"used_percent":78,"reset_at":4070908800u64,"limit_window_seconds":604800}}}),
             ),
         };
-        (200, json!({"status_code":status,"body":upstream.to_string()}))
+        (
+            200,
+            json!({"status_code":status,"body":upstream.to_string()}),
+        )
     }
 }
 impl HubHttp for Fixture {
@@ -127,7 +136,9 @@ impl HubHttp for Failing {
             match status {
                 Some(status) => Ok(HubResponse {
                     status,
-                    body: json!({"error":"management-secret is wrong"}).to_string().into_bytes(),
+                    body: json!({"error":"management-secret is wrong"})
+                        .to_string()
+                        .into_bytes(),
                 }),
                 None => Err(HubTransportError {
                     code: code.map(str::to_owned),
@@ -152,11 +163,19 @@ async fn read(api: &CliproxyApi) -> Vec<Value> {
 
 #[tokio::test]
 async fn names_the_tls_code_when_the_hubs_certificate_is_not_trusted() {
-    let detail = failure(Failing { code: Some("SELF_SIGNED_CERT_IN_CHAIN"), status: None }).await;
+    let detail = failure(Failing {
+        code: Some("SELF_SIGNED_CERT_IN_CHAIN"),
+        status: None,
+    })
+    .await;
     assert!(detail.contains("SELF_SIGNED_CERT_IN_CHAIN"), "{detail}");
     assert!(detail.contains("NODE_EXTRA_CA_CERTS"), "{detail}");
     assert_eq!(
-        failure(Failing { code: Some("ECONNREFUSED"), status: None }).await,
+        failure(Failing {
+            code: Some("ECONNREFUSED"),
+            status: None
+        })
+        .await,
         "The hub request failed (ECONNREFUSED)."
     );
 }
@@ -166,7 +185,11 @@ async fn ignores_a_transport_code_that_is_not_a_short_node_error_code() {
     for code in ["not a code", "lower_case", &"A".repeat(65)] {
         let code: &'static str = Box::leak(code.to_owned().into_boxed_str());
         assert_eq!(
-            failure(Failing { code: Some(code), status: None }).await,
+            failure(Failing {
+                code: Some(code),
+                status: None
+            })
+            .await,
             "The hub management request failed."
         );
     }
@@ -174,7 +197,11 @@ async fn ignores_a_transport_code_that_is_not_a_short_node_error_code() {
 
 #[tokio::test]
 async fn names_the_status_not_the_body_when_the_hub_rejects_the_request() {
-    let detail = failure(Failing { code: None, status: Some(401) }).await;
+    let detail = failure(Failing {
+        code: None,
+        status: Some(401),
+    })
+    .await;
     assert!(detail.contains("401"), "{detail}");
     assert!(!detail.contains("management-secret"), "{detail}");
 }
@@ -190,13 +217,24 @@ async fn reads_both_accounts_and_their_earliest_unexpired_credits() {
         );
     }
     let window = &result[0]["usageLimits"]["windows"][0];
-    assert_eq!((window["id"].as_str(), window["kind"].as_str()), (Some("secondary"), Some("weekly")));
+    assert_eq!(
+        (window["id"].as_str(), window["kind"].as_str()),
+        (Some("secondary"), Some("weekly"))
+    );
     assert_eq!(window["usedPercent"].as_f64(), Some(78.0));
     assert_eq!(result[0]["plan"], "ChatGPT Pro 200 Subscription");
     assert_eq!(result[0]["email"], "first@example.com");
     assert_eq!(result[0]["workspaceId"], "account-a");
-    let calls: Vec<Value> = fixture.requests().into_iter().filter_map(|r| r.body).filter(|b| b.get("url").is_some()).collect();
-    let mut indexes: Vec<&str> = calls.iter().map(|c| c["auth_index"].as_str().unwrap()).collect();
+    let calls: Vec<Value> = fixture
+        .requests()
+        .into_iter()
+        .filter_map(|r| r.body)
+        .filter(|b| b.get("url").is_some())
+        .collect();
+    let mut indexes: Vec<&str> = calls
+        .iter()
+        .map(|c| c["auth_index"].as_str().unwrap())
+        .collect();
     indexes.sort_unstable();
     assert_eq!(indexes, ["a", "a", "b", "b"]);
     let b = calls.iter().find(|c| c["auth_index"] == "b").unwrap();
@@ -222,7 +260,12 @@ async fn resolves_a_missing_usage_plan_from_current_then_legacy_token_plans() {
     let result = read(&api).await;
     let plans: Vec<(Value, Value)> = result
         .iter()
-        .map(|a| (a["plan"].clone(), a["usageLimits"]["windows"][0]["kind"].clone()))
+        .map(|a| {
+            (
+                a["plan"].clone(),
+                a["usageLimits"]["windows"][0]["kind"].clone(),
+            )
+        })
         .collect();
     assert_eq!(
         plans,
@@ -252,7 +295,9 @@ async fn keeps_the_path_of_a_hub_served_under_a_prefix() {
         let requests = fixture.requests();
         assert!(!requests.is_empty());
         assert!(
-            requests.iter().all(|r| r.path.starts_with("/cliproxy/v0/management/")),
+            requests
+                .iter()
+                .all(|r| r.path.starts_with("/cliproxy/v0/management/")),
             "{url}: {requests:?}"
         );
     }
@@ -261,7 +306,9 @@ async fn keeps_the_path_of_a_hub_served_under_a_prefix() {
 #[tokio::test]
 async fn preserves_a_hub_path_that_only_ends_with_the_panel_filename() {
     let (fixture, api) = Fixture::new().api();
-    api.accounts("https://tools.test/team-management.html", KEY).await.unwrap();
+    api.accounts("https://tools.test/team-management.html", KEY)
+        .await
+        .unwrap();
     assert!(
         fixture
             .requests()
@@ -284,15 +331,25 @@ async fn an_unparseable_hub_url_is_a_typed_failure_without_a_request() {
 async fn keeps_usage_when_the_credits_endpoint_fails() {
     let (_, api) = Fixture::new()
         .upstream(|request| {
-            if request["url"].as_str().unwrap().ends_with("rate-limit-reset-credits") {
+            if request["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("rate-limit-reset-credits")
+            {
                 (503, json!({"token":"do-not-publish"}))
             } else {
-                (200, json!({"rate_limit":{"primary_window":{"used_percent":12}}}))
+                (
+                    200,
+                    json!({"rate_limit":{"primary_window":{"used_percent":12}}}),
+                )
             }
         })
         .api();
     let result = read(&api).await;
-    assert_eq!(result[0]["usageLimits"]["windows"][0]["usedPercent"].as_f64(), Some(12.0));
+    assert_eq!(
+        result[0]["usageLimits"]["windows"][0]["usedPercent"].as_f64(),
+        Some(12.0)
+    );
     assert!(result[0]["usageLimits"].get("resetCredits").is_none());
 }
 
@@ -302,16 +359,29 @@ async fn isolates_a_failed_account_and_never_publishes_upstream_error_bodies() {
         .upstream(|request| {
             if request["auth_index"] == "a" {
                 (401, json!({"token":"do-not-publish"}))
-            } else if request["url"].as_str().unwrap().ends_with("rate-limit-reset-credits") {
+            } else if request["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("rate-limit-reset-credits")
+            {
                 (200, json!({"credits":[]}))
             } else {
-                (200, json!({"rate_limit":{"primary_window":{"used_percent":12}}}))
+                (
+                    200,
+                    json!({"rate_limit":{"primary_window":{"used_percent":12}}}),
+                )
             }
         })
         .api();
     let result = read(&api).await;
-    assert_eq!(result[0]["usageLimits"]["unavailable"]["reason"], "probeFailed");
-    assert_eq!(result[1]["usageLimits"]["windows"][0]["usedPercent"].as_f64(), Some(12.0));
+    assert_eq!(
+        result[0]["usageLimits"]["unavailable"]["reason"],
+        "probeFailed"
+    );
+    assert_eq!(
+        result[1]["usageLimits"]["windows"][0]["usedPercent"].as_f64(),
+        Some(12.0)
+    );
     assert!(!json!(result).to_string().contains("do-not-publish"));
 }
 
@@ -339,7 +409,11 @@ async fn maps_claude_scoped_windows_without_a_scheduler_plugin() {
         .collect();
     assert_eq!(
         windows,
-        [(json!("five_hour"), Some(10.0)), (json!("seven_day"), Some(50.0)), (json!("seven_day_fable"), Some(80.0))]
+        [
+            (json!("five_hour"), Some(10.0)),
+            (json!("seven_day"), Some(50.0)),
+            (json!("seven_day_fable"), Some(80.0))
+        ]
     );
     assert_eq!(result[0]["driver"], "claudeAgent");
 }
@@ -379,7 +453,12 @@ async fn omits_disabled_claude_budgets_without_losing_rolling_windows() {
         })
         .api();
     let result = read(&api).await;
-    let ids: Vec<&Value> = result[0]["usageLimits"]["windows"].as_array().unwrap().iter().map(|w| &w["id"]).collect();
+    let ids: Vec<&Value> = result[0]["usageLimits"]["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| &w["id"])
+        .collect();
     assert_eq!(ids, [&json!("five_hour")]);
 }
 
@@ -395,13 +474,32 @@ async fn reads_an_xai_account_as_grok_with_grok_cli_headers() {
     assert_eq!(result[0]["driver"], "grok");
     assert_eq!(result[0]["email"], "x@example.com");
     let window = &result[0]["usageLimits"]["windows"][0];
-    assert_eq!((window["id"].clone(), window["kind"].clone(), window["usedPercent"].as_f64()), (json!("subscription"), json!("weekly"), Some(40.0)));
-    let call = fixture.requests().into_iter().find_map(|r| r.body.filter(|b| b.get("url").is_some())).unwrap();
+    assert_eq!(
+        (
+            window["id"].clone(),
+            window["kind"].clone(),
+            window["usedPercent"].as_f64()
+        ),
+        (json!("subscription"), json!("weekly"), Some(40.0))
+    );
+    let call = fixture
+        .requests()
+        .into_iter()
+        .find_map(|r| r.body.filter(|b| b.get("url").is_some()))
+        .unwrap();
     assert_eq!(call["method"], "GET");
-    assert_eq!(call["url"], "https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    assert_eq!(
+        call["url"],
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+    );
     assert_eq!(call["header"]["x-xai-token-auth"], "xai-grok-cli");
     assert!(call["header"]["x-grok-client-version"].is_string());
-    assert!(call["header"]["User-Agent"].as_str().unwrap().starts_with("grok-cli/"));
+    assert!(
+        call["header"]["User-Agent"]
+            .as_str()
+            .unwrap()
+            .starts_with("grok-cli/")
+    );
 }
 
 fn antigravity_summary() -> Value {
@@ -429,10 +527,23 @@ async fn reads_an_antigravity_summary_and_keys_the_account_by_its_google_id() {
         "136d4952771fd67a3600053f37492cbd05828712e0b1c89ebab03d4c22ab6554"
     );
     let window = &account["usageLimits"]["windows"][0];
-    assert_eq!((window["id"].clone(), window["kind"].clone(), window["usedPercent"].as_f64()), (json!("gemini-weekly"), json!("weekly"), Some(25.0)));
+    assert_eq!(
+        (
+            window["id"].clone(),
+            window["kind"].clone(),
+            window["usedPercent"].as_f64()
+        ),
+        (json!("gemini-weekly"), json!("weekly"), Some(25.0))
+    );
     let requests = fixture.requests();
-    let summary = requests.iter().find_map(|r| r.body.clone().filter(|b| b["method"] == "POST")).unwrap();
-    assert_eq!(summary["url"], "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary");
+    let summary = requests
+        .iter()
+        .find_map(|r| r.body.clone().filter(|b| b["method"] == "POST"))
+        .unwrap();
+    assert_eq!(
+        summary["url"],
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+    );
     assert_eq!(summary["data"], json!({"project":"project-7"}).to_string());
     assert_eq!(summary["auth_index"], "g");
     assert_eq!(
@@ -446,7 +557,10 @@ async fn reads_an_antigravity_summary_and_keys_the_account_by_its_google_id() {
         .collect();
     assert_eq!(identity.len(), 1);
     assert_eq!(identity[0]["method"], "GET");
-    assert_eq!(identity[0]["url"], "https://www.googleapis.com/oauth2/v2/userinfo");
+    assert_eq!(
+        identity[0]["url"],
+        "https://www.googleapis.com/oauth2/v2/userinfo"
+    );
 }
 
 #[tokio::test]
@@ -464,9 +578,16 @@ async fn keeps_antigravity_limits_and_listing_email_when_its_identity_read_fails
     let result = read(&api).await;
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["email"], "g@example.com");
-    assert!(result[0]["usageLimits"].get("credentialFingerprint").is_none());
+    assert!(
+        result[0]["usageLimits"]
+            .get("credentialFingerprint")
+            .is_none()
+    );
     assert!(result[0]["usageLimits"].get("unavailable").is_none());
-    assert_eq!(result[0]["usageLimits"]["windows"][0]["id"], "gemini-weekly");
+    assert_eq!(
+        result[0]["usageLimits"]["windows"][0]["id"],
+        "gemini-weekly"
+    );
 }
 
 #[tokio::test]
@@ -483,20 +604,27 @@ async fn reports_refused_or_malformed_xai_and_antigravity_answers_as_unreadable(
             .upstream(move |_| (status, body.clone()))
             .api();
         let result = read(&api).await;
-        assert_eq!(result[0]["usageLimits"]["unavailable"]["reason"], "probeFailed", "{provider} {status}");
+        assert_eq!(
+            result[0]["usageLimits"]["unavailable"]["reason"], "probeFailed",
+            "{provider} {status}"
+        );
     }
 }
 
 #[tokio::test]
 async fn rejects_a_missing_or_blank_antigravity_project_before_upstream_calls() {
     for project in [None, Some(""), Some("  ")] {
-        let mut account = json!({"id":"antigravity.json","auth_index":"a","provider":"antigravity"});
+        let mut account =
+            json!({"id":"antigravity.json","auth_index":"a","provider":"antigravity"});
         if let Some(project) = project {
             account["project_id"] = json!(project);
         }
         let (fixture, api) = Fixture::new().accounts(json!([account])).api();
         let result = read(&api).await;
-        assert_eq!(result[0]["usageLimits"]["unavailable"]["reason"], "probeFailed");
+        assert_eq!(
+            result[0]["usageLimits"]["unavailable"]["reason"],
+            "probeFailed"
+        );
         let paths: Vec<String> = fixture.requests().into_iter().map(|r| r.path).collect();
         assert_eq!(paths, ["/v0/management/auth-files"]);
     }
@@ -514,12 +642,19 @@ async fn skips_accounts_of_providers_the_hub_table_does_not_know() {
     let result = read(&api).await;
     let drivers: Vec<&Value> = result.iter().map(|a| &a["driver"]).collect();
     assert_eq!(drivers, [&json!("claudeAgent")]);
-    assert!(!fixture.requests().iter().any(|r| r.body.as_ref().is_some_and(|b| b["auth_index"] == "k")));
+    assert!(
+        !fixture
+            .requests()
+            .iter()
+            .any(|r| r.body.as_ref().is_some_and(|b| b["auth_index"] == "k"))
+    );
 }
 
 #[tokio::test]
 async fn a_malformed_account_list_is_a_typed_failure() {
-    let (_, api) = Fixture::new().accounts(json!([{"id":"first.json","provider":"codex"}])).api();
+    let (_, api) = Fixture::new()
+        .accounts(json!([{"id":"first.json","provider":"codex"}]))
+        .api();
     match api.accounts(URL, KEY).await.unwrap_err() {
         t3_usage::Error::Probe(detail) => assert_eq!(detail, "The hub could not list accounts."),
         other => panic!("{other}"),
@@ -547,14 +682,21 @@ fn redemptions(fixture: &Fixture) -> Vec<Value> {
 #[tokio::test]
 async fn pins_redemption_to_the_displayed_credit_and_clears_only_that_accounts_cooldown() {
     let (fixture, api) = Fixture::new().api();
-    assert_eq!(consume(&api, "second.json", "credit-b").await.unwrap(), json!({"outcome":"reset"}));
-    assert_eq!(consume(&api, "second.json", "credit-b").await.unwrap(), json!({"outcome":"reset"}));
+    assert_eq!(
+        consume(&api, "second.json", "credit-b").await.unwrap(),
+        json!({"outcome":"reset"})
+    );
+    assert_eq!(
+        consume(&api, "second.json", "credit-b").await.unwrap(),
+        json!({"outcome":"reset"})
+    );
     let redemptions = redemptions(&fixture);
     assert_eq!(redemptions.len(), 2);
     assert_eq!(redemptions[0]["data"], redemptions[1]["data"]);
     assert_eq!(
         redemptions[0]["data"],
-        json!({"redeem_request_id":"519d5243-011a-5b7b-91f3-44d85f095705","credit_id":"credit-b"}).to_string()
+        json!({"redeem_request_id":"519d5243-011a-5b7b-91f3-44d85f095705","credit_id":"credit-b"})
+            .to_string()
     );
     let cooldowns: Vec<Value> = fixture
         .requests()
@@ -585,7 +727,12 @@ async fn skips_disabled_accounts_and_rejects_redemption_on_them() {
         consume(&api, "first.json", "credit").await.unwrap_err(),
         "The Codex hub account is missing or disabled."
     );
-    assert!(fixture.requests().iter().all(|r| r.path.ends_with("/auth-files")));
+    assert!(
+        fixture
+            .requests()
+            .iter()
+            .all(|r| r.path.ends_with("/auth-files"))
+    );
 }
 
 #[tokio::test]
@@ -596,17 +743,31 @@ async fn keeps_the_same_redemption_id_after_an_uncertain_upstream_failure() {
         .upstream(move |_| {
             let mut attempts = counter.lock().unwrap();
             *attempts += 1;
-            if *attempts == 1 { (503, json!({})) } else { (200, json!({"code":"already_redeemed"})) }
+            if *attempts == 1 {
+                (503, json!({}))
+            } else {
+                (200, json!({"code":"already_redeemed"}))
+            }
         })
         .api();
     assert_eq!(
         consume(&api, "first.json", "credit").await.unwrap_err(),
         "The provider refused the hub request (HTTP 503)."
     );
-    assert_eq!(consume(&api, "first.json", "credit").await.unwrap(), json!({"outcome":"alreadyRedeemed"}));
+    assert_eq!(
+        consume(&api, "first.json", "credit").await.unwrap(),
+        json!({"outcome":"alreadyRedeemed"})
+    );
     let redemptions = redemptions(&fixture);
     assert_eq!(redemptions[0]["data"], redemptions[1]["data"]);
-    assert_eq!(fixture.requests().iter().filter(|r| r.path.ends_with("/reset-quota")).count(), 1);
+    assert_eq!(
+        fixture
+            .requests()
+            .iter()
+            .filter(|r| r.path.ends_with("/reset-quota"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -618,12 +779,19 @@ async fn rejects_unknown_accounts_without_forwarding_a_redemption() {
 
 #[tokio::test]
 async fn an_unexpected_redemption_answer_is_a_typed_failure_without_a_cooldown_reset() {
-    let (fixture, api) = Fixture::new().upstream(|_| (200, json!({"code":"surprise"}))).api();
+    let (fixture, api) = Fixture::new()
+        .upstream(|_| (200, json!({"code":"surprise"})))
+        .api();
     assert_eq!(
         consume(&api, "first.json", "credit").await.unwrap_err(),
         "The hub returned an unexpected reset-credit response."
     );
-    assert!(!fixture.requests().iter().any(|r| r.path.ends_with("/reset-quota")));
+    assert!(
+        !fixture
+            .requests()
+            .iter()
+            .any(|r| r.path.ends_with("/reset-quota"))
+    );
 }
 
 #[test]

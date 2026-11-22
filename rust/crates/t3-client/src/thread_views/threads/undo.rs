@@ -109,7 +109,9 @@ impl ThreadUndoRegistry {
     pub fn invalidate_environment(&self, environment: &crate::types::EnvironmentId) {
         change(&self.0, |state| {
             let before = state.actions.len();
-            state.actions.retain(|(_, key), _| &key.environment != environment);
+            state
+                .actions
+                .retain(|(_, key), _| &key.environment != environment);
             state.actions.len() != before
         });
     }

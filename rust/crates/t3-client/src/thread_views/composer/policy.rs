@@ -13,8 +13,11 @@ pub struct Trigger {
     pub query: String,
     pub range: Selection,
 }
-pub fn composer_menu_search_key(kind:TriggerKind,query:&str)->(TriggerKind,String){
-    (kind,crate::view_logic::JsTrim::js_trim(query).to_lowercase())
+pub fn composer_menu_search_key(kind: TriggerKind, query: &str) -> (TriggerKind, String) {
+    (
+        kind,
+        crate::view_logic::JsTrim::js_trim(query).to_lowercase(),
+    )
 }
 
 pub fn currency_amount(query: &str) -> bool {

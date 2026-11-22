@@ -37,7 +37,11 @@ pub struct GeneratorLists {
 /// `TEXT_GENERATOR_PRESETS` (label, kind, base URL).
 const PRESETS: [(&str, &str, &str); 4] = [
     ("OpenAI", "openaiCompatible", "https://api.openai.com/v1"),
-    ("OpenRouter", "openaiCompatible", "https://openrouter.ai/api/v1"),
+    (
+        "OpenRouter",
+        "openaiCompatible",
+        "https://openrouter.ai/api/v1",
+    ),
     ("Anthropic", "anthropic", "https://api.anthropic.com/v1"),
     ("Custom (OpenAI-compatible)", "openaiCompatible", ""),
 ];
@@ -54,7 +58,10 @@ pub fn text_generator_display_name(config: &TextGeneratorConfig) -> String {
     }
     let kind = json["kind"].as_str().unwrap_or_default();
     let base = json["baseUrl"].as_str().unwrap_or_default();
-    if let Some((label, _, _)) = PRESETS.iter().find(|(_, k, url)| *url == base && *k == kind) {
+    if let Some((label, _, _)) = PRESETS
+        .iter()
+        .find(|(_, k, url)| *url == base && *k == kind)
+    {
         return (*label).to_owned();
     }
     url::Url::parse(base)
@@ -76,7 +83,11 @@ pub fn text_generator_brand(config: &TextGeneratorConfig) -> &'static str {
         return "anthropic";
     }
     let url = url::Url::parse(json["baseUrl"].as_str().unwrap_or_default()).ok();
-    let host = url.as_ref().and_then(|u| u.host_str()).unwrap_or_default().to_owned();
+    let host = url
+        .as_ref()
+        .and_then(|u| u.host_str())
+        .unwrap_or_default()
+        .to_owned();
     if host == "openrouter.ai" || host.ends_with(".openrouter.ai") {
         return "openrouter";
     }
@@ -89,9 +100,20 @@ pub fn text_generator_brand(config: &TextGeneratorConfig) -> &'static str {
     "openaiCompatible"
 }
 
-fn list_key(environment: &EnvironmentId, id: &ProviderInstanceId, config: &TextGeneratorConfig) -> String {
+fn list_key(
+    environment: &EnvironmentId,
+    id: &ProviderInstanceId,
+    config: &TextGeneratorConfig,
+) -> String {
     let json = config_json(config);
-    json!([environment.0, id.0, json["kind"], json["baseUrl"], json["apiKey"]]).to_string()
+    json!([
+        environment.0,
+        id.0,
+        json["kind"],
+        json["baseUrl"],
+        json["apiKey"]
+    ])
+    .to_string()
 }
 
 /// `textGeneratorSnapshot`: a picker stand-in for a text generator.
@@ -147,7 +169,11 @@ pub struct TextGenerationTargets {
 
 impl TextGenerationTargets {
     /// `hasTextGenerationProvider`: an enabled, available entry.
-    pub fn has_provider(&self, settings: &ServerSettings, project: Option<&t3_contracts::base_schemas::ProjectId>) -> bool {
+    pub fn has_provider(
+        &self,
+        settings: &ServerSettings,
+        project: Option<&t3_contracts::base_schemas::ProjectId>,
+    ) -> bool {
         models::entries_for(&self.providers, settings, project)
             .iter()
             .any(|entry| entry.enabled && entry.is_available)
@@ -155,7 +181,10 @@ impl TextGenerationTargets {
 }
 
 /// `resolveAppModelSelectionState` over the targets' providers.
-pub fn text_generation_selection(settings: &ServerSettings, providers: &[ServerProvider]) -> ModelSelection {
+pub fn text_generation_selection(
+    settings: &ServerSettings,
+    providers: &[ServerProvider],
+) -> ModelSelection {
     models::text_generation_selection(
         &models::Settings {
             server: settings,
@@ -171,7 +200,10 @@ pub fn selection_traits(
     selection: &ModelSelection,
 ) -> crate::thread_views::composer::model_traits::ModelTraitsView {
     use crate::thread_views::composer::model_traits::{ModelTraitsInput, resolve_model_traits};
-    let Some(provider) = providers.iter().find(|p| p.instance_id == selection.instance_id) else {
+    let Some(provider) = providers
+        .iter()
+        .find(|p| p.instance_id == selection.instance_id)
+    else {
         return Default::default();
     };
     let capabilities = models::model_capabilities(
@@ -179,7 +211,10 @@ pub fn selection_traits(
         Some(&selection.model),
         models::selects_plan(selection.options.as_ref()),
     );
-    let descriptors = capabilities.option_descriptors.flatten().unwrap_or_default();
+    let descriptors = capabilities
+        .option_descriptors
+        .flatten()
+        .unwrap_or_default();
     resolve_model_traits(&ModelTraitsInput {
         descriptors: &descriptors,
         selection: Some(selection),
@@ -231,17 +266,23 @@ pub fn default_model_presentation(
         };
     };
     let entries = models::entries_for(providers, settings, project);
-    let entry = entries.iter().find(|e| e.snapshot.instance_id == saved.instance_id);
+    let entry = entries
+        .iter()
+        .find(|e| e.snapshot.instance_id == saved.instance_id);
     let resolved = models::default_selection(providers, Some(&saved));
     let usable = entry.is_some_and(|e| e.enabled && e.is_available)
-        && resolved.as_ref().is_some_and(|r| r.instance_id == saved.instance_id);
+        && resolved
+            .as_ref()
+            .is_some_and(|r| r.instance_id == saved.instance_id);
     if !usable {
         let note = match entry {
             None => SettingsText::key("This provider is not available on this environment."),
             Some(entry) if !entry.enabled => {
                 SettingsText::with("{name} is turned off.", "name", entry.display_name.clone())
             }
-            Some(entry) => SettingsText::with("{name} is unavailable.", "name", entry.display_name.clone()),
+            Some(entry) => {
+                SettingsText::with("{name} is unavailable.", "name", entry.display_name.clone())
+            }
         };
         return DefaultModelPresentation {
             selection: Some(saved),
@@ -356,10 +397,11 @@ impl<P: crate::platform::Platform + Clone + 'static> super::service::SettingsSer
             }
             let key = list_key(&environment.environment_id, id, generator);
             let models = self.generator_models(&environment.environment_id, id, generator, key);
-            let selected: Vec<String> = (selection.instance_id == *id && !selection.model.is_empty())
-                .then(|| selection.model.clone())
-                .into_iter()
-                .collect();
+            let selected: Vec<String> = (selection.instance_id == *id
+                && !selection.model.is_empty())
+            .then(|| selection.model.clone())
+            .into_iter()
+            .collect();
             if let Some(snapshot) = generator_snapshot(id, generator, &models, &selected) {
                 providers.push(snapshot);
             }
@@ -381,7 +423,10 @@ impl<P: crate::platform::Platform + Clone + 'static> super::service::SettingsSer
         if let Some(models) = lists.lists.borrow().get(&key) {
             return models.clone();
         }
-        lists.lists.borrow_mut().insert(key.clone(), GeneratorModels::Loading);
+        lists
+            .lists
+            .borrow_mut()
+            .insert(key.clone(), GeneratorModels::Loading);
         let fetch = self.list_generator_models(environment, id);
         let notify = self.notifier();
         let _ = config;
@@ -458,7 +503,8 @@ impl<P: crate::platform::Platform + Clone + 'static> super::service::SettingsSer
                 SettingsText::with(
                     "This model is unavailable on {label}. Select that environment to choose its model separately.",
                     "label",
-                    environment.map_or_else(|| "a selected environment".to_owned(), |e| e.label.clone()),
+                    environment
+                        .map_or_else(|| "a selected environment".to_owned(), |e| e.label.clone()),
                 )
             };
             let generator = target.settings.text_generators.get(instance);
@@ -476,10 +522,14 @@ impl<P: crate::platform::Platform + Clone + 'static> super::service::SettingsSer
                 }
                 continue;
             }
-            let Some(providers) = environment.and_then(|e| e.config.as_ref()).map(|c| c.providers.0.clone()) else {
+            let Some(providers) = environment
+                .and_then(|e| e.config.as_ref())
+                .map(|c| c.providers.0.clone())
+            else {
                 continue;
             };
-            let entries = models::entries_for(&providers, &target.settings, target.project_id.as_ref());
+            let entries =
+                models::entries_for(&providers, &target.settings, target.project_id.as_ref());
             let entry = entries.iter().find(|e| &e.snapshot.instance_id == instance);
             let options = models::options_by_instance(
                 &models::Settings {
@@ -494,9 +544,9 @@ impl<P: crate::platform::Platform + Clone + 'static> super::service::SettingsSer
                 entry.enabled
                     && entry.is_available
                     && Some(&entry.snapshot.driver) == source_driver.as_ref()
-            }) && options
-                .get(instance)
-                .is_some_and(|options| options.iter().any(|o| o.slug == model && !o.is_unavailable));
+            }) && options.get(instance).is_some_and(|options| {
+                options.iter().any(|o| o.slug == model && !o.is_unavailable)
+            });
             if !usable {
                 return Some(unavailable());
             }
@@ -515,26 +565,45 @@ mod tests {
 
     #[test]
     fn generators_are_named_and_branded_by_their_service() {
-        let openrouter = config(json!({"kind": "openaiCompatible", "baseUrl": "https://openrouter.ai/api/v1", "apiKey": "", "enabled": true}));
+        let openrouter = config(
+            json!({"kind": "openaiCompatible", "baseUrl": "https://openrouter.ai/api/v1", "apiKey": "", "enabled": true}),
+        );
         assert_eq!(text_generator_display_name(&openrouter), "OpenRouter");
         assert_eq!(text_generator_brand(&openrouter), "openrouter");
-        let local = config(json!({"kind": "openaiCompatible", "baseUrl": "http://localhost:11434/v1", "apiKey": "", "enabled": true}));
+        let local = config(
+            json!({"kind": "openaiCompatible", "baseUrl": "http://localhost:11434/v1", "apiKey": "", "enabled": true}),
+        );
         assert_eq!(text_generator_display_name(&local), "localhost:11434");
         assert_eq!(text_generator_brand(&local), "ollama");
-        let named = config(json!({"kind": "anthropic", "label": "Work", "baseUrl": "https://api.anthropic.com/v1", "apiKey": "", "enabled": true}));
+        let named = config(
+            json!({"kind": "anthropic", "label": "Work", "baseUrl": "https://api.anthropic.com/v1", "apiKey": "", "enabled": true}),
+        );
         assert_eq!(text_generator_display_name(&named), "Work");
         assert_eq!(text_generator_brand(&named), "anthropic");
     }
 
     #[test]
     fn a_generator_snapshot_keeps_the_selected_model_while_its_list_loads() {
-        let generator = config(json!({"kind": "anthropic", "baseUrl": "https://api.anthropic.com/v1", "apiKey": "", "enabled": true}));
+        let generator = config(
+            json!({"kind": "anthropic", "baseUrl": "https://api.anthropic.com/v1", "apiKey": "", "enabled": true}),
+        );
         let id = ProviderInstanceId("work".into());
-        let loading = generator_snapshot(&id, &generator, &GeneratorModels::Loading, &["claude-x".into()]).expect("snapshot");
+        let loading = generator_snapshot(
+            &id,
+            &generator,
+            &GeneratorModels::Loading,
+            &["claude-x".into()],
+        )
+        .expect("snapshot");
         assert_eq!(loading.models.len(), 1);
         assert_eq!(loading.models[0].slug.0, "claude-x");
-        let failed = generator_snapshot(&id, &generator, &GeneratorModels::Failed("401".into()), &[]).expect("snapshot");
+        let failed =
+            generator_snapshot(&id, &generator, &GeneratorModels::Failed("401".into()), &[])
+                .expect("snapshot");
         assert!(failed.models.is_empty());
-        assert_eq!(serde_json::to_value(&failed).unwrap_or_default()["status"], "error");
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap_or_default()["status"],
+            "error"
+        );
     }
 }

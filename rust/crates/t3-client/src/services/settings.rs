@@ -1,15 +1,15 @@
 //! Shared settings rules, plus the settings pages' scope, search and composed service.
+pub mod devices;
+pub mod inheritance;
+pub mod maintenance;
+pub mod models;
+pub mod panels;
 pub mod scope;
 pub mod scoped;
 pub mod search;
 mod search_items;
-pub mod inheritance;
-pub mod devices;
-pub mod maintenance;
-pub mod sessions;
-pub mod models;
-pub mod panels;
 pub mod service;
+pub mod sessions;
 
 use crate::ClientError;
 use serde_json::{Value, json};

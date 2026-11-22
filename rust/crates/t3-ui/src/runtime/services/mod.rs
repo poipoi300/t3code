@@ -11,6 +11,6 @@ pub mod git_panel;
 pub mod links;
 pub mod navigation;
 pub mod settings;
+pub mod shell;
 pub mod terminal;
 pub mod thread_ops;
-pub mod shell;

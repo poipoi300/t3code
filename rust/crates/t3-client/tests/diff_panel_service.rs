@@ -130,10 +130,11 @@ fn a_turn_reads_its_turn_diff_and_lists_its_files_and_totals() {
 #[test]
 fn the_first_turn_reads_the_full_thread_diff_and_shows_its_typed_failure() {
     let mut h = Harness::new("env");
-    h.server().state.borrow_mut().extra_methods.push((
-        "orchestration.getFullThreadDiff",
-        t3_rpc::CallKind::Unary,
-    ));
+    h.server()
+        .state
+        .borrow_mut()
+        .extra_methods
+        .push(("orchestration.getFullThreadDiff", t3_rpc::CallKind::Unary));
     let c = paired(&mut h);
     script(
         &h,
@@ -249,7 +250,14 @@ fn an_unserved_diff_method_shows_its_unsupported_reason_not_an_empty_success() {
     h.run(service.select_turn(&key(), RunId("r1".into()), None))
         .unwrap();
     let (snapshot, _watch) = until(&mut h, service.watch(key()), |s| s.view.error.is_some());
-    assert!(snapshot.view.error.as_deref().unwrap().contains("does not serve"));
+    assert!(
+        snapshot
+            .view
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("does not serve")
+    );
     assert_eq!(
         snapshot.view.body,
         DiffBody::Empty {

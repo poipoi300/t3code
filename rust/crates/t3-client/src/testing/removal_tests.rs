@@ -93,7 +93,11 @@ fn a_removal_whose_caller_is_dropped_still_removes_everything() {
             (StorageArea::Secure, "connection-profile"),
         ] {
             for key in platform.list(area, namespace.into()).await.unwrap() {
-                let bytes = platform.get(area, key.clone()).await.unwrap().unwrap_or_default();
+                let bytes = platform
+                    .get(area, key.clone())
+                    .await
+                    .unwrap()
+                    .unwrap_or_default();
                 if String::from_utf8_lossy(&bytes).contains("\"env\"") {
                     left.push(key);
                 }

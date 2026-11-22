@@ -350,8 +350,7 @@ async fn composition_registers_the_scheduler_commands() {
             .await,
         );
         assert_ne!(
-            cause["defect"],
-            "Unknown request tag: server.refreshUsageRates",
+            cause["defect"], "Unknown request tag: server.refreshUsageRates",
             "server.refreshUsageRates is registered"
         );
     }

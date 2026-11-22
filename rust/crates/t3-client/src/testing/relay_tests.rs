@@ -2,9 +2,7 @@
 //! environment through the relay and connects to it there.
 #![allow(clippy::unwrap_used)]
 use super::environment::FakeEnvironment;
-use crate::{
-    ClientStore, composition::ClientRuntime, connection::Phase, types::EnvironmentId,
-};
+use crate::{ClientStore, composition::ClientRuntime, connection::Phase, types::EnvironmentId};
 use futures::{executor::LocalPool, task::LocalSpawnExt};
 use std::rc::Rc;
 use t3_contracts::orchestration_v2::OrchestrationV2CreationSource;
@@ -29,7 +27,11 @@ fn a_signed_in_host_lists_the_environment_through_the_relay_and_connects_there()
     pool.run_until_stalled();
     let environment = EnvironmentId("env".into());
     let discovered = client.relay_environments().unwrap();
-    assert!(discovered.listed, "{discovered:?} {:?}", server.relay_requests());
+    assert!(
+        discovered.listed,
+        "{discovered:?} {:?}",
+        server.relay_requests()
+    );
     assert_eq!(
         discovered.environments[&environment].environment.label.0,
         "Fake host"

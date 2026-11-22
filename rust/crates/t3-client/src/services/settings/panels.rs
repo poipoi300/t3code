@@ -577,7 +577,12 @@ pub fn sort_snooze_rows<K: Clone>(
     let mut order: Vec<(usize, Option<String>)> = presets
         .iter()
         .enumerate()
-        .map(|(index, preset)| (index, resolve_snooze_preset(preset, calendar).map(|p| p.snoozed_until)))
+        .map(|(index, preset)| {
+            (
+                index,
+                resolve_snooze_preset(preset, calendar).map(|p| p.snoozed_until),
+            )
+        })
         .collect();
     order.sort_by(|a, b| match (&a.1, &b.1) {
         (None, None) => std::cmp::Ordering::Equal,
@@ -586,8 +591,14 @@ pub fn sort_snooze_rows<K: Clone>(
         (Some(a), Some(b)) => a.cmp(b),
     });
     (
-        order.iter().map(|(index, _)| presets[*index].clone()).collect(),
-        order.iter().map(|(index, _)| keys[*index].clone()).collect(),
+        order
+            .iter()
+            .map(|(index, _)| presets[*index].clone())
+            .collect(),
+        order
+            .iter()
+            .map(|(index, _)| keys[*index].clone())
+            .collect(),
     )
 }
 
@@ -753,12 +764,20 @@ mod tests {
         let mut reversed = defaults.clone();
         reversed.reverse();
         assert!(same_snooze_presets(&defaults, &reversed));
-        let at: t3_contracts::settings::SnoozePresetSetting =
-            serde_json::from_value(serde_json::json!({"kind": "at", "day": "today", "time": "18:00"})).expect("preset");
+        let at: t3_contracts::settings::SnoozePresetSetting = serde_json::from_value(
+            serde_json::json!({"kind": "at", "day": "today", "time": "18:00"}),
+        )
+        .expect("preset");
         let after = snooze_with_when(&at, "after", 45, "09:00").expect("after");
-        assert_eq!(serde_json::to_value(&after).unwrap_or_default(), serde_json::json!({"kind": "after", "minutes": 45}));
+        assert_eq!(
+            serde_json::to_value(&after).unwrap_or_default(),
+            serde_json::json!({"kind": "after", "minutes": 45})
+        );
         let friday = snooze_with_when(&at, "friday", 45, "09:00").expect("friday");
-        assert_eq!(serde_json::to_value(&friday).unwrap_or_default()["time"], "18:00");
+        assert_eq!(
+            serde_json::to_value(&friday).unwrap_or_default()["time"],
+            "18:00"
+        );
         assert!(snooze_with_when(&at, "someday", 45, "09:00").is_none());
     }
 
@@ -770,7 +789,10 @@ mod tests {
         // "a" was written and acknowledged before; seeing it again means someone restored it.
         assert_eq!(reconcile_snooze_draft::<&str>(&[], &"a"), None);
         // Every earlier write is acknowledged when a later one echoes.
-        assert_eq!(reconcile_snooze_draft(&["a", "b", "a"], &"b"), Some(vec!["a"]));
+        assert_eq!(
+            reconcile_snooze_draft(&["a", "b", "a"], &"b"),
+            Some(vec!["a"])
+        );
     }
 
     #[test]
@@ -781,7 +803,12 @@ mod tests {
         let now = 1_793_232_000_000_i64 + 16 * 3_600_000;
         let day = 86_400_000_i64;
         let local_wake = |days: i64, hour: u32, minute: u32| {
-            Some(now.div_euclid(day) * day + days * day + i64::from(hour) * 3_600_000 + i64::from(minute) * 60_000)
+            Some(
+                now.div_euclid(day) * day
+                    + days * day
+                    + i64::from(hour) * 3_600_000
+                    + i64::from(minute) * 60_000,
+            )
         };
         let same_day = |a: i64, b: i64| a.div_euclid(day) == b.div_euclid(day);
         let format = |ms: i64| ms.to_string();

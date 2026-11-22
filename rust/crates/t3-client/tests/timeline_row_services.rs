@@ -10,12 +10,8 @@ use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 use support::fake_server::*;
 use t3_client::{
-    ClientError, ClientStore,
-    composition::ClientRuntime,
-    connection::PairingInput,
-    services::assets::AssetUrlState,
-    permissions::SessionGrants,
-    types::ThreadKey,
+    ClientError, ClientStore, composition::ClientRuntime, connection::PairingInput,
+    permissions::SessionGrants, services::assets::AssetUrlState, types::ThreadKey,
 };
 use t3_contracts::{
     assets::AssetResource,
@@ -149,7 +145,12 @@ fn snapshot(phase: &str, sequence: u64) -> Value {
 }
 
 fn subscribes(server: &Server, tag: &str) -> usize {
-    server.calls.borrow().iter().filter(|(t, _)| t == tag).count()
+    server
+        .calls
+        .borrow()
+        .iter()
+        .filter(|(t, _)| t == tag)
+        .count()
 }
 
 #[test]
@@ -240,7 +241,10 @@ fn cancel_answers_the_server_result_keeps_failures_typed_and_skips_finished_setu
         "message":"This session cannot change source control.","requiredScope":"source-control:write"}));
     let error = h.run(service.cancel(&key("t1"), &running)).unwrap_err();
     assert!(matches!(error, ClientError::Rejected { .. }), "{error:?}");
-    assert!(error.to_string().contains("cannot change source control"), "{error}");
+    assert!(
+        error.to_string().contains("cannot change source control"),
+        "{error}"
+    );
     assert!(matches!(
         h.run(service.cancel(&key_in("other"), &running)),
         Err(ClientError::Disconnected)
@@ -269,8 +273,10 @@ fn setup_terminal_opens_only_for_the_shown_thread() {
 }
 
 fn workspace_image() -> AssetResource {
-    serde_json::from_value(json!({"_tag":"workspace-file","threadId":"t1","path":"/repo/first.png"}))
-        .unwrap()
+    serde_json::from_value(
+        json!({"_tag":"workspace-file","threadId":"t1","path":"/repo/first.png"}),
+    )
+    .unwrap()
 }
 
 #[test]

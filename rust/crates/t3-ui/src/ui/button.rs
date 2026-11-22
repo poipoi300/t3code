@@ -166,11 +166,20 @@ pub fn variant_colors(variant: ButtonVariant, p: &Palette) -> VariantColors {
 #[allow(clippy::large_enum_variant)]
 pub enum ButtonContent {
     Label(String),
-    Icon { icon: Icon, label: String },
-    IconLabel { icon: Icon, label: String },
+    Icon {
+        icon: Icon,
+        label: String,
+    },
+    IconLabel {
+        icon: Icon,
+        label: String,
+    },
     /// The caller's own element in the button's frame (a glyph at its own size, with its own
     /// motion); `label` is the button's accessible name, already translated.
-    Custom { label: String, child: AnyElement },
+    Custom {
+        label: String,
+        child: AnyElement,
+    },
 }
 
 /// A button. `disabled` follows a signal or closure; a disabled button is 64% opaque and inert.
@@ -286,7 +295,9 @@ mod tests {
                     || false,
                     || {},
                 ))
-                .child(text(move || SharedString::from(format!("presses {}", presses.get()))))
+                .child(text(move || {
+                    SharedString::from(format!("presses {}", presses.get()))
+                }))
         }
 
         #[test]
@@ -301,11 +312,19 @@ mod tests {
                 ..EngineConfig::new(Root::of::<CustomButtonProbe>())
             })
             .expect("button probe starts");
-            app.wait_for("custom glyph").expect("the caller's element is drawn");
+            app.wait_for("custom glyph")
+                .expect("the caller's element is drawn");
             app.press("role:button[Fork]").expect("named by its label");
-            app.wait_for("presses 1").expect("the press reaches the handler");
-            assert!(app.screen().shows("Copy"), "a label button still draws its label");
-            assert!(!app.screen().shows("Fork"), "a custom button draws no label text");
+            app.wait_for("presses 1")
+                .expect("the press reaches the handler");
+            assert!(
+                app.screen().shows("Copy"),
+                "a label button still draws its label"
+            );
+            assert!(
+                !app.screen().shows("Fork"),
+                "a custom button draws no label text"
+            );
         }
     }
 

@@ -63,7 +63,8 @@ pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
     use t3_client::view_logic::shell::sidebar_width::{
         THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
     };
-    let max = resolve_thread_sidebar_maximum_width(f64::from(window_width), THREAD_SIDEBAR_MIN_WIDTH);
+    let max =
+        resolve_thread_sidebar_maximum_width(f64::from(window_width), THREAD_SIDEBAR_MIN_WIDTH);
     clamp_thread_sidebar_width(f64::from(width), THREAD_SIDEBAR_MIN_WIDTH, max) as f32
 }
 

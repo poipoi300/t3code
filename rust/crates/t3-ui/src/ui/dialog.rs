@@ -914,10 +914,7 @@ pub fn dialog_title(state: DialogState, source: impl Fn() -> Text + 'static) -> 
     title_text(state, source).app_class(tw("font-semibold text-xl leading-snug"))
 }
 
-fn title_text(
-    state: DialogState,
-    source: impl Fn() -> Text + 'static,
-) -> nsh_core::element::Text {
+fn title_text(state: DialogState, source: impl Fn() -> Text + 'static) -> nsh_core::element::Text {
     let source = retained_text(state, source);
     register_text(state.title, source.clone());
     // wrap-anywhere drops: NSH wraps text at words and preserves newlines.

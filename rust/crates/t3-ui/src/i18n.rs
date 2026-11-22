@@ -127,10 +127,7 @@ mod tests {
         );
         let already = SharedString::from(t("Delete thread"));
         assert_eq!(Text::from(already.clone()).resolve(), already);
-        assert!(matches!(
-            Text::client_key("Enter a message."),
-            Text::Key(_)
-        ));
+        assert!(matches!(Text::client_key("Enter a message."), Text::Key(_)));
     }
 
     #[test]
@@ -176,7 +173,8 @@ mod tests {
                     let end = lines
                         .windows(2)
                         .position(|pair| {
-                            pair[0].trim() == "#[cfg(test)]" && pair[1].trim_start().starts_with("mod ")
+                            pair[0].trim() == "#[cfg(test)]"
+                                && pair[1].trim_start().starts_with("mod ")
                         })
                         .unwrap_or(lines.len());
                     for (number, line) in lines[..end].iter().enumerate() {

@@ -596,11 +596,15 @@ impl Platform for EnvironmentPlatform {
             HostAction::RelayDeviceId => {
                 async { Ok(HostReply::Text(Some("device-1".into()))) }.boxed_local()
             }
-            HostAction::DpopPublicJwk => async { Ok(HostReply::Document(dpop_key().0)) }.boxed_local(),
+            HostAction::DpopPublicJwk => {
+                async { Ok(HostReply::Document(dpop_key().0)) }.boxed_local()
+            }
             HostAction::DpopThumbprint => {
                 async { Ok(HostReply::Text(Some(dpop_key().1))) }.boxed_local()
             }
-            HostAction::DpopSign { .. } => async { Ok(HostReply::Bytes(vec![3; 64])) }.boxed_local(),
+            HostAction::DpopSign { .. } => {
+                async { Ok(HostReply::Bytes(vec![3; 64])) }.boxed_local()
+            }
             action => self.fake.host(action),
         }
     }

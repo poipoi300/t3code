@@ -37,7 +37,11 @@ fn utf16_prefix(cell: &str, units: usize) -> &str {
 
 /// RFC 4180-ish: quoted cells, doubled quotes, CR/LF/CRLF rows, a leading BOM skipped. Lengths
 /// are counted in UTF-16 units, as the TypeScript does, and never split a surrogate pair.
-pub fn parse_delimited_preview(text: &str, delimiter: char, limits: DelimitedLimits) -> DelimitedPreview {
+pub fn parse_delimited_preview(
+    text: &str,
+    delimiter: char,
+    limits: DelimitedLimits,
+) -> DelimitedPreview {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut row: Vec<String> = Vec::new();
     let mut cell = String::new();
@@ -46,19 +50,20 @@ pub fn parse_delimited_preview(text: &str, delimiter: char, limits: DelimitedLim
     let mut truncated = false;
     let body = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut row_has_content = false;
-    let end_cell = |row: &mut Vec<String>, cell: &mut String, units: &mut usize, truncated: &mut bool| {
-        if *units > limits.max_cell_length {
-            *cell = utf16_prefix(cell, limits.max_cell_length).to_owned();
-            *truncated = true;
-        }
-        if row.len() < limits.max_columns {
-            row.push(std::mem::take(cell));
-        } else {
-            cell.clear();
-            *truncated = true;
-        }
-        *units = 0;
-    };
+    let end_cell =
+        |row: &mut Vec<String>, cell: &mut String, units: &mut usize, truncated: &mut bool| {
+            if *units > limits.max_cell_length {
+                *cell = utf16_prefix(cell, limits.max_cell_length).to_owned();
+                *truncated = true;
+            }
+            if row.len() < limits.max_columns {
+                row.push(std::mem::take(cell));
+            } else {
+                cell.clear();
+                *truncated = true;
+            }
+            *units = 0;
+        };
     let mut chars = body.char_indices().peekable();
     while let Some((_, c)) = chars.next() {
         row_has_content = true;
@@ -158,7 +163,9 @@ fn notebook_text(value: Option<&Value>, limit: usize) -> Result<String, Notebook
 fn base64_image_syntax(base64: &str) -> bool {
     let body = base64.trim_end_matches('=');
     base64.len() - body.len() <= 2
-        && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
         && base64.len() % 4 != 1
         && (!base64.ends_with('=') || base64.len().is_multiple_of(4))
 }
@@ -291,13 +298,24 @@ mod tests {
     use super::*;
 
     fn rows(preview: &DelimitedPreview) -> Vec<Vec<&str>> {
-        preview.rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect()
+        preview
+            .rows
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect()
     }
 
     #[test]
     fn delimited_rows_follow_quotes_and_line_endings() {
-        let preview = parse_delimited_preview("\u{feff}a,\"b,c\",\"d\"\"e\"\r\n1,2,3\n", ',', DelimitedLimits::default());
-        assert_eq!(rows(&preview), vec![vec!["a", "b,c", "d\"e"], vec!["1", "2", "3"]]);
+        let preview = parse_delimited_preview(
+            "\u{feff}a,\"b,c\",\"d\"\"e\"\r\n1,2,3\n",
+            ',',
+            DelimitedLimits::default(),
+        );
+        assert_eq!(
+            rows(&preview),
+            vec![vec!["a", "b,c", "d\"e"], vec!["1", "2", "3"]]
+        );
         assert!(!preview.truncated);
         let tabs = parse_delimited_preview("x\ty\nz", '\t', DelimitedLimits::default());
         assert_eq!(rows(&tabs), vec![vec!["x", "y"], vec!["z"]]);
@@ -306,12 +324,27 @@ mod tests {
 
     #[test]
     fn delimited_limits_truncate_rows_columns_and_cells() {
-        let limits = DelimitedLimits { max_rows: 2, max_columns: 2, max_cell_length: 3 };
+        let limits = DelimitedLimits {
+            max_rows: 2,
+            max_columns: 2,
+            max_cell_length: 3,
+        };
         let preview = parse_delimited_preview("abcdef,b,c\n1\n2\n", ',', limits);
         assert_eq!(rows(&preview), vec![vec!["abc", "b"], vec!["1"]]);
         assert!(preview.truncated);
-        let emoji = parse_delimited_preview("a😀b", ',', DelimitedLimits { max_cell_length: 2, ..limits });
-        assert_eq!(rows(&emoji), vec![vec!["a"]], "a surrogate pair is never split");
+        let emoji = parse_delimited_preview(
+            "a😀b",
+            ',',
+            DelimitedLimits {
+                max_cell_length: 2,
+                ..limits
+            },
+        );
+        assert_eq!(
+            rows(&emoji),
+            vec![vec!["a"]],
+            "a surrogate pair is never split"
+        );
     }
 
     #[test]
@@ -418,6 +451,9 @@ mod tests {
         assert!(open_notebook("not json").is_err());
         let outputs: Vec<_> = (0..101).map(|_| serde_json::json!({"text": "x"})).collect();
         let many = serde_json::json!({"nbformat": 4, "cells": [{"cell_type": "code", "source": "", "outputs": outputs}]});
-        assert_eq!(open_notebook(&many.to_string()), Err("A notebook cell has too many outputs to preview."));
+        assert_eq!(
+            open_notebook(&many.to_string()),
+            Err("A notebook cell has too many outputs to preview.")
+        );
     }
 }

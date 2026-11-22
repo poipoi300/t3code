@@ -121,7 +121,10 @@ mod tests {
         ])
     }
     fn names(commands: &[ServerProviderSlashCommand]) -> Vec<&str> {
-        commands.iter().map(|command| command.name.0.as_str()).collect()
+        commands
+            .iter()
+            .map(|command| command.name.0.as_str())
+            .collect()
     }
 
     /// `usageLimits.test.ts`: "advertises global and workspace commands only for providers present
@@ -132,7 +135,8 @@ mod tests {
         let with_workspace = provider(json!({"workspaceSnapshots":[
             {"cwd":"/tmp/project","checkedAt":"2026-09-03T11:00:00.000Z","slashCommands":[],"skills":[]}
         ]}));
-        let supported = &with_usage_limits_commands(std::slice::from_ref(&with_workspace), &sources)[0];
+        let supported =
+            &with_usage_limits_commands(std::slice::from_ref(&with_workspace), &sources)[0];
         assert_eq!(names(&supported.slash_commands), ["usage-limits"]);
         assert_eq!(
             names(&supported.workspace_snapshots.as_ref().unwrap()[0].slash_commands),
@@ -143,23 +147,37 @@ mod tests {
                 .slash_commands
                 .is_empty()
         );
-        let own = provider(json!({"slashCommands":[{"name":"usage-limits","description":"Provider's own"}]}));
+        let own = provider(
+            json!({"slashCommands":[{"name":"usage-limits","description":"Provider's own"}]}),
+        );
         let kept = &with_usage_limits_commands(std::slice::from_ref(&own), &[])[0];
         assert_eq!(kept.slash_commands, own.slash_commands);
         let unreadable = source(json!([]), Some("token expired"));
         assert_eq!(
-            names(&with_usage_limits_commands(std::slice::from_ref(&with_workspace), &[unreadable])[0].slash_commands),
+            names(
+                &with_usage_limits_commands(std::slice::from_ref(&with_workspace), &[unreadable])
+                    [0]
+                .slash_commands
+            ),
             ["usage-limits"]
         );
         let selected = provider(json!({"usageLimits":limits()}));
         assert_eq!(
-            names(&with_usage_limits_commands(std::slice::from_ref(&selected), &[])[0].slash_commands),
+            names(
+                &with_usage_limits_commands(std::slice::from_ref(&selected), &[])[0].slash_commands
+            ),
             ["usage-limits"]
         );
         let unrelated = provider(json!({"driver":"claudeAgent"}));
-        let disabled = provider(json!({"driver":"claudeAgent","enabled":false,"usageLimits":limits()}));
+        let disabled =
+            provider(json!({"driver":"claudeAgent","enabled":false,"usageLimits":limits()}));
         let mixed = with_usage_limits_commands(
-            &[selected, with_workspace, unrelated.clone(), disabled.clone()],
+            &[
+                selected,
+                with_workspace,
+                unrelated.clone(),
+                disabled.clone(),
+            ],
             &[],
         );
         let advertised: Vec<Vec<&str>> = mixed.iter().map(|p| names(&p.slash_commands)).collect();

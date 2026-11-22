@@ -3,257 +3,2494 @@
 use super::search::{SettingsSearchItem, SettingsSearchScope};
 
 pub static SETTINGS_SEARCH_ITEMS: &[SettingsSearchItem] = &[
-    SettingsSearchItem { id: "storage-worktree-keep-when", title: "Keep worktrees with local changes", to: "/settings/worktrees", target_id: Some("storage-worktrees"), search_terms: &["any local files uncommitted changes edited tracked files ignored env build output cleanup"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "storage-delete-now", title: "Delete now", to: "/settings/maintenance", target_id: None, search_terms: &["storage cleanup run now results report removed kept failed"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "storage-worktrees", title: "Worktree cleanup", to: "/settings/worktrees", target_id: None, search_terms: &["disk storage automatic delete deleted archived threads old inactive merged settled unchanged worktrees retention days project inherit off custom"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "storage-worktrees-location", title: "Worktree location", to: "/settings/worktrees", target_id: None, search_terms: &["worktree location folder directory path drive external disk"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "storage-artifacts", title: "Artifacts and logs", to: "/settings/maintenance", target_id: None, search_terms: &["disk storage delete old browser artifacts screenshots captures rotated logs cleanup retention"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "project-defaults", title: "Project defaults and overrides", to: "/settings/threads", target_id: None, search_terms: &["model workspace environments projects inheritance checkout"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "project-overview", title: "Project overview", to: "/settings/projects", target_id: None, search_terms: &["name icon emoji image checkout remove delete"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "default-model", title: "Default model", to: "/settings/threads", target_id: None, search_terms: &["new thread project provider reasoning effort"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "fallback-model", title: "Fallback model", to: "/settings/threads", target_id: None, search_terms: &["fallback agent provider out of usage new threads"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "default-permissions", title: "Permissions", to: "/settings/threads", target_id: None, search_terms: &["new thread default runtime mode supervised approvals auto accept edits full access"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "color-scheme", title: "Color scheme", to: "/settings/appearance", target_id: Some("appearance"), search_terms: &["appearance light dark system mode"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "theme", title: "Themes", to: "/settings/appearance", target_id: Some("appearance"), search_terms: &["appearance colors palette custom import"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "setting-appearance-contrast", title: "Contrast", to: "/settings/appearance", target_id: None, search_terms: &["colors borders interface"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "setting-glass-opacity", title: "Glass opacity", to: "/settings/appearance", target_id: None, search_terms: &["transparent transparency solid menus dialogs composer"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "diff-color-scheme", title: "Diff colors", to: "/settings/diffs", target_id: None, search_terms: &["red green blue orange additions deletions changes counts palette colorblind"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "chat-width", title: "Chat width", to: "/settings/appearance", target_id: None, search_terms: &["wide full width column layout messages composer monitor"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "thread-details-items", title: "Thread details", to: "/settings/appearance", target_id: None, search_terms: &["customize show hide panel card environment editor scripts branch pull request git changes servers automations lineage usage limits 5 hour weekly quota tokens context window"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "effort-display", title: "Effort display", to: "/settings/appearance", target_id: None, search_terms: &["reasoning effort thinking bars graph word label level composer"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "math-rendering", title: "Render math", to: "/settings/appearance", target_id: None, search_terms: &["latex tex katex equations formulas markdown"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "panel-animations", title: "Panel animations", to: "/settings/appearance", target_id: None, search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "environment-identification", title: "Environment identification", to: "/settings/appearance", target_id: Some("appearance-interface"), search_terms: &["dev nightly latest channel artwork pill label hide none"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "interface-font", title: "Interface font", to: "/settings/appearance", target_id: None, search_terms: &["typography family size system sans"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "prompt-font", title: "Prompt font", to: "/settings/appearance", target_id: None, search_terms: &["typography family size composer input"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "code-font", title: "Code font", to: "/settings/appearance", target_id: None, search_terms: &["typography family size monospace code blocks diffs file previews"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "terminal-font", title: "Terminal font", to: "/settings/appearance", target_id: None, search_terms: &["typography family size monospace output"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "separate-fonts", title: "Separate fonts", to: "/settings/appearance", target_id: None, search_terms: &["typography advanced prompt code terminal font family size individually"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "font-smoothing", title: "Font smoothing", to: "/settings/appearance", target_id: None, search_terms: &["typography text grayscale anti aliasing macos thin"], scope: None, mac_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "word-wrap", title: "Word wrap", to: "/settings/appearance", target_id: None, search_terms: &["long lines code blocks diffs file previews"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "composer-context", title: "Composer context", to: "/settings/appearance", target_id: None, search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "project-grouping", title: "Project grouping", to: "/settings/general", target_id: None, search_terms: &["combine matching repositories environments sidebar"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "project-order", title: "Project order", to: "/settings/general", target_id: None, search_terms: &["sort projects sidebar manual created recent"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snooze-options", title: "Snooze options", to: "/settings/threads", target_id: None, search_terms: &["snooze presets times later tonight tomorrow next week remind"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snooze-limited-threads", title: "Snooze until limits reset", to: "/settings/threads", target_id: None, search_terms: &["usage quota rate limit reset wake recover continue"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "auto-resume-limited-threads", title: "Resume after usage limits", to: "/settings/threads", target_id: None, search_terms: &["usage quota rate limit reset recover continue"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "working-shelf", title: "Working section", to: "/settings/general", target_id: None, search_terms: &["hide fold running monitoring threads inbox sidebar shelf"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "boring-sidebar", title: "Boring sidebar (group by project)", to: "/settings/labs", target_id: None, search_terms: &["beta folders project tree classic sidebar"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "boring-sidebar-multiline", title: "Two-line folder rows", to: "/settings/labs", target_id: Some("boring-sidebar"), search_terms: &["beta boring sidebar folder rows multiline branch pull request details"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "tool-call-visibility", title: "Tool calls in chat", to: "/settings/chat", target_id: None, search_terms: &["hide tool calls commands edits searches work log activity quiet chat zen final answers only"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "screen-reader-announcements", title: "Screen reader announcements", to: "/settings/chat", target_id: None, search_terms: &["accessibility a11y screen reader nvda jaws voiceover orca narrator speech announce read aloud messages activity steps"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "screen-reader-window-title", title: "Screen reader window title", to: "/settings/chat", target_id: None, search_terms: &["accessibility a11y screen reader nvda jaws voiceover orca narrator window title tab title alt tab taskbar thread status order working approval"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "guest-links", title: "Guest links", to: "/settings/labs", target_id: None, search_terms: &["beta share guest invite link teammate watch t3 connect tunnel"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "linked-environments-beta", title: "Linked environments", to: "/settings/labs", target_id: None, search_terms: &["beta link another machine vps peer agents work there delegate"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "prompt-suggestions-beta", title: "Suggest next prompt", to: "/settings/labs", target_id: None, search_terms: &["beta tab autocomplete predict next message claude codex ghost text"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "simlock-hosts", title: "Simlock device hosts (alpha)", to: "/settings/labs", target_id: None, search_terms: &["beta alpha simlock callstack simulator emulator ios android pool lease gateway"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "worktree-fast-checkout", title: "Fast worktree checkout", to: "/settings/labs", target_id: None, search_terms: &["beta fast worktree checkout clone apfs copy-on-write cache macos speed"], scope: Some(SettingsSearchScope::Environment), fast_worktree_checkout_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "voice-transcription-destination", title: "Transcribe with", to: "/settings/voice", target_id: None, search_terms: &["send microphone audio dictation destination speech voice stt transcription environment machine consent privacy cloud OpenAI Grok OpenRouter"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "voice-microphone", title: "Microphone", to: "/settings/voice", target_id: None, search_terms: &["mic input audio device order priority preferred"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "dictation-shortcut-mode", title: "Dictation shortcut", to: "/settings/voice", target_id: None, search_terms: &["speech voice keyboard hotkey hold toggle auto"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-language", title: "Transcription language", to: "/settings/voice", target_id: None, search_terms: &["speech voice translate english auto detect"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-dictionary", title: "Dictionary", to: "/settings/voice", target_id: None, search_terms: &["speech voice transcription vocabulary names glossary alias"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-project-dictionary", title: "Project dictionary", to: "/settings/voice", target_id: None, search_terms: &["speech voice transcription vocabulary shared dictionary team environment glossary"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-post-processing-model", title: "Cleanup model", to: "/settings/voice", target_id: None, search_terms: &["speech voice transcript cleanup provider model post-processing"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-correction-word", title: "Correction cue", to: "/settings/voice", target_id: None, search_terms: &["speech voice cleanup sorry scratch that fix mistake"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-silence-filtering", title: "Silence filtering", to: "/settings/voice", target_id: None, search_terms: &["voice speech vad silero pauses noise"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "remove-filler-words", title: "Remove filler words", to: "/settings/voice", target_id: None, search_terms: &["voice speech transcription hesitation um uh cleanup"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-post-processing", title: "Clean up transcripts", to: "/settings/voice", target_id: None, search_terms: &["speech transcription polish clean provider prompt post-processing"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-models", title: "Transcription models", to: "/settings/voice", target_id: None, search_terms: &["speech voice stt download whisper parakeet canary moonshine accuracy speed benchmark languages"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "speech-hardware", title: "Transcription hardware and model unloading", to: "/settings/voice", target_id: None, search_terms: &["speech voice stt advanced gpu cpu acceleration memory unload idle"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "microphone-test", title: "Test microphone", to: "/settings/voice", target_id: None, search_terms: &["test mic audio playback loopback record input level"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "transcription-test", title: "Test model", to: "/settings/voice", target_id: None, search_terms: &["test voice speech model transcription recognition"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "auto-settle-inactive-threads", title: "Auto-settle inactive threads", to: "/settings/threads", target_id: None, search_terms: &["sidebar inactivity days no activity automatically"], scope: Some(SettingsSearchScope::ProjectDefaults), requires_thread_auto_settlement: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "compact-idle-threads", title: "Compact idle threads", to: "/settings/providers", target_id: None, search_terms: &["claude context compaction idle cache tokens usage summary resume"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "auto-settle-merged-threads", title: "Auto-settle merged threads", to: "/settings/threads", target_id: None, search_terms: &["pull request merge closed automatically sidebar"], scope: Some(SettingsSearchScope::ProjectDefaults), requires_thread_auto_settlement: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keep-threads-with-pull-requests", title: "Keep threads with a PR", to: "/settings/threads", target_id: Some("auto-settle-inactive-threads"), search_terms: &["pull request inactivity auto-settle merge close sidebar"], scope: Some(SettingsSearchScope::ProjectDefaults), requires_thread_auto_settlement: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "days-before-auto-settle", title: "Days of inactivity before auto-settle", to: "/settings/threads", target_id: Some("auto-settle-inactive-threads"), search_terms: &["thread timeout activity sidebar"], scope: Some(SettingsSearchScope::ProjectDefaults), requires_thread_auto_settlement: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "thread-notifications", title: "Thread notifications", to: "/settings/general", target_id: None, search_terms: &["notification sound alert completion input approval desktop"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "in-app-notifications", title: "In-app notifications", to: "/settings/general", target_id: None, search_terms: &["notification toast popup completion input approval failure"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "language", title: "Language", to: "/settings/general", target_id: None, search_terms: &["locale translation english deutsch german español spanish français french português portuguese brasil brazilian chinese 中文 japanese 日本語 korean 한국어 russian русский sprache idioma langue 语言 言語 언어 язык"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "time-format", title: "Time format", to: "/settings/general", target_id: None, search_terms: &["timestamp clock locale system browser os 12 hour 24 hour"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "response-streaming", title: "Response streaming", to: "/settings/threads", target_id: None, search_terms: &["output token paragraph buffered wait turn legacy"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "hide-whitespace-changes", title: "Hide whitespace changes", to: "/settings/diffs", target_id: None, search_terms: &["diff ignore spaces edits default"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "default-diff-file-state", title: "Default diff file state", to: "/settings/diffs", target_id: None, search_terms: &["collapsed expanded collapse expand files pull request pr code tab"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "diff-layout", title: "Diff layout", to: "/settings/diffs", target_id: None, search_terms: &["stacked split side by side unified inline view"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "proactive-panels", title: "Open pull requests and changes panels proactively", to: "/settings/diffs", target_id: None, search_terms: &["proactive automatically open diff pull request pr right panel agent completion"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "skills-in-slash-menu", title: "Show skills in slash menu", to: "/settings/chat", target_id: None, search_terms: &["command menu dollar $ slash /"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "composer-rich-text", title: "Rich text composer", to: "/settings/chat", target_id: None, search_terms: &["composer rich text tiptap bold italic markdown styled wysiwyg"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "send-shortcut", title: "Send shortcut", to: "/settings/chat", target_id: None, search_terms: &["enter return command ctrl multiline prompt new line composer"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "follow-up-behavior", title: "Follow-up behavior", to: "/settings/chat", target_id: None, search_terms: &["queue steer running turn send default behavior composer"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "provider-update-checks", title: "Provider update checks", to: "/settings/maintenance", target_id: None, search_terms: &["installed cli versions newer available codex claude cursor grok fx kiro opencode"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "continue-threads-after-server-update", title: "Continue threads after restarts", to: "/settings/maintenance", target_id: None, search_terms: &["resume running active interrupted work restart reboot machine crash desktop update automatically"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keep-awake-while-agents-work", title: "Keep awake while agents work", to: "/settings/maintenance", target_id: None, search_terms: &["caffeinate sleep prevent stay awake power laptop lid inhibit"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "background-activity", title: "Background activity", to: "/settings/maintenance", target_id: None, search_terms: &["balanced performance battery saver advanced git fetch provider health refresh host power monitor idle policy"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "new-threads", title: "New threads", to: "/settings/threads", target_id: None, search_terms: &["default workspace mode draft local worktree"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "worktree-submodules", title: "Submodules", to: "/settings/worktrees", target_id: None, search_terms: &["git submodule init recursive top-level none worktree t3.json"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "start-from-origin", title: "Start from remote", to: "/settings/worktrees", target_id: None, search_terms: &["new worktrees start remote origin latest fetched branch local"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "add-project-starts-in", title: "Add project starts in", to: "/settings/threads", target_id: None, search_terms: &["base directory folder browser path home"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "ghq-clone-layout", title: "Clone into host folders", to: "/settings/threads", target_id: None, search_terms: &["ghq clone destination host owner repository root layout"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "unpin-confirmation", title: "Unpin confirmation", to: "/settings/general", target_id: None, search_terms: &["ask before thread pinned section"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "archive-confirmation", title: "Archive confirmation", to: "/settings/general", target_id: None, search_terms: &["ask before thread second click inline action"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "delete-confirmation", title: "Delete confirmation", to: "/settings/general", target_id: None, search_terms: &["ask before thread chat history"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "quit-confirmation", title: "Quit shortcut", to: "/settings/general", target_id: None, search_terms: &["confirmation desktop app exit direct hold double click press twice"], scope: None, desktop_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "text-generation-model", title: "Text generation model", to: "/settings/threads", target_id: None, search_terms: &["generated thread titles source control content default provider"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "thread-title-instructions", title: "Thread title instructions", to: "/settings/threads", target_id: None, search_terms: &["generated thread titles prompt custom style naming rename regenerate"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "app-version", title: "Version", to: "/settings/about", target_id: None, search_terms: &["about check for updates download install upgrade release"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "update-track", title: "Update track", to: "/settings/about", target_id: None, search_terms: &["release channel stable latest nightly prerelease"], scope: None, release_channel_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "cli-command", title: "t3 command", to: "/settings/about", target_id: None, search_terms: &["cli terminal shell path install command line"], scope: None, desktop_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "mobile-app", title: "Mobile app", to: "/settings/about", target_id: None, search_terms: &["phone tablet iPhone iPad iOS Android App Store Google Play QR"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "welcome-page", title: "Welcome page", to: "/settings/about", target_id: None, search_terms: &["onboarding setup first run getting started agents import projects"], scope: None, primary_environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "privacy-policy", title: "Privacy policy", to: "/settings/about", target_id: None, search_terms: &["telemetry analytics usage data tracking legal opt out"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "telemetry-export", title: "OpenTelemetry export", to: "/settings/diagnostics", target_id: Some("telemetry-export"), search_terms: &["OTel OTLP telemetry export endpoints logs traces metrics Grafana"], scope: Some(SettingsSearchScope::Environment), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "diagnostics", title: "Diagnostics", to: "/settings/maintenance", target_id: None, search_terms: &["logs traces processes resource history failures spans cpu memory"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "open-source-licenses", title: "Open source licenses", to: "/settings/about", target_id: None, search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybindings", title: "Keybindings", to: "/settings/keybindings", target_id: None, search_terms: &["keyboard shortcuts hotkeys commands bindings json"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-appearance.cycle", title: "Appearance: Cycle", to: "/settings/keybindings", target_id: None, search_terms: &["appearance.cycle", "mod+alt+shift+a"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-chat.find", title: "Chat: Find", to: "/settings/keybindings", target_id: None, search_terms: &["chat.find", "mod+f"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-chat.new", title: "Chat: New", to: "/settings/keybindings", target_id: None, search_terms: &["chat.new", "mod+n", "mod+shift+o"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-chat.newLocal", title: "Chat: New Local", to: "/settings/keybindings", target_id: None, search_terms: &["chat.newLocal", "mod+shift+n"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-chat.newWithoutProject", title: "Chat: New Without Project", to: "/settings/keybindings", target_id: None, search_terms: &["chat.newWithoutProject", "mod+alt+n"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-commandPalette.toggle", title: "Command Palette: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["commandPalette.toggle", "mod+k"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.branch", title: "Composer: Branch", to: "/settings/keybindings", target_id: None, search_terms: &["composer.branch", "mod+shift+g"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.cycleHost", title: "Composer: Cycle Host", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["composer.cycleHost"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.decreaseEffort", title: "Composer: Decrease Effort", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["composer.decreaseEffort"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.effort", title: "Composer: Effort", to: "/settings/keybindings", target_id: None, search_terms: &["composer.effort", "mod+shift+e"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.host", title: "Composer: Host", to: "/settings/keybindings", target_id: None, search_terms: &["composer.host", "mod+shift+h"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.increaseEffort", title: "Composer: Increase Effort", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["composer.increaseEffort"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.mode", title: "Composer: Mode", to: "/settings/keybindings", target_id: None, search_terms: &["composer.mode", "mod+shift+a"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.sendAlternate", title: "Composer: Opposite Queue or Steer Action", to: "/settings/keybindings", target_id: None, search_terms: &["composer.sendAlternate", "mod+enter"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.previousWorktree", title: "Composer: Previous Worktree", to: "/settings/keybindings", target_id: None, search_terms: &["composer.previousWorktree", "mod+shift+l"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.sendAndNewThread", title: "Composer: Send and Start New Thread", to: "/settings/keybindings", target_id: None, search_terms: &["composer.sendAndNewThread", "mod+alt+enter"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.sendBackground", title: "Composer: Start in Background", to: "/settings/keybindings", target_id: None, search_terms: &["composer.sendBackground", "mod+enter", "mod+alt+enter"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.dictation", title: "Composer: Start or Finish Dictation", to: "/settings/keybindings", target_id: None, search_terms: &["composer.dictation", "mod+shift+d"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.stash", title: "Composer: Stash", to: "/settings/keybindings", target_id: None, search_terms: &["composer.stash", "mod+s"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-composer.workspace", title: "Composer: Workspace", to: "/settings/keybindings", target_id: None, search_terms: &["composer.workspace", "mod+shift+x"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-diff.toggle", title: "Diff: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["diff.toggle", "mod+d"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-editor.openFavorite", title: "Editor: Open Favorite", to: "/settings/keybindings", target_id: None, search_terms: &["editor.openFavorite", "mod+o"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-filePicker.toggle", title: "File Picker: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["filePicker.toggle", "mod+p"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-workspace.focusNext", title: "Focus Next Workspace Area", to: "/settings/keybindings", target_id: None, search_terms: &["workspace.focusNext", "f6", "mod+f6"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-workspace.focusPrevious", title: "Focus Previous Workspace Area", to: "/settings/keybindings", target_id: None, search_terms: &["workspace.focusPrevious", "shift+f6", "mod+shift+f6"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.1", title: "Model Picker: Jump: 1", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.1", "mod+1"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.2", title: "Model Picker: Jump: 2", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.2", "mod+2"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.3", title: "Model Picker: Jump: 3", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.3", "mod+3"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.4", title: "Model Picker: Jump: 4", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.4", "mod+4"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.5", title: "Model Picker: Jump: 5", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.5", "mod+5"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.6", title: "Model Picker: Jump: 6", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.6", "mod+6"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.7", title: "Model Picker: Jump: 7", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.7", "mod+7"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.8", title: "Model Picker: Jump: 8", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.8", "mod+8"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.jump.9", title: "Model Picker: Jump: 9", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.jump.9", "mod+9"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.nextProvider", title: "Model Picker: Next Provider", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.nextProvider", "mod+shift+arrowdown"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.previousProvider", title: "Model Picker: Previous Provider", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.previousProvider", "mod+shift+arrowup"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-modelPicker.toggle", title: "Model Picker: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["modelPicker.toggle", "mod+shift+m"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-navigation.back", title: "Navigation: Back", to: "/settings/keybindings", target_id: None, search_terms: &["navigation.back", "mod+["], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-navigation.forward", title: "Navigation: Forward", to: "/settings/keybindings", target_id: None, search_terms: &["navigation.forward", "mod+]"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.find", title: "Preview: Find on Page", to: "/settings/keybindings", target_id: None, search_terms: &["preview.find", "mod+f"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.focusUrl", title: "Preview: Focus URL", to: "/settings/keybindings", target_id: None, search_terms: &["preview.focusUrl", "mod+l"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.refresh", title: "Preview: Refresh", to: "/settings/keybindings", target_id: None, search_terms: &["preview.refresh", "mod+r"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.resetZoom", title: "Preview: Reset Zoom", to: "/settings/keybindings", target_id: None, search_terms: &["preview.resetZoom", "mod+0"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.toggle", title: "Preview: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["preview.toggle", "mod+shift+j"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.zoomIn", title: "Preview: Zoom In", to: "/settings/keybindings", target_id: None, search_terms: &["preview.zoomIn", "mod+=", "mod++"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-preview.zoomOut", title: "Preview: Zoom Out", to: "/settings/keybindings", target_id: None, search_terms: &["preview.zoomOut", "mod+-"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-projectSearch.toggle", title: "Project Search: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["projectSearch.toggle", "mod+shift+f"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.copyReference", title: "Pull Request: Copy Link or Thread", to: "/settings/keybindings", target_id: None, search_terms: &["thread.copyReference", "mod+shift+c"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-pullRequest.copyNumber", title: "Pull Request: Copy Number", to: "/settings/keybindings", target_id: None, search_terms: &["pullRequest.copyNumber", "mod+shift+k"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.editQueuedMessage", title: "Queue: Edit Last Queued Message", to: "/settings/keybindings", target_id: None, search_terms: &["thread.editQueuedMessage", "alt+arrowup"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.steerQueuedMessage", title: "Queue: Send First Queued Message", to: "/settings/keybindings", target_id: None, search_terms: &["thread.steerQueuedMessage", "mod+shift+enter"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-view.reopenClosed", title: "Reopen Closed Tab", to: "/settings/keybindings", target_id: None, search_terms: &["view.reopenClosed", "mod+shift+t"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-rightPanel.close", title: "Right Panel: Close", to: "/settings/keybindings", target_id: None, search_terms: &["rightPanel.close", "mod+w"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-rightPanel.new", title: "Right Panel: New", to: "/settings/keybindings", target_id: None, search_terms: &["rightPanel.new", "mod+t"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-rightPanel.toggle", title: "Right Panel: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["rightPanel.toggle", "mod+alt+b"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-rightPanel.toggleMaximized", title: "Right Panel: Toggle Maximized", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["rightPanel.toggleMaximized"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-sidebar.toggle", title: "Sidebar: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["sidebar.toggle", "mod+b"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-terminal.close", title: "Terminal: Close", to: "/settings/keybindings", target_id: None, search_terms: &["terminal.close", "mod+w"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-terminal.new", title: "Terminal: New", to: "/settings/keybindings", target_id: None, search_terms: &["terminal.new", "mod+n"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-terminal.split", title: "Terminal: Split", to: "/settings/keybindings", target_id: None, search_terms: &["terminal.split", "mod+d"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-terminal.splitVertical", title: "Terminal: Split Vertical", to: "/settings/keybindings", target_id: None, search_terms: &["terminal.splitVertical", "mod+shift+d"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-terminal.toggle", title: "Terminal: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["terminal.toggle", "mod+j"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-themeEditor.toggle", title: "Theme Editor: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["themeEditor.toggle", "mod+alt+shift+t"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-theme.select", title: "Theme: Select", to: "/settings/keybindings", target_id: None, search_terms: &["theme.select", "mod+alt+a"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-threadPanel.toggle", title: "Thread Panel: Toggle", to: "/settings/keybindings", target_id: None, search_terms: &["threadPanel.toggle", "mod+shift+b"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.1", title: "Thread: Jump: 1", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.1", "mod+1"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.2", title: "Thread: Jump: 2", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.2", "mod+2"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.3", title: "Thread: Jump: 3", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.3", "mod+3"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.4", title: "Thread: Jump: 4", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.4", "mod+4"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.5", title: "Thread: Jump: 5", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.5", "mod+5"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.6", title: "Thread: Jump: 6", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.6", "mod+6"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.7", title: "Thread: Jump: 7", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.7", "mod+7"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.8", title: "Thread: Jump: 8", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.8", "mod+8"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.jump.9", title: "Thread: Jump: 9", to: "/settings/keybindings", target_id: None, search_terms: &["thread.jump.9", "mod+9"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.next", title: "Thread: Next", to: "/settings/keybindings", target_id: None, search_terms: &["thread.next", "mod+shift+]"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.pin", title: "Thread: Pin", to: "/settings/keybindings", target_id: None, search_terms: &["thread.pin", "mod+shift+p"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.previous", title: "Thread: Previous", to: "/settings/keybindings", target_id: None, search_terms: &["thread.previous", "mod+shift+["], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.regenerateTitle", title: "Thread: Regenerate Title", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["thread.regenerateTitle"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.settle", title: "Thread: Settle", to: "/settings/keybindings", target_id: None, search_terms: &["thread.settle", "mod+shift+s"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.stop", title: "Thread: Stop", to: "/settings/keybindings", target_id: Some("keybindings"), search_terms: &["thread.stop"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-thread.undo", title: "Thread: Undo", to: "/settings/keybindings", target_id: None, search_terms: &["thread.undo", "mod+z"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.cost", title: "Usage: Cost", to: "/settings/keybindings", target_id: None, search_terms: &["usage.cost", "c"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.limits", title: "Usage: Limits", to: "/settings/keybindings", target_id: None, search_terms: &["usage.limits", "l"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.open", title: "Usage: Open", to: "/settings/keybindings", target_id: None, search_terms: &["usage.open", "mod+u"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.period.month", title: "Usage: Period: 30 days", to: "/settings/keybindings", target_id: None, search_terms: &["usage.period.month", "mod+shift+3"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.period.week", title: "Usage: Period: 7 days", to: "/settings/keybindings", target_id: None, search_terms: &["usage.period.week", "mod+shift+2"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.period.quarter", title: "Usage: Period: 90 days", to: "/settings/keybindings", target_id: None, search_terms: &["usage.period.quarter", "mod+shift+4"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.period.day", title: "Usage: Period: Past 24h", to: "/settings/keybindings", target_id: None, search_terms: &["usage.period.day", "mod+shift+1"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "keybinding-usage.tokens", title: "Usage: Tokens", to: "/settings/keybindings", target_id: None, search_terms: &["usage.tokens", "t"], scope: None, secondary: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-enabled", title: "SnapShots", to: "/settings/snap-shot", target_id: None, search_terms: &["window capture screenshot"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-accessibility", title: "Include app text", to: "/settings/snap-shot", target_id: Some("snap-shot-enabled"), search_terms: &["capture accessibility data text UI structure elements privacy omit agent context"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-shortcut", title: "Capture shortcut", to: "/settings/snap-shot", target_id: Some("snap-shot-enabled"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-sound", title: "Capture sound", to: "/settings/snap-shot", target_id: Some("snap-shot-enabled"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-flash", title: "Capture flash", to: "/settings/snap-shot", target_id: Some("snap-shot-enabled"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "snap-shot-animations", title: "Capture animations", to: "/settings/snap-shot", target_id: Some("snap-shot-enabled"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "providers", title: "Providers", to: "/settings/providers", target_id: None, search_terms: &["agents cli codex claude cursor grok fx kiro opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory codex_home shadow home endpoint arguments environment variables display name accent color custom favorite hidden auto compact native sessions import resume"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "usage-providers", title: "Usage providers", to: "/settings/providers", target_id: None, search_terms: &["usage sources CLIProxyAPI CLI proxy hub quota subscription limits management key add remove"], scope: None, provider_settings_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "text-generators", title: "Text generators", to: "/settings/providers", target_id: None, search_terms: &["model api api key openai openrouter anthropic ollama lm studio custom endpoint base url thread titles commit messages"], scope: None, provider_settings_only: true, text_generators_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "provider-health-check-interval", title: "Health check interval", to: "/settings/providers", target_id: None, search_terms: &["refresh availability versions auth state models background probes seconds off"], scope: None, provider_settings_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "scheduled-tasks", title: "Scheduled tasks", to: "/settings/scheduled-tasks", target_id: None, search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "agent-browser-access", title: "Agent browser access", to: "/settings/browser", target_id: None, search_terms: &["allow disable enable open drive preview tools sessions project override"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "device-sources", title: "Device sources", to: "/settings/devices", target_id: None, search_terms: &["device hosts ssh remote mac mini identity key connection eas expo cloud simlock pool gateway local simulators"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "agent-device-access", title: "Agents can use devices", to: "/settings/devices", target_id: Some("devices"), search_terms: &["allow simulator emulator ios android drive tools sessions"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "device-hub", title: "Use devices", to: "/settings/devices", target_id: Some("devices"), search_terms: &["device hub simulator emulator ios android install start version"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "device-platform-support", title: "Local simulators", to: "/settings/devices", target_id: Some("device-sources"), search_terms: &["simulator support xcode android studio sdk avd runtime"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-profiles", title: "Browser profiles", to: "/settings/browser", target_id: Some("browser"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-default-profile", title: "Default browser profile", to: "/settings/browser", target_id: Some("browser-profiles"), search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-default-viewport", title: "Default browser viewport", to: "/settings/browser", target_id: None, search_terms: &["preview size width height device desktop mobile rotate"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-default-zoom", title: "Default browser zoom", to: "/settings/browser", target_id: None, search_terms: &["preview page scale tabs percent"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-default-appearance", title: "Default browser appearance", to: "/settings/browser", target_id: None, search_terms: &["preview color scheme light dark system os"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-recording-frame-rate", title: "Browser recording frame rate", to: "/settings/browser", target_id: None, search_terms: &[], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-recording-key-presses", title: "Show key presses in recordings", to: "/settings/browser", target_id: None, search_terms: &["browser preview keyboard shortcuts keystrokes overlay capture"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-recording-mouse-presses", title: "Show mouse presses in recordings", to: "/settings/browser", target_id: None, search_terms: &["browser preview clicks buttons drag overlay capture"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-link-target", title: "Open links in", to: "/settings/browser", target_id: None, search_terms: &["links default browser in-app browser external open"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-search-engine", title: "Search engine", to: "/settings/browser", target_id: None, search_terms: &["address bar duckduckgo google bing brave kagi ecosia custom url"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "pull-request-links-open-in-app", title: "Open pull requests in T3 Code", to: "/settings/diffs", target_id: None, search_terms: &["pr commit links GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps browser external click default pull request view panel"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "browser-auto-show-floating-preview", title: "Auto-show floating preview", to: "/settings/browser", target_id: None, search_terms: &["agent opens browser device simulator pop into view hide"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "automatic-pull", title: "Automatically pull", to: "/settings/source-control", target_id: None, search_terms: &["auto pull default branch current checkout fast forward upstream"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "remove-agent-credits-on-merge", title: "Remove agent credits when merging", to: "/settings/source-control", target_id: None, search_terms: &["pull request GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps squash co-authored-by attribution claude codex generated"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "pull-request-merge-method", title: "Default merge method", to: "/settings/source-control", target_id: None, search_terms: &["pull request merge squash rebase last selected"], scope: Some(SettingsSearchScope::ProjectDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control", title: "Source control", to: "/settings/source-control", target_id: None, search_terms: &["version control git GitHub ghes enterprise Cursor Origin cursor origin GitLab GitCafe Forgejo gitea tea codeberg Bitbucket Azure DevOps hosting integrations credentials scan server environment"], scope: Some(SettingsSearchScope::EnvironmentDefaults), ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "git-fetch-interval", title: "Git fetch interval", to: "/settings/maintenance", target_id: Some("background-activity"), search_terms: &["automatic remote branch refresh background credentials security keys seconds off"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "worktree-branch-naming", title: "Worktree branch naming", to: "/settings/worktrees", target_id: None, search_terms: &["static semantic prefix custom prompt instructions feat fix refactor chore"], scope: Some(SettingsSearchScope::ProjectDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control-host-github", title: "GitHub accounts and token", to: "/settings/source-control", target_id: None, search_terms: &["GitHub ghes enterprise gh account login user host switch multiple accounts disable sign in token personal access token pat api key credential"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control-host-gitcafe", title: "GitCafe credentials", to: "/settings/source-control", target_id: None, search_terms: &["GitCafe token token credentials sign in"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control-host-bitbucket", title: "Bitbucket credentials", to: "/settings/source-control", target_id: None, search_terms: &["Bitbucket accessToken email apiToken token credentials sign in"], scope: Some(SettingsSearchScope::EnvironmentDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control-writing-style", title: "Commit and pull request writing", to: "/settings/source-control", target_id: None, search_terms: &["repository conventions conventional commits custom instructions commit messages change pr pull request merge request titles descriptions body style prompt write my own"], scope: None, environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "follow-change-request-templates", title: "Follow pull request templates", to: "/settings/source-control", target_id: None, search_terms: &["repository pr pull request merge request change request description structure"], scope: None, environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "source-control-writer-model", title: "Source control writer model", to: "/settings/source-control", target_id: None, search_terms: &["override generated commit change request pr titles descriptions branch bookmark"], scope: Some(SettingsSearchScope::ProjectDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "review-guides", title: "Review guides (beta)", to: "/settings/source-control", target_id: None, search_terms: &["pull request pr guided review guide tour beta experimental"], scope: None, environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "review-guide-model", title: "Review guide model", to: "/settings/source-control", target_id: Some("review-guides"), search_terms: &["pull request pr guided review guide brief maintainer"], scope: Some(SettingsSearchScope::ProjectDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "review-guide-instructions", title: "Review guide instructions", to: "/settings/source-control", target_id: Some("review-guides"), search_terms: &["pull request pr guided review guide preferences taste prompt custom"], scope: Some(SettingsSearchScope::ProjectDefaults), environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "project-actions", title: "Actions", to: "/settings/projects", target_id: None, search_terms: &["commands scripts setup run dev server checkout worktree t3.json import"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "environment-icon", title: "Environment icon", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["machine glyph sidebar mac mini studio laptop desktop server cloud vm"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "local-environment", title: "Local environment", to: "/settings/connections", target_id: None, search_terms: &["turn off on disable enable local server agents remote only restart"], scope: None, desktop_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "network-access", title: "Network access", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["expose backend remote pairing local machine interfaces host restart"], scope: None, local_backend_management_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "tailscale-https", title: "Tailscale HTTPS", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["serve magicdns endpoint remote secure network"], scope: None, desktop_only: true, local_backend_management_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "wsl-backend", title: "WSL backend", to: "/settings/access", target_id: None, search_terms: &["windows subsystem linux distro second server projects stop windows backend restart wsl only"], scope: None, desktop_only: true, windows_only: true, local_backend_management_only: true, wsl_available_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "t3-connect", title: "T3 Connect", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["managed tunnel cloud other devices remote tunnels limit t3 chat"], scope: None, desktop_only: true, cloud_only: true, local_environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "connect-device-approval", title: "Require approval for new devices", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["t3 connect devices approve deny trust revoke pairing code security account"], scope: None, cloud_only: true, managed_tunnel_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "hold-webhooks-while-offline", title: "Hold webhooks while offline", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["webhook automations offline queue mailbox t3 connect"], scope: None, cloud_only: true, local_environment_only: true, managed_tunnel_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "publish-agent-activity", title: "Publish agent activity", to: "/settings/access", target_id: Some("connections-environment"), search_terms: &["mobile push notifications live activities cloud tunnel"], scope: None, cloud_only: true, local_environment_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "connections-environment", title: "This machine", to: "/settings/access", target_id: None, search_terms: &["connections server backend local remote access administrative permissions scope pairing links qr code authorized clients sessions revoke endpoint"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "linked-environments", title: "Linked environments", to: "/settings/connections", target_id: Some("linked-environments"), search_terms: &["link peer another machine vps agents work there handoff pairing code"], scope: None, peer_links_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "remote-environments", title: "Environments", to: "/settings/connections", target_id: None, search_terms: &["add pair backend host code ssh config agent tunnel saved t3 connect"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "load-balancing", title: "Load balancing", to: "/settings/connections", target_id: None, search_terms: &["automatic machine environment resources cpu memory capacity preference weight shared projects"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "pull-request-routing", title: "Pull request sharing", to: "/settings/connections", target_id: None, search_terms: &["pull request routing trusted environments shared credentials permissions read actions source control GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps"], scope: None, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "secret-providers", title: "Secret providers", to: "/settings/secrets", target_id: None, search_terms: &["1password vault credentials api key"], scope: None, secrets_feature_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "secret-providers-add", title: "Add secret provider", to: "/settings/secrets", target_id: Some("secret-providers"), search_terms: &["new 1password vault op cli account"], scope: None, secrets_feature_only: true, ..SettingsSearchItem::BASE },
-    SettingsSearchItem { id: "archive", title: "Archived threads", to: "/settings/archived", target_id: None, search_terms: &["restore reopen deleted history projects"], scope: None, ..SettingsSearchItem::BASE },
+    SettingsSearchItem {
+        id: "storage-worktree-keep-when",
+        title: "Keep worktrees with local changes",
+        to: "/settings/worktrees",
+        target_id: Some("storage-worktrees"),
+        search_terms: &[
+            "any local files uncommitted changes edited tracked files ignored env build output cleanup",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "storage-delete-now",
+        title: "Delete now",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &["storage cleanup run now results report removed kept failed"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "storage-worktrees",
+        title: "Worktree cleanup",
+        to: "/settings/worktrees",
+        target_id: None,
+        search_terms: &[
+            "disk storage automatic delete deleted archived threads old inactive merged settled unchanged worktrees retention days project inherit off custom",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "storage-worktrees-location",
+        title: "Worktree location",
+        to: "/settings/worktrees",
+        target_id: None,
+        search_terms: &["worktree location folder directory path drive external disk"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "storage-artifacts",
+        title: "Artifacts and logs",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &[
+            "disk storage delete old browser artifacts screenshots captures rotated logs cleanup retention",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "project-defaults",
+        title: "Project defaults and overrides",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["model workspace environments projects inheritance checkout"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "project-overview",
+        title: "Project overview",
+        to: "/settings/projects",
+        target_id: None,
+        search_terms: &["name icon emoji image checkout remove delete"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "default-model",
+        title: "Default model",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["new thread project provider reasoning effort"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "fallback-model",
+        title: "Fallback model",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["fallback agent provider out of usage new threads"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "default-permissions",
+        title: "Permissions",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &[
+            "new thread default runtime mode supervised approvals auto accept edits full access",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "color-scheme",
+        title: "Color scheme",
+        to: "/settings/appearance",
+        target_id: Some("appearance"),
+        search_terms: &["appearance light dark system mode"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "theme",
+        title: "Themes",
+        to: "/settings/appearance",
+        target_id: Some("appearance"),
+        search_terms: &["appearance colors palette custom import"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "setting-appearance-contrast",
+        title: "Contrast",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["colors borders interface"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "setting-glass-opacity",
+        title: "Glass opacity",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["transparent transparency solid menus dialogs composer"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "diff-color-scheme",
+        title: "Diff colors",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &[
+            "red green blue orange additions deletions changes counts palette colorblind",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "chat-width",
+        title: "Chat width",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["wide full width column layout messages composer monitor"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "thread-details-items",
+        title: "Thread details",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &[
+            "customize show hide panel card environment editor scripts branch pull request git changes servers automations lineage usage limits 5 hour weekly quota tokens context window",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "effort-display",
+        title: "Effort display",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["reasoning effort thinking bars graph word label level composer"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "math-rendering",
+        title: "Render math",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["latex tex katex equations formulas markdown"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "panel-animations",
+        title: "Panel animations",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "environment-identification",
+        title: "Environment identification",
+        to: "/settings/appearance",
+        target_id: Some("appearance-interface"),
+        search_terms: &["dev nightly latest channel artwork pill label hide none"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "interface-font",
+        title: "Interface font",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography family size system sans"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "prompt-font",
+        title: "Prompt font",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography family size composer input"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "code-font",
+        title: "Code font",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography family size monospace code blocks diffs file previews"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "terminal-font",
+        title: "Terminal font",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography family size monospace output"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "separate-fonts",
+        title: "Separate fonts",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography advanced prompt code terminal font family size individually"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "font-smoothing",
+        title: "Font smoothing",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["typography text grayscale anti aliasing macos thin"],
+        scope: None,
+        mac_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "word-wrap",
+        title: "Word wrap",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &["long lines code blocks diffs file previews"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "composer-context",
+        title: "Composer context",
+        to: "/settings/appearance",
+        target_id: None,
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "project-grouping",
+        title: "Project grouping",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["combine matching repositories environments sidebar"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "project-order",
+        title: "Project order",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["sort projects sidebar manual created recent"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snooze-options",
+        title: "Snooze options",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["snooze presets times later tonight tomorrow next week remind"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snooze-limited-threads",
+        title: "Snooze until limits reset",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["usage quota rate limit reset wake recover continue"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "auto-resume-limited-threads",
+        title: "Resume after usage limits",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["usage quota rate limit reset recover continue"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "working-shelf",
+        title: "Working section",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["hide fold running monitoring threads inbox sidebar shelf"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "boring-sidebar",
+        title: "Boring sidebar (group by project)",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &["beta folders project tree classic sidebar"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "boring-sidebar-multiline",
+        title: "Two-line folder rows",
+        to: "/settings/labs",
+        target_id: Some("boring-sidebar"),
+        search_terms: &["beta boring sidebar folder rows multiline branch pull request details"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "tool-call-visibility",
+        title: "Tool calls in chat",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &[
+            "hide tool calls commands edits searches work log activity quiet chat zen final answers only",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "screen-reader-announcements",
+        title: "Screen reader announcements",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &[
+            "accessibility a11y screen reader nvda jaws voiceover orca narrator speech announce read aloud messages activity steps",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "screen-reader-window-title",
+        title: "Screen reader window title",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &[
+            "accessibility a11y screen reader nvda jaws voiceover orca narrator window title tab title alt tab taskbar thread status order working approval",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "guest-links",
+        title: "Guest links",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &["beta share guest invite link teammate watch t3 connect tunnel"],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "linked-environments-beta",
+        title: "Linked environments",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &["beta link another machine vps peer agents work there delegate"],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "prompt-suggestions-beta",
+        title: "Suggest next prompt",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &["beta tab autocomplete predict next message claude codex ghost text"],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "simlock-hosts",
+        title: "Simlock device hosts (alpha)",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &[
+            "beta alpha simlock callstack simulator emulator ios android pool lease gateway",
+        ],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "worktree-fast-checkout",
+        title: "Fast worktree checkout",
+        to: "/settings/labs",
+        target_id: None,
+        search_terms: &["beta fast worktree checkout clone apfs copy-on-write cache macos speed"],
+        scope: Some(SettingsSearchScope::Environment),
+        fast_worktree_checkout_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "voice-transcription-destination",
+        title: "Transcribe with",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &[
+            "send microphone audio dictation destination speech voice stt transcription environment machine consent privacy cloud OpenAI Grok OpenRouter",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "voice-microphone",
+        title: "Microphone",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["mic input audio device order priority preferred"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "dictation-shortcut-mode",
+        title: "Dictation shortcut",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice keyboard hotkey hold toggle auto"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-language",
+        title: "Transcription language",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice translate english auto detect"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-dictionary",
+        title: "Dictionary",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice transcription vocabulary names glossary alias"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-project-dictionary",
+        title: "Project dictionary",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &[
+            "speech voice transcription vocabulary shared dictionary team environment glossary",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-post-processing-model",
+        title: "Cleanup model",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice transcript cleanup provider model post-processing"],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-correction-word",
+        title: "Correction cue",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice cleanup sorry scratch that fix mistake"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-silence-filtering",
+        title: "Silence filtering",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["voice speech vad silero pauses noise"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "remove-filler-words",
+        title: "Remove filler words",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["voice speech transcription hesitation um uh cleanup"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-post-processing",
+        title: "Clean up transcripts",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech transcription polish clean provider prompt post-processing"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-models",
+        title: "Transcription models",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &[
+            "speech voice stt download whisper parakeet canary moonshine accuracy speed benchmark languages",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "speech-hardware",
+        title: "Transcription hardware and model unloading",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["speech voice stt advanced gpu cpu acceleration memory unload idle"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "microphone-test",
+        title: "Test microphone",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["test mic audio playback loopback record input level"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "transcription-test",
+        title: "Test model",
+        to: "/settings/voice",
+        target_id: None,
+        search_terms: &["test voice speech model transcription recognition"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "auto-settle-inactive-threads",
+        title: "Auto-settle inactive threads",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["sidebar inactivity days no activity automatically"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        requires_thread_auto_settlement: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "compact-idle-threads",
+        title: "Compact idle threads",
+        to: "/settings/providers",
+        target_id: None,
+        search_terms: &["claude context compaction idle cache tokens usage summary resume"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "auto-settle-merged-threads",
+        title: "Auto-settle merged threads",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["pull request merge closed automatically sidebar"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        requires_thread_auto_settlement: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keep-threads-with-pull-requests",
+        title: "Keep threads with a PR",
+        to: "/settings/threads",
+        target_id: Some("auto-settle-inactive-threads"),
+        search_terms: &["pull request inactivity auto-settle merge close sidebar"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        requires_thread_auto_settlement: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "days-before-auto-settle",
+        title: "Days of inactivity before auto-settle",
+        to: "/settings/threads",
+        target_id: Some("auto-settle-inactive-threads"),
+        search_terms: &["thread timeout activity sidebar"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        requires_thread_auto_settlement: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "thread-notifications",
+        title: "Thread notifications",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["notification sound alert completion input approval desktop"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "in-app-notifications",
+        title: "In-app notifications",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["notification toast popup completion input approval failure"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "language",
+        title: "Language",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &[
+            "locale translation english deutsch german español spanish français french português portuguese brasil brazilian chinese 中文 japanese 日本語 korean 한국어 russian русский sprache idioma langue 语言 言語 언어 язык",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "time-format",
+        title: "Time format",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["timestamp clock locale system browser os 12 hour 24 hour"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "response-streaming",
+        title: "Response streaming",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["output token paragraph buffered wait turn legacy"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "hide-whitespace-changes",
+        title: "Hide whitespace changes",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &["diff ignore spaces edits default"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "default-diff-file-state",
+        title: "Default diff file state",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &["collapsed expanded collapse expand files pull request pr code tab"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "diff-layout",
+        title: "Diff layout",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &["stacked split side by side unified inline view"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "proactive-panels",
+        title: "Open pull requests and changes panels proactively",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &[
+            "proactive automatically open diff pull request pr right panel agent completion",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "skills-in-slash-menu",
+        title: "Show skills in slash menu",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &["command menu dollar $ slash /"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "composer-rich-text",
+        title: "Rich text composer",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &["composer rich text tiptap bold italic markdown styled wysiwyg"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "send-shortcut",
+        title: "Send shortcut",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &["enter return command ctrl multiline prompt new line composer"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "follow-up-behavior",
+        title: "Follow-up behavior",
+        to: "/settings/chat",
+        target_id: None,
+        search_terms: &["queue steer running turn send default behavior composer"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "provider-update-checks",
+        title: "Provider update checks",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &[
+            "installed cli versions newer available codex claude cursor grok fx kiro opencode",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "continue-threads-after-server-update",
+        title: "Continue threads after restarts",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &[
+            "resume running active interrupted work restart reboot machine crash desktop update automatically",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keep-awake-while-agents-work",
+        title: "Keep awake while agents work",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &["caffeinate sleep prevent stay awake power laptop lid inhibit"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "background-activity",
+        title: "Background activity",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &[
+            "balanced performance battery saver advanced git fetch provider health refresh host power monitor idle policy",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "new-threads",
+        title: "New threads",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["default workspace mode draft local worktree"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "worktree-submodules",
+        title: "Submodules",
+        to: "/settings/worktrees",
+        target_id: None,
+        search_terms: &["git submodule init recursive top-level none worktree t3.json"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "start-from-origin",
+        title: "Start from remote",
+        to: "/settings/worktrees",
+        target_id: None,
+        search_terms: &["new worktrees start remote origin latest fetched branch local"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "add-project-starts-in",
+        title: "Add project starts in",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["base directory folder browser path home"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "ghq-clone-layout",
+        title: "Clone into host folders",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["ghq clone destination host owner repository root layout"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "unpin-confirmation",
+        title: "Unpin confirmation",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["ask before thread pinned section"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "archive-confirmation",
+        title: "Archive confirmation",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["ask before thread second click inline action"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "delete-confirmation",
+        title: "Delete confirmation",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["ask before thread chat history"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "quit-confirmation",
+        title: "Quit shortcut",
+        to: "/settings/general",
+        target_id: None,
+        search_terms: &["confirmation desktop app exit direct hold double click press twice"],
+        scope: None,
+        desktop_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "text-generation-model",
+        title: "Text generation model",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["generated thread titles source control content default provider"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "thread-title-instructions",
+        title: "Thread title instructions",
+        to: "/settings/threads",
+        target_id: None,
+        search_terms: &["generated thread titles prompt custom style naming rename regenerate"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "app-version",
+        title: "Version",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["about check for updates download install upgrade release"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "update-track",
+        title: "Update track",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["release channel stable latest nightly prerelease"],
+        scope: None,
+        release_channel_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "cli-command",
+        title: "t3 command",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["cli terminal shell path install command line"],
+        scope: None,
+        desktop_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "mobile-app",
+        title: "Mobile app",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["phone tablet iPhone iPad iOS Android App Store Google Play QR"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "welcome-page",
+        title: "Welcome page",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["onboarding setup first run getting started agents import projects"],
+        scope: None,
+        primary_environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "privacy-policy",
+        title: "Privacy policy",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &["telemetry analytics usage data tracking legal opt out"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "telemetry-export",
+        title: "OpenTelemetry export",
+        to: "/settings/diagnostics",
+        target_id: Some("telemetry-export"),
+        search_terms: &["OTel OTLP telemetry export endpoints logs traces metrics Grafana"],
+        scope: Some(SettingsSearchScope::Environment),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "diagnostics",
+        title: "Diagnostics",
+        to: "/settings/maintenance",
+        target_id: None,
+        search_terms: &["logs traces processes resource history failures spans cpu memory"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "open-source-licenses",
+        title: "Open source licenses",
+        to: "/settings/about",
+        target_id: None,
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybindings",
+        title: "Keybindings",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["keyboard shortcuts hotkeys commands bindings json"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-appearance.cycle",
+        title: "Appearance: Cycle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["appearance.cycle", "mod+alt+shift+a"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-chat.find",
+        title: "Chat: Find",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["chat.find", "mod+f"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-chat.new",
+        title: "Chat: New",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["chat.new", "mod+n", "mod+shift+o"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-chat.newLocal",
+        title: "Chat: New Local",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["chat.newLocal", "mod+shift+n"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-chat.newWithoutProject",
+        title: "Chat: New Without Project",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["chat.newWithoutProject", "mod+alt+n"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-commandPalette.toggle",
+        title: "Command Palette: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["commandPalette.toggle", "mod+k"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.branch",
+        title: "Composer: Branch",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.branch", "mod+shift+g"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.cycleHost",
+        title: "Composer: Cycle Host",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["composer.cycleHost"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.decreaseEffort",
+        title: "Composer: Decrease Effort",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["composer.decreaseEffort"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.effort",
+        title: "Composer: Effort",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.effort", "mod+shift+e"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.host",
+        title: "Composer: Host",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.host", "mod+shift+h"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.increaseEffort",
+        title: "Composer: Increase Effort",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["composer.increaseEffort"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.mode",
+        title: "Composer: Mode",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.mode", "mod+shift+a"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.sendAlternate",
+        title: "Composer: Opposite Queue or Steer Action",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.sendAlternate", "mod+enter"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.previousWorktree",
+        title: "Composer: Previous Worktree",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.previousWorktree", "mod+shift+l"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.sendAndNewThread",
+        title: "Composer: Send and Start New Thread",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.sendAndNewThread", "mod+alt+enter"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.sendBackground",
+        title: "Composer: Start in Background",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.sendBackground", "mod+enter", "mod+alt+enter"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.dictation",
+        title: "Composer: Start or Finish Dictation",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.dictation", "mod+shift+d"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.stash",
+        title: "Composer: Stash",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.stash", "mod+s"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-composer.workspace",
+        title: "Composer: Workspace",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["composer.workspace", "mod+shift+x"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-diff.toggle",
+        title: "Diff: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["diff.toggle", "mod+d"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-editor.openFavorite",
+        title: "Editor: Open Favorite",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["editor.openFavorite", "mod+o"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-filePicker.toggle",
+        title: "File Picker: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["filePicker.toggle", "mod+p"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-workspace.focusNext",
+        title: "Focus Next Workspace Area",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["workspace.focusNext", "f6", "mod+f6"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-workspace.focusPrevious",
+        title: "Focus Previous Workspace Area",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["workspace.focusPrevious", "shift+f6", "mod+shift+f6"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.1",
+        title: "Model Picker: Jump: 1",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.1", "mod+1"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.2",
+        title: "Model Picker: Jump: 2",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.2", "mod+2"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.3",
+        title: "Model Picker: Jump: 3",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.3", "mod+3"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.4",
+        title: "Model Picker: Jump: 4",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.4", "mod+4"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.5",
+        title: "Model Picker: Jump: 5",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.5", "mod+5"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.6",
+        title: "Model Picker: Jump: 6",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.6", "mod+6"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.7",
+        title: "Model Picker: Jump: 7",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.7", "mod+7"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.8",
+        title: "Model Picker: Jump: 8",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.8", "mod+8"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.jump.9",
+        title: "Model Picker: Jump: 9",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.jump.9", "mod+9"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.nextProvider",
+        title: "Model Picker: Next Provider",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.nextProvider", "mod+shift+arrowdown"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.previousProvider",
+        title: "Model Picker: Previous Provider",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.previousProvider", "mod+shift+arrowup"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-modelPicker.toggle",
+        title: "Model Picker: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["modelPicker.toggle", "mod+shift+m"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-navigation.back",
+        title: "Navigation: Back",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["navigation.back", "mod+["],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-navigation.forward",
+        title: "Navigation: Forward",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["navigation.forward", "mod+]"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.find",
+        title: "Preview: Find on Page",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.find", "mod+f"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.focusUrl",
+        title: "Preview: Focus URL",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.focusUrl", "mod+l"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.refresh",
+        title: "Preview: Refresh",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.refresh", "mod+r"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.resetZoom",
+        title: "Preview: Reset Zoom",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.resetZoom", "mod+0"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.toggle",
+        title: "Preview: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.toggle", "mod+shift+j"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.zoomIn",
+        title: "Preview: Zoom In",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.zoomIn", "mod+=", "mod++"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-preview.zoomOut",
+        title: "Preview: Zoom Out",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["preview.zoomOut", "mod+-"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-projectSearch.toggle",
+        title: "Project Search: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["projectSearch.toggle", "mod+shift+f"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.copyReference",
+        title: "Pull Request: Copy Link or Thread",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.copyReference", "mod+shift+c"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-pullRequest.copyNumber",
+        title: "Pull Request: Copy Number",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["pullRequest.copyNumber", "mod+shift+k"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.editQueuedMessage",
+        title: "Queue: Edit Last Queued Message",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.editQueuedMessage", "alt+arrowup"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.steerQueuedMessage",
+        title: "Queue: Send First Queued Message",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.steerQueuedMessage", "mod+shift+enter"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-view.reopenClosed",
+        title: "Reopen Closed Tab",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["view.reopenClosed", "mod+shift+t"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-rightPanel.close",
+        title: "Right Panel: Close",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["rightPanel.close", "mod+w"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-rightPanel.new",
+        title: "Right Panel: New",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["rightPanel.new", "mod+t"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-rightPanel.toggle",
+        title: "Right Panel: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["rightPanel.toggle", "mod+alt+b"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-rightPanel.toggleMaximized",
+        title: "Right Panel: Toggle Maximized",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["rightPanel.toggleMaximized"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-sidebar.toggle",
+        title: "Sidebar: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["sidebar.toggle", "mod+b"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-terminal.close",
+        title: "Terminal: Close",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["terminal.close", "mod+w"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-terminal.new",
+        title: "Terminal: New",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["terminal.new", "mod+n"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-terminal.split",
+        title: "Terminal: Split",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["terminal.split", "mod+d"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-terminal.splitVertical",
+        title: "Terminal: Split Vertical",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["terminal.splitVertical", "mod+shift+d"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-terminal.toggle",
+        title: "Terminal: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["terminal.toggle", "mod+j"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-themeEditor.toggle",
+        title: "Theme Editor: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["themeEditor.toggle", "mod+alt+shift+t"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-theme.select",
+        title: "Theme: Select",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["theme.select", "mod+alt+a"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-threadPanel.toggle",
+        title: "Thread Panel: Toggle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["threadPanel.toggle", "mod+shift+b"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.1",
+        title: "Thread: Jump: 1",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.1", "mod+1"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.2",
+        title: "Thread: Jump: 2",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.2", "mod+2"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.3",
+        title: "Thread: Jump: 3",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.3", "mod+3"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.4",
+        title: "Thread: Jump: 4",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.4", "mod+4"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.5",
+        title: "Thread: Jump: 5",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.5", "mod+5"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.6",
+        title: "Thread: Jump: 6",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.6", "mod+6"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.7",
+        title: "Thread: Jump: 7",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.7", "mod+7"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.8",
+        title: "Thread: Jump: 8",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.8", "mod+8"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.jump.9",
+        title: "Thread: Jump: 9",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.jump.9", "mod+9"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.next",
+        title: "Thread: Next",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.next", "mod+shift+]"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.pin",
+        title: "Thread: Pin",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.pin", "mod+shift+p"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.previous",
+        title: "Thread: Previous",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.previous", "mod+shift+["],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.regenerateTitle",
+        title: "Thread: Regenerate Title",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["thread.regenerateTitle"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.settle",
+        title: "Thread: Settle",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.settle", "mod+shift+s"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.stop",
+        title: "Thread: Stop",
+        to: "/settings/keybindings",
+        target_id: Some("keybindings"),
+        search_terms: &["thread.stop"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-thread.undo",
+        title: "Thread: Undo",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["thread.undo", "mod+z"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.cost",
+        title: "Usage: Cost",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.cost", "c"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.limits",
+        title: "Usage: Limits",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.limits", "l"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.open",
+        title: "Usage: Open",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.open", "mod+u"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.period.month",
+        title: "Usage: Period: 30 days",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.period.month", "mod+shift+3"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.period.week",
+        title: "Usage: Period: 7 days",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.period.week", "mod+shift+2"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.period.quarter",
+        title: "Usage: Period: 90 days",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.period.quarter", "mod+shift+4"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.period.day",
+        title: "Usage: Period: Past 24h",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.period.day", "mod+shift+1"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "keybinding-usage.tokens",
+        title: "Usage: Tokens",
+        to: "/settings/keybindings",
+        target_id: None,
+        search_terms: &["usage.tokens", "t"],
+        scope: None,
+        secondary: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-enabled",
+        title: "SnapShots",
+        to: "/settings/snap-shot",
+        target_id: None,
+        search_terms: &["window capture screenshot"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-accessibility",
+        title: "Include app text",
+        to: "/settings/snap-shot",
+        target_id: Some("snap-shot-enabled"),
+        search_terms: &[
+            "capture accessibility data text UI structure elements privacy omit agent context",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-shortcut",
+        title: "Capture shortcut",
+        to: "/settings/snap-shot",
+        target_id: Some("snap-shot-enabled"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-sound",
+        title: "Capture sound",
+        to: "/settings/snap-shot",
+        target_id: Some("snap-shot-enabled"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-flash",
+        title: "Capture flash",
+        to: "/settings/snap-shot",
+        target_id: Some("snap-shot-enabled"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "snap-shot-animations",
+        title: "Capture animations",
+        to: "/settings/snap-shot",
+        target_id: Some("snap-shot-enabled"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "providers",
+        title: "Providers",
+        to: "/settings/providers",
+        target_id: None,
+        search_terms: &[
+            "agents cli codex claude cursor grok fx kiro opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory codex_home shadow home endpoint arguments environment variables display name accent color custom favorite hidden auto compact native sessions import resume",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "usage-providers",
+        title: "Usage providers",
+        to: "/settings/providers",
+        target_id: None,
+        search_terms: &[
+            "usage sources CLIProxyAPI CLI proxy hub quota subscription limits management key add remove",
+        ],
+        scope: None,
+        provider_settings_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "text-generators",
+        title: "Text generators",
+        to: "/settings/providers",
+        target_id: None,
+        search_terms: &[
+            "model api api key openai openrouter anthropic ollama lm studio custom endpoint base url thread titles commit messages",
+        ],
+        scope: None,
+        provider_settings_only: true,
+        text_generators_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "provider-health-check-interval",
+        title: "Health check interval",
+        to: "/settings/providers",
+        target_id: None,
+        search_terms: &[
+            "refresh availability versions auth state models background probes seconds off",
+        ],
+        scope: None,
+        provider_settings_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "scheduled-tasks",
+        title: "Scheduled tasks",
+        to: "/settings/scheduled-tasks",
+        target_id: None,
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "agent-browser-access",
+        title: "Agent browser access",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["allow disable enable open drive preview tools sessions project override"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "device-sources",
+        title: "Device sources",
+        to: "/settings/devices",
+        target_id: None,
+        search_terms: &[
+            "device hosts ssh remote mac mini identity key connection eas expo cloud simlock pool gateway local simulators",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "agent-device-access",
+        title: "Agents can use devices",
+        to: "/settings/devices",
+        target_id: Some("devices"),
+        search_terms: &["allow simulator emulator ios android drive tools sessions"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "device-hub",
+        title: "Use devices",
+        to: "/settings/devices",
+        target_id: Some("devices"),
+        search_terms: &["device hub simulator emulator ios android install start version"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "device-platform-support",
+        title: "Local simulators",
+        to: "/settings/devices",
+        target_id: Some("device-sources"),
+        search_terms: &["simulator support xcode android studio sdk avd runtime"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-profiles",
+        title: "Browser profiles",
+        to: "/settings/browser",
+        target_id: Some("browser"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-default-profile",
+        title: "Default browser profile",
+        to: "/settings/browser",
+        target_id: Some("browser-profiles"),
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-default-viewport",
+        title: "Default browser viewport",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["preview size width height device desktop mobile rotate"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-default-zoom",
+        title: "Default browser zoom",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["preview page scale tabs percent"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-default-appearance",
+        title: "Default browser appearance",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["preview color scheme light dark system os"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-recording-frame-rate",
+        title: "Browser recording frame rate",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &[],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-recording-key-presses",
+        title: "Show key presses in recordings",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["browser preview keyboard shortcuts keystrokes overlay capture"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-recording-mouse-presses",
+        title: "Show mouse presses in recordings",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["browser preview clicks buttons drag overlay capture"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-link-target",
+        title: "Open links in",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["links default browser in-app browser external open"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-search-engine",
+        title: "Search engine",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["address bar duckduckgo google bing brave kagi ecosia custom url"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "pull-request-links-open-in-app",
+        title: "Open pull requests in T3 Code",
+        to: "/settings/diffs",
+        target_id: None,
+        search_terms: &[
+            "pr commit links GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps browser external click default pull request view panel",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "browser-auto-show-floating-preview",
+        title: "Auto-show floating preview",
+        to: "/settings/browser",
+        target_id: None,
+        search_terms: &["agent opens browser device simulator pop into view hide"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "automatic-pull",
+        title: "Automatically pull",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &["auto pull default branch current checkout fast forward upstream"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "remove-agent-credits-on-merge",
+        title: "Remove agent credits when merging",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "pull request GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps squash co-authored-by attribution claude codex generated",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "pull-request-merge-method",
+        title: "Default merge method",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &["pull request merge squash rebase last selected"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control",
+        title: "Source control",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "version control git GitHub ghes enterprise Cursor Origin cursor origin GitLab GitCafe Forgejo gitea tea codeberg Bitbucket Azure DevOps hosting integrations credentials scan server environment",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "git-fetch-interval",
+        title: "Git fetch interval",
+        to: "/settings/maintenance",
+        target_id: Some("background-activity"),
+        search_terms: &[
+            "automatic remote branch refresh background credentials security keys seconds off",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "worktree-branch-naming",
+        title: "Worktree branch naming",
+        to: "/settings/worktrees",
+        target_id: None,
+        search_terms: &[
+            "static semantic prefix custom prompt instructions feat fix refactor chore",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control-host-github",
+        title: "GitHub accounts and token",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "GitHub ghes enterprise gh account login user host switch multiple accounts disable sign in token personal access token pat api key credential",
+        ],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control-host-gitcafe",
+        title: "GitCafe credentials",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &["GitCafe token token credentials sign in"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control-host-bitbucket",
+        title: "Bitbucket credentials",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &["Bitbucket accessToken email apiToken token credentials sign in"],
+        scope: Some(SettingsSearchScope::EnvironmentDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control-writing-style",
+        title: "Commit and pull request writing",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "repository conventions conventional commits custom instructions commit messages change pr pull request merge request titles descriptions body style prompt write my own",
+        ],
+        scope: None,
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "follow-change-request-templates",
+        title: "Follow pull request templates",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "repository pr pull request merge request change request description structure",
+        ],
+        scope: None,
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "source-control-writer-model",
+        title: "Source control writer model",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &[
+            "override generated commit change request pr titles descriptions branch bookmark",
+        ],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "review-guides",
+        title: "Review guides (beta)",
+        to: "/settings/source-control",
+        target_id: None,
+        search_terms: &["pull request pr guided review guide tour beta experimental"],
+        scope: None,
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "review-guide-model",
+        title: "Review guide model",
+        to: "/settings/source-control",
+        target_id: Some("review-guides"),
+        search_terms: &["pull request pr guided review guide brief maintainer"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "review-guide-instructions",
+        title: "Review guide instructions",
+        to: "/settings/source-control",
+        target_id: Some("review-guides"),
+        search_terms: &["pull request pr guided review guide preferences taste prompt custom"],
+        scope: Some(SettingsSearchScope::ProjectDefaults),
+        environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "project-actions",
+        title: "Actions",
+        to: "/settings/projects",
+        target_id: None,
+        search_terms: &["commands scripts setup run dev server checkout worktree t3.json import"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "environment-icon",
+        title: "Environment icon",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["machine glyph sidebar mac mini studio laptop desktop server cloud vm"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "local-environment",
+        title: "Local environment",
+        to: "/settings/connections",
+        target_id: None,
+        search_terms: &["turn off on disable enable local server agents remote only restart"],
+        scope: None,
+        desktop_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "network-access",
+        title: "Network access",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["expose backend remote pairing local machine interfaces host restart"],
+        scope: None,
+        local_backend_management_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "tailscale-https",
+        title: "Tailscale HTTPS",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["serve magicdns endpoint remote secure network"],
+        scope: None,
+        desktop_only: true,
+        local_backend_management_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "wsl-backend",
+        title: "WSL backend",
+        to: "/settings/access",
+        target_id: None,
+        search_terms: &[
+            "windows subsystem linux distro second server projects stop windows backend restart wsl only",
+        ],
+        scope: None,
+        desktop_only: true,
+        windows_only: true,
+        local_backend_management_only: true,
+        wsl_available_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "t3-connect",
+        title: "T3 Connect",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["managed tunnel cloud other devices remote tunnels limit t3 chat"],
+        scope: None,
+        desktop_only: true,
+        cloud_only: true,
+        local_environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "connect-device-approval",
+        title: "Require approval for new devices",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &[
+            "t3 connect devices approve deny trust revoke pairing code security account",
+        ],
+        scope: None,
+        cloud_only: true,
+        managed_tunnel_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "hold-webhooks-while-offline",
+        title: "Hold webhooks while offline",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["webhook automations offline queue mailbox t3 connect"],
+        scope: None,
+        cloud_only: true,
+        local_environment_only: true,
+        managed_tunnel_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "publish-agent-activity",
+        title: "Publish agent activity",
+        to: "/settings/access",
+        target_id: Some("connections-environment"),
+        search_terms: &["mobile push notifications live activities cloud tunnel"],
+        scope: None,
+        cloud_only: true,
+        local_environment_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "connections-environment",
+        title: "This machine",
+        to: "/settings/access",
+        target_id: None,
+        search_terms: &[
+            "connections server backend local remote access administrative permissions scope pairing links qr code authorized clients sessions revoke endpoint",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "linked-environments",
+        title: "Linked environments",
+        to: "/settings/connections",
+        target_id: Some("linked-environments"),
+        search_terms: &["link peer another machine vps agents work there handoff pairing code"],
+        scope: None,
+        peer_links_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "remote-environments",
+        title: "Environments",
+        to: "/settings/connections",
+        target_id: None,
+        search_terms: &["add pair backend host code ssh config agent tunnel saved t3 connect"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "load-balancing",
+        title: "Load balancing",
+        to: "/settings/connections",
+        target_id: None,
+        search_terms: &[
+            "automatic machine environment resources cpu memory capacity preference weight shared projects",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "pull-request-routing",
+        title: "Pull request sharing",
+        to: "/settings/connections",
+        target_id: None,
+        search_terms: &[
+            "pull request routing trusted environments shared credentials permissions read actions source control GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps",
+        ],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "secret-providers",
+        title: "Secret providers",
+        to: "/settings/secrets",
+        target_id: None,
+        search_terms: &["1password vault credentials api key"],
+        scope: None,
+        secrets_feature_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "secret-providers-add",
+        title: "Add secret provider",
+        to: "/settings/secrets",
+        target_id: Some("secret-providers"),
+        search_terms: &["new 1password vault op cli account"],
+        scope: None,
+        secrets_feature_only: true,
+        ..SettingsSearchItem::BASE
+    },
+    SettingsSearchItem {
+        id: "archive",
+        title: "Archived threads",
+        to: "/settings/archived",
+        target_id: None,
+        search_terms: &["restore reopen deleted history projects"],
+        scope: None,
+        ..SettingsSearchItem::BASE
+    },
 ];

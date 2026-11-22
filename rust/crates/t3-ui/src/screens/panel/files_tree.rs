@@ -42,7 +42,12 @@ pub trait FileTreeHandle {
 
 /// The Files panel's client services (`runtime/services/files.rs`).
 pub trait FilesService {
-    fn tree(&self, environment: &EnvironmentId, cwd: &str, host_folder: bool) -> Rc<dyn FileTreeHandle>;
+    fn tree(
+        &self,
+        environment: &EnvironmentId,
+        cwd: &str,
+        host_folder: bool,
+    ) -> Rc<dyn FileTreeHandle>;
     fn read_access(&self, environment: &EnvironmentId) -> ReadAccess;
     fn access_changes(&self, environment: &EnvironmentId) -> LocalBoxStream<'static, ()>;
     /// A web `localStorage` preference, kept in the client's local preferences.
@@ -93,19 +98,29 @@ pub fn file_explorer_pane(
     let start = signal(0.0_f32);
     let service = runtime.0.clone();
     watch(async move {
-        if let Some(saved) = service.preference(EXPLORER_WIDTH_KEY).await.and_then(|v| v.as_f64()) {
+        if let Some(saved) = service
+            .preference(EXPLORER_WIDTH_KEY)
+            .await
+            .and_then(|v| v.as_f64())
+        {
             width.try_set(saved as f32);
         }
     });
     let save = runtime.0.clone();
     let clamped = computed(move || explorer_width(width.get(), row_width.get()));
-    let pane = view()
-        .label(t("File explorer"))
-        .app_class(tw(&cn([
-            Some("relative flex min-h-0 min-w-0 shrink-0 bg-background"),
-            Some(if resizable { "border-l border-border/60" } else { "flex-1" }),
-        ])));
-    let pane = if resizable { pane.w(move || px(clamped.get())) } else { pane };
+    let pane = view().label(t("File explorer")).app_class(tw(&cn([
+        Some("relative flex min-h-0 min-w-0 shrink-0 bg-background"),
+        Some(if resizable {
+            "border-l border-border/60"
+        } else {
+            "flex-1"
+        }),
+    ])));
+    let pane = if resizable {
+        pane.w(move || px(clamped.get()))
+    } else {
+        pane
+    };
     pane.child(resizable.then(move || {
             nsh_base::resize_handle()
                 .test_id("file-explorer-resize")
@@ -123,7 +138,10 @@ pub fn file_explorer_pane(
         .child(children)
 }
 
-fn with_tooltip(caption: impl Fn() -> String + 'static, control: impl IntoElement) -> impl IntoElement {
+fn with_tooltip(
+    caption: impl Fn() -> String + 'static,
+    control: impl IntoElement,
+) -> impl IntoElement {
     view()
         .app_class(tw("inline-flex shrink-0"))
         .tooltip(tooltip(
@@ -152,7 +170,10 @@ pub struct FileBrowserProps {
 
 /// The tree's rows as NSH items. A folder not listed yet (or collapsed) holds one placeholder
 /// row, so it can expand before its children are known.
-fn tree_items(nodes: &[FileTreeNode], states: &mut BTreeMap<Rc<str>, (bool, bool)>) -> Vec<nsh_base::TreeItem> {
+fn tree_items(
+    nodes: &[FileTreeNode],
+    states: &mut BTreeMap<Rc<str>, (bool, bool)>,
+) -> Vec<nsh_base::TreeItem> {
     nodes
         .iter()
         .map(|node| {
@@ -162,7 +183,8 @@ fn tree_items(nodes: &[FileTreeNode], states: &mut BTreeMap<Rc<str>, (bool, bool
                 (ProjectEntryKind::File, _) => item,
                 (_, Some(children)) => item.children(tree_items(children, states)),
                 (_, None) => item.child(
-                    nsh_base::TreeItem::new(SharedString::from(format!("{}\u{0}", node.id)), "").disabled(true),
+                    nsh_base::TreeItem::new(SharedString::from(format!("{}\u{0}", node.id)), "")
+                        .disabled(true),
                 ),
             }
         })
@@ -171,7 +193,9 @@ fn tree_items(nodes: &[FileTreeNode], states: &mut BTreeMap<Rc<str>, (bool, bool
 
 /// Port of FileBrowserPanel.
 pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> impl IntoElement {
-    let handle = runtime.0.tree(&props.environment, &props.cwd, props.host_folder);
+    let handle = runtime
+        .0
+        .tree(&props.environment, &props.cwd, props.host_folder);
     let view_state = signal_with(handle.view(), nsh_core::element::SignalEquals::Never);
     let selected = signal(props.selected_path.get_untracked());
     let tree_ref = component_ref::<nsh_base::Tree>();
@@ -191,7 +215,8 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
     let reveal_id = props.reveal_id;
     let try_reveal = move || {
         let path = selected_path.get_untracked();
-        if let Some(reveal) = handle.with(|h| h.reveal(path.as_deref(), reveal_id.get_untracked())) {
+        if let Some(reveal) = handle.with(|h| h.reveal(path.as_deref(), reveal_id.get_untracked()))
+        {
             selected.set(Some(reveal.id.to_string()));
             if let Some(api) = tree_ref.api::<nsh_base::TreeApi>() {
                 api.reveal_item(reveal.id.to_string());
@@ -204,7 +229,9 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
         let mut changes = handle.with(|h| h.changes());
         watch(async move {
             while changes.next().await.is_some() {
-                let Some(view) = handle.try_with(|h| h.view()) else { return };
+                let Some(view) = handle.try_with(|h| h.view()) else {
+                    return;
+                };
                 if !view_state.try_set(view) {
                     return;
                 }
@@ -228,15 +255,20 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
 
     let query = signal(String::new());
     let search_focused = signal(false);
-    let error = computed(move || {
-        view_state.with(|v| v.error.clone().or_else(|| v.search.error.clone()))
-    });
+    let error =
+        computed(move || view_state.with(|v| v.error.clone().or_else(|| v.search.error.clone())));
     let open = props.on_open_file.clone();
     let project_name = props.project_name.clone();
     let host_folder = props.host_folder;
 
     let toggle_state = computed(move || {
-        view_state.with(|v| (v.has_directories && !host_folder, v.expand_all || v.all_expanded, v.all_expanded))
+        view_state.with(|v| {
+            (
+                v.has_directories && !host_folder,
+                v.expand_all || v.all_expanded,
+                v.all_expanded,
+            )
+        })
     });
     let subheader = view()
         .app_class(tw("flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2"))
@@ -310,7 +342,11 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
     );
     // `sr-only` when rows already show: no element, the status is announced instead.
     let loading_row = when(
-        move || view_state.with(|v| (!v.ready || v.search.pending) && !(v.has_entries && !v.search.no_matches)),
+        move || {
+            view_state.with(|v| {
+                (!v.ready || v.search.pending) && !(v.has_entries && !v.search.no_matches)
+            })
+        },
         || {
             view()
                 .app_class(tw("px-3 py-1 text-xs text-muted-foreground"))
@@ -318,7 +354,16 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
         },
     );
     let no_matches = when(
-        move || view_state.with(|v| v.search.no_matches && v.ready && !v.pending && !v.search.pending && v.error.is_none() && v.search.error.is_none()),
+        move || {
+            view_state.with(|v| {
+                v.search.no_matches
+                    && v.ready
+                    && !v.pending
+                    && !v.search.pending
+                    && v.error.is_none()
+                    && v.search.error.is_none()
+            })
+        },
         || {
             view()
                 .app_class(tw("px-3 py-4 text-xs text-muted-foreground"))
@@ -336,9 +381,17 @@ pub fn file_browser_panel(runtime: FilesRuntime, props: FileBrowserProps) -> imp
         })
     });
     let expanded = computed(move || {
-        view_state.with(|v| v.expanded.iter().map(|id| SharedString::from(id.to_string())).collect::<Vec<_>>())
+        view_state.with(|v| {
+            v.expanded
+                .iter()
+                .map(|id| SharedString::from(id.to_string()))
+                .collect::<Vec<_>>()
+        })
     });
-    let tree_label = tr("{project} files", &[("project", Value::Text(props.project_name.clone()))]);
+    let tree_label = tr(
+        "{project} files",
+        &[("project", Value::Text(props.project_name.clone()))],
+    );
     let tree = nsh_base::tree()
         .component_ref(&tree_ref)
         .items(move || items.get())
@@ -405,7 +458,9 @@ fn file_tree_row(entry: nsh_base::TreeEntry, states: RowStates) -> AnyElement {
     if entry.id.ends_with('\u{0}') {
         return view()
             .pl(px(8.0 + entry.depth as f32 * 12.0))
-            .app_class(tw("flex min-w-0 items-center text-xs text-muted-foreground"))
+            .app_class(tw(
+                "flex min-w-0 items-center text-xs text-muted-foreground",
+            ))
             .child(text(t("Loading…")))
             .into_element();
     }
@@ -425,8 +480,13 @@ fn file_tree_row(entry: nsh_base::TreeEntry, states: RowStates) -> AnyElement {
         })
         .child(if folder {
             view()
-                .app_class(tw("flex size-4 shrink-0 items-center justify-center text-muted-foreground"))
-                .child(icon_with_class(Icon::ChevronRight, "size-3 transition-transform group-aria-expanded:rotate-90"))
+                .app_class(tw(
+                    "flex size-4 shrink-0 items-center justify-center text-muted-foreground",
+                ))
+                .child(icon_with_class(
+                    Icon::ChevronRight,
+                    "size-3 transition-transform group-aria-expanded:rotate-90",
+                ))
                 .into_element()
         } else {
             view().app_class(tw("size-4 shrink-0")).into_element()
@@ -448,9 +508,18 @@ fn file_tree_row(entry: nsh_base::TreeEntry, states: RowStates) -> AnyElement {
 fn refresh_files_button(pending: Memo<bool>, on_refresh: impl Fn() + 'static) -> impl IntoElement {
     // RefreshIcon's spin is a repainting animation; the tooltip says it instead.
     with_tooltip(
-        move || if pending.get() { t("Refreshing…") } else { t("Refresh files") },
+        move || {
+            if pending.get() {
+                t("Refreshing…")
+            } else {
+                t("Refresh files")
+            }
+        },
         button(
-            ButtonContent::Icon { icon: Icon::RefreshCw, label: t("Refresh workspace files") },
+            ButtonContent::Icon {
+                icon: Icon::RefreshCw,
+                label: t("Refresh workspace files"),
+            },
             ButtonVariant::Ghost,
             ButtonSize::IconXs,
             || false,
@@ -509,6 +578,10 @@ mod tests {
         assert_eq!(explorer_width(400.0, 500.0), 244.0_f32.max(MIN_WIDTH));
         assert_eq!(explorer_width(100.0, 2000.0), MIN_WIDTH);
         assert_eq!(explorer_width(900.0, 2000.0), MAX_WIDTH);
-        assert_eq!(explorer_width(300.0, 300.0), MIN_WIDTH, "a narrow row still shows the minimum");
+        assert_eq!(
+            explorer_width(300.0, 300.0),
+            MIN_WIDTH,
+            "a narrow row still shows the minimum"
+        );
     }
 }

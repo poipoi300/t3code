@@ -422,7 +422,9 @@ fn text_generator_models_load_into_the_picker_targets() {
         .rpc_script
         .entry("server.listTextGeneratorModels".into())
         .or_default()
-        .push_back(Ok(json!({"models": [{"id": "claude-small", "name": "Claude Small"}]})));
+        .push_back(Ok(
+            json!({"models": [{"id": "claude-small", "name": "Claude Small"}]}),
+        ));
     let settings = runtime.settings();
     let mut changes = settings.changes();
     let view = settings.scope_view(SettingsPage::Threads, &SettingsScopeSearch::default());
@@ -434,12 +436,25 @@ fn text_generator_models_load_into_the_picker_targets() {
         .expect("the generator stands in as a provider");
     assert!(generator.models.is_empty(), "its list is still loading");
     h.settle();
-    assert!(changes.next().now_or_never().is_some(), "the list's arrival is a change");
+    assert!(
+        changes.next().now_or_never().is_some(),
+        "the list's arrival is a change"
+    );
     let loaded = settings.text_generation_targets(&view);
-    let generator = loaded.providers.iter().find(|p| p.instance_id.0 == "work").expect("generator");
+    let generator = loaded
+        .providers
+        .iter()
+        .find(|p| p.instance_id.0 == "work")
+        .expect("generator");
     assert_eq!(generator.models[0].slug.0, "claude-small");
     assert_eq!(
-        h.server().state.borrow().rpc_calls.iter().filter(|(tag, _)| tag == "server.listTextGeneratorModels").count(),
+        h.server()
+            .state
+            .borrow()
+            .rpc_calls
+            .iter()
+            .filter(|(tag, _)| tag == "server.listTextGeneratorModels")
+            .count(),
         1,
         "the list is fetched once and then read from the cache"
     );

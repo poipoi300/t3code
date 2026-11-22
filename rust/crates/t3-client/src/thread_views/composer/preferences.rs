@@ -93,9 +93,11 @@ impl<P: Platform + 'static> ComposerPreferences<P> {
         // early write (completing onboarding, say) never replaces the user's settings with defaults.
         let mut next = match (self.hydration.get(), prior_bytes.as_deref()) {
             (SettingsHydration::Ready, _) | (_, None) => prior.as_ref().clone(),
-            (_, Some(bytes)) => decode_record::<ClientSettingsSchema>(bytes, &key(), 1)
-                .map_err(|e| ClientError::InvalidPayload(e.to_string()))?
-                .payload,
+            (_, Some(bytes)) => {
+                decode_record::<ClientSettingsSchema>(bytes, &key(), 1)
+                    .map_err(|e| ClientError::InvalidPayload(e.to_string()))?
+                    .payload
+            }
         };
         edit(&mut next);
         let next = Rc::new(next);
@@ -198,8 +200,14 @@ mod tests {
             onboarding_completed_at: Some(date.into()),
             ..Default::default()
         };
-        serde_json::to_vec(&Record::new("client-settings", None, key().record, 1, &settings))
-            .unwrap()
+        serde_json::to_vec(&Record::new(
+            "client-settings",
+            None,
+            key().record,
+            1,
+            &settings,
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -246,8 +254,14 @@ mod tests {
         };
         stored(
             &platform,
-            serde_json::to_vec(&Record::new("client-settings", None, key().record, 1, &saved))
-                .unwrap(),
+            serde_json::to_vec(&Record::new(
+                "client-settings",
+                None,
+                key().record,
+                1,
+                &saved,
+            ))
+            .unwrap(),
         );
         let preferences = ComposerPreferences::new(Rc::new(platform.clone()));
         block_on(preferences.update(|settings| {

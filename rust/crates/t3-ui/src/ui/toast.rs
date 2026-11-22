@@ -1158,16 +1158,15 @@ fn toast_body_content(
                     "shrink-0"
                 }),
             ])))
-            .child(
-                body.copy_error
-                    .then(|| copy_error_button(
-                        controls
-                            .description
-                            .as_ref()
-                            .map(|description| description.resolve().to_string())
-                            .unwrap_or_default(),
-                    )),
-            )
+            .child(body.copy_error.then(|| {
+                copy_error_button(
+                    controls
+                        .description
+                        .as_ref()
+                        .map(|description| description.resolve().to_string())
+                        .unwrap_or_default(),
+                )
+            }))
             .children(controls.data.additional_actions.iter().map(|(_, action)| {
                 toast_action(
                     action,

@@ -15,7 +15,9 @@ use std::{
 };
 use t3_contracts::{
     base_schemas::TrimmedNonEmptyString,
-    project::{ProjectFileFailure, ProjectReadFileError, ProjectReadFileInput, ProjectReadFileResult},
+    project::{
+        ProjectFileFailure, ProjectReadFileError, ProjectReadFileInput, ProjectReadFileResult,
+    },
     rpc::WsProjectsReadFileRpc,
 };
 
@@ -92,7 +94,10 @@ impl FileRead {
                 ..FileReadView::default()
             };
         }
-        let missing = state.data.as_ref().is_some_and(|d| d.exists.flatten() == Some(false));
+        let missing = state
+            .data
+            .as_ref()
+            .is_some_and(|d| d.exists.flatten() == Some(false));
         let data = if missing { None } else { state.data.clone() };
         let is_not_file = state
             .read_error
@@ -143,9 +148,25 @@ impl FileRead {
 
 impl<P: Platform + Clone + 'static> ProjectFiles<P> {
     /// `projects.readFile` for `relative_path` (`allowMissing` for the project file `t3.json`).
-    pub fn read_file(&self, environment: &EnvironmentId, cwd: &str, relative_path: &str) -> FileRead {
-        let key = (environment.clone(), cwd.to_owned(), relative_path.to_owned());
-        if let Some(shared) = self.state.reads.reads.borrow().get(&key).and_then(Weak::upgrade) {
+    pub fn read_file(
+        &self,
+        environment: &EnvironmentId,
+        cwd: &str,
+        relative_path: &str,
+    ) -> FileRead {
+        let key = (
+            environment.clone(),
+            cwd.to_owned(),
+            relative_path.to_owned(),
+        );
+        if let Some(shared) = self
+            .state
+            .reads
+            .reads
+            .borrow()
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
             return FileRead { shared };
         }
         let (kick, kicks) = mpsc::unbounded();

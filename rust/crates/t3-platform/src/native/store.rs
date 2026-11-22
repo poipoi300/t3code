@@ -381,7 +381,11 @@ impl Store {
                     .and_then(|count| count.parse::<u32>().ok())
                     .unwrap_or(0)
                     + 1;
-                set_meta(&connection, "unavailable-key-launches", Some(&count.to_string()))?;
+                set_meta(
+                    &connection,
+                    "unavailable-key-launches",
+                    Some(&count.to_string()),
+                )?;
                 if count < UNAVAILABLE_LAUNCHES {
                     return Err(error.into());
                 }
@@ -391,7 +395,9 @@ impl Store {
         };
         let secret = match read {
             Some(KeyRead::Present(secret))
-                if recorded.as_deref().is_none_or(|check| check == key_check(&secret)) =>
+                if recorded
+                    .as_deref()
+                    .is_none_or(|check| check == key_check(&secret)) =>
             {
                 if recorded.is_none() {
                     set_meta(&connection, "secure-key-check", Some(&key_check(&secret)))?;
@@ -450,7 +456,10 @@ impl Store {
                 // sealed with a key that is gone for good (an older build overwrote this id);
                 // this key is kept and those rows go.
                 let check = key_check(&secret);
-                if recorded.as_deref().is_some_and(|recorded| recorded != check) {
+                if recorded
+                    .as_deref()
+                    .is_some_and(|recorded| recorded != check)
+                {
                     report.discarded_secure_records += transaction
                         .execute("DELETE FROM records WHERE area = 1", [])
                         .map_err(database_error)?;
@@ -527,7 +536,9 @@ impl Store {
         let recorded = meta(connection, "retained-key-check")?;
         let old = match read_key(secrets, &retained_id) {
             Ok(KeyRead::Present(secret))
-                if recorded.as_deref().is_none_or(|check| check == key_check(&secret)) =>
+                if recorded
+                    .as_deref()
+                    .is_none_or(|check| check == key_check(&secret)) =>
             {
                 unbound(&secret)?
             }
@@ -542,7 +553,9 @@ impl Store {
                 .prepare("SELECT key, namespace, value FROM records WHERE area = ?1")
                 .map_err(database_error)?;
             statement
-                .query_map([RETAINED_AREA], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .query_map([RETAINED_AREA], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
                 .map_err(database_error)?
                 .collect::<rusqlite::Result<_>>()
                 .map_err(database_error)?

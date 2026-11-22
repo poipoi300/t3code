@@ -175,7 +175,9 @@ impl ApprovalContext {
             services: {
                 let services = use_context::<ApprovalServices>();
                 debug_assert!(
-                    services.is_some() || use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
+                    services.is_some()
+                        || use_context::<crate::runtime::Rt>()
+                            .is_none_or(|rt| rt.backend().client().is_none()),
                     "ApprovalServices is not provided: app::provide_client_services provides it with the client"
                 );
                 services

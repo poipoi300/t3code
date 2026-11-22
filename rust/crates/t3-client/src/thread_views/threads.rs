@@ -74,7 +74,6 @@ macro_rules! item_field {
     };
 }
 pub mod activity_announcement;
-pub mod turn_detail_announcement;
 pub mod archived;
 pub mod checkpoints;
 pub mod context_window;
@@ -82,11 +81,11 @@ pub mod detail;
 pub mod execution;
 pub mod execution_presentation;
 pub mod families;
-pub mod find;
-pub mod minimap;
 pub mod feedback;
+pub mod find;
 pub mod item_support;
 pub mod lifecycle;
+pub mod minimap;
 pub mod notification_center;
 pub mod notifications;
 pub mod older_settled;
@@ -101,6 +100,7 @@ pub mod subagents;
 #[cfg(test)]
 mod tests;
 pub mod title_regeneration;
+pub mod turn_detail_announcement;
 pub mod undo;
 pub mod workflows;
 pub const THREAD_SNAPSHOT_IDLE_TTL_MS: u64 = 5 * 60_000;

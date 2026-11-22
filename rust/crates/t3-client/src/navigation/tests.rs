@@ -334,25 +334,65 @@ fn each_launch_address_lands_where_the_web_router_sends_it_in_each_state() {
     let project = "/projects/env%3Arepo";
     for (launch, before_restore, unpaired, paired) in [
         ("/", "/", "/pair", "/"),
-        ("/new?prompt=hi", "/new?prompt=hi", "/pair", "/new?prompt=hi"),
+        (
+            "/new?prompt=hi",
+            "/new?prompt=hi",
+            "/pair",
+            "/new?prompt=hi",
+        ),
         ("/e/t?diff=1", "/e/t?diff=1", "/pair", "/e/t?diff=1"),
         ("/threads/e/t", "/e/t", "/pair", "/e/t"),
         ("/draft/d", "/draft/d", "/pair", "/draft/d"),
-        ("/pull-requests", "/pull-requests", "/pair", "/pull-requests"),
-        ("/settings", "/settings/general", "/pair", "/settings/general"),
-        ("/settings/beta", "/settings/labs", "/pair", "/settings/labs"),
-        ("/settings/secrets", "/settings/secrets", "/pair", "/settings/general"),
+        (
+            "/pull-requests",
+            "/pull-requests",
+            "/pair",
+            "/pull-requests",
+        ),
+        (
+            "/settings",
+            "/settings/general",
+            "/pair",
+            "/settings/general",
+        ),
+        (
+            "/settings/beta",
+            "/settings/labs",
+            "/pair",
+            "/settings/labs",
+        ),
+        (
+            "/settings/secrets",
+            "/settings/secrets",
+            "/pair",
+            "/settings/general",
+        ),
         ("/welcome", "/welcome", "/pair", "/welcome"),
         ("/pair", "/pair", "/pair", "/"),
         // A pairing launch stays on `/pair` even when already paired.
         (pairing, pairing, pairing, pairing),
         ("/pair#token=abc", "/pair#token=abc", "/pair#token=abc", "/"),
         // An agent approval or connect-CLI launch: hosted static app only, which this is not.
-        ("/approve-agent?code=x", "/approve-agent?code=x", "/pair", "/"),
+        (
+            "/approve-agent?code=x",
+            "/approve-agent?code=x",
+            "/pair",
+            "/",
+        ),
         ("/connect?state=s", "/connect?state=s", "/pair", "/"),
-        ("/connect-agent", "/connect-agent", "/connect-agent", "/connect-agent"),
+        (
+            "/connect-agent",
+            "/connect-agent",
+            "/connect-agent",
+            "/connect-agent",
+        ),
         ("/guest", "/guest", "/guest", "/guest"),
-        (project, project, "/pair", "/settings/projects?project=env%3Arepo"),
+        (
+            project,
+            project,
+            "/pair",
+            "/settings/projects?project=env%3Arepo",
+        ),
         ("/nope", "/nope", "/nope", "/nope"),
     ] {
         for (state, policy, expected) in [
@@ -402,4 +442,3 @@ fn the_first_run_wizard_takes_only_home_to_welcome() {
     };
     assert_eq!(Location::resolve("/", signed_out).href(), "/pair");
 }
-

@@ -211,7 +211,9 @@ pub async fn unary(socket: &mut Socket, client: &mut Client, tag: &str, payload:
             }
             // A background provider-status update from an open config stream (see `chunk`).
             CallEvent::Chunk { id, values }
-                if values.iter().all(|value| value["type"] == "providerStatuses") =>
+                if values
+                    .iter()
+                    .all(|value| value["type"] == "providerStatuses") =>
             {
                 client.acknowledge(id);
             }

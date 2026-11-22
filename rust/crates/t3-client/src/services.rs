@@ -2,7 +2,6 @@
 pub mod asset_urls;
 pub mod assets;
 pub mod command_output;
-pub mod storage_notice;
 pub mod config;
 pub mod default_theme;
 pub mod filesystem;
@@ -17,6 +16,7 @@ pub mod scheduling;
 pub mod server;
 pub mod sessions;
 pub mod settings;
+pub mod storage_notice;
 pub mod terminal;
 pub mod terminal_sessions;
 pub mod updates;

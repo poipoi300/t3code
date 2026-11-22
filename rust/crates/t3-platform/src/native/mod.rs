@@ -6,9 +6,9 @@
 //! future cancels the request, and a dropped storage call still commits or rolls back whole.
 mod history;
 mod host;
+mod http;
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod proxy;
-mod http;
 mod secret;
 mod socket;
 mod store;

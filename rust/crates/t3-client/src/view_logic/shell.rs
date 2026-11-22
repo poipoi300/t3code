@@ -34,12 +34,10 @@ pub mod preview_state;
 pub mod request_latency;
 #[path = "shell/search.rs"]
 pub mod search;
-#[path = "shell/startup_recovery.rs"]
-pub mod startup_recovery;
-#[path = "shell/shortcuts.rs"]
-pub mod shortcuts;
 #[path = "shell/shortcut_config.rs"]
 pub mod shortcut_config;
+#[path = "shell/shortcuts.rs"]
+pub mod shortcuts;
 #[path = "shell/sidebar.rs"]
 pub mod sidebar;
 #[path = "shell/sidebar_list.rs"]
@@ -48,6 +46,8 @@ pub mod sidebar_list;
 pub mod sidebar_width;
 #[path = "shell/skill_search.rs"]
 pub mod skill_search;
+#[path = "shell/startup_recovery.rs"]
+pub mod startup_recovery;
 #[path = "shell/stash.rs"]
 pub mod stash;
 #[path = "shell/terminal_state.rs"]

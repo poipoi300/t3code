@@ -21,10 +21,10 @@ pub mod floating_status;
 pub mod image_gallery;
 #[path = "session/links.rs"]
 pub mod links;
-#[path = "session/markdown_link_presentation.rs"]
-pub mod markdown_link_presentation;
 #[path = "session/markdown.rs"]
 pub mod markdown;
+#[path = "session/markdown_link_presentation.rs"]
+pub mod markdown_link_presentation;
 #[path = "session/markdown_references.rs"]
 pub mod markdown_references;
 #[path = "session/questions.rs"]

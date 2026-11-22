@@ -518,7 +518,8 @@ fn content_slots_are_shown_verbatim_and_key_slots_translated() {
         ..EngineConfig::new(Root::of::<ContentToastFixture>())
     })
     .expect("content toast fixture");
-    app.wait_for("Paramètres").expect("the key title is translated");
+    app.wait_for("Paramètres")
+        .expect("the key title is translated");
     app.wait_for("role:button[Settings]")
         .expect("the content action label is shown as given");
     let screen = app.screen();

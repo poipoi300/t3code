@@ -4,7 +4,9 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use crate::support::{DESKTOP, PHONE};
-use futures::{FutureExt, channel::mpsc, future::LocalBoxFuture, stream::LocalBoxStream, StreamExt};
+use futures::{
+    FutureExt, StreamExt, channel::mpsc, future::LocalBoxFuture, stream::LocalBoxStream,
+};
 use nsh_core::prelude::*;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
@@ -13,7 +15,10 @@ use t3_client::{
     types::EnvironmentId,
     workspace::project_files::tree::{FileTreeView, Problem, Reveal, TreeModel},
 };
-use t3_contracts::{base_schemas::TrimmedNonEmptyString, project::{ProjectEntry, ProjectEntryKind}};
+use t3_contracts::{
+    base_schemas::TrimmedNonEmptyString,
+    project::{ProjectEntry, ProjectEntryKind},
+};
 use t3_ui::screens::panel::files_tree::{
     FileBrowserProps, FileTreeHandle, FilesRuntime, FilesService, file_browser_panel,
 };
@@ -21,7 +26,11 @@ use t3_ui::screens::panel::files_tree::{
 pub fn entry(path: &str, directory: bool) -> ProjectEntry {
     ProjectEntry {
         path: TrimmedNonEmptyString(path.into()),
-        kind: if directory { ProjectEntryKind::Directory } else { ProjectEntryKind::File },
+        kind: if directory {
+            ProjectEntryKind::Directory
+        } else {
+            ProjectEntryKind::File
+        },
         ignored: None,
     }
 }
@@ -55,7 +64,9 @@ impl FakeTree {
             };
             self.model.borrow_mut().complete(&directory, result);
         }
-        self.listeners.borrow_mut().retain(|l| l.unbounded_send(()).is_ok());
+        self.listeners
+            .borrow_mut()
+            .retain(|l| l.unbounded_send(()).is_ok());
     }
 }
 impl FileTreeHandle for FakeTree {
@@ -90,7 +101,9 @@ impl FileTreeHandle for FakeTree {
                     .collect::<Vec<_>>()
             });
             if let Some(found) = found {
-                self.model.borrow_mut().complete_search(generation, Ok((found, false)));
+                self.model
+                    .borrow_mut()
+                    .complete_search(generation, Ok((found, false)));
             }
         }
         self.serve();
@@ -144,7 +157,11 @@ impl FilesService for FakeFiles {
         tree
     }
     fn read_access(&self, _: &EnvironmentId) -> ReadAccess {
-        ReadAccess { allowed: true, pending: false, error: None }
+        ReadAccess {
+            allowed: true,
+            pending: false,
+            error: None,
+        }
     }
     fn access_changes(&self, _: &EnvironmentId) -> LocalBoxStream<'static, ()> {
         futures::stream::pending().boxed_local()
@@ -205,7 +222,11 @@ fn BrokenBrowser() -> impl IntoElement {
 }
 
 fn start(viewport: (f32, f32), broken: bool) -> Headless {
-    let root = if broken { Root::of::<BrokenBrowser>() } else { Root::of::<Browser>() };
+    let root = if broken {
+        Root::of::<BrokenBrowser>()
+    } else {
+        Root::of::<Browser>()
+    };
     let config = EngineConfig {
         ui_sets: t3_ui::registries(),
         viewport: size(px(viewport.0), px(viewport.1)),
@@ -219,14 +240,19 @@ fn folders_expand_lazily_and_files_open_on_selection() {
     for viewport in [DESKTOP, PHONE] {
         let mut app = start(viewport, false);
         app.wait_for("text:README.md").expect("root listed");
-        assert!(!app.screen().shows("main.rs"), "a collapsed folder's rows are not built");
+        assert!(
+            !app.screen().shows("main.rs"),
+            "a collapsed folder's rows are not built"
+        );
         assert!(app.screen().shows("lists:1"), "only the root is read");
         app.press("text:src").expect("expand src");
         app.wait_for("text:main.rs").expect("src listed");
         assert!(app.screen().shows("lists:2"));
         app.press("text:main.rs").expect("select file");
-        app.wait_for("text:opened:src/main.rs").expect("file opened");
-        app.press("text:lib").expect("expand a folder, which opens nothing");
+        app.wait_for("text:opened:src/main.rs")
+            .expect("file opened");
+        app.press("text:lib")
+            .expect("expand a folder, which opens nothing");
         app.wait_for("text:mod.rs").expect("lib listed");
         assert!(app.screen().shows("opened:src/main.rs"));
     }
@@ -236,18 +262,23 @@ fn folders_expand_lazily_and_files_open_on_selection() {
 fn search_hides_non_matches_and_says_when_nothing_matches() {
     let mut app = start(DESKTOP, false);
     app.wait_for("text:README.md").expect("root listed");
-    app.type_text("label:Search Proj files", "mod").expect("search");
-    app.wait_for("text:mod.rs").expect("the match and its folders show");
+    app.type_text("label:Search Proj files", "mod")
+        .expect("search");
+    app.wait_for("text:mod.rs")
+        .expect("the match and its folders show");
     assert!(!app.screen().shows("README.md"));
-    app.type_text("label:Search Proj files", "zzz").expect("search again");
+    app.type_text("label:Search Proj files", "zzz")
+        .expect("search again");
     app.wait_for("text:No matching files.").expect("no matches");
 }
 
 #[test]
 fn a_failed_folder_read_shows_the_server_reason_and_retries() {
     let mut app = start(DESKTOP, true);
-    app.wait_for("text:Workspace root is gone. Click to retry.").expect("error row");
-    app.press("role:button[Workspace root is gone. Click to retry.]").expect("retry");
+    app.wait_for("text:Workspace root is gone. Click to retry.")
+        .expect("error row");
+    app.press("role:button[Workspace root is gone. Click to retry.]")
+        .expect("retry");
     app.wait_for("text:README.md").expect("listed after retry");
     assert!(!app.screen().shows("Click to retry."));
 }
@@ -256,11 +287,17 @@ fn a_failed_folder_read_shows_the_server_reason_and_retries() {
 fn expand_all_opens_every_folder_and_collapses_them_again() {
     let mut app = start(DESKTOP, false);
     app.wait_for("text:README.md").expect("root listed");
-    app.press("role:button[Refresh workspace files]").expect("refresh");
-    app.wait_for("text:lists:2").expect("refresh re-reads the root");
-    app.press("role:button[Expand all folders]").expect("expand all");
-    app.wait_for("label:Collapse all folders").expect("the button now collapses");
+    app.press("role:button[Refresh workspace files]")
+        .expect("refresh");
+    app.wait_for("text:lists:2")
+        .expect("refresh re-reads the root");
+    app.press("role:button[Expand all folders]")
+        .expect("expand all");
+    app.wait_for("label:Collapse all folders")
+        .expect("the button now collapses");
     app.wait_for("text:mod.rs").expect("nested folder opened");
-    app.press("role:button[Collapse all folders]").expect("collapse all");
-    app.wait_for_gone("text:main.rs", std::time::Duration::from_secs(5)).expect("collapsed");
+    app.press("role:button[Collapse all folders]")
+        .expect("collapse all");
+    app.wait_for_gone("text:main.rs", std::time::Duration::from_secs(5))
+        .expect("collapsed");
 }

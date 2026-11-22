@@ -313,10 +313,9 @@ impl Location {
             Route::Settings(SettingsPage::Secrets) if !policy.secrets_enabled => {
                 "/settings/general".into()
             }
-            Route::ProjectLink(key) if signed_in => format!(
-                "/settings/projects?project={}",
-                encode_search_string(key)
-            ),
+            Route::ProjectLink(key) if signed_in => {
+                format!("/settings/projects?project={}", encode_search_string(key))
+            }
             Route::ProjectLink(_) => "/pair".into(),
             Route::Connect if !policy.connect_cli_enabled => "/".into(),
             Route::ApproveAgent if !policy.approve_agent_enabled => "/".into(),

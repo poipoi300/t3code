@@ -16,7 +16,9 @@ pub trait AssetUrlClient {
     ) -> LocalBoxStream<'static, AssetUrlState>;
 }
 
-impl<P: Platform + Clone + 'static> AssetUrlClient for t3_client::services::asset_urls::AssetUrls<P> {
+impl<P: Platform + Clone + 'static> AssetUrlClient
+    for t3_client::services::asset_urls::AssetUrls<P>
+{
     fn watch(
         &self,
         environment: EnvironmentId,

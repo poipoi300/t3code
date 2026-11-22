@@ -177,11 +177,17 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
 
     /// A web `localStorage` preference of the panel (explorer width and visibility, rendered
     /// modes), kept in the client's local preferences under the web's own key.
-    pub fn preference(&self, key: &'static str) -> LocalBoxFuture<'static, Option<serde_json::Value>> {
+    pub fn preference(
+        &self,
+        key: &'static str,
+    ) -> LocalBoxFuture<'static, Option<serde_json::Value>> {
         let platform = self.platform.clone();
         async move {
             let bytes = platform
-                .get(StorageArea::Ordinary, StorageKey::new("local-preferences", None, key))
+                .get(
+                    StorageArea::Ordinary,
+                    StorageKey::new("local-preferences", None, key),
+                )
                 .await
                 .ok()
                 .flatten()?;
@@ -193,7 +199,9 @@ impl<P: Platform + Clone + 'static> ProjectFiles<P> {
         let platform = self.platform.clone();
         let _ = self.runtime.spawn(
             async move {
-                let Ok(bytes) = serde_json::to_vec(&value) else { return };
+                let Ok(bytes) = serde_json::to_vec(&value) else {
+                    return;
+                };
                 let _ = platform
                     .write(
                         StorageArea::Ordinary,
@@ -407,7 +415,11 @@ async fn drive_tree<P: Platform + Clone + 'static>(
     shared.model.borrow_mut().restore(restored);
     let mut persisted = shared.model.borrow().expansion_revision;
     drop(shared);
-    let mut sessions = files.runtime.store().subscribe_environment(&environment).fuse();
+    let mut sessions = files
+        .runtime
+        .store()
+        .subscribe_environment(&environment)
+        .fuse();
     let mut connected = files.endpoint(&environment).is_some();
     let mut session = session_generation(&files, &environment);
     let mut calls: FuturesUnordered<LocalBoxFuture<'static, Done>> = FuturesUnordered::new();
@@ -425,7 +437,14 @@ async fn drive_tree<P: Platform + Clone + 'static>(
         }
         if shared.refresh_search.take() {
             let current = shared.model.borrow().search_generation();
-            calls.push(search(&files, &environment, endpoint.clone(), &cwd, &shared, current));
+            calls.push(search(
+                &files,
+                &environment,
+                endpoint.clone(),
+                &cwd,
+                &shared,
+                current,
+            ));
         }
         if let Some(search_generation) = shared.search.take() {
             let platform = files.platform.clone();
@@ -560,9 +579,10 @@ fn search<P: Platform + Clone + 'static>(
             if access.pending {
                 return Done::Idle;
             }
-            let problem = access
-                .error
-                .map_or_else(|| Problem::client(CANNOT_SEARCH_HOST_FILES), |text| Problem::client(&text));
+            let problem = access.error.map_or_else(
+                || Problem::client(CANNOT_SEARCH_HOST_FILES),
+                |text| Problem::client(&text),
+            );
             return Done::Search(generation, Err(problem));
         }
         let result = match endpoint {

@@ -1,9 +1,9 @@
 //! Native server composition and transports; does not target wasm32-unknown-unknown.
 pub mod adapters;
 #[cfg(feature = "local-services")]
-pub mod entry;
-#[cfg(feature = "local-services")]
 pub mod cli;
+#[cfg(feature = "local-services")]
+pub mod entry;
 pub mod handlers;
 pub mod http;
 pub mod registry;

@@ -161,17 +161,38 @@ mod tests {
 
     #[test]
     fn only_the_scratch_root_itself_is_a_scratch_project() {
-        assert!(is_scratch_project("/home/me/.t3/scratch", Some("/home/me/.t3/scratch/")));
-        assert!(!is_scratch_project("/home/me/repo", Some("/home/me/.t3/scratch")));
+        assert!(is_scratch_project(
+            "/home/me/.t3/scratch",
+            Some("/home/me/.t3/scratch/")
+        ));
+        assert!(!is_scratch_project(
+            "/home/me/repo",
+            Some("/home/me/.t3/scratch")
+        ));
         assert!(!is_scratch_project("/home/me/.t3/scratch", None));
     }
 
     #[test]
     fn density_falls_back_from_full_to_compact_to_essential() {
-        assert_eq!(resolve_thread_details_density(300.0, 0.0, 0.0), DetailsDensity::Full);
-        assert_eq!(resolve_thread_details_density(300.0, 280.0, 0.0), DetailsDensity::Full);
-        assert_eq!(resolve_thread_details_density(300.0, 320.0, 0.0), DetailsDensity::Compact);
-        assert_eq!(resolve_thread_details_density(300.0, 320.0, 240.0), DetailsDensity::Compact);
-        assert_eq!(resolve_thread_details_density(200.0, 320.0, 240.0), DetailsDensity::Essential);
+        assert_eq!(
+            resolve_thread_details_density(300.0, 0.0, 0.0),
+            DetailsDensity::Full
+        );
+        assert_eq!(
+            resolve_thread_details_density(300.0, 280.0, 0.0),
+            DetailsDensity::Full
+        );
+        assert_eq!(
+            resolve_thread_details_density(300.0, 320.0, 0.0),
+            DetailsDensity::Compact
+        );
+        assert_eq!(
+            resolve_thread_details_density(300.0, 320.0, 240.0),
+            DetailsDensity::Compact
+        );
+        assert_eq!(
+            resolve_thread_details_density(200.0, 320.0, 240.0),
+            DetailsDensity::Essential
+        );
     }
 }

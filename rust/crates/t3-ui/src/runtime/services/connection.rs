@@ -17,15 +17,17 @@ const CLIENT_VERSION: Option<&str> = option_env!("T3_APP_VERSION");
 
 struct Actions<P: Platform + Clone + 'static>(ClientRuntime<P>);
 
-pub fn actions<P: Platform + Clone + 'static>(runtime: &ClientRuntime<P>) -> Rc<dyn ConnectionActions> {
+pub fn actions<P: Platform + Clone + 'static>(
+    runtime: &ClientRuntime<P>,
+) -> Rc<dyn ConnectionActions> {
     Rc::new(Actions(runtime.clone()))
 }
 
 fn error(error: t3_client::ClientError) -> Text {
     match error {
-        t3_client::ClientError::Rejected { message, detail } => {
-            Text::content(t3_client::error::rejection_text(&message, detail.as_deref()))
-        }
+        t3_client::ClientError::Rejected { message, detail } => Text::content(
+            t3_client::error::rejection_text(&message, detail.as_deref()),
+        ),
         error => Text::client_key(error.to_string()),
     }
 }

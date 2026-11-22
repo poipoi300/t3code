@@ -64,7 +64,9 @@ pub fn delimited_table_preview(source: &str, delimiter: char) -> impl IntoElemen
     );
     let body = if header.is_none() {
         view()
-            .app_class(tw("flex flex-1 items-center justify-center p-6 text-xs text-muted-foreground"))
+            .app_class(tw(
+                "flex flex-1 items-center justify-center p-6 text-xs text-muted-foreground",
+            ))
             .child(text(t("This file is empty.")))
             .into_element()
     } else {

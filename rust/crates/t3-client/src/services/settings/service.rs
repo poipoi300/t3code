@@ -286,7 +286,11 @@ fn grouping_mode(mode: &SidebarProjectGroupingMode) -> GroupingMode {
 }
 
 impl<P: Platform + Clone + 'static> SettingsService<P> {
-    pub fn new(runtime: ClientRuntime<P>, platform: Rc<P>, spawn: crate::composition::Spawner) -> Self {
+    pub fn new(
+        runtime: ClientRuntime<P>,
+        platform: Rc<P>,
+        spawn: crate::composition::Spawner,
+    ) -> Self {
         Self {
             runtime,
             platform,
@@ -313,7 +317,10 @@ impl<P: Platform + Clone + 'static> SettingsService<P> {
         (self.spawn)(future);
     }
 
-    pub(super) fn session_for(&self, environment: &EnvironmentId) -> Option<crate::rpc::SessionEndpoint> {
+    pub(super) fn session_for(
+        &self,
+        environment: &EnvironmentId,
+    ) -> Option<crate::rpc::SessionEndpoint> {
         self.session(environment)
     }
 

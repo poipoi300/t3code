@@ -561,7 +561,8 @@ impl Control {
 pub fn git_actions_control(props: GitActionsControlProps) -> impl IntoElement {
     let backend = use_context::<GitActionsRuntime>();
     debug_assert!(
-        backend.is_some() || use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
+        backend.is_some()
+            || use_context::<crate::runtime::Rt>().is_none_or(|rt| rt.backend().client().is_none()),
         "GitActionsRuntime is not provided: app::provide_client_services provides it with the client"
     );
     let backend = stored(backend);
@@ -1779,15 +1780,15 @@ fn publish_summary(control: Control, publish: PublishState) -> impl IntoElement 
     dynamic(move || {
         let result = publish.result.get();
         untracked(move || {
-        let Some(result) = result else {
-            return text(t("Publish result unavailable.")).app_class(tw("rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]")).into_element();
-        };
-        let pushed = result.status == SourceControlPublishStatus::Pushed;
-        // The publish response's URL is the environment's: opened only through the client's
-        // policy (a hostile server's `search-ms:` or `vscode://file/<UNC>` opens nothing).
-        let opener = crate::runtime::services::links::link_opener_here();
-        let url = result.repository.url.0;
-        view().app_class(tw("space-y-4"))
+            let Some(result) = result else {
+                return text(t("Publish result unavailable.")).app_class(tw("rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground dark:border-transparent dark:bg-white/[0.035]")).into_element();
+            };
+            let pushed = result.status == SourceControlPublishStatus::Pushed;
+            // The publish response's URL is the environment's: opened only through the client's
+            // policy (a hostile server's `search-ms:` or `vscode://file/<UNC>` opens nothing).
+            let opener = crate::runtime::services::links::link_opener_here();
+            let url = result.repository.url.0;
+            view().app_class(tw("space-y-4"))
             .child(view().app_class(tw("flex flex-col items-center gap-2 py-1 text-center"))
                 .child(view().app_class(tw("grid size-8 place-items-center rounded-full bg-success/15 text-success")).child(icon_with_class(Icon::Check, "size-4")))
                 .child(text(t(if pushed { "Repository published" } else { "Repository created" })).app_class(tw("text-sm font-semibold text-foreground")))

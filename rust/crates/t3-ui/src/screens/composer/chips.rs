@@ -178,34 +178,36 @@ impl NodeView for ComposerChipNodeView {
         let context = use_context::<ChipContext>()
             .unwrap_or_else(|| ChipContext::new(computed(ChipData::default)));
         // The editor may call `create` while tracking; the frame's theme read must not subscribe it.
-        untracked(move || view()
-            .app_class(tw(
-                "relative inline-flex min-w-0 max-w-full select-none items-baseline",
-            ))
-            // NSH recreates inline NodeViews for changed attributes; avoid another transient region.
-            .child(untracked(move || match node.ty().name() {
-                "composer-mention" => composer_mention_node_view(&node, context),
-                "composer-skill" => composer_skill_node_view(&node, context),
-                "composer-model" => composer_model_node_view(&node, context),
-                "composer-citation" => composer_citation_node_view(&node, context),
-                "composer-context-reference" => {
-                    composer_context_reference_node_view(&node, context)
-                }
-                _ => text(SharedString::from(attr(&node, "source").to_owned())).into_element(),
-            }))
-            // NSH has no CSS system Highlight colour; the theme's selection accent replaces it.
-            .child(
-                view()
-                    .pointer_events(PointerEvents::None)
-                    .app_class(move || {
-                        Some(tw(if selected.get() {
-                            "absolute inset-0 rounded-sm bg-primary opacity-30"
-                        } else {
-                            "hidden"
-                        }))
-                    }),
-            )
-            .into_element())
+        untracked(move || {
+            view()
+                .app_class(tw(
+                    "relative inline-flex min-w-0 max-w-full select-none items-baseline",
+                ))
+                // NSH recreates inline NodeViews for changed attributes; avoid another transient region.
+                .child(untracked(move || match node.ty().name() {
+                    "composer-mention" => composer_mention_node_view(&node, context),
+                    "composer-skill" => composer_skill_node_view(&node, context),
+                    "composer-model" => composer_model_node_view(&node, context),
+                    "composer-citation" => composer_citation_node_view(&node, context),
+                    "composer-context-reference" => {
+                        composer_context_reference_node_view(&node, context)
+                    }
+                    _ => text(SharedString::from(attr(&node, "source").to_owned())).into_element(),
+                }))
+                // NSH has no CSS system Highlight colour; the theme's selection accent replaces it.
+                .child(
+                    view()
+                        .pointer_events(PointerEvents::None)
+                        .app_class(move || {
+                            Some(tw(if selected.get() {
+                                "absolute inset-0 rounded-sm bg-primary opacity-30"
+                            } else {
+                                "hidden"
+                            }))
+                        }),
+                )
+                .into_element()
+        })
     }
 
     fn update(&self, node: &Node, _: &[nsh_base::rich_editor::state::Decoration]) -> bool {

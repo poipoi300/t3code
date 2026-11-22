@@ -258,7 +258,12 @@ fn RowLikePanel() -> impl IntoElement {
                     });
                     collapsible(
                         view()
-                            .child(collapsible_trigger(handle, "Group".into(), text("Group"), ""))
+                            .child(collapsible_trigger(
+                                handle,
+                                "Group".into(),
+                                text("Group"),
+                                "",
+                            ))
                             .child(collapsible_panel(handle, false, panel)),
                     )
                     .into_element()

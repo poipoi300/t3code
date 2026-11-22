@@ -42,18 +42,27 @@ fn key() -> StorageKey {
 
 /// Adds `notice` to one an earlier launch saved and nobody saw, saves the result until it is
 /// acknowledged, and returns it. A storage failure keeps the in-memory notice: it is still shown.
-pub(crate) async fn remember(platform: &(impl Platform + ?Sized), notice: StorageNotice) -> StorageNotice {
-    let saved = crate::persistence::load_record::<StorageNotice>(platform, StorageArea::Ordinary, &key(), 1)
-        .await
-        .ok()
-        .flatten()
-        .map(|record| record.payload)
-        .unwrap_or_default();
+pub(crate) async fn remember(
+    platform: &(impl Platform + ?Sized),
+    notice: StorageNotice,
+) -> StorageNotice {
+    let saved = crate::persistence::load_record::<StorageNotice>(
+        platform,
+        StorageArea::Ordinary,
+        &key(),
+        1,
+    )
+    .await
+    .ok()
+    .flatten()
+    .map(|record| record.payload)
+    .unwrap_or_default();
     let notice = saved.clone().merge(notice);
     if notice != saved
         && let Ok(value) = serde_json::to_value(&notice)
         && let Ok(encoded) =
-            crate::persistence::Record::new("storage-notice", None, "unacknowledged", 1, value).encode()
+            crate::persistence::Record::new("storage-notice", None, "unacknowledged", 1, value)
+                .encode()
     {
         let _ = platform
             .write(
@@ -71,6 +80,12 @@ pub(crate) async fn remember(platform: &(impl Platform + ?Sized), notice: Storag
 /// The UI has the notice: forget the saved copy.
 pub(crate) async fn acknowledge(platform: &(impl Platform + ?Sized)) {
     let _ = platform
-        .write(StorageArea::Ordinary, vec![StorageWrite { key: key(), value: None }])
+        .write(
+            StorageArea::Ordinary,
+            vec![StorageWrite {
+                key: key(),
+                value: None,
+            }],
+        )
         .await;
 }

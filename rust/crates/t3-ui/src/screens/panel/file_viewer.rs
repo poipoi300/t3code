@@ -20,13 +20,14 @@ use t3_client::{
     },
 };
 use t3_contracts::{
-    assets::AssetResource,
-    base_schemas::TrimmedNonEmptyString,
-    chat_attachment::ChatFileAttachment,
-    project::ProjectFileFailure,
+    assets::AssetResource, base_schemas::TrimmedNonEmptyString,
+    chat_attachment::ChatFileAttachment, project::ProjectFileFailure,
 };
 
-use super::files_tree::{FileBrowserProps, FilesRuntime, file_browser_panel, file_explorer_pane, files_runtime, problem_text};
+use super::files_tree::{
+    FileBrowserProps, FilesRuntime, file_browser_panel, file_explorer_pane, files_runtime,
+    problem_text,
+};
 use super::{Action, PanelHost, PanelRegistration, SurfaceContent, SurfaceContext, SurfaceKind};
 use crate::i18n::{Text, Value, t, tr};
 use crate::runtime::Shared;
@@ -55,7 +56,12 @@ pub trait FileViewerService {
     fn workspace(&self, thread: &ThreadKey) -> Option<FilesWorkspace>;
     fn workspace_mutation(&self, thread: &ThreadKey) -> Option<String>;
     fn can_write(&self, environment: &EnvironmentId) -> bool;
-    fn read(&self, environment: &EnvironmentId, cwd: &str, relative_path: &str) -> Rc<dyn FileReadHandle>;
+    fn read(
+        &self,
+        environment: &EnvironmentId,
+        cwd: &str,
+        relative_path: &str,
+    ) -> Rc<dyn FileReadHandle>;
     fn asset_bytes(
         &self,
         environment: &EnvironmentId,
@@ -95,7 +101,11 @@ pub fn files_panel_registration(host: PanelHost) -> PanelRegistration {
     );
     registration.title = Some(Rc::new(|surface: &super::Surface| match &surface.content {
         SurfaceContent::File { relative_path, .. } => SharedString::from(
-            relative_path.rsplit(['/', '\\']).next().unwrap_or(relative_path).to_owned(),
+            relative_path
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(relative_path)
+                .to_owned(),
         ),
         _ => SharedString::from(t("Files")),
     }));
@@ -283,8 +293,18 @@ pub(super) fn file_surface_toggle(
         let on_press = on_press.clone();
         let name = label(state);
         view()
-            .app_class(move || Some(tw(if pressed.get() == state { "inline-flex shrink-0" } else { "hidden" })))
-            .tooltip(tooltip(tooltip_create_handle(), TooltipOptions::default(), text(name.clone())))
+            .app_class(move || {
+                Some(tw(if pressed.get() == state {
+                    "inline-flex shrink-0"
+                } else {
+                    "hidden"
+                }))
+            })
+            .tooltip(tooltip(
+                tooltip_create_handle(),
+                TooltipOptions::default(),
+                text(name.clone()),
+            ))
             .child(toggle(
                 toggle::Content::slot(name, icon_with_class(icon(state), "size-3.5")),
                 toggle::Variant::Ghost,
@@ -294,18 +314,33 @@ pub(super) fn file_surface_toggle(
                 move |_| on_press(),
             ))
     };
-    view().app_class(tw("inline-flex shrink-0")).child(half(false)).child(half(true))
+    view()
+        .app_class(tw("inline-flex shrink-0"))
+        .child(half(false))
+        .child(half(true))
 }
 
 const FILE_SURFACE_SUBHEADER_CLASS: &str =
     "flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-background px-3";
 
 fn file_surface(props: SurfaceProps) -> impl IntoElement {
-    let SurfaceProps { files, viewer, host, thread, workspace, target, mutation, can_write, visible } = props;
+    let SurfaceProps {
+        files,
+        viewer,
+        host,
+        thread,
+        workspace,
+        target,
+        mutation,
+        can_write,
+        visible,
+    } = props;
     let environment = thread.environment.clone();
     let cwd = workspace.cwd.clone();
     let relative_path = preview::resolve_file_preview_path(target.relative_path.as_deref(), &cwd);
-    let read = relative_path.as_ref().map(|path| viewer.0.read(&environment, &cwd, path));
+    let read = relative_path
+        .as_ref()
+        .map(|path| viewer.0.read(&environment, &cwd, path));
     let file = signal(read.as_ref().map(|r| r.view()).unwrap_or_default());
     if let Some(read) = read.clone() {
         let mut changes = read.changes();
@@ -325,14 +360,19 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
             }
         });
     }
-    let kinds = relative_path.as_deref().map(|p| PathKinds::of(p, false)).unwrap_or_default();
+    let kinds = relative_path
+        .as_deref()
+        .map(|p| PathKinds::of(p, false))
+        .unwrap_or_default();
     let host_file = relative_path.as_deref().is_some_and(preview::is_host_path);
     let folder_trail = target.folder_trail.clone();
     let has_trail = folder_trail.is_some();
     let is_folder = computed(move || {
         file.with(|f| f.is_not_file || (has_trail && f.data.is_none() && f.error.is_none()))
     });
-    let breadcrumb_path = relative_path.clone().or_else(|| folder_trail.as_ref().map(|_| String::new()));
+    let breadcrumb_path = relative_path
+        .clone()
+        .or_else(|| folder_trail.as_ref().map(|_| String::new()));
     let breadcrumb_trail = breadcrumb_path
         .as_deref()
         .map(|path| preview::retained_breadcrumb_trail(folder_trail.as_deref(), path));
@@ -347,14 +387,28 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
         let path = target.relative_path.clone();
         let request = target.reveal_request_id;
         let line = target.reveal_line;
-        computed(move || line.is_none() || handled_reveal.get() == path.clone().map(|p| (p, request)))
+        computed(move || {
+            line.is_none() || handled_reveal.get() == path.clone().map(|p| (p, request))
+        })
     };
     let rendered_mode = kinds.rendered_mode();
     let (rendered, rendered_pref) = match rendered_mode {
-        Some(RenderedMode::Mermaid) => (computed(move || render_mermaid.get() && reveal_handled.get()), Some((render_mermaid, preview::RENDER_MERMAID_STORAGE_KEY))),
-        Some(RenderedMode::Markdown) => (computed(move || render_markdown.get() && reveal_handled.get()), Some((render_markdown, preview::RENDER_MARKDOWN_STORAGE_KEY))),
-        Some(RenderedMode::Table) => (computed(move || render_table.get() && reveal_handled.get()), Some((render_table, preview::RENDER_TABLE_STORAGE_KEY))),
-        Some(RenderedMode::Html) => (computed(move || render_browser.get() && reveal_handled.get()), Some((render_browser, preview::RENDER_BROWSER_FILE_STORAGE_KEY))),
+        Some(RenderedMode::Mermaid) => (
+            computed(move || render_mermaid.get() && reveal_handled.get()),
+            Some((render_mermaid, preview::RENDER_MERMAID_STORAGE_KEY)),
+        ),
+        Some(RenderedMode::Markdown) => (
+            computed(move || render_markdown.get() && reveal_handled.get()),
+            Some((render_markdown, preview::RENDER_MARKDOWN_STORAGE_KEY)),
+        ),
+        Some(RenderedMode::Table) => (
+            computed(move || render_table.get() && reveal_handled.get()),
+            Some((render_table, preview::RENDER_TABLE_STORAGE_KEY)),
+        ),
+        Some(RenderedMode::Html) => (
+            computed(move || render_browser.get() && reveal_handled.get()),
+            Some((render_browser, preview::RENDER_BROWSER_FILE_STORAGE_KEY)),
+        ),
         None => (computed(|| false), None),
     };
     let render_browser_file = computed(move || kinds.pdf || (kinds.html && rendered.get()));
@@ -371,7 +425,11 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
         computed(move || if is_folder.get() { None } else { path.clone() })
     };
     let show_explorer = computed(move || {
-        preview::should_show_file_explorer(preview_path.get().as_deref(), explorer_open.get(), false)
+        preview::should_show_file_explorer(
+            preview_path.get().as_deref(),
+            explorer_open.get(),
+            false,
+        )
     });
 
     let on_open_file: Rc<dyn Fn(String)> = {
@@ -383,78 +441,132 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
         None => "files".to_owned(),
     };
 
-    let subheader = breadcrumb_path.clone().zip(breadcrumb_trail.clone()).map(|(crumb_path, trail)| {
-        let files_for_toggle = files.clone();
-        let nav_thread = thread.clone();
-        let nav_surface = surface_id.clone();
-        let trail_for_nav = trail.clone();
-        let navigate = Rc::new(move |crumb: String| {
-            let path = if preview::breadcrumb_path_of(&trail_for_nav) == crumb { trail_for_nav.clone() } else { crumb };
-            let keep_source = !is_folder.get_untracked();
-            host.apply(&nav_thread, Action::NavigateFolder {
-                surface: nav_surface.clone(),
-                trail: preview::retained_breadcrumb_trail(Some(&trail_for_nav), &path),
-                path,
-                keep_source,
-            });
-        });
-        let open = on_open_file.clone();
-        view()
-            .app_class(tw(FILE_SURFACE_SUBHEADER_CLASS))
-            .child(
-                scroll()
-                    .horizontal()
-                    .app_class(tw("min-w-0 flex-1"))
-                    .child(file_breadcrumbs(&workspace.project_name, &crumb_path, &trail, navigate, open)),
-            )
-            .child(rendered_mode.zip(rendered_pref).map(|(mode, (pref, key))| {
-                let files = files_for_toggle.clone();
-                let path = target.relative_path.clone();
-                let request = target.reveal_request_id;
-                file_surface_toggle(
-                    rendered,
-                    move |on| t(mode.toggle_label(on)),
-                    move |on| if on { Icon::CodeXml } else if mode == RenderedMode::Table { Icon::Table2 } else { Icon::Eye },
-                    move || {
-                        let pressed = !rendered.get_untracked();
-                        pref.set(pressed);
-                        files.0.set_preference(key, serde_json::json!(pressed));
-                        handled_reveal.set(if pressed { path.clone().map(|p| (p, request)) } else { None });
-                    },
-                )
-            }))
-            .child(when(move || shows_raw_text.get(), move || {
-                file_surface_toggle(
-                    computed(move || word_wrap.get()),
-                    |on| if on { t("Disable word wrap") } else { t("Enable word wrap") },
-                    |_| Icon::TextWrap,
-                    move || word_wrap.set(!word_wrap.get_untracked()),
-                )
-            }))
-            .child((!host_file).then(|| {
-                let files = files_for_toggle.clone();
-                when(move || preview_path.with(Option::is_some), move || {
-                    let files = files.clone();
-                    file_surface_toggle(
-                        computed(move || explorer_open.get()),
-                        |on| if on { t("Hide file explorer") } else { t("Show file explorer") },
-                        |_| Icon::FolderTree,
-                        move || {
-                            let next = !explorer_open.get_untracked();
-                            explorer_open.set(next);
-                            files.0.set_preference(preview::FILE_EXPLORER_STORAGE_KEY, serde_json::json!(next));
+    let subheader =
+        breadcrumb_path
+            .clone()
+            .zip(breadcrumb_trail.clone())
+            .map(|(crumb_path, trail)| {
+                let files_for_toggle = files.clone();
+                let nav_thread = thread.clone();
+                let nav_surface = surface_id.clone();
+                let trail_for_nav = trail.clone();
+                let navigate = Rc::new(move |crumb: String| {
+                    let path = if preview::breadcrumb_path_of(&trail_for_nav) == crumb {
+                        trail_for_nav.clone()
+                    } else {
+                        crumb
+                    };
+                    let keep_source = !is_folder.get_untracked();
+                    host.apply(
+                        &nav_thread,
+                        Action::NavigateFolder {
+                            surface: nav_surface.clone(),
+                            trail: preview::retained_breadcrumb_trail(Some(&trail_for_nav), &path),
+                            path,
+                            keep_source,
                         },
-                    )
-                })
-            }))
-    });
+                    );
+                });
+                let open = on_open_file.clone();
+                view()
+                    .app_class(tw(FILE_SURFACE_SUBHEADER_CLASS))
+                    .child(scroll().horizontal().app_class(tw("min-w-0 flex-1")).child(
+                        file_breadcrumbs(
+                            &workspace.project_name,
+                            &crumb_path,
+                            &trail,
+                            navigate,
+                            open,
+                        ),
+                    ))
+                    .child(rendered_mode.zip(rendered_pref).map(|(mode, (pref, key))| {
+                        let files = files_for_toggle.clone();
+                        let path = target.relative_path.clone();
+                        let request = target.reveal_request_id;
+                        file_surface_toggle(
+                            rendered,
+                            move |on| t(mode.toggle_label(on)),
+                            move |on| {
+                                if on {
+                                    Icon::CodeXml
+                                } else if mode == RenderedMode::Table {
+                                    Icon::Table2
+                                } else {
+                                    Icon::Eye
+                                }
+                            },
+                            move || {
+                                let pressed = !rendered.get_untracked();
+                                pref.set(pressed);
+                                files.0.set_preference(key, serde_json::json!(pressed));
+                                handled_reveal.set(if pressed {
+                                    path.clone().map(|p| (p, request))
+                                } else {
+                                    None
+                                });
+                            },
+                        )
+                    }))
+                    .child(when(
+                        move || shows_raw_text.get(),
+                        move || {
+                            file_surface_toggle(
+                                computed(move || word_wrap.get()),
+                                |on| {
+                                    if on {
+                                        t("Disable word wrap")
+                                    } else {
+                                        t("Enable word wrap")
+                                    }
+                                },
+                                |_| Icon::TextWrap,
+                                move || word_wrap.set(!word_wrap.get_untracked()),
+                            )
+                        },
+                    ))
+                    .child((!host_file).then(|| {
+                        let files = files_for_toggle.clone();
+                        when(
+                            move || preview_path.with(Option::is_some),
+                            move || {
+                                let files = files.clone();
+                                file_surface_toggle(
+                                    computed(move || explorer_open.get()),
+                                    |on| {
+                                        if on {
+                                            t("Hide file explorer")
+                                        } else {
+                                            t("Show file explorer")
+                                        }
+                                    },
+                                    |_| Icon::FolderTree,
+                                    move || {
+                                        let next = !explorer_open.get_untracked();
+                                        explorer_open.set(next);
+                                        files.0.set_preference(
+                                            preview::FILE_EXPLORER_STORAGE_KEY,
+                                            serde_json::json!(next),
+                                        );
+                                    },
+                                )
+                            },
+                        )
+                    }))
+            });
 
     let read_only_banner = (relative_path.is_some() && !host_file).then(|| {
-        when(move || !can_write.get(), || {
-            view()
-                .app_class(tw("shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground"))
-                .child(text(t("Read-only connection. Unsaved edits are kept until write access returns.")))
-        })
+        when(
+            move || !can_write.get(),
+            || {
+                view()
+                    .app_class(tw(
+                        "shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground",
+                    ))
+                    .child(text(t(
+                        "Read-only connection. Unsaved edits are kept until write access returns.",
+                    )))
+            },
+        )
     });
     let truncated_banner = when(
         move || {
@@ -582,7 +694,13 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
         let open = on_open_file.clone();
         let reveal_id = target.reveal_request_id;
         view()
-            .app_class(move || Some(tw(if show_explorer.get() { "flex min-h-0" } else { "hidden" })))
+            .app_class(move || {
+                Some(tw(if show_explorer.get() {
+                    "flex min-h-0"
+                } else {
+                    "hidden"
+                }))
+            })
             .on_layout(move |bounds: &Bounds<Points>| row_width.set(bounds.size.width.0))
             .child(dynamic(move || {
                 let resizable = preview_path.with(Option::is_some);
@@ -614,7 +732,9 @@ fn file_surface(props: SurfaceProps) -> impl IntoElement {
     };
 
     view()
-        .app_class(tw("flex min-h-0 flex-1 flex-col overflow-hidden bg-background"))
+        .app_class(tw(
+            "flex min-h-0 flex-1 flex-col overflow-hidden bg-background",
+        ))
         .child(subheader)
         .child(read_only_banner)
         .child(truncated_banner)
@@ -634,11 +754,17 @@ fn relative_path_is_some(file: &Signal<FileReadView>) -> bool {
 pub(super) fn file_surface_loading() -> impl IntoElement {
     view()
         .label(t("Loading file"))
-        .app_class(tw("flex min-h-0 flex-1 items-center justify-center text-muted-foreground"))
+        .app_class(tw(
+            "flex min-h-0 flex-1 items-center justify-center text-muted-foreground",
+        ))
         .child(icon_with_class(Icon::LoaderCircle, "size-6"))
 }
 
-fn read_failure(message: Text, attempted: Option<String>, folder: Option<String>) -> impl IntoElement {
+fn read_failure(
+    message: Text,
+    attempted: Option<String>,
+    folder: Option<String>,
+) -> impl IntoElement {
     scroll().app_class(tw("flex min-h-0 flex-1 flex-col")).child(
         view()
             .app_class(tw("my-auto flex shrink-0 flex-col gap-3 px-6 py-6 text-center text-xs leading-relaxed"))
@@ -673,7 +799,8 @@ fn file_breadcrumbs(
     let row = view().app_class(tw("flex h-full w-max min-w-full items-center text-xs"));
     let last = crumbs.len().saturating_sub(1);
     row.children(crumbs.into_iter().enumerate().map(|(index, crumb)| {
-        let is_current = crumb.path == current || (crumb.kind == CrumbKind::Project && current.is_empty());
+        let is_current =
+            crumb.path == current || (crumb.kind == CrumbKind::Project && current.is_empty());
         let navigate = navigate.clone();
         let open_file = open_file.clone();
         let path = crumb.path.clone();
@@ -683,14 +810,29 @@ fn file_breadcrumbs(
             .child(
                 nsh_base::button()
                     .accessibility_label(Some(SharedString::from(crumb.label.clone())))
-                    .on_press(move || if is_file { open_file(path.clone()) } else { navigate(path.clone()) })
+                    .on_press(move || {
+                        if is_file {
+                            open_file(path.clone())
+                        } else {
+                            navigate(path.clone())
+                        }
+                    })
                     .app_class(tw(&cn([
                         Some("rounded-md px-1 py-0.5 hover:bg-accent hover:text-foreground"),
-                        Some(if is_current { "font-medium text-foreground" } else { "text-muted-foreground" }),
+                        Some(if is_current {
+                            "font-medium text-foreground"
+                        } else {
+                            "text-muted-foreground"
+                        }),
                     ])))
                     .child(text(crumb.label.clone()).app_class(tw("truncate"))),
             )
-            .child((index < last).then(|| icon_with_class(Icon::ChevronRight, "size-3 shrink-0 text-muted-foreground/60")))
+            .child((index < last).then(|| {
+                icon_with_class(
+                    Icon::ChevronRight,
+                    "size-3 shrink-0 text-muted-foreground/60",
+                )
+            }))
             .into_element()
     }))
 }
@@ -758,7 +900,8 @@ fn read_only_source_preview(
         let highlighted = highlighted_chunk(chunk, computed(|| false), state.clone());
         code_chunk_row(chunk, highlighted, wrapped)
     });
-    rows.element_ref(&list).app_class(tw("min-h-0 flex-1 bg-(--code-background)"))
+    rows.element_ref(&list)
+        .app_class(tw("min-h-0 flex-1 bg-(--code-background)"))
 }
 
 /// Port of WorkspaceImagePreview and PreviewImageContent: the signed workspace URL, re-minted
@@ -837,9 +980,19 @@ mod tests {
         let text: String = (1..=85).map(|i| format!("line {i}\n")).collect();
         let chunks = file_code_chunks("rs", &text);
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks.iter().map(|c| c.start_line).collect::<Vec<_>>(), [1, 41, 81]);
+        assert_eq!(
+            chunks.iter().map(|c| c.start_line).collect::<Vec<_>>(),
+            [1, 41, 81]
+        );
         assert!(chunks[0].first && chunks[2].last && !chunks[1].first);
-        assert_eq!(chunks.iter().map(|c| c.text.as_str()).collect::<String>(), text);
-        assert_eq!(file_code_chunks("rs", "").len(), 1, "an empty file still shows one row");
+        assert_eq!(
+            chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+            text
+        );
+        assert_eq!(
+            file_code_chunks("rs", "").len(),
+            1,
+            "an empty file still shows one row"
+        );
     }
 }

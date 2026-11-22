@@ -7,7 +7,9 @@
 
 use url::Url;
 
-use super::{ConnectionMode, ConnectionPresentation, PresentationPhase, Route, RouteKind, route_kind};
+use super::{
+    ConnectionMode, ConnectionPresentation, PresentationPhase, Route, RouteKind, route_kind,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
@@ -85,10 +87,11 @@ pub enum RouteLabel {
 }
 
 fn route_hostname(route: &Route) -> Option<String> {
-    Url::parse(&route.http_base)
-        .ok()?
-        .host_str()
-        .map(|host| host.trim_start_matches('[').trim_end_matches(']').to_owned())
+    Url::parse(&route.http_base).ok()?.host_str().map(|host| {
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned()
+    })
 }
 
 /// `connectionRouteLabel`. The client keeps no SSH profile on the route, so an SSH route is "SSH".
@@ -149,14 +152,18 @@ mod tests {
     #[test]
     fn the_status_follows_saved_backend_status() {
         use PresentationPhase::*;
-        let status = |enabled, phase, error| saved_environment_status(enabled, &presentation(phase, error));
+        let status =
+            |enabled, phase, error| saved_environment_status(enabled, &presentation(phase, error));
         assert_eq!(status(false, Connected, None).text, StatusText::Key("Off"));
         assert_eq!(
             status(false, Unsupported, None).text,
             StatusText::Key("Client not supported"),
             "an unsupported client says so even when switched off"
         );
-        assert_eq!(status(true, Available, None).text, StatusText::Key("Not connected"));
+        assert_eq!(
+            status(true, Available, None).text,
+            StatusText::Key("Not connected")
+        );
         let failed = status(true, Error, Some("Connection credential c is unavailable."));
         assert_eq!(failed.tone, StatusTone::Error);
         assert_eq!(
@@ -171,10 +178,17 @@ mod tests {
             true,
             &ConnectionPresentation {
                 awaiting_approval: true,
-                ..presentation(Reconnecting, Some("Approve this device on box (code 1234)."))
+                ..presentation(
+                    Reconnecting,
+                    Some("Approve this device on box (code 1234)."),
+                )
             },
         );
-        assert_eq!(waiting.tone, StatusTone::Muted, "waiting for approval is not a failure");
+        assert_eq!(
+            waiting.tone,
+            StatusTone::Muted,
+            "waiting for approval is not a failure"
+        );
         assert_eq!(
             waiting.text,
             StatusText::Content("Approve this device on box (code 1234).".into())
@@ -188,7 +202,10 @@ mod tests {
             RouteLabel::Key("T3 Connect")
         );
         assert_eq!(
-            environment_transport_label(&[route(ConnectionMode::Remote, "https://box.example.com/")]),
+            environment_transport_label(&[route(
+                ConnectionMode::Remote,
+                "https://box.example.com/"
+            )]),
             RouteLabel::Address("https://box.example.com".into())
         );
         assert_eq!(

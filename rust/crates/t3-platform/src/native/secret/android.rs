@@ -4,12 +4,12 @@
 //! entry, which the OS drops with the app. If that entry is gone, the wrapped key reads as
 //! missing, so the store starts with a fresh key and discards secure records it can no longer
 //! open, as it does on desktop.
+use super::keystore_failure::Site;
 use super::{SecretKeyStore, SecretStoreError, wrapped};
 use jni::{
     JNIEnv, JavaVM,
     objects::{JByteArray, JObject, JValue},
 };
-use super::keystore_failure::Site;
 use std::{cell::Cell, io::ErrorKind, path::PathBuf, sync::OnceLock};
 use zeroize::Zeroizing;
 
@@ -74,9 +74,7 @@ impl AndroidKeystoreStore {
         let result = env.with_local_frame(32, |env| call(env, &site));
         match result {
             Ok(value) => Ok(value),
-            Err(jni::errors::Error::JavaException) => {
-                Err(classify_exception(&mut env, site.get()))
-            }
+            Err(jni::errors::Error::JavaException) => Err(classify_exception(&mut env, site.get())),
             Err(error) => Err(JavaFailure::Other(error.to_string())),
         }
     }

@@ -15,8 +15,14 @@ const AT_CHANGE: i64 = 1_710_054_000_000;
 fn new_york_follows_daylight_saving_and_kolkata_has_none() {
     let new_york = TimeZone::Iana("America/New_York".into());
     let kolkata = TimeZone::Iana("Asia/Kolkata".into());
-    assert!(new_york.is_known(), "the platform zone data resolves America/New_York");
-    assert!(kolkata.is_known(), "the platform zone data resolves Asia/Kolkata");
+    assert!(
+        new_york.is_known(),
+        "the platform zone data resolves America/New_York"
+    );
+    assert!(
+        kolkata.is_known(),
+        "the platform zone data resolves Asia/Kolkata"
+    );
 
     assert_eq!(new_york.offset_seconds(WINTER), -5 * 3600);
     assert_eq!(new_york.offset_seconds(SUMMER), -4 * 3600);
@@ -27,12 +33,20 @@ fn new_york_follows_daylight_saving_and_kolkata_has_none() {
 
     let summer_in_new_york = civil(SUMMER, &new_york);
     assert_eq!(
-        (summer_in_new_york.day.month, summer_in_new_york.day.day, summer_in_new_york.hour),
+        (
+            summer_in_new_york.day.month,
+            summer_in_new_york.day.day,
+            summer_in_new_york.hour
+        ),
         (7, 4, 8)
     );
     let winter_in_kolkata = civil(WINTER, &kolkata);
     assert_eq!(
-        (winter_in_kolkata.day.day, winter_in_kolkata.hour, winter_in_kolkata.minute),
+        (
+            winter_in_kolkata.day.day,
+            winter_in_kolkata.hour,
+            winter_in_kolkata.minute
+        ),
         (15, 17, 30)
     );
 }

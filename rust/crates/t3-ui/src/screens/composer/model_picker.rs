@@ -802,11 +802,7 @@ fn model_list_row(props: Rc<PickerProps>, state: PickerState, key: ModelKey) -> 
     let Some(provider) = data.provider(&key.instance_id) else {
         return view().into_element();
     };
-    let label = format!(
-        "{}, {}",
-        display_name(model, false),
-        provider.display_name
-    );
+    let label = format!("{}, {}", display_name(model, false), provider.display_name);
     let disabled = !can_pick(&props, &key);
     let selected = data
         .selected_models

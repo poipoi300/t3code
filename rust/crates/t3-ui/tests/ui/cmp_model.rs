@@ -272,14 +272,21 @@ fn provider_lock_and_disconnect_prevent_choices_already_shown_in_the_popup() {
     let mut app = start(DESKTOP, true, false);
     open(&mut app);
     app.press("role:button[Disconnect]").expect("disconnect");
-    app.wait_until("rows refuse choices", std::time::Duration::from_secs(5), |screen| {
-        !screen
-            .enabled("role:button[Second model, Codex]")
-            .expect("row")
-    })
+    app.wait_until(
+        "rows refuse choices",
+        std::time::Duration::from_secs(5),
+        |screen| {
+            !screen
+                .enabled("role:button[Second model, Codex]")
+                .expect("row")
+        },
+    )
     .expect("offline rows are disabled");
     // The web's picker adds no explanation of its own; the composer banner reports the outage.
-    assert!(!app.screen().shows("Not connected. Model selection is unavailable."));
+    assert!(
+        !app.screen()
+            .shows("Not connected. Model selection is unavailable.")
+    );
     assert!(app.press("role:button[Second model, Codex]").is_err());
     assert!(app.screen().shows("Picks: 0"));
 }
