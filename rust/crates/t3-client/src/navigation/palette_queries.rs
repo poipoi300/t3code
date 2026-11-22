@@ -497,7 +497,7 @@ impl<P: Platform + Clone + 'static> PaletteSearchClient for PaletteService<P> {
         let tail = async move {
             this.platform.sleep(120).await;
             let input = ProjectSearchContentsInput {
-                cwd: TrimmedNonEmptyString(target.cwd.clone()),
+                cwd: t3_contracts::base_schemas::TrimmedNonEmptyString(target.cwd.clone()),
                 query: query.clone(),
                 limit: 500,
                 case_sensitive: options.case_sensitive,
