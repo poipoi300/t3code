@@ -13,6 +13,7 @@ mod normalize;
 pub mod palette_service;
 pub mod project_flow;
 pub mod prompt_links;
+pub mod pull_request_links;
 pub use normalize::normalize_app_path;
 mod service;
 pub use service::UrlClient;

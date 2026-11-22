@@ -314,6 +314,36 @@ impl Keybindings {
         })
     }
 
+    /// Invoke a registered command handler directly (used by palette actions).
+    pub fn dispatch_command(self, command: &str) -> bool {
+        let mut event = DispatchEvent {
+            key: KeyEvent {
+                key: String::new(),
+                code: String::new(),
+                modifiers: Modifiers::default(),
+                event_type: Some("keydown".into()),
+                repeat: false,
+                editable_focus: false,
+                alt_graph: false,
+            },
+            default_prevented: false,
+            propagation_stopped: false,
+            inside_confirmation: false,
+        };
+        let scopes = self
+            .scopes
+            .with(|scopes| scopes.values().cloned().collect::<Vec<_>>());
+        for scope in scopes.into_iter().rev() {
+            if (scope.when)(&event)
+                && let Some(handler) = scope.commands.get(command)
+                && handler(&mut event)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn shortcut_label(self, command: &str) -> Option<String> {
         self.rules.with(|rules| {
             effective_shortcuts_for_command(

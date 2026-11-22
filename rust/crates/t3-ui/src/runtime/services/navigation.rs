@@ -7,12 +7,17 @@ use futures::{FutureExt, StreamExt, future::LocalBoxFuture, stream::LocalBoxStre
 use std::{cell::RefCell, rc::Rc};
 use t3_client::navigation::{
     Route,
-    palette_service::{Action as PaletteAction, Catalogue, PaletteService},
+    palette_service::{
+        Action as PaletteAction, Catalogue, PaletteHostFailure, PaletteService, PaletteToast,
+    },
+    pull_request_links::{PullRequestInputResolution, ResolvedPullRequestLink},
 };
+use t3_client::types::{EnvironmentId, ThreadKey};
 use t3_client::view_logic::shell::{
     palette::{Group, Item},
     palette_files::PaletteSearchClient,
 };
+use t3_client::workspace::ProjectKey;
 
 use t3_client::{ClientError, composition::ClientRuntime, platform::Platform};
 struct UrlBinding<P> {
@@ -603,6 +608,35 @@ pub trait PaletteClient: PaletteSearchClient {
         query: String,
     ) -> LocalBoxStream<'static, Result<Rc<Vec<Group>>, ClientError>>;
     fn activate(&self, item: Item) -> LocalBoxFuture<'static, Result<PaletteAction, ClientError>>;
+    fn copy_thread_reference(
+        &self,
+        key: ThreadKey,
+    ) -> LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>>;
+    fn copy_prompt_link(
+        &self,
+        key: Option<ThreadKey>,
+        with_context: bool,
+    ) -> LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>>;
+    fn restart_agent_session(
+        &self,
+        key: ThreadKey,
+        on_restarting: Rc<dyn Fn(PaletteToast)>,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn toggle_project_pin(
+        &self,
+        project: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
+    fn pull_request_linking_supported(&self, environment: &EnvironmentId) -> bool;
+    fn resolve_link_pull_request(
+        &self,
+        key: &ThreadKey,
+        reference: &str,
+    ) -> PullRequestInputResolution;
+    fn link_pull_request(
+        &self,
+        key: ThreadKey,
+        link: ResolvedPullRequestLink,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>>;
 }
 
 impl<P: Platform + Clone + 'static> PaletteClient for PaletteService<P> {
@@ -632,5 +666,64 @@ impl<P: Platform + Clone + 'static> PaletteClient for PaletteService<P> {
     fn activate(&self, item: Item) -> LocalBoxFuture<'static, Result<PaletteAction, ClientError>> {
         let client = self.clone();
         async move { PaletteService::activate(&client, &item).await }.boxed_local()
+    }
+
+    fn copy_thread_reference(
+        &self,
+        key: ThreadKey,
+    ) -> LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>> {
+        let client = self.clone();
+        async move { PaletteService::copy_thread_reference(&client, &key).await }.boxed_local()
+    }
+
+    fn copy_prompt_link(
+        &self,
+        key: Option<ThreadKey>,
+        with_context: bool,
+    ) -> LocalBoxFuture<'static, Result<PaletteToast, PaletteHostFailure>> {
+        let client = self.clone();
+        async move { PaletteService::copy_prompt_link(&client, key.as_ref(), with_context).await }
+            .boxed_local()
+    }
+
+    fn restart_agent_session(
+        &self,
+        key: ThreadKey,
+        on_restarting: Rc<dyn Fn(PaletteToast)>,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let client = self.clone();
+        async move {
+            PaletteService::restart_agent_session(&client, &key, |toast| on_restarting(toast)).await
+        }
+        .boxed_local()
+    }
+
+    fn toggle_project_pin(
+        &self,
+        project: ProjectKey,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let client = self.clone();
+        async move { PaletteService::toggle_project_pin(&client, &project).await }.boxed_local()
+    }
+
+    fn pull_request_linking_supported(&self, environment: &EnvironmentId) -> bool {
+        PaletteService::pull_request_linking_supported(self, environment)
+    }
+
+    fn resolve_link_pull_request(
+        &self,
+        key: &ThreadKey,
+        reference: &str,
+    ) -> PullRequestInputResolution {
+        PaletteService::resolve_link_pull_request(self, key, reference)
+    }
+
+    fn link_pull_request(
+        &self,
+        key: ThreadKey,
+        link: ResolvedPullRequestLink,
+    ) -> LocalBoxFuture<'static, Result<(), ClientError>> {
+        let client = self.clone();
+        async move { PaletteService::link_pull_request(&client, &key, link).await }.boxed_local()
     }
 }

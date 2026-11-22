@@ -212,6 +212,7 @@ fn themed_tree(nav: Navigator) -> AnyElement {
         // ConfirmDialogHost at the root, as the web mounts it: every confirm request needs one.
         .child(crate::ui::confirm::confirm_dialog_host())
         .child(crate::screens::guest_share_dialog::guest_share_dialog_host())
+        .child(crate::screens::palette::link_pr_dialog::link_pull_request_dialog_host())
         // CONN-1: pairing links handed to the running app (confirmed by origin, through the
         // confirm host above) and the storage notice, once; nothing on the demo backend.
         .child(

@@ -4,6 +4,7 @@
 pub mod files;
 pub mod results;
 // End of declarations.
+pub mod link_pr_dialog;
 
 use std::{collections::BTreeMap, rc::Rc};
 
@@ -34,6 +35,9 @@ use crate::ui::toast::{ToastOptions, Variant, toast_manager};
 
 #[derive(Clone, Default)]
 struct Presence(usize);
+
+#[derive(Clone, Copy)]
+struct PaletteHostOwner(TaskOwner);
 
 /// Capture this surface-local handle in handlers, including SH-KEYS' command handlers.
 #[derive(Clone, Copy)]
@@ -176,6 +180,7 @@ pub fn command_palette(children: impl IntoElement) -> impl IntoElement {
         provide_context(client);
     }
     let palette = palette_controller();
+    provide_context(PaletteHostOwner(TaskOwner::here()));
     palette.store.update(MountState::mount);
     cleanup(move || {
         if let Some(mut store) = palette.store.try_get() {
@@ -353,6 +358,24 @@ fn open_intent_view(intent: Option<&Intent>) -> Option<View> {
     })
 }
 
+fn show_host_command_error(
+    toast: Option<crate::ui::toast::ToastManager>,
+    result: Result<(), t3_client::ClientError>,
+) {
+    let Err(error) = result else { return };
+    if matches!(error, t3_client::ClientError::Cancelled) {
+        return;
+    }
+    if let Some(toast) = toast {
+        toast.add(ToastOptions {
+            variant: Variant::Error,
+            title: "Command failed".into(),
+            description: Some(Text::content(error.to_string())),
+            ..Default::default()
+        });
+    }
+}
+
 fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
     let initial = palette.state();
     let service = use_context::<Rc<dyn PaletteClient>>();
@@ -360,6 +383,9 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
     let nav = use_context::<Navigator>();
     let urls = use_context::<UrlState>();
     let tasks = TaskOwner::here();
+    let host_tasks = use_context::<PaletteHostOwner>()
+        .map(|owner| owner.0)
+        .unwrap_or(tasks);
     let toast = service.as_ref().map(|_| toast_manager());
     let groups = signal(Shared(Rc::new(Vec::<Group>::new())));
     let results = computed(move || results::Results::new(groups.get()));
@@ -399,6 +425,7 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
             let origin = nav.top();
             operation_pending.set(true);
             let toast = toast.clone();
+            let service = service.clone();
             tasks.spawn(async move {
                 let result = operation.await;
                 operation_pending.set(false);
@@ -436,14 +463,121 @@ fn open_command_palette_dialog(palette: Palette) -> impl IntoElement {
                         }
                     }
                     Ok(Action::Host {
-                        command: t3_client::navigation::palette_service::HostCommand::ShareGuest,
-                        thread: Some(key),
-                        ..
+                        command,
+                        thread,
+                        project,
                     }) => {
-                        palette.close();
-                        crate::screens::guest_share_dialog::open_guest_share_dialog(key);
+                        use t3_client::navigation::palette_service::HostCommand;
+                        let toast_result = move |toast: Option<crate::ui::toast::ToastManager>,
+                                                 result: Result<
+                            t3_client::navigation::palette_service::PaletteToast,
+                            t3_client::navigation::palette_service::PaletteHostFailure,
+                        >| {
+                            let Some(toast) = toast else { return };
+                            match result {
+                                Ok(ok) => {
+                                    toast.add(ToastOptions {
+                                        variant: Variant::Success,
+                                        title: Text::client_key(ok.title),
+                                        description: ok.description.map(Text::content),
+                                        ..Default::default()
+                                    });
+                                }
+                                Err(err) => {
+                                    toast.add(ToastOptions {
+                                        variant: Variant::Error,
+                                        title: Text::client_key(err.title),
+                                        description: Some(Text::content(err.description)),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        };
+                        match command {
+                            HostCommand::ShareGuest => {
+                                if let Some(key) = thread {
+                                    palette.close();
+                                    crate::screens::guest_share_dialog::open_guest_share_dialog(
+                                        key,
+                                    );
+                                }
+                            }
+                            HostCommand::LinkPullRequest => {
+                                if let Some(key) = thread {
+                                    palette.close();
+                                    link_pr_dialog::open_link_pull_request_dialog(key);
+                                }
+                            }
+                            HostCommand::FindThread => {
+                                palette.close();
+                                if let Some(keys) = keys {
+                                    keys.dispatch_command("chat.find");
+                                }
+                            }
+                            HostCommand::CopyReference => {
+                                if let Some(key) = thread {
+                                    palette.close();
+                                    let service = service.clone();
+                                    host_tasks.spawn(async move {
+                                        let result = service.copy_thread_reference(key).await;
+                                        toast_result(toast, result);
+                                    });
+                                }
+                            }
+                            HostCommand::CopyPrompt | HostCommand::CopyPromptContext => {
+                                let with_context =
+                                    matches!(command, HostCommand::CopyPromptContext);
+                                palette.close();
+                                let service = service.clone();
+                                host_tasks.spawn(async move {
+                                    let result =
+                                        service.copy_prompt_link(thread, with_context).await;
+                                    toast_result(toast, result);
+                                });
+                            }
+                            HostCommand::RestartSession => {
+                                if let Some(key) = thread {
+                                    palette.close();
+                                    let service = service.clone();
+                                    let notify_toast = toast.clone();
+                                    let notify: Rc<
+                                        dyn Fn(
+                                            t3_client::navigation::palette_service::PaletteToast,
+                                        ),
+                                    > = Rc::new(move |ok| {
+                                        if let Some(t) = notify_toast.clone() {
+                                            t.add(ToastOptions {
+                                                variant: Variant::Success,
+                                                title: Text::client_key(ok.title),
+                                                description: ok.description.map(Text::content),
+                                                ..Default::default()
+                                            });
+                                        }
+                                    });
+                                    host_tasks.spawn(async move {
+                                        show_host_command_error(
+                                            toast,
+                                            service.restart_agent_session(key, notify).await,
+                                        );
+                                    });
+                                }
+                            }
+                            HostCommand::PinProject => {
+                                if let Some(project) = project {
+                                    palette.close();
+                                    let service = service.clone();
+                                    host_tasks.spawn(async move {
+                                        show_host_command_error(
+                                            toast,
+                                            service.toggle_project_pin(project).await,
+                                        );
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
                     }
-                    Ok(Action::NewProject | Action::Host { .. }) => {}
+                    Ok(Action::NewProject) => {}
                 }
             });
         },

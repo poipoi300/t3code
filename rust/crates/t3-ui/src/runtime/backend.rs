@@ -115,7 +115,19 @@ impl<P: Platform + Clone + 'static> Backend for ClientRuntime<P> {
         let palette = ClientRuntime::palette(self);
         // The commands this UI can carry out (`screens/palette` handles `Action::Host`); without
         // this the service offers no host command at all.
-        palette.set_host_commands([HostCommand::ShareGuest].into());
+        palette.set_host_commands(
+            [
+                HostCommand::FindThread,
+                HostCommand::CopyPrompt,
+                HostCommand::CopyPromptContext,
+                HostCommand::CopyReference,
+                HostCommand::LinkPullRequest,
+                HostCommand::ShareGuest,
+                HostCommand::RestartSession,
+                HostCommand::PinProject,
+            ]
+            .into(),
+        );
         Some(Rc::new(palette))
     }
 

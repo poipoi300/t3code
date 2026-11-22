@@ -210,6 +210,8 @@ mod sh_palette_1;
 mod sh_palette_2;
 #[path = "ui/sh_palette_3.rs"]
 mod sh_palette_3;
+#[path = "ui/sh_palette_4.rs"]
+mod sh_palette_4;
 #[path = "ui/sh_routes.rs"]
 mod sh_routes;
 #[path = "ui/sh_swipe.rs"]

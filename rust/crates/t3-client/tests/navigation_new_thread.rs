@@ -652,6 +652,7 @@ fn link_setup() -> LinkHarness {
             cfg["settings"]["ghqCloneLayout"] = json!(false);
             cfg["environment"]["capabilities"]["ignoredFileListing"] = json!(true);
             cfg["environment"]["capabilities"]["ignoredFileSearch"] = json!(true);
+            cfg["threadFind"] = json!(true);
             return Some(t3_rpc::HandlerOutput::Stream(
                 futures::stream::iter([Ok(vec![
                     json!({"version":1,"type":"snapshot","config":cfg}),
