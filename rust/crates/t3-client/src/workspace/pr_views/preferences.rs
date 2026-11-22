@@ -150,6 +150,32 @@ impl ListSearch {
         }
     }
 
+    pub fn labels(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, raw) in self.0.iter().filter(|(k, _)| k == "labels") {
+            let parsed =
+                serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| vec![raw.clone()]);
+            for item in parsed {
+                let trimmed = item.trim().to_owned();
+                if !trimmed.is_empty() && seen.insert(trimmed.to_lowercase()) {
+                    out.push(trimmed);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn set_labels(&mut self, labels: &[String]) {
+        self.0.retain(|(k, _)| k != "labels");
+        for label in labels.iter().take(10) {
+            let trimmed = label.trim();
+            if !trimmed.is_empty() {
+                self.0.push(("labels".into(), trimmed.to_owned()));
+            }
+        }
+    }
+
     /// Resolve a URL selection against known, non-scratch checkouts. A named server can
     /// still be pairing, so its project must never be resolved on a different server.
     pub fn detail_surface(

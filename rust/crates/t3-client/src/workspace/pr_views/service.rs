@@ -402,6 +402,17 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
             .await
     }
 
+    pub async fn pull_request_filter_options(
+        &self,
+        environment: &EnvironmentId,
+        input: PullRequestFilterOptionsInput,
+    ) -> Result<PullRequestFilterOptions, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.pr_session(environment)?
+            .command::<WsPullRequestsFilterOptionsRpc>(input)
+            .await
+    }
+
     fn pr_session(
         &self,
         environment: &EnvironmentId,
@@ -432,6 +443,17 @@ impl<P: Platform + Clone + 'static> crate::composition::ClientRuntime<P> {
             .command::<WsPullRequestsLinkedThreadsRpc>(reference)
             .await
     }
+}
+
+/// Parameters for `PullRequestReviewSession::run_action_with`, supporting stack and branch updates.
+#[derive(Debug, Clone)]
+pub struct PullRequestActionOptions {
+    pub action: PullRequestAction,
+    pub merge_method: Option<PullRequestMergeMethod>,
+    pub update_method: Option<PullRequestUpdateMethod>,
+    pub number_override: Option<t3_contracts::base_schemas::PositiveInt>,
+    pub stack_number: Option<t3_contracts::base_schemas::PositiveInt>,
+    pub expected_stack_heads: Option<Vec<PullRequestStackHead>>,
 }
 
 #[derive(Clone)]
@@ -491,22 +513,123 @@ impl PullRequestReviewSession {
         action: PullRequestAction,
         merge_method: Option<PullRequestMergeMethod>,
     ) -> Result<Option<PullRequestSummary>, RpcCallError> {
+        self.run_action_with(PullRequestActionOptions {
+            action,
+            merge_method,
+            update_method: None,
+            number_override: None,
+            stack_number: None,
+            expected_stack_heads: None,
+        })
+        .await
+    }
+
+    pub async fn run_action_with(
+        &self,
+        options: PullRequestActionOptions,
+    ) -> Result<Option<PullRequestSummary>, RpcCallError> {
         use crate::rpc::RpcEndpoint;
         let r = &self.reference;
         self.endpoint()?
             .command::<WsPullRequestsRunActionRpc>(PullRequestActionInput {
                 project_id: r.project_id.clone(),
                 repository: r.repository.clone(),
-                number: r.number,
+                number: options.number_override.unwrap_or(r.number),
                 host: r.host.clone(),
                 expected_account_id: r.expected_account_id.clone(),
                 allow_stale: r.allow_stale,
-                action,
-                merge_method: merge_method.map(Some),
-                update_method: None,
-                stack_number: None,
-                expected_stack_heads: None,
+                action: options.action,
+                merge_method: options.merge_method.map(Some),
+                update_method: options.update_method.map(Some),
+                stack_number: options.stack_number.map(Some),
+                expected_stack_heads: options.expected_stack_heads.map(Some),
                 reply_with_summary: Some(Some(PullRequestActionInputReplyWithSummary)),
+            })
+            .await
+    }
+
+    pub async fn reviewer_candidates(
+        &self,
+        query: Option<t3_contracts::base_schemas::TrimmedNonEmptyString>,
+    ) -> Result<PullRequestReviewerCandidateList, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let r = &self.reference;
+        self.endpoint()?
+            .command::<WsPullRequestsReviewerCandidatesRpc>(PullRequestReviewerCandidatesInput {
+                project_id: r.project_id.clone(),
+                host: r.host.clone(),
+                expected_account_id: r.expected_account_id.clone(),
+                allow_stale: r.allow_stale,
+                repository: r.repository.clone(),
+                number: r.number,
+                query: query.map(Some),
+            })
+            .await
+    }
+
+    pub async fn request_reviewers(
+        &self,
+        reviewers: Vec<PullRequestReviewerRequestInputReviewers>,
+        requested: bool,
+    ) -> Result<(), RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let r = &self.reference;
+        self.endpoint()?
+            .command::<WsPullRequestsRequestReviewersRpc>(PullRequestReviewerRequestInput {
+                project_id: r.project_id.clone(),
+                host: r.host.clone(),
+                expected_account_id: r.expected_account_id.clone(),
+                allow_stale: r.allow_stale,
+                repository: r.repository.clone(),
+                number: r.number,
+                reviewers,
+                requested,
+            })
+            .await
+    }
+
+    pub async fn label_candidates(&self) -> Result<PullRequestLabelCandidateList, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint()?
+            .command::<WsPullRequestsLabelCandidatesRpc>(self.reference.clone())
+            .await
+    }
+
+    pub async fn set_labels(
+        &self,
+        labels: Vec<t3_contracts::base_schemas::TrimmedNonEmptyString>,
+        applied: bool,
+    ) -> Result<(), RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        let r = &self.reference;
+        self.endpoint()?
+            .command::<WsPullRequestsSetLabelsRpc>(PullRequestLabelChangeInput {
+                project_id: r.project_id.clone(),
+                host: r.host.clone(),
+                expected_account_id: r.expected_account_id.clone(),
+                allow_stale: r.allow_stale,
+                repository: r.repository.clone(),
+                number: r.number,
+                labels,
+                applied,
+            })
+            .await
+    }
+
+    pub async fn list_refs(
+        &self,
+        cwd: t3_contracts::base_schemas::TrimmedNonEmptyString,
+    ) -> Result<t3_contracts::git::VcsListRefsResult, RpcCallError> {
+        use crate::rpc::RpcEndpoint;
+        self.endpoint()?
+            .command::<WsVcsListRefsRpc>(t3_contracts::git::VcsListRefsInput {
+                cwd,
+                query: None,
+                cursor: None,
+                include_matching_remote_refs: Some(Some(true)),
+                ref_kind: None,
+                refresh: None,
+                limit: Some(Some(2)),
             })
             .await
     }
@@ -671,5 +794,159 @@ mod review_session_tests {
                 .is_err()
         );
         assert!(server.calls("pullRequests.runAction").is_empty());
+    }
+
+    #[test]
+    fn pickers_filter_options_stack_actions_and_merge_method_persist() {
+        let mut pool = LocalPool::new();
+        let worker = pool.spawner();
+        let spawn: Spawner = Rc::new(move |f| worker.spawn_local(f).expect("spawn"));
+        let server = FakeEnvironment::new("forge", spawn.clone());
+        server.set_permissions(&["orchestration:read", "source-control:write"]);
+        for tag in [
+            "pullRequests.filterOptions",
+            "pullRequests.reviewerCandidates",
+            "pullRequests.requestReviewers",
+            "pullRequests.labelCandidates",
+            "pullRequests.setLabels",
+            "pullRequests.runAction",
+            "vcs.listRefs",
+        ] {
+            server.register(tag, CallKind::Unary);
+        }
+        server.reply(
+            "pullRequests.filterOptions",
+            Ok(json!({"labels":[],"authors":[{"login":"octocat","name":null,"avatarUrl":null}],"references":[],"truncated":false})),
+        );
+        server.reply(
+            "pullRequests.reviewerCandidates",
+            Ok(json!({"candidates":[{"id":"u1","kind":"user","login":"carol","name":"Carol","avatarUrl":null,"isRequested":false}],"truncated":false})),
+        );
+        server.reply("pullRequests.requestReviewers", Ok(Value::Null));
+        server.reply(
+            "pullRequests.labelCandidates",
+            Ok(json!({"candidates":[{"name":"bug","color":"d73a4a","description":"Broken","isApplied":false}],"truncated":false})),
+        );
+        server.reply("pullRequests.setLabels", Ok(Value::Null));
+        server.reply("pullRequests.runAction", Ok(Value::Null));
+        server.reply(
+            "vcs.listRefs",
+            Ok(json!({
+                "refs": [{
+                    "name": "origin/main",
+                    "current": false,
+                    "isDefault": true,
+                    "isRemote": true,
+                    "remoteName": "origin",
+                    "worktreePath": null
+                }],
+                "isRepo": true,
+                "hasPrimaryRemote": true,
+                "nextCursor": null,
+                "totalCount": 1
+            })),
+        );
+
+        let runtime = ClientRuntime::new(
+            server.platform(),
+            ClientStore::default(),
+            OrchestrationV2CreationSource::Web,
+            spawn,
+        );
+        let environment = pool
+            .run_until(runtime.pair(server.pairing()))
+            .expect("pair");
+        pool.run_until_stalled();
+
+        let opts = pool
+            .run_until(runtime.pull_request_filter_options(
+                &environment,
+                PullRequestFilterOptionsInput {
+                    kind: PullRequestFilterOptionKind::Authors,
+                    project_id: None,
+                    project_ids: None,
+                    host: None,
+                    query: Some(Some(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                        "octo".into(),
+                    ))),
+                    sigil: None,
+                },
+            ))
+            .expect("filter options");
+        assert_eq!(opts.authors.len(), 1);
+
+        let reference: PullRequestRef = serde_json::from_value(
+            json!({"projectId":"project","repository":"team/widget","number":14,"host":"github.com"}),
+        )
+        .expect("ref");
+        let session = runtime.pull_request_review_session(&environment, reference);
+
+        let reviewers = pool
+            .run_until(session.reviewer_candidates(None))
+            .expect("reviewers");
+        assert_eq!(reviewers.candidates[0].login.0, "carol");
+        pool.run_until(session.request_reviewers(
+            vec![PullRequestReviewerRequestInputReviewers {
+                id: t3_contracts::base_schemas::TrimmedNonEmptyString("u1".into()),
+                kind: PullRequestReviewerKind::User,
+            }],
+            true,
+        ))
+        .expect("request reviewers");
+
+        let labels = pool.run_until(session.label_candidates()).expect("labels");
+        assert_eq!(labels.candidates[0].name.0, "bug");
+        pool.run_until(session.set_labels(
+            vec![t3_contracts::base_schemas::TrimmedNonEmptyString(
+                "bug".into(),
+            )],
+            true,
+        ))
+        .expect("set labels");
+
+        pool.run_until(session.run_action_with(PullRequestActionOptions {
+            action: PullRequestAction::Merge,
+            merge_method: Some(PullRequestMergeMethod::Squash),
+            update_method: None,
+            number_override: Some(15),
+            stack_number: Some(42),
+            expected_stack_heads: Some(vec![PullRequestStackHead {
+                number: 14,
+                head_sha: t3_contracts::base_schemas::TrimmedNonEmptyString("sha14".into()),
+            }]),
+        }))
+        .expect("run action");
+
+        let refs = pool
+            .run_until(
+                session.list_refs(t3_contracts::base_schemas::TrimmedNonEmptyString(
+                    "/repo".into(),
+                )),
+            )
+            .expect("list refs");
+        assert_eq!(refs.refs.len(), 1);
+
+        pool.run_until(runtime.set_pull_request_merge_method(PullRequestMergeMethod::Rebase))
+            .expect("save method");
+        assert_eq!(
+            pool.run_until(runtime.pull_request_merge_method())
+                .expect("read method"),
+            PullRequestMergeMethod::Rebase
+        );
+
+        assert_eq!(
+            server.calls("pullRequests.runAction"),
+            [json!({
+                "projectId": "project",
+                "host": "github.com",
+                "repository": "team/widget",
+                "number": 15,
+                "action": "merge",
+                "mergeMethod": "squash",
+                "stackNumber": 42,
+                "expectedStackHeads": [{"number": 14, "headSha": "sha14"}],
+                "replyWithSummary": true
+            })]
+        );
     }
 }

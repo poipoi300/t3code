@@ -19,6 +19,8 @@ pub mod markdown;
 pub mod preferences;
 #[path = "pr_views/queries.rs"]
 pub mod queries;
+#[path = "pr_views/reviewers.rs"]
+pub mod reviewers;
 #[path = "pr_views/routing.rs"]
 pub mod routing;
 #[path = "pr_views/service.rs"]

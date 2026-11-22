@@ -16,6 +16,38 @@ impl<P: Platform + Clone + 'static> ClientRuntime<P> {
             self.inner.spawn.clone(),
         )
     }
+
+    /// Reads the persisted global last-used PR merge method from local UI preferences.
+    pub fn pull_request_merge_method(
+        &self,
+    ) -> LocalBoxFuture<
+        'static,
+        Result<t3_contracts::pull_request::PullRequestMergeMethod, crate::platform::PlatformError>,
+    > {
+        let platform = self.inner.platform.clone();
+        async move {
+            crate::view_logic::shell::ui_state::UiPreferences::read_pull_request_merge_method(
+                &platform,
+            )
+            .await
+        }
+        .boxed_local()
+    }
+
+    /// Persists the global last-used PR merge method via atomic CAS without clobbering sidebar state.
+    pub fn set_pull_request_merge_method(
+        &self,
+        method: t3_contracts::pull_request::PullRequestMergeMethod,
+    ) -> LocalBoxFuture<'static, Result<(), crate::platform::PlatformError>> {
+        let platform = self.inner.platform.clone();
+        async move {
+            crate::view_logic::shell::ui_state::UiPreferences::save_pull_request_merge_method(
+                &platform, method,
+            )
+            .await
+        }
+        .boxed_local()
+    }
 }
 
 impl<P: Platform + Clone + 'static> ClientRuntime<P> {

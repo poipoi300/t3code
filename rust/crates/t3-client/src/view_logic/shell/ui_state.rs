@@ -330,6 +330,61 @@ impl UiPreferences {
         })
     }
 
+    /// Reads the persisted pull-request merge method from `t3code:ui-state:v1` (or legacy fallback).
+    pub async fn read_pull_request_merge_method(
+        storage: &(impl crate::platform::Storage + ?Sized),
+    ) -> Result<t3_contracts::pull_request::PullRequestMergeMethod, crate::platform::PlatformError>
+    {
+        Ok(Self::load(storage).await?.state.pull_request_merge_method)
+    }
+
+    /// Atomically updates `pullRequestMergeMethod` in `t3code:ui-state:v1` without clobbering
+    /// concurrent sidebar preference writes.
+    pub async fn save_pull_request_merge_method(
+        storage: &(impl crate::platform::Storage + ?Sized),
+        method: t3_contracts::pull_request::PullRequestMergeMethod,
+    ) -> Result<(), crate::platform::PlatformError> {
+        use crate::platform::{
+            PlatformError, StorageArea, StorageCondition, StorageTransaction, StorageWrite,
+        };
+        let key = preference_key(STORAGE_KEY);
+        let invalid = |error: &dyn std::fmt::Display| PlatformError::InvalidData(error.to_string());
+        for _ in 0..3 {
+            let expected = storage.get(StorageArea::Ordinary, key.clone()).await?;
+            let mut state = if let Some(raw) = expected.as_deref() {
+                let raw = std::str::from_utf8(raw).map_err(|error| invalid(&error))?;
+                UiState::decode(raw, &crate::time::epoch_ms).map_err(|error| invalid(&error))?
+            } else {
+                Self::load(storage).await?.state
+            };
+            state.pull_request_merge_method = method.clone();
+            let value = state
+                .encode()
+                .map_err(|error| invalid(&error))?
+                .into_bytes();
+            if storage
+                .transaction(StorageTransaction {
+                    conditions: vec![StorageCondition {
+                        area: StorageArea::Ordinary,
+                        key: key.clone(),
+                        expected,
+                    }],
+                    ordinary: vec![StorageWrite {
+                        key: key.clone(),
+                        value: Some(value),
+                    }],
+                    secure: vec![],
+                })
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(PlatformError::Storage(
+            "Pull request merge method changed repeatedly while saving.".into(),
+        ))
+    }
+
     /// Writes every record in one atomic write. Legacy records are left for older clients.
     pub async fn save(
         &self,

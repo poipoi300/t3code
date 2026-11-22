@@ -1022,6 +1022,52 @@ pub fn linked_thread_reference(
     })
 }
 
+/// Resolves the legacy client-side `pullRequestMergeMethodOverrides` map when a project
+/// has no scoped server `pullRequestMergeMethod` default configured.
+pub fn resolve_legacy_merge_method_override(
+    client: &t3_contracts::settings::ClientSettingsSchema,
+    projects: &[crate::workspace::projects::EnvironmentProject],
+    environment_id: &EnvironmentId,
+    project_id: &t3_contracts::base_schemas::ProjectId,
+) -> Option<PullRequestMergeMethod> {
+    use crate::services::settings::scope::logical_project_scope_key;
+    use crate::workspace::projects::{
+        GroupingMode, GroupingSettings, PhysicalProjectKey, logical_project_key,
+    };
+    use t3_contracts::settings::SidebarProjectGroupingMode;
+
+    if client.pull_request_merge_method_overrides.is_empty() {
+        return None;
+    }
+    let target = projects
+        .iter()
+        .find(|p| &p.environment == environment_id && &p.project.id == project_id)?;
+    let to_mode = |mode: &SidebarProjectGroupingMode| match mode {
+        SidebarProjectGroupingMode::Repository => GroupingMode::Repository,
+        SidebarProjectGroupingMode::RepositoryPath => GroupingMode::RepositoryPath,
+        SidebarProjectGroupingMode::Separate => GroupingMode::Separate,
+    };
+    let settings = GroupingSettings {
+        mode: to_mode(&client.sidebar_project_grouping_mode),
+        overrides: client
+            .sidebar_project_grouping_overrides
+            .iter()
+            .filter_map(|(key, mode)| {
+                let (env, path) = key.0.split_once(':')?;
+                Some((
+                    PhysicalProjectKey::new(EnvironmentId(env.into()), path),
+                    to_mode(mode),
+                ))
+            })
+            .collect(),
+    };
+    let key = logical_project_scope_key(&logical_project_key(target, &settings, false));
+    client
+        .pull_request_merge_method_overrides
+        .iter()
+        .find(|(candidate, _)| candidate.0 == key)
+        .map(|(_, method)| method.clone())
+}
 /// Object IDs for the exact file versions displayed in a whole-PR patch.
 /// Use the panel parser's file ranges and decoded paths, including rename destinations.
 pub fn diff_file_revisions(patch: &str) -> std::collections::BTreeMap<String, String> {
